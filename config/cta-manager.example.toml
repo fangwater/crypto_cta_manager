@@ -16,6 +16,7 @@ account = "trade01"
 venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade01/data/persist_manager"
 enabled = true
+gateway_prefix = "/exec_trade01"
 # Effective fee charged per unit of fill notional (4 bps in this example).
 estimated_fee_rate = 0.0004
 # Omit start_ts_us to backfill all available history on the first run.
@@ -27,4 +28,5 @@ estimated_fee_rate = 0.0004
 #venue = "binance-futures"
 #rocksdb_path = "/home/el01/binance_exec_trade02/data/persist_manager"
 #enabled = true
+#gateway_prefix = "/exec_trade02"
 #estimated_fee_rate = 0.0004

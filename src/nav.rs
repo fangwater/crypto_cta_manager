@@ -1552,6 +1552,7 @@ mod tests {
             start_ts_us: None,
             poll_interval_secs: None,
             estimated_fee_rate: fee_rate,
+            gateway_prefix: None,
         }
     }
 

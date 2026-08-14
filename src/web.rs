@@ -24,7 +24,17 @@ pub struct DashboardSnapshot {
     pub generated_at_us: i64,
     pub generation_duration_ms: u64,
     pub refresh_interval_secs: u64,
+    pub accounts: Vec<DashboardAccount>,
     pub report: nav::NavReport,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DashboardAccount {
+    pub source_id: String,
+    pub account: String,
+    pub venue: String,
+    pub enabled: bool,
+    pub gateway_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -353,6 +363,17 @@ async fn build_dashboard(
     refresh_interval_secs: u64,
 ) -> Result<DashboardSnapshot> {
     let started = Instant::now();
+    let accounts = config
+        .sources
+        .iter()
+        .map(|source| DashboardAccount {
+            source_id: source.id.clone(),
+            account: source.account.clone(),
+            venue: source.venue.clone(),
+            enabled: source.enabled,
+            gateway_prefix: source.gateway_prefix.clone(),
+        })
+        .collect();
     let mut snapshots = nav::SourcePositionSnapshots::new();
     for source in config.sources.iter().filter(|source| source.enabled) {
         if let Some(snapshot) = postgres::load_latest_position_snapshot(pool, &source.id).await? {
@@ -372,6 +393,7 @@ async fn build_dashboard(
         generated_at_us: unix_now_us(),
         generation_duration_ms: duration_ms,
         refresh_interval_secs,
+        accounts,
         report,
     })
 }

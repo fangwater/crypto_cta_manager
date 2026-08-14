@@ -75,10 +75,19 @@ export interface NavReport {
   sources: SourceNavReport[]
 }
 
+export interface DashboardAccount {
+  source_id: string
+  account: string
+  venue: string
+  enabled: boolean
+  gateway_prefix: string | null
+}
+
 export interface DashboardSnapshot {
   generated_at_us: number
   generation_duration_ms: number
   refresh_interval_secs: number
+  accounts?: DashboardAccount[]
   report: NavReport
 }
 

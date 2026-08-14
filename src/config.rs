@@ -46,6 +46,8 @@ pub struct SourceConfig {
     pub poll_interval_secs: Option<u64>,
     /// Effective fee rate used to estimate fees from fill notional, for example 0.0004.
     pub estimated_fee_rate: Option<f64>,
+    /// Same-origin gateway path for this account's Exec Viz, for example /exec_trade01.
+    pub gateway_prefix: Option<String>,
 }
 
 impl Default for IngestionConfig {
@@ -84,6 +86,7 @@ impl AppConfig {
 
         let mut ids = HashSet::new();
         let mut paths = HashSet::new();
+        let mut gateway_prefixes = HashSet::new();
         let mut enabled = 0usize;
         for source in &self.sources {
             validate_source_id(&source.id)?;
@@ -117,6 +120,12 @@ impl AppConfig {
                     "source {} estimated_fee_rate must be finite and nonnegative",
                     source.id
                 );
+            }
+            if let Some(gateway_prefix) = &source.gateway_prefix {
+                validate_gateway_prefix(&source.id, gateway_prefix)?;
+                if !gateway_prefixes.insert(gateway_prefix.clone()) {
+                    bail!("duplicate source gateway_prefix: {gateway_prefix}");
+                }
             }
             if !ids.insert(source.id.clone()) {
                 bail!("duplicate source id: {}", source.id);
@@ -169,6 +178,20 @@ fn validate_source_id(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_gateway_prefix(source_id: &str, value: &str) -> Result<()> {
+    let suffix = value.strip_prefix('/').unwrap_or_default();
+    let valid_len = !suffix.is_empty() && value.len() <= 128;
+    let valid_chars = suffix
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    if !valid_len || !valid_chars {
+        bail!(
+            "source {source_id} gateway_prefix must be one absolute path segment containing only ASCII letters, digits, '_' or '-': {value:?}"
+        );
+    }
+    Ok(())
+}
+
 fn default_database_url_env() -> String {
     "CRYPTO_CTA_LOCAL_DATABASE_URL".to_string()
 }
@@ -206,6 +229,7 @@ mod tests {
             start_ts_us: None,
             poll_interval_secs: None,
             estimated_fee_rate: Some(0.0004),
+            gateway_prefix: Some(format!("/{id}")),
         }
     }
 
@@ -252,6 +276,31 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("estimated_fee_rate")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_duplicate_gateway_prefixes() {
+        let mut invalid = source("binance_exec_trade01", "/srv/trade01/persist_manager");
+        invalid.gateway_prefix = Some("/exec/trade01".to_string());
+        assert!(
+            config_with_sources(vec![invalid])
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("gateway_prefix")
+        );
+
+        let mut first = source("binance_exec_trade01", "/srv/trade01/persist_manager");
+        let mut second = source("binance_exec_trade02", "/srv/trade02/persist_manager");
+        first.gateway_prefix = Some("/exec_trade".to_string());
+        second.gateway_prefix = Some("/exec_trade".to_string());
+        assert!(
+            config_with_sources(vec![first, second])
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate source gateway_prefix")
         );
     }
 

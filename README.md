@@ -27,6 +27,9 @@ The default URL variable is `CRYPTO_CTA_LOCAL_DATABASE_URL`.
 Set `estimated_fee_rate` on every source used for NAV reconstruction. The value
 is a decimal rate applied to every fill's `price * amount_update`; for example,
 `0.0004` is 4 bps. The order-ingestion process does not require this setting.
+Set an explicit one-segment `gateway_prefix`, such as `/exec_trade01`, for each
+account whose Exec Viz and Config services are exposed through the unified
+gateway. The dashboard never derives service paths from account names.
 
 If the account already had positions when its RocksDB history began, store an
 immutable position snapshot in PostgreSQL with `nav_snapshot`. Position
@@ -174,7 +177,13 @@ SSH destination is stored only in
 are therefore:
 
 ```text
+http://172.16.30.42:10041/
 http://172.16.30.42:10041/manager/
 http://172.16.30.42:10041/exec_trade01/
 http://172.16.30.42:10041/exec_trade01/config/
 ```
+
+The root route is the multi-account workspace. It reads the account list and
+gateway prefixes from the Manager API, links into source-scoped NAV, Exec Viz,
+and Config views, and expands automatically when another configured source is
+added. `/manager/` remains the full NAV timeline and position workspace.

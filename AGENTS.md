@@ -137,7 +137,7 @@ must not replace, restart, or reconfigure the existing Viz service on port
 The deployed Nginx routes are:
 
 ```text
-/                         -> 302 /manager/
+/                         -> multi-account CTA workspace
 /manager/                 -> CTA Manager frontend
 /manager/api/             -> cta_web /api/
 /exec_trade01/            -> Exec Viz
@@ -147,6 +147,12 @@ The deployed Nginx routes are:
 /cta/                     -> compatibility redirect to /manager/
 /cta-api/                 -> compatibility proxy to cta_web /api/
 ```
+
+The root multi-account workspace was deployed and browser-verified on
+2026-08-14 UTC at 1440x1000 and 390x1100. Its `trade01` card linked to the
+source-scoped NAV view, `/exec_trade01/`, and `/exec_trade01/config/`; the NAV
+deep link selected the requested source, and the Viz WebSocket still returned
+`101 Switching Protocols` after the Nginx reload.
 
 Keep `absolute_redirect off` in this Nginx server. Without it, redirects expose
 the loopback gateway port `10051`, which is not reachable through the external
@@ -170,6 +176,11 @@ Additional Exec accounts receive distinct path prefixes and loopback Viz
 ports. After an account is actually deployed, add one named Nginx upstream and
 one account-prefixed proxy location; the external port and SSH tunnel remain
 unchanged. Never route two account prefixes to the same upstream by accident.
+Each source must declare its explicit one-segment `gateway_prefix`; the API
+exposes that prefix with sanitized account metadata so the root workspace can
+render source-scoped NAV, Exec Viz, and Config links. Never infer a gateway path
+from an account label or source ID. The root workspace may list multiple
+configured sources, while `/manager/` remains the detailed NAV timeline.
 
 The current `cta_web` API is read-only. Nginx already preserves request methods,
 bodies, and response statuses so future Manager endpoints can update

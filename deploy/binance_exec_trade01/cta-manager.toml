@@ -14,4 +14,5 @@ account = "trade01"
 venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade01/data/persist_manager"
 enabled = true
+gateway_prefix = "/exec_trade01"
 estimated_fee_rate = 0.0004

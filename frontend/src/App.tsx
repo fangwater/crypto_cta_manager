@@ -5,6 +5,7 @@ import {
   Clock3,
   Coins,
   Database,
+  LayoutDashboard,
   LoaderCircle,
   RefreshCw,
   Search,
@@ -14,6 +15,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { getDashboard, getHealth, getTimeline } from './api'
+import { WorkspacePage } from './pages/WorkspacePage'
 import {
   NavTimelineChart,
   navSeriesMeta,
@@ -111,11 +113,20 @@ function scopeStartMs(
   return starts.length === 0 ? fallbackEndMs : Math.min(...starts)
 }
 
+function initialScope() {
+  return new URLSearchParams(window.location.search).get('source')?.trim() || 'all'
+}
+
 export default function App() {
+  const path = window.location.pathname.replace(/\/+$/, '') || '/'
+  return path === '/' ? <WorkspacePage /> : <NavPage />
+}
+
+function NavPage() {
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [timeline, setTimeline] = useState<TimelineSnapshot | null>(null)
-  const [scope, setScope] = useState('all')
+  const [scope, setScope] = useState(initialScope)
   const [feeMode, setFeeMode] = useState<FeeMode>('after')
   const [chartMode, setChartMode] =
     useState<TimelineChartMode>('portfolio')
@@ -301,6 +312,10 @@ export default function App() {
 
   function selectScope(nextScope: string) {
     setScope(nextScope)
+    const url = new URL(window.location.href)
+    if (nextScope === 'all') url.searchParams.delete('source')
+    else url.searchParams.set('source', nextScope)
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
     setSelectedSymbols(null)
     setTimeline(null)
     if (!dashboard || endMs === null) return
@@ -358,28 +373,34 @@ export default function App() {
               <p>CTA 组合净值</p>
             </div>
           </div>
-          <div className="header-state">
-            <span
-              className={`status-dot ${health?.status === 'ok' ? 'status-dot--ready' : 'status-dot--warning'}`}
-            />
-            <div>
-              <span>{health?.status === 'ok' ? '运行正常' : '数据延迟'}</span>
-              <time>
-                {timestampUs(
-                  timeline?.generated_at_us ?? dashboard?.generated_at_us ?? null,
-                )}
-              </time>
+          <div className="header-actions">
+            <a className="header-nav-link" href="/" title="综合总览">
+              <LayoutDashboard size={16} />
+              <span>综合总览</span>
+            </a>
+            <div className="header-state">
+              <span
+                className={`status-dot ${health?.status === 'ok' ? 'status-dot--ready' : 'status-dot--warning'}`}
+              />
+              <div>
+                <span>{health?.status === 'ok' ? '运行正常' : '数据延迟'}</span>
+                <time>
+                  {timestampUs(
+                    timeline?.generated_at_us ?? dashboard?.generated_at_us ?? null,
+                  )}
+                </time>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                title="刷新数据"
+                aria-label="刷新数据"
+                disabled={refreshing}
+                onClick={() => void manualRefresh()}
+              >
+                <RefreshCw size={17} className={refreshing ? 'is-spinning' : ''} />
+              </button>
             </div>
-            <button
-              type="button"
-              className="icon-button"
-              title="刷新数据"
-              aria-label="刷新数据"
-              disabled={refreshing}
-              onClick={() => void manualRefresh()}
-            >
-              <RefreshCw size={17} className={refreshing ? 'is-spinning' : ''} />
-            </button>
           </div>
         </div>
       </header>
@@ -634,11 +655,13 @@ export default function App() {
             <div className="chart-foot">
               <span>
                 <Database size={13} />
-                {integer(timeline.report.summary.fill_count)} fills
+                {integer(noSymbolsSelected ? 0 : timeline.report.summary.fill_count)} fills
               </span>
               <span>
                 {integer(
-                  chartMode === 'portfolio'
+                  noSymbolsSelected
+                    ? 0
+                    : chartMode === 'portfolio'
                     ? timeline.report.points.length
                     : timeline.report.symbol_points.reduce(
                         (count, item) => count + item.points.length,
@@ -647,7 +670,7 @@ export default function App() {
                 )}{' '}
                 15min ticks
               </span>
-              <span>{selectedSet.size} symbols</span>
+              <span>{noSymbolsSelected ? 0 : selectedSet.size} symbols</span>
               <span>{timeline.generation_duration_ms} ms</span>
               {timeline.report.sampled && <span>sampled</span>}
             </div>
