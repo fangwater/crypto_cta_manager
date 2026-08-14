@@ -1,0 +1,16 @@
+[Unit]
+Description=CTA Exec unified gateway SSH tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/crypto-cta-manager/gateway-tunnel.env
+ExecStart=/usr/bin/ssh -g -NT -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -L 172.16.30.42:10041:127.0.0.1:10051 ${CTA_EXEC_SSH_TARGET}
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

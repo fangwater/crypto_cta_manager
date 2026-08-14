@@ -1,0 +1,30 @@
+[database]
+# The URL itself remains in the host credential file and is never stored here.
+url_env = "CRYPTO_CTA_LOCAL_DATABASE_URL"
+max_connections = 8
+
+[ingestion]
+poll_interval_secs = 60
+# Do not scan the newest few seconds while persist_manager may still be writing them.
+safety_lag_secs = 5
+# Re-read a recent window on every poll; PostgreSQL upserts make this idempotent.
+overlap_secs = 300
+
+[[sources]]
+id = "binance_exec_trade01"
+account = "trade01"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade01/data/persist_manager"
+enabled = true
+# Effective fee charged per unit of fill notional (4 bps in this example).
+estimated_fee_rate = 0.0004
+# Omit start_ts_us to backfill all available history on the first run.
+
+# Additional accounts are independent workers with independent checkpoints.
+#[[sources]]
+#id = "binance_exec_trade02"
+#account = "trade02"
+#venue = "binance-futures"
+#rocksdb_path = "/home/el01/binance_exec_trade02/data/persist_manager"
+#enabled = true
+#estimated_fee_rate = 0.0004

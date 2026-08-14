@@ -1,0 +1,17 @@
+[database]
+# PostgreSQL stores immutable position snapshots and ingestion checkpoints.
+url_env = "CRYPTO_CTA_LOCAL_DATABASE_URL"
+max_connections = 8
+
+[ingestion]
+poll_interval_secs = 60
+safety_lag_secs = 5
+overlap_secs = 300
+
+[[sources]]
+id = "binance_exec_trade01"
+account = "trade01"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade01/data/persist_manager"
+enabled = true
+estimated_fee_rate = 0.0004

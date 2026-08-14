@@ -1,2 +1,5 @@
 /target
+/frontend/dist
+/frontend/node_modules
 /postgresql-*-linux-x86_64-user.tar.gz*
+/config/cta-manager.toml
