@@ -15,7 +15,6 @@ import { Alert } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/Card'
 import { FieldHint, Input, Label, Select } from '../../components/ui/Field'
-import { StatTile } from '../../components/AppShell'
 import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { money } from '../../format'
@@ -157,85 +156,65 @@ export function AccountBindingsPage() {
       ) : (
         <div className="space-y-6">
           <CapacityPanel capacity={capacity ?? studio?.capacity} />
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Wallet size={16} /> 账户
-                </CardTitle>
-                <CardDescription>
-                  {account ? `${account.account} · ${account.source_id}` : '选择账户'}
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2">
-                <Label>
-                  账户
-                  <Select
-                    value={sourceId}
-                    onChange={(event) => {
-                      const next = event.target.value
-                      setSourceId(next)
-                      window.history.replaceState({}, '', routes.configBindings(next))
-                    }}
-                  >
-                    {accounts.map((entry) => (
-                      <option key={entry.source_id} value={entry.source_id}>
-                        {entry.account} / {entry.source_id}
-                      </option>
-                    ))}
-                  </Select>
-                </Label>
-                <Label>
-                  杠杆率
-                  <Input value={leverage} onChange={(event) => setLeverage(event.target.value)} />
-                  <FieldHint>
-                    CTA 配置倍数，不是交易所保证金杠杆。可用名义 = 实时权益 × 杠杆率，再除以单份参考权益得到可配置份数。
-                  </FieldHint>
-                </Label>
-                <div className="sm:col-span-2 flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    variant="primary"
-                    disabled={saving}
-                    onClick={() =>
-                      void withWrite(async () => {
-                        const next = await saveAccountStudio(sourceId, Number(leverage))
-                        setStudio(next)
-                        setCapacity(next.capacity ?? null)
-                      })
-                    }
-                  >
-                    <Save size={15} /> 保存杠杆
-                  </Button>
-                  <a
-                    href={routes.account(sourceId)}
-                    className="inline-flex h-9 items-center justify-center rounded-lg px-3.5 text-sm font-medium text-muted transition-colors hover:bg-canvas hover:text-ink"
-                  >
-                    查看账户概览
-                  </a>
-                </div>
-              </CardContent>
-            </Card>
-
-            {studio && (
-              <div className="grid gap-3">
-                <StatTile label="已启用策略" value={`${studio.bindings.length} 条`} />
-                <StatTile
-                  label="参考权益合计"
-                  value={`${money(studio.bound_equity_usdt)} USDT`}
-                  hint="用于计算各策略占比"
-                />
-                <StatTile
-                  label="可配置份数"
-                  value={
-                    (capacity ?? studio?.capacity)?.configurable_shares != null
-                      ? (capacity ?? studio?.capacity)!.configurable_shares!.toFixed(2)
-                      : '--'
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Wallet size={16} /> 账户
+              </CardTitle>
+              <CardDescription>
+                {account ? `${account.account} · ${account.source_id}` : '选择账户'}
+                {studio ? ` · 已启用 ${studio.bindings.length} 条` : ''}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-2">
+              <Label>
+                账户
+                <Select
+                  value={sourceId}
+                  onChange={(event) => {
+                    const next = event.target.value
+                    setSourceId(next)
+                    window.history.replaceState({}, '', routes.configBindings(next))
+                  }}
+                >
+                  {accounts.map((entry) => (
+                    <option key={entry.source_id} value={entry.source_id}>
+                      {entry.account} / {entry.source_id}
+                    </option>
+                  ))}
+                </Select>
+              </Label>
+              <Label>
+                杠杆率
+                <Input value={leverage} onChange={(event) => setLeverage(event.target.value)} />
+                <FieldHint>
+                  CTA 配置倍数，不是交易所保证金杠杆。可用名义 = 实时权益 × 杠杆率，再除以单份参考权益得到可配置份数。
+                </FieldHint>
+              </Label>
+              <div className="sm:col-span-2 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="primary"
+                  disabled={saving}
+                  onClick={() =>
+                    void withWrite(async () => {
+                      const next = await saveAccountStudio(sourceId, Number(leverage))
+                      setStudio(next)
+                      setCapacity(next.capacity ?? null)
+                    })
                   }
-                />
+                >
+                  <Save size={15} /> 保存杠杆
+                </Button>
+                <a
+                  href={routes.account(sourceId)}
+                  className="inline-flex h-9 items-center justify-center rounded-lg px-3.5 text-sm font-medium text-muted transition-colors hover:bg-canvas hover:text-ink"
+                >
+                  查看账户概览
+                </a>
               </div>
-            )}
-          </div>
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>

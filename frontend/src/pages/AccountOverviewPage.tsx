@@ -11,7 +11,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getAccountLive, getAccountStudio, getDashboard } from '../api'
-import { AppShell, PageIntro, StatTile } from '../components/AppShell'
+import { AppShell, PageIntro } from '../components/AppShell'
 import { CapacityPanel } from '../components/CapacityPanel'
 import { OrderParametersView } from '../components/OrderParametersView'
 import { TargetPositionsView } from '../components/TargetPositionsView'
@@ -19,7 +19,7 @@ import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
-import { feeBps, money, signedClass, timestampUs } from '../format'
+import { money, signedClass, timestampUs } from '../format'
 import { percent } from '../lib/strategyDefaults'
 import { readSourceId, routes } from '../lib/routes'
 import { cn } from '../lib/cn'
@@ -158,21 +158,6 @@ export function AccountOverviewPage() {
 
           <div className="mb-8">
             <CapacityPanel capacity={capacity ?? studio?.capacity} />
-          </div>
-
-          <div className="mb-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <StatTile label="杠杆率" value={studio ? String(studio.leverage) : '--'} />
-            <StatTile
-              label="参考权益合计"
-              value={studio ? money(studio.bound_equity_usdt) : '--'}
-              hint="USDT"
-            />
-            <StatTile
-              label="累计费后净值"
-              value={report ? money(report.nav_change_after_fee_quote) : '--'}
-              hint="USDT"
-            />
-            <StatTile label="估算费率" value={report ? feeBps(report.estimated_fee_rate) : '--'} />
           </div>
 
           <section className="mb-8">
