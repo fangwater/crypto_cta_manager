@@ -177,16 +177,11 @@ export function getAccountStudio(sourceId: string, signal?: AbortSignal) {
   })
 }
 
-export function saveAccountStudio(
-  sourceId: string,
-  equityUsdt: number,
-  leverage: number,
-  token: string,
-) {
+export function saveAccountStudio(sourceId: string, leverage: number, token: string) {
   return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}`, {
     method: 'PUT',
     token,
-    body: { equity_usdt: equityUsdt, leverage },
+    body: { leverage },
   })
 }
 

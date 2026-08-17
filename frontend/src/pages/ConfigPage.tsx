@@ -65,6 +65,22 @@ function emptyOrder(): CatalogOrderStrategy {
   }
 }
 
+function percent(ratio: number) {
+  return `${(ratio * 100).toFixed(1)}%`
+}
+
+function nextAllocationRatio(
+  studio: AccountStudio,
+  bindingName: string,
+  nextEquity: number,
+) {
+  const replaced =
+    studio.bindings.find((binding) => binding.binding_name === bindingName)?.position_equity_usdt ??
+    0
+  const total = studio.bound_equity_usdt - replaced + nextEquity
+  return total > 0 ? nextEquity / total : 0
+}
+
 function parseTargets(raw: string): Record<string, number> {
   const parsed = JSON.parse(raw || '{}') as unknown
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -91,7 +107,6 @@ export function ConfigPage() {
   const [selectedPosition, setSelectedPosition] = useState<PositionStrategy>(emptyPosition)
   const [selectedOrder, setSelectedOrder] = useState<CatalogOrderStrategy>(emptyOrder)
   const [targetsText, setTargetsText] = useState('{}')
-  const [accountEquity, setAccountEquity] = useState('50000')
   const [leverage, setLeverage] = useState('1')
   const [bindingName, setBindingName] = useState('')
   const [bindPosition, setBindPosition] = useState('')
@@ -158,7 +173,6 @@ export function ConfigPage() {
     getAccountStudio(sourceId, controller.signal)
       .then((next) => {
         setStudio(next)
-        setAccountEquity(String(next.equity_usdt))
         setLeverage(String(next.leverage))
         setError(null)
       })
@@ -347,7 +361,7 @@ export function ConfigPage() {
                 />
               </label>
               <p className="studio-hint">
-                target 按这份权益定义，默认 10000 USDT。账户绑定后占用同样金额。
+                target 按这份参考权益定义，默认 10000 USDT。账户绑定后只用来算组合比例，不占用账户容量。
               </p>
               <label>
                 目标仓位 JSON
@@ -510,36 +524,29 @@ export function ConfigPage() {
                 </select>
               </label>
               <label>
-                账户权益 USDT
-                <input value={accountEquity} onChange={(event) => setAccountEquity(event.target.value)} />
-              </label>
-              <label>
                 杠杆率
                 <input value={leverage} onChange={(event) => setLeverage(event.target.value)} />
               </label>
+              <p className="studio-hint">
+                账户权益是实时变动的，这里不填金额、也不卡容量。绑定后按各仓位策略的参考权益算比例。
+              </p>
               <button
                 type="button"
                 className="command-button command-button--primary"
                 disabled={saving}
                 onClick={() =>
                   void withWrite(async () => {
-                    const next = await saveAccountStudio(
-                      sourceId,
-                      Number(accountEquity),
-                      Number(leverage),
-                      token,
-                    )
+                    const next = await saveAccountStudio(sourceId, Number(leverage), token)
                     setStudio(next)
                   })
                 }
               >
-                <Save size={15} /> 保存账户风险
+                <Save size={15} /> 保存杠杆
               </button>
               {studio && (
                 <div className="studio-capacity">
-                  <span>容量 {money(studio.capacity_usdt)}</span>
-                  <span>已占用 {money(studio.used_equity_usdt)}</span>
-                  <span>剩余 {money(studio.remaining_usdt)}</span>
+                  <span>杠杆 {studio.leverage}</span>
+                  <span>参考权益合计 {money(studio.bound_equity_usdt)}</span>
                 </div>
               )}
             </div>
@@ -590,11 +597,15 @@ export function ConfigPage() {
               </label>
               {studio && bindPosition && (
                 <p className="studio-hint">
-                  本次占用{' '}
-                  {money(
-                    positions.find((item) => item.strategy_name === bindPosition)?.equity_usdt ?? 0,
-                  )}{' '}
-                  ，剩余容量 {money(studio.remaining_usdt)}
+                  绑定后约占组合{' '}
+                  {percent(
+                    nextAllocationRatio(
+                      studio,
+                      bindingName,
+                      positions.find((item) => item.strategy_name === bindPosition)?.equity_usdt ?? 0,
+                    ),
+                  )}
+                  ，与账户实时权益无关
                 </p>
               )}
               <button type="submit" className="command-button command-button--primary" disabled={saving}>
@@ -608,7 +619,10 @@ export function ConfigPage() {
                   <p>
                     仓位 {binding.position_strategy_name} × 下单 {binding.order_strategy_name}
                   </p>
-                  <p>占用 {money(binding.position_equity_usdt)} USDT</p>
+                  <p>
+                    参考权益 {money(binding.position_equity_usdt)} USDT · 比例{' '}
+                    {percent(binding.allocation_ratio)}
+                  </p>
                   <div className="studio-actions">
                     <button
                       type="button"

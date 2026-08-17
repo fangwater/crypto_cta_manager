@@ -22,7 +22,6 @@ CREATE TABLE cta_order_strategies (
 
 CREATE TABLE cta_account_settings (
     source_id text PRIMARY KEY REFERENCES cta_order_sources(source_id),
-    equity_usdt double precision NOT NULL CHECK (equity_usdt > 0),
     leverage double precision NOT NULL CHECK (leverage > 0),
     updated_at_us bigint NOT NULL
 );

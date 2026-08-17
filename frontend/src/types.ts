@@ -128,16 +128,14 @@ export interface AccountBinding {
   position_strategy_name: string
   order_strategy_name: string
   position_equity_usdt: number
+  allocation_ratio: number
   updated_at_us: number
 }
 
 export interface AccountStudio {
   source_id: string
-  equity_usdt: number
   leverage: number
-  capacity_usdt: number
-  used_equity_usdt: number
-  remaining_usdt: number
+  bound_equity_usdt: number
   bindings: AccountBinding[]
   updated_at_us: number
 }
