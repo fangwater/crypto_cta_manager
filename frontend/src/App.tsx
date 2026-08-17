@@ -12,9 +12,9 @@ import {
   WalletCards,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import './App.css'
+import './nav-dashboard.css'
 import { getDashboard, getHealth, getTimeline } from './api'
-import { AppNav } from './components/AppNav'
+import { AppShell } from './components/AppShell'
 import { WorkspacePage } from './pages/WorkspacePage'
 import { ConfigPage } from './pages/ConfigPage'
 import { DocsPage } from './pages/DocsPage'
@@ -398,48 +398,42 @@ function NavPage() {
   if (loading && !dashboard) return <LoadingScreen />
 
   return (
-    <div className="app-frame">
-      <header className="app-header">
-        <div className="app-header__inner">
-          <div className="brand">
-            <span className="brand__mark" aria-hidden="true">
-              <Activity size={19} strokeWidth={2.1} />
-            </span>
-            <div>
-              <h1>CTA NAV</h1>
-              <p>CTA 组合净值</p>
-            </div>
+    <AppShell
+      active="manager"
+      title="CTA NAV"
+      subtitle="CTA 组合净值"
+      icon={Activity}
+      className="max-w-[1240px] px-5 sm:px-6"
+      actions={
+        <div className="flex items-center gap-3 rounded-xl border border-border-soft bg-canvas/80 px-3 py-2">
+          <span
+            className={`h-2 w-2 shrink-0 rounded-full ${
+              health?.status === 'ok' ? 'bg-emerald-500' : 'bg-amber-500'
+            }`}
+          />
+          <div className="hidden min-w-0 sm:block">
+            <p className="text-xs font-medium text-ink">
+              {health?.status === 'ok' ? '运行正常' : '数据延迟'}
+            </p>
+            <time className="text-[11px] text-subtle">
+              {timestampUs(
+                timeline?.generated_at_us ?? dashboard?.generated_at_us ?? null,
+              )}
+            </time>
           </div>
-          <div className="header-actions">
-            <AppNav active="manager" />
-            <div className="header-state">
-              <span
-                className={`status-dot ${health?.status === 'ok' ? 'status-dot--ready' : 'status-dot--warning'}`}
-              />
-              <div>
-                <span>{health?.status === 'ok' ? '运行正常' : '数据延迟'}</span>
-                <time>
-                  {timestampUs(
-                    timeline?.generated_at_us ?? dashboard?.generated_at_us ?? null,
-                  )}
-                </time>
-              </div>
-              <button
-                type="button"
-                className="icon-button"
-                title="刷新数据"
-                aria-label="刷新数据"
-                disabled={refreshing}
-                onClick={() => void manualRefresh()}
-              >
-                <RefreshCw size={17} className={refreshing ? 'is-spinning' : ''} />
-              </button>
-            </div>
-          </div>
+          <button
+            type="button"
+            className="grid h-9 w-9 place-items-center rounded-lg border border-border bg-surface text-muted transition-colors hover:border-brand-ring hover:text-brand disabled:opacity-50"
+            title="刷新数据"
+            aria-label="刷新数据"
+            disabled={refreshing}
+            onClick={() => void manualRefresh()}
+          >
+            <RefreshCw size={16} className={refreshing ? 'animate-spin-slow' : ''} />
+          </button>
         </div>
-      </header>
-
-      <main className="page-shell">
+      }
+    >
         {error && <div className="error-banner">数据请求失败：{error}</div>}
         {timelineError && (
           <div className="error-banner">净值重算失败：{timelineError}</div>
@@ -931,8 +925,7 @@ function NavPage() {
             ))}
           </div>
         </section>
-      </main>
-    </div>
+    </AppShell>
   )
 }
 
@@ -1026,14 +1019,21 @@ function SourceDatum({
 
 function LoadingScreen() {
   return (
-    <div className="loading-screen">
-      <div className="loading-brand">
-        <Activity size={21} />
-        <strong>CTA NAV</strong>
+    <div className="grid min-h-screen place-items-center bg-canvas px-6">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-8 shadow-card">
+        <div className="flex items-center gap-3 text-brand">
+          <Activity size={22} strokeWidth={2.2} />
+          <strong className="text-lg font-semibold text-ink">CTA NAV</strong>
+        </div>
+        <div className="mt-6 space-y-3">
+          <div className="h-2 animate-pulse rounded-full bg-border-soft" />
+          <div className="h-2 w-2/3 animate-pulse rounded-full bg-border-soft" />
+        </div>
+        <p className="mt-6 flex items-center gap-2 text-sm text-muted">
+          <Clock3 size={16} />
+          正在加载净值数据…
+        </p>
       </div>
-      <div className="loading-line" />
-      <div className="loading-line loading-line--short" />
-      <Clock3 size={16} className="loading-clock" />
     </div>
   )
 }

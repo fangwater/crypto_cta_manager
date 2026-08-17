@@ -1,6 +1,9 @@
 import { BookOpen, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { AppNav } from '../components/AppNav'
+import { AppShell } from '../components/AppShell'
+import { Button } from '../components/ui/Button'
+import { Card, CardContent } from '../components/ui/Card'
+import { cn } from '../lib/cn'
 
 const GATEWAY = 'http://172.16.30.42:10041'
 const TRADE01_CONFIG = `${GATEWAY}/exec_trade01/config`
@@ -31,10 +34,12 @@ function CodeBlock({ children }: { children: string }) {
   const [copied, setCopied] = useState(false)
 
   return (
-    <div className="gitbook-code">
-      <button
+    <div className="relative overflow-hidden rounded-xl border border-border bg-canvas">
+      <Button
         type="button"
-        className="gitbook-copy"
+        size="sm"
+        variant="secondary"
+        className="absolute right-3 top-3 z-10"
         onClick={async () => {
           await navigator.clipboard.writeText(children)
           setCopied(true)
@@ -42,8 +47,8 @@ function CodeBlock({ children }: { children: string }) {
         }}
       >
         {copied ? '已复制' : '复制'}
-      </button>
-      <pre>
+      </Button>
+      <pre className="overflow-x-auto p-4 pt-12 font-mono text-[12px] leading-6 text-ink">
         <code>{children}</code>
       </pre>
     </div>
@@ -590,76 +595,78 @@ export function DocsPage() {
   }
 
   return (
-    <div className="app-frame gitbook-frame">
-      <header className="app-header">
-        <div className="app-header__inner">
-          <div className="brand">
-            <span className="brand__mark" aria-hidden="true">
-              <BookOpen size={19} strokeWidth={2.1} />
-            </span>
-            <div>
-              <h1>CTA GitBook</h1>
-              <p>操作方法与 API</p>
-            </div>
-          </div>
-          <div className="header-actions">
-            <AppNav active="docs" />
-          </div>
-        </div>
-      </header>
+    <AppShell active="docs" title="CTA Docs" subtitle="操作方法与 API" icon={BookOpen}>
+      <div className="grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)]">
+        <Card className="h-fit lg:sticky lg:top-24">
+          <CardContent className="space-y-5 p-4">
+            {groups.map((group) => (
+              <section key={group.group}>
+                <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-brand">
+                  {group.group}
+                </h2>
+                <ul className="space-y-1">
+                  {group.items.map((chapter) => (
+                    <li key={chapter.id}>
+                      <button
+                        type="button"
+                        className={cn(
+                          'docs-sidebar-link',
+                          chapter.id === active.id && 'is-active',
+                        )}
+                        onClick={() => openChapter(chapter.id)}
+                      >
+                        {chapter.title}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </CardContent>
+        </Card>
 
-      <div className="gitbook-layout">
-        <aside className="gitbook-sidebar" aria-label="GitBook 目录">
-          {groups.map((group) => (
-            <section key={group.group}>
-              <h2>{group.group}</h2>
-              <ul>
-                {group.items.map((chapter) => (
-                  <li key={chapter.id}>
-                    <button
-                      type="button"
-                      className={chapter.id === active.id ? 'is-active' : ''}
-                      onClick={() => openChapter(chapter.id)}
-                    >
-                      {chapter.title}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ))}
-        </aside>
-
-        <article className="gitbook-page" aria-labelledby="gitbook-title">
-          <p className="eyebrow">{active.group}</p>
-          <h2 id="gitbook-title">{active.title}</h2>
-          <div className="gitbook-body">{active.content}</div>
-          <nav className="gitbook-pager" aria-label="章节翻页">
-            {previous ? (
-              <button type="button" onClick={() => openChapter(previous.id)}>
-                <ChevronLeft size={16} />
-                <span>
-                  <small>上一章</small>
+        <Card>
+          <CardContent className="p-6 sm:p-8">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-brand">
+              {active.group}
+            </p>
+            <h2 id="gitbook-title" className="mt-2 text-3xl font-semibold tracking-tight text-ink">
+              {active.title}
+            </h2>
+            <div className="docs-prose mt-6">{active.content}</div>
+            <nav className="mt-10 flex items-stretch justify-between gap-3 border-t border-border-soft pt-6">
+              {previous ? (
+                <button
+                  type="button"
+                  className="docs-sidebar-link max-w-[48%]"
+                  onClick={() => openChapter(previous.id)}
+                >
+                  <span className="mb-1 flex items-center gap-1 text-xs text-subtle">
+                    <ChevronLeft size={14} /> 上一章
+                  </span>
                   {previous.title}
-                </span>
-              </button>
-            ) : (
-              <span />
-            )}
-            {next ? (
-              <button type="button" onClick={() => openChapter(next.id)}>
-                <span>
-                  <small>下一章</small>
+                </button>
+              ) : (
+                <span />
+              )}
+              {next ? (
+                <button
+                  type="button"
+                  className="docs-sidebar-link max-w-[48%] text-right"
+                  onClick={() => openChapter(next.id)}
+                >
+                  <span className="mb-1 flex items-center justify-end gap-1 text-xs text-subtle">
+                    下一章 <ChevronRight size={14} />
+                  </span>
                   {next.title}
-                </span>
-                <ChevronRight size={16} />
-              </button>
-            ) : (
-              <span />
-            )}
-          </nav>
-        </article>
+                </button>
+              ) : (
+                <span />
+              )}
+            </nav>
+          </CardContent>
+        </Card>
       </div>
-    </div>
+    </AppShell>
   )
 }

@@ -1,53 +1,112 @@
-:root {
+@import 'tailwindcss';
+
+@theme {
   --font-sans:
-    "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC",
-    "Source Han Sans SC", "Microsoft YaHei UI", "Microsoft YaHei",
-    "WenQuanYi Micro Hei", ui-sans-serif, system-ui, sans-serif;
+    'PingFang SC', 'Hiragino Sans GB', 'Noto Sans CJK SC', 'Noto Sans SC',
+    'Source Han Sans SC', 'Microsoft YaHei UI', 'Microsoft YaHei',
+    'WenQuanYi Micro Hei', ui-sans-serif, system-ui, sans-serif;
   --font-mono:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Noto Sans Mono CJK SC", "Microsoft YaHei UI", monospace;
-  font-family: var(--font-sans);
-  color: #20252d;
-  background: #f5f6f8;
-  font-synthesis: weight;
-  text-rendering: auto;
-  letter-spacing: 0;
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Noto Sans Mono CJK SC', monospace;
+
+  --color-canvas: #f4f6f9;
+  --color-surface: #ffffff;
+  --color-border: #e2e8f0;
+  --color-border-soft: #eef2f6;
+  --color-ink: #0f172a;
+  --color-muted: #64748b;
+  --color-subtle: #94a3b8;
+  --color-brand: #0f766e;
+  --color-brand-hover: #115e59;
+  --color-brand-soft: #ecfdf5;
+  --color-brand-ring: #99f6e4;
+  --color-danger: #be123c;
+  --color-danger-soft: #fff1f2;
+  --color-warning: #b45309;
+  --color-warning-soft: #fffbeb;
+
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.04), 0 8px 24px rgb(15 23 42 / 0.04);
+  --shadow-float: 0 12px 40px rgb(15 23 42 / 0.08);
 }
 
-* {
-  box-sizing: border-box;
+@layer base {
+  html {
+    @apply min-h-full bg-canvas text-ink antialiased;
+    font-family: var(--font-sans);
+    font-synthesis: weight;
+    text-rendering: auto;
+  }
+
+  body {
+    @apply m-0 min-h-screen;
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+
+  ::selection {
+    @apply bg-brand-soft text-brand-hover;
+  }
 }
 
-html {
-  min-width: 320px;
-  min-height: 100%;
-  background: #f5f6f8;
+@layer components {
+  .docs-sidebar-link {
+    @apply w-full rounded-lg px-3 py-2 text-left text-sm text-muted transition-colors hover:bg-canvas hover:text-ink;
+  }
+
+  .docs-sidebar-link.is-active {
+    @apply bg-brand-soft font-medium text-brand-hover;
+  }
+
+  .docs-prose {
+    @apply text-sm leading-7 text-ink;
+  }
+
+  .docs-prose p,
+  .docs-prose ul,
+  .docs-prose ol,
+  .docs-prose table {
+    @apply my-4;
+  }
+
+  .docs-prose ul,
+  .docs-prose ol {
+    @apply pl-5;
+  }
+
+  .docs-prose li + li {
+    @apply mt-1;
+  }
+
+  .docs-prose a {
+    @apply font-medium text-brand hover:text-brand-hover;
+  }
+
+  .docs-prose code {
+    @apply rounded bg-canvas px-1.5 py-0.5 font-mono text-[12px] text-ink;
+  }
+
+  .docs-prose table {
+    @apply w-full border-collapse overflow-hidden rounded-xl border border-border text-[13px];
+  }
+
+  .docs-prose th,
+  .docs-prose td {
+    @apply border border-border px-3 py-2 text-left align-top;
+  }
+
+  .docs-prose th {
+    @apply bg-canvas font-semibold;
+  }
 }
 
-body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
-}
+@layer utilities {
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
-  letter-spacing: 0;
-}
-
-button {
-  color: inherit;
-}
-
-code,
-.mono {
-  font-family: var(--font-mono);
-  letter-spacing: 0;
-}
-
-#root {
-  min-height: 100vh;
+  .animate-spin-slow {
+    animation: spin 1.2s linear infinite;
+  }
 }

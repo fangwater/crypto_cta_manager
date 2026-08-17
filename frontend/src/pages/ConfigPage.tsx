@@ -1,4 +1,15 @@
-import { CheckCircle2, Plus, RefreshCw, Save, Settings, Trash2 } from 'lucide-react'
+import {
+  CheckCircle2,
+  Layers3,
+  Link2,
+  LoaderCircle,
+  Plus,
+  RefreshCw,
+  Save,
+  Settings2,
+  Trash2,
+  Wallet,
+} from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ApiError,
@@ -15,8 +26,15 @@ import {
   saveOrderStrategy,
   savePositionStrategy,
 } from '../api'
-import { AppNav } from '../components/AppNav'
+import { AppShell, PageIntro, StatTile } from '../components/AppShell'
+import { TargetPositionsEditor } from '../components/TargetPositionsEditor'
+import { Alert, Badge } from '../components/ui/Badge'
+import { Button } from '../components/ui/Button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
+import { FieldHint, Input, Label, Select } from '../components/ui/Field'
+import { Tabs } from '../components/ui/Tabs'
 import { money } from '../format'
+import { cn } from '../lib/cn'
 import type {
   AccountStudio,
   CatalogOrderStrategy,
@@ -38,53 +56,88 @@ const DEFAULT_ORDER: OrderParameters = {
   target_tolerance_usdt: 10,
 }
 
+const TAB_ITEMS: Array<{ id: StudioTab; label: string; hint: string }> = [
+  { id: 'position', label: '仓位策略', hint: '目标仓位与参考权益' },
+  { id: 'order', label: '下单策略', hint: '执行参数模板' },
+  { id: 'account', label: '账户组合', hint: '绑定与发布' },
+]
+
 function emptyPosition(): PositionStrategy {
-  return {
-    strategy_name: '',
-    equity_usdt: 10_000,
-    targets: {},
-    updated_at_us: 0,
-  }
+  return { strategy_name: '', equity_usdt: 10_000, targets: {}, updated_at_us: 0 }
 }
 
 function emptyOrder(): CatalogOrderStrategy {
-  return {
-    strategy_name: '',
-    order_parameters: { ...DEFAULT_ORDER },
-    updated_at_us: 0,
-  }
+  return { strategy_name: '', order_parameters: { ...DEFAULT_ORDER }, updated_at_us: 0 }
 }
 
 function percent(ratio: number) {
   return `${(ratio * 100).toFixed(1)}%`
 }
 
-function nextAllocationRatio(
-  studio: AccountStudio,
-  bindingName: string,
-  nextEquity: number,
-) {
+function nextAllocationRatio(studio: AccountStudio, bindingName: string, nextEquity: number) {
   const replaced =
-    studio.bindings.find((binding) => binding.binding_name === bindingName)?.position_equity_usdt ??
-    0
+    studio.bindings.find((binding) => binding.binding_name === bindingName)?.position_equity_usdt ?? 0
   const total = studio.bound_equity_usdt - replaced + nextEquity
   return total > 0 ? nextEquity / total : 0
 }
 
-function parseTargets(raw: string): Record<string, number> {
-  const parsed = JSON.parse(raw || '{}') as unknown
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('targets 必须是 JSON 对象')
-  }
-  const targets: Record<string, number> = {}
-  for (const [symbol, quantity] of Object.entries(parsed)) {
-    const name = symbol.trim().toUpperCase()
-    const value = Number(quantity)
-    if (!name) throw new Error('品种名不能为空')
-    if (!Number.isFinite(value)) throw new Error(`${name} 数量无效`)
-    targets[name] = value
-  }
-  return targets
+function StrategyPicker({
+  title,
+  emptyLabel,
+  items,
+  selectedName,
+  onSelect,
+  onCreate,
+  renderMeta,
+}: {
+  title: string
+  emptyLabel: string
+  items: Array<{ strategy_name: string }>
+  selectedName: string
+  onSelect: (name: string) => void
+  onCreate: () => void
+  renderMeta: (name: string) => string
+}) {
+  return (
+    <Card className="h-fit">
+      <CardHeader className="flex flex-row items-start justify-between gap-3">
+        <div>
+          <CardTitle>{title}</CardTitle>
+          <CardDescription>{items.length} 个已保存</CardDescription>
+        </div>
+        <Button type="button" size="sm" variant="primary" onClick={onCreate}>
+          <Plus size={14} /> 新建
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-2 pt-0">
+        {items.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
+            {emptyLabel}
+          </div>
+        ) : (
+          items.map((item) => {
+            const active = selectedName === item.strategy_name
+            return (
+              <button
+                key={item.strategy_name}
+                type="button"
+                onClick={() => onSelect(item.strategy_name)}
+                className={cn(
+                  'w-full rounded-xl border px-3 py-3 text-left transition-all',
+                  active
+                    ? 'border-brand bg-brand-soft shadow-sm'
+                    : 'border-border-soft bg-canvas/40 hover:border-border hover:bg-surface',
+                )}
+              >
+                <p className="truncate text-sm font-medium text-ink">{item.strategy_name}</p>
+                <p className="mt-1 text-xs text-muted">{renderMeta(item.strategy_name)}</p>
+              </button>
+            )
+          })
+        )}
+      </CardContent>
+    </Card>
+  )
 }
 
 export function ConfigPage() {
@@ -96,7 +149,6 @@ export function ConfigPage() {
   const [sourceId, setSourceId] = useState('')
   const [selectedPosition, setSelectedPosition] = useState<PositionStrategy>(emptyPosition)
   const [selectedOrder, setSelectedOrder] = useState<CatalogOrderStrategy>(emptyOrder)
-  const [targetsText, setTargetsText] = useState('{}')
   const [leverage, setLeverage] = useState('1')
   const [bindingName, setBindingName] = useState('')
   const [bindPosition, setBindPosition] = useState('')
@@ -187,433 +239,466 @@ export function ConfigPage() {
   }
 
   return (
-    <div className="app-frame">
-      <header className="app-header">
-        <div className="app-header__inner">
-          <div className="brand">
-            <span className="brand__mark" aria-hidden="true">
-              <Settings size={19} strokeWidth={2.1} />
-            </span>
-            <div>
-              <h1>CTA Manager</h1>
-              <p>策略组合配置</p>
-            </div>
-          </div>
-          <div className="header-actions">
-            <AppNav active="config" />
-          </div>
-        </div>
-      </header>
+    <AppShell
+      active="config"
+      title="CTA Manager"
+      subtitle="策略组合工作室"
+      icon={Settings2}
+      actions={
+        saving ? (
+          <Badge tone="brand" className="hidden sm:inline-flex">
+            <RefreshCw size={12} className="mr-1 animate-spin-slow" /> 写入中
+          </Badge>
+        ) : null
+      }
+    >
+      <PageIntro
+        eyebrow="Strategy Studio"
+        title="组合仓位、下单与账户绑定"
+        description="仓位策略和下单策略独立维护，账户只负责选择组合并按参考权益计算分配比例。保存后点发布，才会写入 Exec。"
+      />
 
-      <main className="page-shell config-shell">
-        {error && <div className="error-banner">{error}</div>}
-        {notice && <div className="success-banner">{notice}</div>}
+      <div className="space-y-4">
+        {error && <Alert tone="error">{error}</Alert>}
+        {notice && <Alert tone="success">{notice}</Alert>}
 
-        <section className="config-heading">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">STRATEGY STUDIO</p>
-              <h2>仓位策略、下单策略、账户绑定</h2>
-            </div>
-          </div>
-          <div className="studio-tabs">
-            {(
-              [
-                ['position', '仓位策略'],
-                ['order', '下单策略'],
-                ['account', '账户组合'],
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                className={tab === id ? 'is-active' : ''}
-                onClick={() => setTab(id)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </section>
+        <Tabs value={tab} onChange={setTab} items={TAB_ITEMS} />
 
         {loading ? (
-          <div className="config-empty">正在加载配置</div>
+          <Card>
+            <CardContent className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
+              <LoaderCircle size={18} className="animate-spin-slow" />
+              正在加载策略目录
+            </CardContent>
+          </Card>
         ) : tab === 'position' ? (
-          <div className="studio-split">
-            <aside>
-              <button
-                type="button"
-                className="command-button"
-                onClick={() => {
-                  setSelectedPosition(emptyPosition())
-                  setTargetsText('{}')
-                }}
-              >
-                <Plus size={15} /> 新建仓位策略
-              </button>
-              <ul>
-                {positions.map((item) => (
-                  <li key={item.strategy_name}>
-                    <button
-                      type="button"
-                      className={
-                        selectedPosition.strategy_name === item.strategy_name ? 'is-active' : ''
-                      }
-                      onClick={() => {
-                        setSelectedPosition(item)
-                        setTargetsText(JSON.stringify(item.targets, null, 2))
-                      }}
-                    >
-                      <strong>{item.strategy_name}</strong>
-                      <span>权益 {money(item.equity_usdt)} USDT</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </aside>
-            <form
-              className="studio-form"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void withWrite(async () => {
-                  const saved = await savePositionStrategy(
-                    {
-                      ...selectedPosition,
-                      equity_usdt: Number(selectedPosition.equity_usdt),
-                      targets: parseTargets(targetsText),
-                    },
-                  )
-                  setSelectedPosition(saved)
-                  setTargetsText(JSON.stringify(saved.targets, null, 2))
-                  await reloadCatalog()
-                })
+          <div className="grid gap-6 lg:grid-cols-[300px_minmax(0,1fr)]">
+            <StrategyPicker
+              title="仓位策略库"
+              emptyLabel="还没有仓位策略，先创建一个。"
+              items={positions}
+              selectedName={selectedPosition.strategy_name}
+              onSelect={(name) => {
+                const item = positions.find((entry) => entry.strategy_name === name)
+                if (!item) return
+                setSelectedPosition(item)
               }}
-            >
-              <label>
-                策略名
-                <input
-                  value={selectedPosition.strategy_name}
-                  onChange={(event) =>
-                    setSelectedPosition({ ...selectedPosition, strategy_name: event.target.value })
-                  }
-                />
-              </label>
-              <label>
-                权益金额 USDT
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={selectedPosition.equity_usdt}
-                  onChange={(event) =>
-                    setSelectedPosition({
-                      ...selectedPosition,
-                      equity_usdt: Number(event.target.value),
-                    })
-                  }
-                />
-              </label>
-              <p className="studio-hint">
-                target 按这份参考权益定义，默认 10000 USDT。账户绑定后只用来算组合比例，不占用账户容量。
-              </p>
-              <label>
-                目标仓位 JSON
-                <textarea
-                  rows={12}
-                  value={targetsText}
-                  onChange={(event) => setTargetsText(event.target.value)}
-                />
-              </label>
-              <div className="studio-actions">
-                <button type="submit" className="command-button command-button--primary" disabled={saving}>
-                  <Save size={15} /> 保存仓位策略
-                </button>
-                {selectedPosition.strategy_name && (
-                  <button
-                    type="button"
-                    className="command-button"
-                    disabled={saving}
-                    onClick={() =>
-                      void withWrite(async () => {
-                        await deletePositionStrategy(selectedPosition.strategy_name)
-                        setSelectedPosition(emptyPosition())
-                        setTargetsText('{}')
-                        await reloadCatalog()
+              onCreate={() => {
+                setSelectedPosition(emptyPosition())
+              }}
+              renderMeta={(name) => {
+                const item = positions.find((entry) => entry.strategy_name === name)
+                if (!item) return ''
+                const active = Object.values(item.targets).filter((value) => value !== 0).length
+                return `参考权益 ${money(item.equity_usdt)} USDT · ${active} 非零`
+              }}
+            />
+
+            <Card>
+              <CardHeader>
+                <CardTitle>编辑仓位策略</CardTitle>
+                <CardDescription>按参考权益定义各品种目标仓位，绑定账户后仅参与比例计算。</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form
+                  className="grid gap-4"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void withWrite(async () => {
+                      const saved = await savePositionStrategy({
+                        ...selectedPosition,
+                        equity_usdt: Number(selectedPosition.equity_usdt),
+                        targets: selectedPosition.targets,
                       })
-                    }
-                  >
-                    <Trash2 size={15} /> 删除
-                  </button>
-                )}
-              </div>
-            </form>
-          </div>
-        ) : tab === 'order' ? (
-          <div className="studio-split">
-            <aside>
-              <button
-                type="button"
-                className="command-button"
-                onClick={() => setSelectedOrder(emptyOrder())}
-              >
-                <Plus size={15} /> 新建下单策略
-              </button>
-              <ul>
-                {orders.map((item) => (
-                  <li key={item.strategy_name}>
-                    <button
-                      type="button"
-                      className={selectedOrder.strategy_name === item.strategy_name ? 'is-active' : ''}
-                      onClick={() => setSelectedOrder(item)}
-                    >
-                      <strong>{item.strategy_name}</strong>
-                      <span>单笔 {item.order_parameters.single_order_usdt} USDT</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </aside>
-            <form
-              className="studio-form"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void withWrite(async () => {
-                  const saved = await saveOrderStrategy(selectedOrder)
-                  setSelectedOrder(saved)
-                  await reloadCatalog()
-                })
-              }}
-            >
-              <label>
-                策略名
-                <input
-                  value={selectedOrder.strategy_name}
-                  onChange={(event) =>
-                    setSelectedOrder({ ...selectedOrder, strategy_name: event.target.value })
-                  }
-                />
-              </label>
-              {(
-                [
-                  ['single_order_usdt', '单笔名义金额'],
-                  ['orders_per_batch', '每批订单数'],
-                  ['tick_spacing', 'Tick 间距'],
-                  ['batch_interval_ms', '批次间隔'],
-                  ['maker_timeout_ms', 'Maker 超时'],
-                  ['max_maker_requotes', '最大重报价'],
-                  ['target_tolerance_usdt', '目标容差'],
-                ] as const
-              ).map(([field, label]) => (
-                <label key={field}>
-                  {label}
-                  <input
-                    type="number"
-                    value={selectedOrder.order_parameters[field]}
-                    onChange={(event) =>
-                      setSelectedOrder({
-                        ...selectedOrder,
-                        order_parameters: {
-                          ...selectedOrder.order_parameters,
-                          [field]: Number(event.target.value),
-                        },
+                      setSelectedPosition(saved)
+                      await reloadCatalog()
+                    })
+                  }}
+                >
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <Label>
+                      策略名
+                      <Input
+                        value={selectedPosition.strategy_name}
+                        onChange={(event) =>
+                          setSelectedPosition({
+                            ...selectedPosition,
+                            strategy_name: event.target.value,
+                          })
+                        }
+                      />
+                    </Label>
+                    <Label>
+                      参考权益 USDT
+                      <Input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={selectedPosition.equity_usdt}
+                        onChange={(event) =>
+                          setSelectedPosition({
+                            ...selectedPosition,
+                            equity_usdt: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </Label>
+                  </div>
+                  <FieldHint>默认 10000 USDT。账户实时权益变动时，这里只用于计算组合比例。</FieldHint>
+                  <TargetPositionsEditor
+                    targets={selectedPosition.targets}
+                    onChange={(targets) =>
+                      setSelectedPosition({
+                        ...selectedPosition,
+                        targets,
                       })
                     }
                   />
-                </label>
-              ))}
-              <label>
-                Maker 价格锚点
-                <select
-                  value={selectedOrder.order_parameters.maker_price_anchor}
-                  onChange={(event) =>
-                    setSelectedOrder({
-                      ...selectedOrder,
-                      order_parameters: {
-                        ...selectedOrder.order_parameters,
-                        maker_price_anchor: event.target
-                          .value as OrderParameters['maker_price_anchor'],
-                      },
-                    })
-                  }
-                >
-                  <option value="own_best">己方一档</option>
-                  <option value="opposite_best_plus_one_tick">对手一档 + 1 tick</option>
-                </select>
-              </label>
-              <div className="studio-actions">
-                <button type="submit" className="command-button command-button--primary" disabled={saving}>
-                  <Save size={15} /> 保存下单策略
-                </button>
-                {selectedOrder.strategy_name && (
-                  <button
-                    type="button"
-                    className="command-button"
-                    disabled={saving}
-                    onClick={() =>
-                      void withWrite(async () => {
-                        await deleteOrderStrategy(selectedOrder.strategy_name)
-                        setSelectedOrder(emptyOrder())
-                        await reloadCatalog()
-                      })
-                    }
-                  >
-                    <Trash2 size={15} /> 删除
-                  </button>
-                )}
-              </div>
-            </form>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="submit" variant="primary" disabled={saving}>
+                      <Save size={15} /> 保存仓位策略
+                    </Button>
+                    {selectedPosition.strategy_name && (
+                      <Button
+                        type="button"
+                        variant="danger"
+                        disabled={saving}
+                        onClick={() =>
+                          void withWrite(async () => {
+                            await deletePositionStrategy(selectedPosition.strategy_name)
+                            setSelectedPosition(emptyPosition())
+                            await reloadCatalog()
+                          })
+                        }
+                      >
+                        <Trash2 size={15} /> 删除
+                      </Button>
+                    )}
+                  </div>
+                </form>
+              </CardContent>
+            </Card>
           </div>
-        ) : (
-          <div className="studio-account">
-            <div className="studio-form">
-              <label>
-                账户
-                <select value={sourceId} onChange={(event) => setSourceId(event.target.value)}>
-                  {accounts.map((account) => (
-                    <option key={account.source_id} value={account.source_id}>
-                      {account.account} / {account.source_id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                杠杆率
-                <input value={leverage} onChange={(event) => setLeverage(event.target.value)} />
-              </label>
-              <p className="studio-hint">
-                账户权益是实时变动的，这里不填金额、也不卡容量。绑定后按各仓位策略的参考权益算比例。
-              </p>
-              <button
-                type="button"
-                className="command-button command-button--primary"
-                disabled={saving}
-                onClick={() =>
-                  void withWrite(async () => {
-                    const next = await saveAccountStudio(sourceId, Number(leverage))
-                    setStudio(next)
-                  })
-                }
-              >
-                <Save size={15} /> 保存杠杆
-              </button>
-              {studio && (
-                <div className="studio-capacity">
-                  <span>杠杆 {studio.leverage}</span>
-                  <span>参考权益合计 {money(studio.bound_equity_usdt)}</span>
-                </div>
-              )}
-            </div>
-            <form
-              className="studio-form"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void withWrite(async () => {
-                  const next = await saveAccountBinding(
-                    sourceId,
-                    bindingName,
-                    bindPosition,
-                    bindOrder,
-                  )
-                  setStudio(next)
-                })
+        ) : tab === 'order' ? (
+          <div className="grid gap-6 lg:grid-cols-[300px_minmax(0,1fr)]">
+            <StrategyPicker
+              title="下单策略库"
+              emptyLabel="还没有下单策略，先创建一个。"
+              items={orders}
+              selectedName={selectedOrder.strategy_name}
+              onSelect={(name) => {
+                const item = orders.find((entry) => entry.strategy_name === name)
+                if (item) setSelectedOrder(item)
               }}
-            >
-              <h3>绑定组合</h3>
-              <label>
-                发布名
-                <input
-                  value={bindingName}
-                  placeholder="写入 Exec 的策略名"
-                  onChange={(event) => setBindingName(event.target.value)}
-                />
-              </label>
-              <label>
-                仓位策略
-                <select value={bindPosition} onChange={(event) => setBindPosition(event.target.value)}>
-                  {positions.map((item) => (
-                    <option key={item.strategy_name} value={item.strategy_name}>
-                      {item.strategy_name} / {money(item.equity_usdt)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                下单策略
-                <select value={bindOrder} onChange={(event) => setBindOrder(event.target.value)}>
-                  {orders.map((item) => (
-                    <option key={item.strategy_name} value={item.strategy_name}>
-                      {item.strategy_name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {studio && bindPosition && (
-                <p className="studio-hint">
-                  绑定后约占组合{' '}
-                  {percent(
-                    nextAllocationRatio(
-                      studio,
-                      bindingName,
-                      positions.find((item) => item.strategy_name === bindPosition)?.equity_usdt ?? 0,
-                    ),
-                  )}
-                  ，与账户实时权益无关
-                </p>
-              )}
-              <button type="submit" className="command-button command-button--primary" disabled={saving}>
-                <Plus size={15} /> 绑定到账户
-              </button>
-            </form>
-            <div className="studio-bindings">
-              {(studio?.bindings ?? []).map((binding) => (
-                <article key={binding.binding_name}>
-                  <h3>{binding.binding_name}</h3>
-                  <p>
-                    仓位 {binding.position_strategy_name} × 下单 {binding.order_strategy_name}
-                  </p>
-                  <p>
-                    参考权益 {money(binding.position_equity_usdt)} USDT · 比例{' '}
-                    {percent(binding.allocation_ratio)}
-                  </p>
-                  <div className="studio-actions">
-                    <button
-                      type="button"
-                      className="command-button command-button--primary"
-                      disabled={saving}
-                      onClick={() =>
-                        void withWrite(async () => {
-                          await publishAccountBinding(sourceId, binding.binding_name)
+              onCreate={() => setSelectedOrder(emptyOrder())}
+              renderMeta={(name) => {
+                const item = orders.find((entry) => entry.strategy_name === name)
+                return item ? `单笔 ${item.order_parameters.single_order_usdt} USDT` : ''
+              }}
+            />
+
+            <Card>
+              <CardHeader>
+                <CardTitle>编辑下单策略</CardTitle>
+                <CardDescription>8 个执行参数可复用到多个账户绑定。</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form
+                  className="grid gap-4"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void withWrite(async () => {
+                      const saved = await saveOrderStrategy(selectedOrder)
+                      setSelectedOrder(saved)
+                      await reloadCatalog()
+                    })
+                  }}
+                >
+                  <Label>
+                    策略名
+                    <Input
+                      value={selectedOrder.strategy_name}
+                      onChange={(event) =>
+                        setSelectedOrder({ ...selectedOrder, strategy_name: event.target.value })
+                      }
+                    />
+                  </Label>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {(
+                      [
+                        ['single_order_usdt', '单笔名义金额'],
+                        ['orders_per_batch', '每批订单数'],
+                        ['tick_spacing', 'Tick 间距'],
+                        ['batch_interval_ms', '批次间隔 ms'],
+                        ['maker_timeout_ms', 'Maker 超时 ms'],
+                        ['max_maker_requotes', '最大重报价'],
+                        ['target_tolerance_usdt', '目标容差 USDT'],
+                      ] as const
+                    ).map(([field, label]) => (
+                      <Label key={field}>
+                        {label}
+                        <Input
+                          type="number"
+                          value={selectedOrder.order_parameters[field]}
+                          onChange={(event) =>
+                            setSelectedOrder({
+                              ...selectedOrder,
+                              order_parameters: {
+                                ...selectedOrder.order_parameters,
+                                [field]: Number(event.target.value),
+                              },
+                            })
+                          }
+                        />
+                      </Label>
+                    ))}
+                  </div>
+                  <Label>
+                    Maker 价格锚点
+                    <Select
+                      value={selectedOrder.order_parameters.maker_price_anchor}
+                      onChange={(event) =>
+                        setSelectedOrder({
+                          ...selectedOrder,
+                          order_parameters: {
+                            ...selectedOrder.order_parameters,
+                            maker_price_anchor: event.target
+                              .value as OrderParameters['maker_price_anchor'],
+                          },
                         })
                       }
                     >
-                      <CheckCircle2 size={15} /> 发布到 Exec
-                    </button>
-                    <button
+                      <option value="own_best">己方一档</option>
+                      <option value="opposite_best_plus_one_tick">对手一档 + 1 tick</option>
+                    </Select>
+                  </Label>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="submit" variant="primary" disabled={saving}>
+                      <Save size={15} /> 保存下单策略
+                    </Button>
+                    {selectedOrder.strategy_name && (
+                      <Button
+                        type="button"
+                        variant="danger"
+                        disabled={saving}
+                        onClick={() =>
+                          void withWrite(async () => {
+                            await deleteOrderStrategy(selectedOrder.strategy_name)
+                            setSelectedOrder(emptyOrder())
+                            await reloadCatalog()
+                          })
+                        }
+                      >
+                        <Trash2 size={15} /> 删除
+                      </Button>
+                    )}
+                  </div>
+                </form>
+              </CardContent>
+            </Card>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Wallet size={16} /> 账户设置
+                  </CardTitle>
+                  <CardDescription>账户权益实时变化，这里只保存杠杆与绑定关系。</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-4 sm:grid-cols-2">
+                  <Label>
+                    账户
+                    <Select value={sourceId} onChange={(event) => setSourceId(event.target.value)}>
+                      {accounts.map((account) => (
+                        <option key={account.source_id} value={account.source_id}>
+                          {account.account} / {account.source_id}
+                        </option>
+                      ))}
+                    </Select>
+                  </Label>
+                  <Label>
+                    杠杆率
+                    <Input value={leverage} onChange={(event) => setLeverage(event.target.value)} />
+                  </Label>
+                  <div className="sm:col-span-2">
+                    <Button
                       type="button"
-                      className="command-button"
+                      variant="primary"
                       disabled={saving}
                       onClick={() =>
                         void withWrite(async () => {
-                          await deleteAccountBinding(sourceId, binding.binding_name)
-                          const next = await getAccountStudio(sourceId)
+                          const next = await saveAccountStudio(sourceId, Number(leverage))
                           setStudio(next)
                         })
                       }
                     >
-                      <Trash2 size={15} /> 解绑
-                    </button>
+                      <Save size={15} /> 保存杠杆
+                    </Button>
                   </div>
-                </article>
-              ))}
+                </CardContent>
+              </Card>
+
+              {studio && (
+                <div className="grid gap-3">
+                  <StatTile label="杠杆" value={String(studio.leverage)} />
+                  <StatTile
+                    label="参考权益合计"
+                    value={`${money(studio.bound_equity_usdt)} USDT`}
+                    hint="各绑定仓位策略参考权益之和"
+                  />
+                  <StatTile label="已绑定" value={`${studio.bindings.length} 组`} />
+                </div>
+              )}
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Link2 size={16} /> 新建绑定
+                  </CardTitle>
+                  <CardDescription>选择仓位策略 × 下单策略，并指定 Exec 发布名。</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <form
+                    className="grid gap-4"
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      void withWrite(async () => {
+                        const next = await saveAccountBinding(
+                          sourceId,
+                          bindingName,
+                          bindPosition,
+                          bindOrder,
+                        )
+                        setStudio(next)
+                        setBindingName('')
+                      })
+                    }}
+                  >
+                    <Label>
+                      发布名
+                      <Input
+                        value={bindingName}
+                        placeholder="写入 Exec 的策略名"
+                        onChange={(event) => setBindingName(event.target.value)}
+                      />
+                    </Label>
+                    <Label>
+                      仓位策略
+                      <Select
+                        value={bindPosition}
+                        onChange={(event) => setBindPosition(event.target.value)}
+                      >
+                        {positions.map((item) => (
+                          <option key={item.strategy_name} value={item.strategy_name}>
+                            {item.strategy_name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Label>
+                    <Label>
+                      下单策略
+                      <Select value={bindOrder} onChange={(event) => setBindOrder(event.target.value)}>
+                        {orders.map((item) => (
+                          <option key={item.strategy_name} value={item.strategy_name}>
+                            {item.strategy_name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Label>
+                    {studio && bindPosition && (
+                      <FieldHint>
+                        预计占比{' '}
+                        {percent(
+                          nextAllocationRatio(
+                            studio,
+                            bindingName,
+                            positions.find((item) => item.strategy_name === bindPosition)
+                              ?.equity_usdt ?? 0,
+                          ),
+                        )}
+                      </FieldHint>
+                    )}
+                    <Button type="submit" variant="primary" disabled={saving}>
+                      <Plus size={15} /> 绑定到账户
+                    </Button>
+                  </form>
+                </CardContent>
+              </Card>
+
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 text-sm font-medium text-ink">
+                  <Layers3 size={16} className="text-brand" />
+                  当前绑定
+                </div>
+                {(studio?.bindings ?? []).length === 0 ? (
+                  <Card>
+                    <CardContent className="py-12 text-center text-sm text-muted">
+                      还没有绑定组合。先从左侧创建绑定。
+                    </CardContent>
+                  </Card>
+                ) : (
+                  (studio?.bindings ?? []).map((binding) => (
+                    <Card key={binding.binding_name}>
+                      <CardContent className="space-y-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-base font-semibold text-ink">{binding.binding_name}</p>
+                            <p className="mt-1 text-sm text-muted">
+                              {binding.position_strategy_name} × {binding.order_strategy_name}
+                            </p>
+                          </div>
+                          <Badge tone="brand">{percent(binding.allocation_ratio)}</Badge>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-canvas">
+                          <div
+                            className="h-full rounded-full bg-brand transition-all"
+                            style={{ width: `${Math.max(binding.allocation_ratio * 100, 4)}%` }}
+                          />
+                        </div>
+                        <p className="text-xs text-subtle">
+                          参考权益 {money(binding.position_equity_usdt)} USDT
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            variant="primary"
+                            disabled={saving}
+                            onClick={() =>
+                              void withWrite(async () => {
+                                await publishAccountBinding(sourceId, binding.binding_name)
+                              })
+                            }
+                          >
+                            <CheckCircle2 size={15} /> 发布到 Exec
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={saving}
+                            onClick={() =>
+                              void withWrite(async () => {
+                                await deleteAccountBinding(sourceId, binding.binding_name)
+                                const next = await getAccountStudio(sourceId)
+                                setStudio(next)
+                              })
+                            }
+                          >
+                            <Trash2 size={15} /> 解绑
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))
+                )}
+              </div>
             </div>
           </div>
         )}
-        {saving && (
-          <p className="studio-hint">
-            <RefreshCw size={14} className="is-spinning" /> 正在写入
-          </p>
-        )}
-      </main>
-    </div>
+      </div>
+    </AppShell>
   )
 }
