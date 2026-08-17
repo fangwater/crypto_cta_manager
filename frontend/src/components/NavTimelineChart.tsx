@@ -15,7 +15,7 @@ import type {
   SymbolNavTimeline,
   TimelineChartMode,
 } from '../types'
-import { strategyLabel } from '../format'
+import { strategyLabel, UI_FONT_SANS } from '../format'
 
 echarts.use([
   LineChart,
@@ -148,6 +148,7 @@ export function NavTimelineChart({
     chart.setOption(
       {
         animation: false,
+        textStyle: { fontFamily: UI_FONT_SANS },
         color:
           mode === 'portfolio'
             ? visibleSeries.map((key) => navSeriesMeta[key].color)

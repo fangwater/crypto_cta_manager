@@ -1,3 +1,6 @@
+export const UI_FONT_SANS =
+  '"PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "WenQuanYi Micro Hei", ui-sans-serif, system-ui, sans-serif'
+
 const moneyFormatter = new Intl.NumberFormat('zh-CN', {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,

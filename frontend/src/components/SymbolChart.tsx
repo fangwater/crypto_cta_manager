@@ -7,7 +7,7 @@ import {
 import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { useEffect, useRef } from 'react'
-import { compactMoney, money } from '../format'
+import { compactMoney, money, UI_FONT_SANS } from '../format'
 import type { ChartMode, FeeMode, SymbolRow } from '../types'
 
 echarts.use([
@@ -72,6 +72,7 @@ export function SymbolChart({ rows, chartMode, feeMode }: Props) {
     chart.setOption(
       {
         animationDuration: 260,
+        textStyle: { fontFamily: UI_FONT_SANS },
         grid: { left: 104, right: 26, top: 22, bottom: 42 },
         tooltip: {
           trigger: 'axis',
