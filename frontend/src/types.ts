@@ -109,6 +109,39 @@ export interface OrderStrategyList {
   strategies: string[]
 }
 
+export interface PositionStrategy {
+  strategy_name: string
+  equity_usdt: number
+  targets: Record<string, number>
+  updated_at_us: number
+}
+
+export interface CatalogOrderStrategy {
+  strategy_name: string
+  order_parameters: OrderParameters
+  updated_at_us: number
+}
+
+export interface AccountBinding {
+  source_id: string
+  binding_name: string
+  position_strategy_name: string
+  order_strategy_name: string
+  position_equity_usdt: number
+  updated_at_us: number
+}
+
+export interface AccountStudio {
+  source_id: string
+  equity_usdt: number
+  leverage: number
+  capacity_usdt: number
+  used_equity_usdt: number
+  remaining_usdt: number
+  bindings: AccountBinding[]
+  updated_at_us: number
+}
+
 export interface DashboardSnapshot {
   generated_at_us: number
   generation_duration_ms: number

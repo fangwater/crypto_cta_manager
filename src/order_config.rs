@@ -300,6 +300,64 @@ impl ExecConfigClient {
             nonzero_target_count: 0,
         })
     }
+
+    pub async fn save_targets(
+        &self,
+        base_url: &str,
+        strategy_name: &str,
+        targets: &BTreeMap<String, f64>,
+    ) -> std::result::Result<(), ExecConfigError> {
+        validate_strategy_name(strategy_name).map_err(ExecConfigError::invalid)?;
+        let url = endpoint(base_url, "targets")?;
+        let response = self
+            .http
+            .post(url)
+            .json(&serde_json::json!({
+                "strategy_name": strategy_name,
+                "targets": targets,
+            }))
+            .send()
+            .await
+            .map_err(ExecConfigError::transport)?;
+        let _: serde_json::Value = decode_response(response).await?;
+        Ok(())
+    }
+
+    pub async fn save_full_strategy(
+        &self,
+        base_url: &str,
+        strategy_name: &str,
+        order_parameters: &OrderParameters,
+        targets: &BTreeMap<String, f64>,
+    ) -> std::result::Result<(), ExecConfigError> {
+        validate_strategy_name(strategy_name).map_err(ExecConfigError::invalid)?;
+        order_parameters
+            .validate()
+            .map_err(ExecConfigError::invalid)?;
+        let url = endpoint(base_url, "strategy")?;
+        let response = self
+            .http
+            .post(url)
+            .json(&serde_json::json!({
+                "strategy_name": strategy_name,
+                "config": {
+                    "single_order_usdt": order_parameters.single_order_usdt,
+                    "orders_per_batch": order_parameters.orders_per_batch,
+                    "maker_price_anchor": order_parameters.maker_price_anchor,
+                    "tick_spacing": order_parameters.tick_spacing,
+                    "batch_interval_ms": order_parameters.batch_interval_ms,
+                    "maker_timeout_ms": order_parameters.maker_timeout_ms,
+                    "max_maker_requotes": order_parameters.max_maker_requotes,
+                    "target_tolerance_usdt": order_parameters.target_tolerance_usdt,
+                    "targets": targets,
+                }
+            }))
+            .send()
+            .await
+            .map_err(ExecConfigError::transport)?;
+        let _: serde_json::Value = decode_response(response).await?;
+        Ok(())
+    }
 }
 
 fn endpoint(base_url: &str, path: &str) -> std::result::Result<Url, ExecConfigError> {

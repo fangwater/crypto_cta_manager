@@ -8,6 +8,7 @@ const TRADE01_CONFIG = `${GATEWAY}/exec_trade01/config`
 type ChapterId =
   | 'overview'
   | 'model'
+  | 'studio'
   | 'entry'
   | 'op-params'
   | 'op-targets'
@@ -57,19 +58,19 @@ const chapters: Chapter[] = [
     content: (
       <>
         <p>
-          这份 GitBook 说明 CTA Exec 的日常操作和 Config
-          API。浏览器改下单参数，推送脚本改目标仓位；两者都按账户进入，再按策略落库。
+          这份 GitBook 说明 CTA 的策略组合和 Exec Config
+          API。仓位策略、下单策略在 Manager 里独立配置，再绑定到账户；发布后才写入 Exec。
         </p>
         <ul>
           <li>
-            浏览器改参数：打开{' '}
+            浏览器配置组合：打开{' '}
             <a href="/manager/config/">/manager/config/</a>
           </li>
           <li>
-            脚本推仓位：<code>POST /exec_trade01/config/api/targets</code>
+            脚本直接推仓位：<code>POST /exec_trade01/config/api/targets</code>
           </li>
           <li>
-            同时写参数和仓位：<code>POST /exec_trade01/config/api/strategy</code>
+            脚本同时写参数和仓位：<code>POST /exec_trade01/config/api/strategy</code>
           </li>
         </ul>
         <p>当前已部署账户只有 <code>trade01</code>。以后 <code>trade02</code> 会使用独立前缀，不能和 trade01 共用入口。</p>
@@ -113,9 +114,64 @@ const chapters: Chapter[] = [
           维护的实际仓位。同一个账户里，两个策略的 BTC target 可以不同，互不覆盖。
         </p>
         <p>
-          <code>order-parameters</code> 只是该策略的下单执行参数，不是仓位。实际仓位由
-          Exec 根据 target 成交后写在 Redis 的 <code>position_allocations</code> 里，接口不直接改它。
+          Exec 运行时仍按「账户 + 策略名」落 Redis。Manager 这边把原来混在一起的策略拆成仓位策略和下单策略，组合后再发布成 Exec 策略名。
         </p>
+      </>
+    ),
+  },
+  {
+    id: 'studio',
+    group: '开始',
+    title: '策略组合',
+    content: (
+      <>
+        <p>
+          Manager 配置页把策略拆成两份独立目录，不再挂在账户下面。账户只负责绑定和容量。
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>对象</th>
+              <th>独立配置什么</th>
+              <th>默认值</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>仓位策略</td>
+              <td>
+                策略名、<code>equity_usdt</code>、<code>targets</code>
+              </td>
+              <td>权益 10000 USDT</td>
+            </tr>
+            <tr>
+              <td>下单策略</td>
+              <td>策略名和 8 个下单参数</td>
+              <td>与现有 Exec 默认一致</td>
+            </tr>
+            <tr>
+              <td>账户</td>
+              <td>账户权益、杠杆率</td>
+              <td>权益 50000，杠杆 1</td>
+            </tr>
+            <tr>
+              <td>绑定</td>
+              <td>仓位策略 × 下单策略，发布名写入 Exec</td>
+              <td>无</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          账户容量 = 账户权益 × 杠杆。例如权益 5 万、杠杆 2，可配置 10 万。绑定占用的是仓位策略的权益金额；同一账户可绑定任意多组，只要总和不超过容量。同一份仓位或下单策略也可以绑到多个账户。
+        </p>
+        <p>
+          浏览器在 <a href="/manager/config/">/manager/config/</a> 完成创建、绑定和发布。发布时：
+        </p>
+        <ul>
+          <li>Exec 上还没有这个发布名：走 <code>POST /api/strategy</code> 一次写入参数和 target</li>
+          <li>已经存在：分别走 <code>POST /api/targets</code> 和带 token 的 <code>POST /api/order-parameters</code></li>
+        </ul>
+        <p>未点「发布到 Exec」之前，组合只存在 Manager 本地 PostgreSQL，不会改交易进程。</p>
       </>
     ),
   },
@@ -182,24 +238,24 @@ const chapters: Chapter[] = [
     content: (
       <>
         <p>
-          只通过 Manager 浏览器改 8 个下单参数。Exec 的{' '}
+          下单参数现在属于独立的下单策略，不再先选账户再改某个 Exec 策略。Exec 的{' '}
           <code>/exec_trade01/config/</code> 页面保持只读。
         </p>
         <ol>
           <li>
-            打开 <a href="/manager/config/">下单配置</a>
+            打开 <a href="/manager/config/">策略组合</a>，解锁写权限 token
           </li>
-          <li>选择账户（现在是 trade01）和策略</li>
-          <li>输入写权限 token（只留在当前浏览器内存，不会发给除 Manager 以外的服务）</li>
-          <li>
-            修改这 8 项：<code>single_order_usdt</code>、<code>orders_per_batch</code>、
-            <code>maker_price_anchor</code>、<code>tick_spacing</code>、
-            <code>batch_interval_ms</code>、<code>maker_timeout_ms</code>、
-            <code>max_maker_requotes</code>、<code>target_tolerance_usdt</code>
-          </li>
-          <li>保存。请求带当前的 <code>expected_updated_at_us</code>，冲突时请刷新后再存</li>
+          <li>在「仓位策略」里创建或编辑 target 和权益金额</li>
+          <li>在「下单策略」里创建或编辑 8 个下单参数</li>
+          <li>在「账户组合」里设置账户权益和杠杆，再把仓位策略和下单策略绑成发布名</li>
+          <li>点「发布到 Exec」。未发布的组合不会进入交易进程</li>
         </ol>
-        <p>这里不能改 target、不能新建或删除策略、也不能改实际仓位。</p>
+        <p>
+          8 个下单参数仍是：<code>single_order_usdt</code>、<code>orders_per_batch</code>、
+          <code>maker_price_anchor</code>、<code>tick_spacing</code>、
+          <code>batch_interval_ms</code>、<code>maker_timeout_ms</code>、
+          <code>max_maker_requotes</code>、<code>target_tolerance_usdt</code>。
+        </p>
       </>
     ),
   },

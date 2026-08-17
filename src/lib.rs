@@ -7,4 +7,5 @@ pub mod postgres;
 pub mod reconcile;
 pub mod rocks_source;
 pub mod snapshot;
+pub mod strategy_catalog;
 pub mod web;

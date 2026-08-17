@@ -1,9 +1,12 @@
 import type {
+  AccountStudio,
+  CatalogOrderStrategy,
   DashboardSnapshot,
   HealthResponse,
   OrderParameters,
   OrderStrategyList,
   OrderStrategyView,
+  PositionStrategy,
   TimelineSnapshot,
 } from './types'
 
@@ -20,7 +23,7 @@ export class ApiError extends Error {
 
 interface RequestOptions {
   signal?: AbortSignal
-  method?: 'GET' | 'POST'
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   body?: unknown
   token?: string
 }
@@ -42,6 +45,7 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
       | null
     throw new ApiError(payload?.error ?? `HTTP ${response.status}`, response.status)
   }
+  if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
 
@@ -119,5 +123,104 @@ export function saveOrderParameters(
         order_parameters: orderParameters,
       },
     },
+  )
+}
+
+export function listPositionStrategies(signal?: AbortSignal) {
+  return requestJson<PositionStrategy[]>('/catalog/position-strategies', { signal })
+}
+
+export function savePositionStrategy(body: PositionStrategy, token: string) {
+  return requestJson<PositionStrategy>('/catalog/position-strategies', {
+    method: 'POST',
+    token,
+    body: {
+      strategy_name: body.strategy_name,
+      equity_usdt: body.equity_usdt,
+      targets: body.targets,
+    },
+  })
+}
+
+export function deletePositionStrategy(name: string, token: string) {
+  return requestJson<void>(`/catalog/position-strategies/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    token,
+  })
+}
+
+export function listOrderStrategies(signal?: AbortSignal) {
+  return requestJson<CatalogOrderStrategy[]>('/catalog/order-strategies', { signal })
+}
+
+export function saveOrderStrategy(body: CatalogOrderStrategy, token: string) {
+  return requestJson<CatalogOrderStrategy>('/catalog/order-strategies', {
+    method: 'POST',
+    token,
+    body: {
+      strategy_name: body.strategy_name,
+      order_parameters: body.order_parameters,
+    },
+  })
+}
+
+export function deleteOrderStrategy(name: string, token: string) {
+  return requestJson<void>(`/catalog/order-strategies/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    token,
+  })
+}
+
+export function getAccountStudio(sourceId: string, signal?: AbortSignal) {
+  return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}`, {
+    signal,
+  })
+}
+
+export function saveAccountStudio(
+  sourceId: string,
+  equityUsdt: number,
+  leverage: number,
+  token: string,
+) {
+  return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}`, {
+    method: 'PUT',
+    token,
+    body: { equity_usdt: equityUsdt, leverage },
+  })
+}
+
+export function saveAccountBinding(
+  sourceId: string,
+  bindingName: string,
+  positionStrategyName: string,
+  orderStrategyName: string,
+  token: string,
+) {
+  return requestJson<AccountStudio>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings`,
+    {
+      method: 'POST',
+      token,
+      body: {
+        binding_name: bindingName,
+        position_strategy_name: positionStrategyName,
+        order_strategy_name: orderStrategyName,
+      },
+    },
+  )
+}
+
+export function deleteAccountBinding(sourceId: string, bindingName: string, token: string) {
+  return requestJson<void>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings/${encodeURIComponent(bindingName)}`,
+    { method: 'DELETE', token },
+  )
+}
+
+export function publishAccountBinding(sourceId: string, bindingName: string, token: string) {
+  return requestJson<OrderStrategyView>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings/${encodeURIComponent(bindingName)}/publish`,
+    { method: 'POST', token },
   )
 }

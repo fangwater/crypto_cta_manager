@@ -1,156 +1,136 @@
 import {
   CheckCircle2,
   LockKeyhole,
+  Plus,
   RefreshCw,
-  RotateCcw,
   Save,
   Settings,
-  ShieldCheck,
+  Trash2,
   UnlockKeyhole,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ApiError,
   authenticateOrderConfig,
+  deleteAccountBinding,
+  deleteOrderStrategy,
+  deletePositionStrategy,
+  getAccountStudio,
   getDashboard,
-  getOrderConfigStrategies,
-  getOrderConfigStrategy,
-  saveOrderParameters,
+  listOrderStrategies,
+  listPositionStrategies,
+  publishAccountBinding,
+  saveAccountBinding,
+  saveAccountStudio,
+  saveOrderStrategy,
+  savePositionStrategy,
 } from '../api'
 import { AppNav } from '../components/AppNav'
-import { timestampUs } from '../format'
+import { money } from '../format'
 import type {
+  AccountStudio,
+  CatalogOrderStrategy,
   DashboardSnapshot,
   OrderParameters,
-  OrderStrategyView,
+  PositionStrategy,
 } from '../types'
 
-interface ParameterForm {
-  single_order_usdt: string
-  orders_per_batch: string
-  maker_price_anchor: OrderParameters['maker_price_anchor']
-  tick_spacing: string
-  batch_interval_ms: string
-  maker_timeout_ms: string
-  max_maker_requotes: string
-  target_tolerance_usdt: string
+type StudioTab = 'position' | 'order' | 'account'
+
+const DEFAULT_ORDER: OrderParameters = {
+  single_order_usdt: 100,
+  orders_per_batch: 3,
+  maker_price_anchor: 'own_best',
+  tick_spacing: 1,
+  batch_interval_ms: 500,
+  maker_timeout_ms: 1000,
+  max_maker_requotes: 2,
+  target_tolerance_usdt: 10,
 }
 
-type NumericField = Exclude<keyof ParameterForm, 'maker_price_anchor'>
-
-const fieldLabels: Record<keyof ParameterForm, string> = {
-  single_order_usdt: '单笔名义金额',
-  orders_per_batch: '每批订单数',
-  maker_price_anchor: 'Maker 价格锚点',
-  tick_spacing: 'Tick 间距',
-  batch_interval_ms: '批次间隔',
-  maker_timeout_ms: 'Maker 超时',
-  max_maker_requotes: '最大重报价次数',
-  target_tolerance_usdt: '目标容差',
-}
-
-function initialQuery(name: string) {
-  return new URLSearchParams(window.location.search).get(name)?.trim() ?? ''
-}
-
-function toForm(parameters: OrderParameters): ParameterForm {
+function emptyPosition(): PositionStrategy {
   return {
-    single_order_usdt: String(parameters.single_order_usdt),
-    orders_per_batch: String(parameters.orders_per_batch),
-    maker_price_anchor: parameters.maker_price_anchor,
-    tick_spacing: String(parameters.tick_spacing),
-    batch_interval_ms: String(parameters.batch_interval_ms),
-    maker_timeout_ms: String(parameters.maker_timeout_ms),
-    max_maker_requotes: String(parameters.max_maker_requotes),
-    target_tolerance_usdt: String(parameters.target_tolerance_usdt),
+    strategy_name: '',
+    equity_usdt: 10_000,
+    targets: {},
+    updated_at_us: 0,
   }
 }
 
-function finiteNumber(value: string, label: string, minimum: number) {
-  if (!value.trim()) throw new Error(`${label}不能为空`)
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed < minimum) {
-    throw new Error(`${label}必须大于等于 ${minimum}`)
-  }
-  return parsed
-}
-
-function positiveNumber(value: string, label: string) {
-  const parsed = finiteNumber(value, label, 0)
-  if (parsed === 0) throw new Error(`${label}必须大于 0`)
-  return parsed
-}
-
-function unsignedInteger(value: string, label: string, minimum: number) {
-  const parsed = finiteNumber(value, label, minimum)
-  if (!Number.isInteger(parsed) || parsed > 4_294_967_295) {
-    throw new Error(`${label}必须是有效整数`)
-  }
-  return parsed
-}
-
-function parseForm(form: ParameterForm): OrderParameters {
+function emptyOrder(): CatalogOrderStrategy {
   return {
-    single_order_usdt: positiveNumber(form.single_order_usdt, fieldLabels.single_order_usdt),
-    orders_per_batch: unsignedInteger(form.orders_per_batch, fieldLabels.orders_per_batch, 1),
-    maker_price_anchor: form.maker_price_anchor,
-    tick_spacing: unsignedInteger(form.tick_spacing, fieldLabels.tick_spacing, 0),
-    batch_interval_ms: unsignedInteger(form.batch_interval_ms, fieldLabels.batch_interval_ms, 0),
-    maker_timeout_ms: unsignedInteger(form.maker_timeout_ms, fieldLabels.maker_timeout_ms, 1),
-    max_maker_requotes: unsignedInteger(
-      form.max_maker_requotes,
-      fieldLabels.max_maker_requotes,
-      0,
-    ),
-    target_tolerance_usdt: finiteNumber(
-      form.target_tolerance_usdt,
-      fieldLabels.target_tolerance_usdt,
-      0,
-    ),
+    strategy_name: '',
+    order_parameters: { ...DEFAULT_ORDER },
+    updated_at_us: 0,
   }
 }
 
-function displayValue(field: keyof ParameterForm, value: string) {
-  if (field !== 'maker_price_anchor') return value
-  return value === 'own_best' ? '己方一档' : '对手一档 + 1 tick'
+function parseTargets(raw: string): Record<string, number> {
+  const parsed = JSON.parse(raw || '{}') as unknown
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('targets 必须是 JSON 对象')
+  }
+  const targets: Record<string, number> = {}
+  for (const [symbol, quantity] of Object.entries(parsed)) {
+    const name = symbol.trim().toUpperCase()
+    const value = Number(quantity)
+    if (!name) throw new Error('品种名不能为空')
+    if (!Number.isFinite(value)) throw new Error(`${name} 数量无效`)
+    targets[name] = value
+  }
+  return targets
 }
 
 export function ConfigPage() {
+  const [tab, setTab] = useState<StudioTab>('position')
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
-  const [sourceId, setSourceId] = useState(() => initialQuery('source'))
-  const [strategies, setStrategies] = useState<string[]>([])
-  const [strategyName, setStrategyName] = useState(() => initialQuery('strategy'))
-  const [loaded, setLoaded] = useState<OrderStrategyView | null>(null)
-  const [form, setForm] = useState<ParameterForm | null>(null)
+  const [positions, setPositions] = useState<PositionStrategy[]>([])
+  const [orders, setOrders] = useState<CatalogOrderStrategy[]>([])
+  const [studio, setStudio] = useState<AccountStudio | null>(null)
+  const [sourceId, setSourceId] = useState('')
+  const [selectedPosition, setSelectedPosition] = useState<PositionStrategy>(emptyPosition)
+  const [selectedOrder, setSelectedOrder] = useState<CatalogOrderStrategy>(emptyOrder)
+  const [targetsText, setTargetsText] = useState('{}')
+  const [accountEquity, setAccountEquity] = useState('50000')
+  const [leverage, setLeverage] = useState('1')
+  const [bindingName, setBindingName] = useState('')
+  const [bindPosition, setBindPosition] = useState('')
+  const [bindOrder, setBindOrder] = useState('')
   const [token, setToken] = useState('')
   const [unlocked, setUnlocked] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [strategyLoading, setStrategyLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [unlocking, setUnlocking] = useState(false)
-  const [reloadRevision, setReloadRevision] = useState(0)
-  const [pendingParameters, setPendingParameters] = useState<OrderParameters | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
-  const configurableAccounts = useMemo(
+  const accounts = useMemo(
     () => (dashboard?.accounts ?? []).filter((account) => account.enabled && account.configurable),
     [dashboard],
   )
-  const selectedAccount = configurableAccounts.find(
-    (account) => account.source_id === sourceId,
-  )
-  const baselineForm = useMemo(
-    () => (loaded ? toForm(loaded.order_parameters) : null),
-    [loaded],
-  )
-  const dirty =
-    form !== null && baselineForm !== null && JSON.stringify(form) !== JSON.stringify(baselineForm)
+
+  const reloadCatalog = useCallback(async (signal?: AbortSignal) => {
+    const [nextPositions, nextOrders] = await Promise.all([
+      listPositionStrategies(signal),
+      listOrderStrategies(signal),
+    ])
+    setPositions(nextPositions)
+    setOrders(nextOrders)
+    setBindPosition((current) =>
+      nextPositions.some((item) => item.strategy_name === current)
+        ? current
+        : (nextPositions[0]?.strategy_name ?? ''),
+    )
+    setBindOrder((current) =>
+      nextOrders.some((item) => item.strategy_name === current)
+        ? current
+        : (nextOrders[0]?.strategy_name ?? ''),
+    )
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
-    getDashboard(controller.signal)
-      .then((snapshot) => {
+    Promise.all([getDashboard(controller.signal), reloadCatalog(controller.signal)])
+      .then(([snapshot]) => {
         setDashboard(snapshot)
         setError(null)
       })
@@ -160,201 +140,68 @@ export function ConfigPage() {
       })
       .finally(() => setLoading(false))
     return () => controller.abort()
-  }, [])
+  }, [reloadCatalog])
 
   useEffect(() => {
-    if (!dashboard) return
-    const accounts = (dashboard.accounts ?? []).filter(
-      (account) => account.enabled && account.configurable,
-    )
+    if (!accounts.length) return
     if (!accounts.some((account) => account.source_id === sourceId)) {
-      setSourceId(accounts[0]?.source_id ?? '')
+      setSourceId(accounts[0].source_id)
     }
-  }, [dashboard, sourceId])
+  }, [accounts, sourceId])
 
   useEffect(() => {
     if (!sourceId) {
-      setStrategies([])
-      setStrategyName('')
-      setLoaded(null)
-      setForm(null)
+      setStudio(null)
       return
     }
     const controller = new AbortController()
-    setStrategyLoading(true)
-    setLoaded(null)
-    setForm(null)
-    getOrderConfigStrategies(sourceId, controller.signal)
-      .then((response) => {
-        setStrategies(response.strategies)
-        setStrategyName((current) =>
-          response.strategies.includes(current) ? current : (response.strategies[0] ?? ''),
-        )
+    getAccountStudio(sourceId, controller.signal)
+      .then((next) => {
+        setStudio(next)
+        setAccountEquity(String(next.equity_usdt))
+        setLeverage(String(next.leverage))
         setError(null)
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
-        setStrategies([])
-        setStrategyName('')
         setError(reason instanceof Error ? reason.message : String(reason))
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setStrategyLoading(false)
       })
     return () => controller.abort()
   }, [sourceId])
 
-  useEffect(() => {
-    if (!sourceId || !strategyName) {
-      setLoaded(null)
-      setForm(null)
+  async function withWrite<T>(action: () => Promise<T>) {
+    if (!unlocked) {
+      setError('请先解锁写权限')
       return
     }
-    const controller = new AbortController()
-    setStrategyLoading(true)
-    getOrderConfigStrategy(sourceId, strategyName, controller.signal)
-      .then((strategy) => {
-        setLoaded(strategy)
-        setForm(toForm(strategy.order_parameters))
-        setError(null)
-        setNotice(null)
-      })
-      .catch((reason: unknown) => {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return
-        setLoaded(null)
-        setForm(null)
-        setError(reason instanceof Error ? reason.message : String(reason))
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setStrategyLoading(false)
-      })
-    return () => controller.abort()
-  }, [reloadRevision, sourceId, strategyName])
-
-  useEffect(() => {
-    if (!dirty) return
-    const warn = (event: BeforeUnloadEvent) => event.preventDefault()
-    window.addEventListener('beforeunload', warn)
-    return () => window.removeEventListener('beforeunload', warn)
-  }, [dirty])
-
-  const updateQuery = useCallback((nextSource: string, nextStrategy: string) => {
-    const url = new URL(window.location.href)
-    if (nextSource) url.searchParams.set('source', nextSource)
-    else url.searchParams.delete('source')
-    if (nextStrategy) url.searchParams.set('strategy', nextStrategy)
-    else url.searchParams.delete('strategy')
-    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
-  }, [])
-
-  function confirmDiscard() {
-    return !dirty || window.confirm('当前下单参数尚未保存，确认放弃修改？')
-  }
-
-  function selectSource(nextSource: string) {
-    if (!confirmDiscard()) return
-    setSourceId(nextSource)
-    setStrategyName('')
-    setNotice(null)
-    updateQuery(nextSource, '')
-  }
-
-  function selectStrategy(nextStrategy: string) {
-    if (!confirmDiscard()) return
-    setStrategyName(nextStrategy)
-    setNotice(null)
-    updateQuery(sourceId, nextStrategy)
-  }
-
-  function setNumericField(field: NumericField, value: string) {
-    setForm((current) => (current ? { ...current, [field]: value } : current))
-    setNotice(null)
-  }
-
-  async function unlock(event: React.FormEvent) {
-    event.preventDefault()
-    const candidate = token.trim()
-    if (!candidate) {
-      setError('请输入写入密钥')
-      return
-    }
-    setUnlocking(true)
-    try {
-      await authenticateOrderConfig(candidate)
-      setToken(candidate)
-      setUnlocked(true)
-      setError(null)
-      setNotice('写入权限已解锁')
-    } catch (reason: unknown) {
-      setUnlocked(false)
-      setError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      setUnlocking(false)
-    }
-  }
-
-  function lock() {
-    setUnlocked(false)
-    setToken('')
-    setPendingParameters(null)
-    setNotice(null)
-  }
-
-  function prepareSave() {
-    if (!form || !loaded || !unlocked) return
-    if (loaded.updated_at_us === null) {
-      setError('当前策略缺少配置版本，无法安全保存')
-      return
-    }
-    try {
-      setPendingParameters(parseForm(form))
-      setError(null)
-    } catch (reason: unknown) {
-      setError(reason instanceof Error ? reason.message : String(reason))
-    }
-  }
-
-  async function confirmSave() {
-    if (!pendingParameters || !loaded || loaded.updated_at_us === null) return
     setSaving(true)
+    setError(null)
+    setNotice(null)
     try {
-      const saved = await saveOrderParameters(
-        sourceId,
-        strategyName,
-        loaded.updated_at_us,
-        pendingParameters,
-        token,
-      )
-      setLoaded(saved)
-      setForm(toForm(saved.order_parameters))
-      setPendingParameters(null)
-      setError(null)
-      setNotice('下单参数已保存')
+      const result = await action()
+      setNotice('已保存')
+      return result
     } catch (reason: unknown) {
-      setPendingParameters(null)
-      if (reason instanceof ApiError && reason.status === 401) lock()
-      setError(
-        reason instanceof ApiError && reason.status === 409
-          ? '配置版本已变化，请重新加载后再修改'
-          : reason instanceof Error
-            ? reason.message
-            : String(reason),
-      )
+      setError(reason instanceof ApiError ? reason.message : String(reason))
     } finally {
       setSaving(false)
     }
   }
 
-  const changes = useMemo(() => {
-    if (!form || !baselineForm) return []
-    return (Object.keys(fieldLabels) as (keyof ParameterForm)[])
-      .filter((field) => form[field] !== baselineForm[field])
-      .map((field) => ({
-        field,
-        before: displayValue(field, baselineForm[field]),
-        after: displayValue(field, form[field]),
-      }))
-  }, [baselineForm, form])
+  async function unlock() {
+    setSaving(true)
+    try {
+      await authenticateOrderConfig(token)
+      setUnlocked(true)
+      setError(null)
+      setNotice('写权限已解锁')
+    } catch (reason: unknown) {
+      setUnlocked(false)
+      setError(reason instanceof ApiError ? reason.message : String(reason))
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <div className="app-frame">
@@ -366,7 +213,7 @@ export function ConfigPage() {
             </span>
             <div>
               <h1>CTA Manager</h1>
-              <p>下单配置</p>
+              <p>策略组合配置</p>
             </div>
           </div>
           <div className="header-actions">
@@ -379,310 +226,428 @@ export function ConfigPage() {
         {error && <div className="error-banner">{error}</div>}
         {notice && <div className="success-banner">{notice}</div>}
 
-        <section className="config-heading" aria-labelledby="config-title">
+        <section className="config-heading">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">ORDER EXECUTION</p>
-              <h2 id="config-title">{selectedAccount?.account ?? '下单参数'}</h2>
+              <p className="eyebrow">STRATEGY STUDIO</p>
+              <h2>仓位策略、下单策略、账户绑定</h2>
             </div>
-            {loaded && (
-              <span className="workspace-updated">
-                <CheckCircle2 size={14} />
-                {timestampUs(loaded.updated_at_us)}
-              </span>
-            )}
+            <div className="config-auth">
+              {unlocked ? <UnlockKeyhole size={16} /> : <LockKeyhole size={16} />}
+              <input
+                type="password"
+                value={token}
+                placeholder="写权限 token"
+                onChange={(event) => {
+                  setToken(event.target.value)
+                  setUnlocked(false)
+                }}
+              />
+              <button type="button" className="command-button" disabled={saving} onClick={() => void unlock()}>
+                {unlocked ? '已解锁' : '解锁'}
+              </button>
+            </div>
+          </div>
+          <div className="studio-tabs">
+            {(
+              [
+                ['position', '仓位策略'],
+                ['order', '下单策略'],
+                ['account', '账户组合'],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                className={tab === id ? 'is-active' : ''}
+                onClick={() => setTab(id)}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </section>
 
-        <section className="config-context" aria-label="配置范围">
-          <label>
-            <span>账户</span>
-            <select
-              value={sourceId}
-              disabled={loading || configurableAccounts.length === 0}
-              onChange={(event) => selectSource(event.target.value)}
-            >
-              {configurableAccounts.map((account) => (
-                <option key={account.source_id} value={account.source_id}>
-                  {account.account} · {account.venue}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>策略</span>
-            <select
-              value={strategyName}
-              disabled={strategyLoading || strategies.length === 0}
-              onChange={(event) => selectStrategy(event.target.value)}
-            >
-              {strategies.length === 0 && <option value="">暂无策略</option>}
-              {strategies.map((strategy) => (
-                <option key={strategy} value={strategy}>
-                  {strategy}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            className="icon-button"
-            title="重新加载"
-            aria-label="重新加载配置"
-            disabled={!strategyName || strategyLoading}
-            onClick={() => {
-              if (confirmDiscard()) setReloadRevision((current) => current + 1)
-            }}
-          >
-            <RefreshCw size={17} className={strategyLoading ? 'is-spinning' : ''} />
-          </button>
-        </section>
-
-        <section className="config-editor" aria-labelledby="parameters-title">
-          <div className="panel-heading config-editor__heading">
-            <div>
-              <p className="eyebrow">BATCH EXEC</p>
-              <h2 id="parameters-title">下单参数</h2>
-            </div>
-            <div className="config-readonly-state">
-              <LockKeyhole size={14} />
-              <span>仓位只读</span>
-              <strong>
-                {loaded ? `${loaded.nonzero_target_count} / ${loaded.target_count}` : '--'}
-              </strong>
-            </div>
-          </div>
-
-          {form && loaded ? (
-            <>
-              <fieldset className="parameter-grid" disabled={!unlocked || saving}>
-                <NumberField
-                  label={fieldLabels.single_order_usdt}
-                  code="single_order_usdt"
-                  unit="USDT"
-                  value={form.single_order_usdt}
-                  onChange={(value) => setNumericField('single_order_usdt', value)}
-                />
-                <NumberField
-                  label={fieldLabels.orders_per_batch}
-                  code="orders_per_batch"
-                  value={form.orders_per_batch}
-                  integer
-                  onChange={(value) => setNumericField('orders_per_batch', value)}
-                />
-                <div className="parameter-field parameter-field--wide">
-                  <div className="parameter-label">
-                    <span>{fieldLabels.maker_price_anchor}</span>
-                    <code>maker_price_anchor</code>
-                  </div>
-                  <div className="anchor-segmented" aria-label="Maker 价格锚点">
-                    <button
-                      type="button"
-                      className={form.maker_price_anchor === 'own_best' ? 'is-active' : ''}
-                      onClick={() =>
-                        setForm((current) =>
-                          current ? { ...current, maker_price_anchor: 'own_best' } : current,
-                        )
-                      }
-                    >
-                      己方一档
-                    </button>
+        {loading ? (
+          <div className="config-empty">正在加载配置</div>
+        ) : tab === 'position' ? (
+          <div className="studio-split">
+            <aside>
+              <button
+                type="button"
+                className="command-button"
+                onClick={() => {
+                  setSelectedPosition(emptyPosition())
+                  setTargetsText('{}')
+                }}
+              >
+                <Plus size={15} /> 新建仓位策略
+              </button>
+              <ul>
+                {positions.map((item) => (
+                  <li key={item.strategy_name}>
                     <button
                       type="button"
                       className={
-                        form.maker_price_anchor === 'opposite_best_plus_one_tick'
-                          ? 'is-active'
-                          : ''
+                        selectedPosition.strategy_name === item.strategy_name ? 'is-active' : ''
                       }
-                      onClick={() =>
-                        setForm((current) =>
-                          current
-                            ? {
-                                ...current,
-                                maker_price_anchor: 'opposite_best_plus_one_tick',
-                              }
-                            : current,
-                        )
-                      }
+                      onClick={() => {
+                        setSelectedPosition(item)
+                        setTargetsText(JSON.stringify(item.targets, null, 2))
+                      }}
                     >
-                      对手一档 + 1 tick
+                      <strong>{item.strategy_name}</strong>
+                      <span>权益 {money(item.equity_usdt)} USDT</span>
                     </button>
-                  </div>
-                </div>
-                <NumberField
-                  label={fieldLabels.tick_spacing}
-                  code="tick_spacing"
-                  unit="ticks"
-                  value={form.tick_spacing}
-                  integer
-                  onChange={(value) => setNumericField('tick_spacing', value)}
+                  </li>
+                ))}
+              </ul>
+            </aside>
+            <form
+              className="studio-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void withWrite(async () => {
+                  const saved = await savePositionStrategy(
+                    {
+                      ...selectedPosition,
+                      equity_usdt: Number(selectedPosition.equity_usdt),
+                      targets: parseTargets(targetsText),
+                    },
+                    token,
+                  )
+                  setSelectedPosition(saved)
+                  setTargetsText(JSON.stringify(saved.targets, null, 2))
+                  await reloadCatalog()
+                })
+              }}
+            >
+              <label>
+                策略名
+                <input
+                  value={selectedPosition.strategy_name}
+                  onChange={(event) =>
+                    setSelectedPosition({ ...selectedPosition, strategy_name: event.target.value })
+                  }
                 />
-                <NumberField
-                  label={fieldLabels.batch_interval_ms}
-                  code="batch_interval_ms"
-                  unit="ms"
-                  value={form.batch_interval_ms}
-                  integer
-                  onChange={(value) => setNumericField('batch_interval_ms', value)}
+              </label>
+              <label>
+                权益金额 USDT
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={selectedPosition.equity_usdt}
+                  onChange={(event) =>
+                    setSelectedPosition({
+                      ...selectedPosition,
+                      equity_usdt: Number(event.target.value),
+                    })
+                  }
                 />
-                <NumberField
-                  label={fieldLabels.maker_timeout_ms}
-                  code="maker_timeout_ms"
-                  unit="ms"
-                  value={form.maker_timeout_ms}
-                  integer
-                  onChange={(value) => setNumericField('maker_timeout_ms', value)}
+              </label>
+              <p className="studio-hint">
+                target 按这份权益定义，默认 10000 USDT。账户绑定后占用同样金额。
+              </p>
+              <label>
+                目标仓位 JSON
+                <textarea
+                  rows={12}
+                  value={targetsText}
+                  onChange={(event) => setTargetsText(event.target.value)}
                 />
-                <NumberField
-                  label={fieldLabels.max_maker_requotes}
-                  code="max_maker_requotes"
-                  value={form.max_maker_requotes}
-                  integer
-                  onChange={(value) => setNumericField('max_maker_requotes', value)}
-                />
-                <NumberField
-                  label={fieldLabels.target_tolerance_usdt}
-                  code="target_tolerance_usdt"
-                  unit="USDT"
-                  value={form.target_tolerance_usdt}
-                  onChange={(value) => setNumericField('target_tolerance_usdt', value)}
-                />
-              </fieldset>
-
-              <footer className="config-editor__footer">
-                {unlocked ? (
-                  <div className="config-unlocked">
-                    <ShieldCheck size={17} />
-                    <span>已解锁</span>
-                    <button type="button" className="text-button" onClick={lock}>
-                      锁定
-                    </button>
-                  </div>
-                ) : (
-                  <form className="config-auth" onSubmit={(event) => void unlock(event)}>
-                    <LockKeyhole size={16} />
-                    <input
-                      type="password"
-                      value={token}
-                      autoComplete="off"
-                      placeholder="写入密钥"
-                      aria-label="写入密钥"
-                      onChange={(event) => setToken(event.target.value)}
-                    />
-                    <button type="submit" disabled={unlocking || !token.trim()}>
-                      <UnlockKeyhole size={15} />
-                      解锁
-                    </button>
-                  </form>
+              </label>
+              <div className="studio-actions">
+                <button type="submit" className="command-button command-button--primary" disabled={saving}>
+                  <Save size={15} /> 保存仓位策略
+                </button>
+                {selectedPosition.strategy_name && (
+                  <button
+                    type="button"
+                    className="command-button"
+                    disabled={saving}
+                    onClick={() =>
+                      void withWrite(async () => {
+                        await deletePositionStrategy(selectedPosition.strategy_name, token)
+                        setSelectedPosition(emptyPosition())
+                        setTargetsText('{}')
+                        await reloadCatalog()
+                      })
+                    }
+                  >
+                    <Trash2 size={15} /> 删除
+                  </button>
                 )}
-                <div className="config-commands">
-                  <button
-                    type="button"
-                    className="command-button command-button--secondary"
-                    disabled={!dirty || saving}
-                    onClick={() => baselineForm && setForm(baselineForm)}
-                  >
-                    <RotateCcw size={15} />
-                    重置
-                  </button>
-                  <button
-                    type="button"
-                    className="command-button command-button--primary"
-                    disabled={!dirty || !unlocked || saving}
-                    onClick={prepareSave}
-                  >
-                    <Save size={15} />
-                    保存
-                  </button>
-                </div>
-              </footer>
-            </>
-          ) : (
-            <div className="config-empty">
-              {strategyLoading ? <RefreshCw className="is-spinning" size={19} /> : null}
-              <span>{strategyLoading ? '加载中' : '暂无可配置策略'}</span>
-            </div>
-          )}
-        </section>
-      </main>
-
-      {pendingParameters && (
-        <div className="config-dialog-backdrop" role="presentation">
-          <section className="config-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-            <div className="config-dialog__head">
-              <ShieldCheck size={19} />
-              <div>
-                <h2 id="confirm-title">确认保存下单参数</h2>
-                <code>{strategyName}</code>
               </div>
-            </div>
-            <div className="config-change-list">
-              {changes.map((change) => (
-                <div key={change.field}>
-                  <span>{fieldLabels[change.field]}</span>
-                  <code>{change.before}</code>
-                  <strong>→</strong>
-                  <code>{change.after}</code>
-                </div>
-              ))}
-            </div>
-            <div className="config-dialog__actions">
+            </form>
+          </div>
+        ) : tab === 'order' ? (
+          <div className="studio-split">
+            <aside>
               <button
                 type="button"
-                className="command-button command-button--secondary"
-                disabled={saving}
-                onClick={() => setPendingParameters(null)}
+                className="command-button"
+                onClick={() => setSelectedOrder(emptyOrder())}
               >
-                取消
+                <Plus size={15} /> 新建下单策略
               </button>
+              <ul>
+                {orders.map((item) => (
+                  <li key={item.strategy_name}>
+                    <button
+                      type="button"
+                      className={selectedOrder.strategy_name === item.strategy_name ? 'is-active' : ''}
+                      onClick={() => setSelectedOrder(item)}
+                    >
+                      <strong>{item.strategy_name}</strong>
+                      <span>单笔 {item.order_parameters.single_order_usdt} USDT</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </aside>
+            <form
+              className="studio-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void withWrite(async () => {
+                  const saved = await saveOrderStrategy(selectedOrder, token)
+                  setSelectedOrder(saved)
+                  await reloadCatalog()
+                })
+              }}
+            >
+              <label>
+                策略名
+                <input
+                  value={selectedOrder.strategy_name}
+                  onChange={(event) =>
+                    setSelectedOrder({ ...selectedOrder, strategy_name: event.target.value })
+                  }
+                />
+              </label>
+              {(
+                [
+                  ['single_order_usdt', '单笔名义金额'],
+                  ['orders_per_batch', '每批订单数'],
+                  ['tick_spacing', 'Tick 间距'],
+                  ['batch_interval_ms', '批次间隔'],
+                  ['maker_timeout_ms', 'Maker 超时'],
+                  ['max_maker_requotes', '最大重报价'],
+                  ['target_tolerance_usdt', '目标容差'],
+                ] as const
+              ).map(([field, label]) => (
+                <label key={field}>
+                  {label}
+                  <input
+                    type="number"
+                    value={selectedOrder.order_parameters[field]}
+                    onChange={(event) =>
+                      setSelectedOrder({
+                        ...selectedOrder,
+                        order_parameters: {
+                          ...selectedOrder.order_parameters,
+                          [field]: Number(event.target.value),
+                        },
+                      })
+                    }
+                  />
+                </label>
+              ))}
+              <label>
+                Maker 价格锚点
+                <select
+                  value={selectedOrder.order_parameters.maker_price_anchor}
+                  onChange={(event) =>
+                    setSelectedOrder({
+                      ...selectedOrder,
+                      order_parameters: {
+                        ...selectedOrder.order_parameters,
+                        maker_price_anchor: event.target
+                          .value as OrderParameters['maker_price_anchor'],
+                      },
+                    })
+                  }
+                >
+                  <option value="own_best">己方一档</option>
+                  <option value="opposite_best_plus_one_tick">对手一档 + 1 tick</option>
+                </select>
+              </label>
+              <div className="studio-actions">
+                <button type="submit" className="command-button command-button--primary" disabled={saving}>
+                  <Save size={15} /> 保存下单策略
+                </button>
+                {selectedOrder.strategy_name && (
+                  <button
+                    type="button"
+                    className="command-button"
+                    disabled={saving}
+                    onClick={() =>
+                      void withWrite(async () => {
+                        await deleteOrderStrategy(selectedOrder.strategy_name, token)
+                        setSelectedOrder(emptyOrder())
+                        await reloadCatalog()
+                      })
+                    }
+                  >
+                    <Trash2 size={15} /> 删除
+                  </button>
+                )}
+              </div>
+            </form>
+          </div>
+        ) : (
+          <div className="studio-account">
+            <div className="studio-form">
+              <label>
+                账户
+                <select value={sourceId} onChange={(event) => setSourceId(event.target.value)}>
+                  {accounts.map((account) => (
+                    <option key={account.source_id} value={account.source_id}>
+                      {account.account} / {account.source_id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                账户权益 USDT
+                <input value={accountEquity} onChange={(event) => setAccountEquity(event.target.value)} />
+              </label>
+              <label>
+                杠杆率
+                <input value={leverage} onChange={(event) => setLeverage(event.target.value)} />
+              </label>
               <button
                 type="button"
                 className="command-button command-button--primary"
                 disabled={saving}
-                onClick={() => void confirmSave()}
+                onClick={() =>
+                  void withWrite(async () => {
+                    const next = await saveAccountStudio(
+                      sourceId,
+                      Number(accountEquity),
+                      Number(leverage),
+                      token,
+                    )
+                    setStudio(next)
+                  })
+                }
               >
-                <Save size={15} />
-                {saving ? '保存中' : '确认保存'}
+                <Save size={15} /> 保存账户风险
               </button>
+              {studio && (
+                <div className="studio-capacity">
+                  <span>容量 {money(studio.capacity_usdt)}</span>
+                  <span>已占用 {money(studio.used_equity_usdt)}</span>
+                  <span>剩余 {money(studio.remaining_usdt)}</span>
+                </div>
+              )}
             </div>
-          </section>
-        </div>
-      )}
+            <form
+              className="studio-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void withWrite(async () => {
+                  const next = await saveAccountBinding(
+                    sourceId,
+                    bindingName,
+                    bindPosition,
+                    bindOrder,
+                    token,
+                  )
+                  setStudio(next)
+                })
+              }}
+            >
+              <h3>绑定组合</h3>
+              <label>
+                发布名
+                <input
+                  value={bindingName}
+                  placeholder="写入 Exec 的策略名"
+                  onChange={(event) => setBindingName(event.target.value)}
+                />
+              </label>
+              <label>
+                仓位策略
+                <select value={bindPosition} onChange={(event) => setBindPosition(event.target.value)}>
+                  {positions.map((item) => (
+                    <option key={item.strategy_name} value={item.strategy_name}>
+                      {item.strategy_name} / {money(item.equity_usdt)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                下单策略
+                <select value={bindOrder} onChange={(event) => setBindOrder(event.target.value)}>
+                  {orders.map((item) => (
+                    <option key={item.strategy_name} value={item.strategy_name}>
+                      {item.strategy_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {studio && bindPosition && (
+                <p className="studio-hint">
+                  本次占用{' '}
+                  {money(
+                    positions.find((item) => item.strategy_name === bindPosition)?.equity_usdt ?? 0,
+                  )}{' '}
+                  ，剩余容量 {money(studio.remaining_usdt)}
+                </p>
+              )}
+              <button type="submit" className="command-button command-button--primary" disabled={saving}>
+                <Plus size={15} /> 绑定到账户
+              </button>
+            </form>
+            <div className="studio-bindings">
+              {(studio?.bindings ?? []).map((binding) => (
+                <article key={binding.binding_name}>
+                  <h3>{binding.binding_name}</h3>
+                  <p>
+                    仓位 {binding.position_strategy_name} × 下单 {binding.order_strategy_name}
+                  </p>
+                  <p>占用 {money(binding.position_equity_usdt)} USDT</p>
+                  <div className="studio-actions">
+                    <button
+                      type="button"
+                      className="command-button command-button--primary"
+                      disabled={saving}
+                      onClick={() =>
+                        void withWrite(async () => {
+                          await publishAccountBinding(sourceId, binding.binding_name, token)
+                        })
+                      }
+                    >
+                      <CheckCircle2 size={15} /> 发布到 Exec
+                    </button>
+                    <button
+                      type="button"
+                      className="command-button"
+                      disabled={saving}
+                      onClick={() =>
+                        void withWrite(async () => {
+                          await deleteAccountBinding(sourceId, binding.binding_name, token)
+                          const next = await getAccountStudio(sourceId)
+                          setStudio(next)
+                        })
+                      }
+                    >
+                      <Trash2 size={15} /> 解绑
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        )}
+        {saving && (
+          <p className="studio-hint">
+            <RefreshCw size={14} className="is-spinning" /> 正在写入
+          </p>
+        )}
+      </main>
     </div>
-  )
-}
-
-function NumberField({
-  label,
-  code,
-  unit,
-  value,
-  integer = false,
-  onChange,
-}: {
-  label: string
-  code: string
-  unit?: string
-  value: string
-  integer?: boolean
-  onChange: (value: string) => void
-}) {
-  return (
-    <label className="parameter-field">
-      <span className="parameter-label">
-        <span>{label}</span>
-        <code>{code}</code>
-      </span>
-      <span className="parameter-input">
-        <input
-          type="number"
-          inputMode={integer ? 'numeric' : 'decimal'}
-          step={integer ? '1' : 'any'}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-        />
-        {unit && <span>{unit}</span>}
-      </span>
-    </label>
   )
 }

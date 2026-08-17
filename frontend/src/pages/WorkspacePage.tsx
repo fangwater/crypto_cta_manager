@@ -236,7 +236,7 @@ export function WorkspacePage() {
             <div>
               <p className="eyebrow">DOCUMENTATION</p>
               <h3>操作文档</h3>
-              <p>查看账户入口、推送仓位、改下单参数，以及 Config API</p>
+              <p>查看策略组合、账户入口、推送仓位，以及 Config API</p>
             </div>
             <span className="docs-entry-card__go">
               打开文档

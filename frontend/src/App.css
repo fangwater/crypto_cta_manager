@@ -212,6 +212,149 @@
   padding-top: 34px;
 }
 
+.studio-tabs {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.studio-tabs button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--muted);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.studio-tabs button.is-active {
+  color: var(--green);
+  background: var(--green-soft);
+  border-color: #c6ddd4;
+}
+
+.studio-split {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 18px;
+}
+
+.studio-split aside,
+.studio-form,
+.studio-bindings article {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.studio-split aside ul {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.studio-split aside li + li {
+  margin-top: 6px;
+}
+
+.studio-split aside li button,
+.studio-form label,
+.studio-form input,
+.studio-form select,
+.studio-form textarea {
+  width: 100%;
+}
+
+.studio-split aside li button {
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: #f5f6f8;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.studio-split aside li button.is-active {
+  border-color: #c6ddd4;
+  background: var(--green-soft);
+}
+
+.studio-split aside li span,
+.studio-hint {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.studio-form {
+  display: grid;
+  gap: 12px;
+}
+
+.studio-form h3 {
+  margin: 0;
+}
+
+.studio-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.studio-form input,
+.studio-form select,
+.studio-form textarea {
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--ink);
+  font: inherit;
+}
+
+.studio-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.studio-account {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.studio-capacity,
+.studio-bindings {
+  display: grid;
+  gap: 10px;
+}
+
+.studio-capacity {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.studio-bindings {
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 860px) {
+  .studio-split,
+  .studio-account,
+  .studio-bindings,
+  .studio-capacity {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .config-heading {
   margin-bottom: 22px;
 }
@@ -2044,8 +2187,8 @@ tbody tr.is-selected td {
 .gitbook-body code {
   padding: 1px 5px;
   border-radius: 4px;
-  background: #1b1f24;
-  color: #f4f6f8;
+  background: #eef1f4;
+  color: #1a1d23;
   font-size: 12px;
 }
 
@@ -2071,9 +2214,9 @@ tbody tr.is-selected td {
 .gitbook-code {
   position: relative;
   overflow: hidden;
-  border: 1px solid #111418;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: #0b0d10;
+  background: #f3f5f7;
 }
 
 .gitbook-code pre,
@@ -2083,7 +2226,7 @@ tbody tr.is-selected td {
   overflow: visible;
   border-radius: 0;
   background: transparent;
-  color: #f5f7fa;
+  color: #1a1d23;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     "Courier New", monospace;
   font-size: 12px;
@@ -2102,10 +2245,10 @@ tbody tr.is-selected td {
   right: 8px;
   height: 26px;
   padding: 0 8px;
-  border: 1px solid #30363d;
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: #21262d;
-  color: #c9d1d9;
+  background: #fff;
+  color: var(--ink);
   font-size: 11px;
   cursor: pointer;
 }

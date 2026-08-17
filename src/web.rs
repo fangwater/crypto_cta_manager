@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPool;
@@ -17,6 +17,10 @@ use tracing::{error, info, warn};
 use crate::config::{AppConfig, SourceConfig};
 use crate::order_config::{
     ExecConfigClient, ExecConfigError, SaveOrderParametersRequest, validate_strategy_name,
+};
+use crate::strategy_catalog::{
+    self, SaveAccountSettingsRequest, SaveBindingRequest, SaveOrderStrategyRequest,
+    SavePositionStrategyRequest,
 };
 use crate::{nav, postgres};
 
@@ -136,6 +140,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
 
     let database_url = config.database_url()?;
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
+    postgres::migrate(&pool).await?;
+    postgres::register_sources(&pool, &config.sources).await?;
     let order_config_write_token = config.order_config_write_token()?;
     let exec_config = ExecConfigClient::new(
         config.order_config.request_timeout_secs,
@@ -177,6 +183,38 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route(
             "/api/order-config/{source_id}/order-parameters",
             post(save_order_parameters),
+        )
+        .route(
+            "/api/catalog/position-strategies",
+            get(list_position_strategies).post(save_position_strategy),
+        )
+        .route(
+            "/api/catalog/position-strategies/{name}",
+            delete(delete_position_strategy),
+        )
+        .route(
+            "/api/catalog/order-strategies",
+            get(list_order_strategies).post(save_order_strategy),
+        )
+        .route(
+            "/api/catalog/order-strategies/{name}",
+            delete(delete_order_strategy),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}",
+            get(get_account_studio).put(save_account_studio),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bindings",
+            post(save_account_binding),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bindings/{binding_name}",
+            delete(delete_account_binding),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bindings/{binding_name}/publish",
+            post(publish_account_binding),
         )
         .with_state(WebState {
             cache,
@@ -458,6 +496,240 @@ async fn save_order_parameters(
         "applied Exec order parameter update"
     );
     Ok((NO_STORE, Json(saved)).into_response())
+}
+
+async fn list_position_strategies(State(state): State<WebState>) -> Result<Response, ApiError> {
+    let strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
+    Ok((NO_STORE, Json(strategies)).into_response())
+}
+
+async fn save_position_strategy(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<SavePositionStrategyRequest>,
+) -> Result<Response, ApiError> {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return Ok(unauthorized());
+    }
+    match strategy_catalog::upsert_position_strategy(&state.pool, &request, unix_now_us()).await {
+        Ok(saved) => Ok((NO_STORE, Json(saved)).into_response()),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn delete_position_strategy(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return Ok(unauthorized());
+    }
+    match strategy_catalog::delete_position_strategy(&state.pool, &name).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Ok(false) => Ok(not_found("position strategy was not found")),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn list_order_strategies(State(state): State<WebState>) -> Result<Response, ApiError> {
+    let strategies = strategy_catalog::list_order_strategies(&state.pool).await?;
+    Ok((NO_STORE, Json(strategies)).into_response())
+}
+
+async fn save_order_strategy(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<SaveOrderStrategyRequest>,
+) -> Result<Response, ApiError> {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return Ok(unauthorized());
+    }
+    match strategy_catalog::upsert_order_strategy(&state.pool, &request, unix_now_us()).await {
+        Ok(saved) => Ok((NO_STORE, Json(saved)).into_response()),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn delete_order_strategy(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return Ok(unauthorized());
+    }
+    match strategy_catalog::delete_order_strategy(&state.pool, &name).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Ok(false) => Ok(not_found("order strategy was not found")),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn get_account_studio(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+        return Ok(response);
+    }
+    match strategy_catalog::load_account_studio(&state.pool, &source_id, unix_now_us()).await {
+        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn save_account_studio(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SaveAccountSettingsRequest>,
+) -> Result<Response, ApiError> {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return Ok(unauthorized());
+    }
+    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+        return Ok(response);
+    }
+    match strategy_catalog::save_account_settings(&state.pool, &source_id, &request, unix_now_us())
+        .await
+    {
+        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn save_account_binding(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SaveBindingRequest>,
+) -> Result<Response, ApiError> {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return Ok(unauthorized());
+    }
+    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+        return Ok(response);
+    }
+    match strategy_catalog::save_binding(&state.pool, &source_id, &request, unix_now_us()).await {
+        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn delete_account_binding(
+    State(state): State<WebState>,
+    Path((source_id, binding_name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return Ok(unauthorized());
+    }
+    match strategy_catalog::delete_binding(&state.pool, &source_id, &binding_name).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Ok(false) => Ok(not_found("binding was not found")),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn publish_account_binding(
+    State(state): State<WebState>,
+    Path((source_id, binding_name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return Ok(unauthorized());
+    }
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
+    let Some((position, order)) =
+        strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name).await?
+    else {
+        return Ok(not_found("binding was not found"));
+    };
+    let exec_config_url = source.exec_config_url.as_deref().unwrap_or_default();
+    let existing = state
+        .exec_config
+        .load_strategy(&source_id, exec_config_url, &binding_name)
+        .await;
+    let published = match existing {
+        Ok(current) => {
+            if let Err(error) = state
+                .exec_config
+                .save_targets(exec_config_url, &binding_name, &position.targets)
+                .await
+            {
+                return Ok(exec_config_error_response(&error));
+            }
+            match state
+                .exec_config
+                .save_order_parameters(
+                    &source_id,
+                    exec_config_url,
+                    &SaveOrderParametersRequest {
+                        strategy_name: binding_name.clone(),
+                        expected_updated_at_us: current.updated_at_us,
+                        order_parameters: order.order_parameters.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(saved) => saved,
+                Err(error) => return Ok(exec_config_error_response(&error)),
+            }
+        }
+        Err(error) if error.status() == Some(StatusCode::NOT_FOUND) => {
+            if let Err(error) = state
+                .exec_config
+                .save_full_strategy(
+                    exec_config_url,
+                    &binding_name,
+                    &order.order_parameters,
+                    &position.targets,
+                )
+                .await
+            {
+                return Ok(exec_config_error_response(&error));
+            }
+            match state
+                .exec_config
+                .load_strategy(&source_id, exec_config_url, &binding_name)
+                .await
+            {
+                Ok(saved) => saved,
+                Err(error) => return Ok(exec_config_error_response(&error)),
+            }
+        }
+        Err(error) => return Ok(exec_config_error_response(&error)),
+    };
+    Ok((NO_STORE, Json(published)).into_response())
+}
+
+fn catalog_error(error: anyhow::Error) -> Response {
+    let message = error.to_string();
+    let status = if message.contains("exceeds")
+        || message.contains("unknown")
+        || message.contains("invalid")
+        || message.contains("must be")
+        || message.contains("violates")
+    {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(ErrorResponse { error: message })).into_response()
+}
+
+fn not_found(message: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: message.to_string(),
+        }),
+    )
+        .into_response()
 }
 
 fn resolve_order_config_source<'a>(
