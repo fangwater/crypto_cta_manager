@@ -69,7 +69,7 @@ const chapters: Chapter[] = [
             脚本推仓位：<code>POST /exec_trade01/config/api/targets</code>
           </li>
           <li>
-            查询与全量兼容接口仍走同一账户入口下的 <code>/api/strategy</code>
+            同时写参数和仓位：<code>POST /exec_trade01/config/api/strategy</code>
           </li>
         </ul>
         <p>当前已部署账户只有 <code>trade01</code>。以后 <code>trade02</code> 会使用独立前缀，不能和 trade01 共用入口。</p>
@@ -170,7 +170,7 @@ const chapters: Chapter[] = [
           </tbody>
         </table>
         <p>
-          旧地址 <code>{GATEWAY}/config/</code> 只兼容到 trade01，账户一多就会指错。新脚本请使用带账户前缀的 URL。
+          脚本必须带账户前缀。不要使用 <code>{GATEWAY}/config/</code>，它无法区分 trade01 / trade02。
         </p>
       </>
     ),
@@ -236,15 +236,14 @@ const chapters: Chapter[] = [
   {
     id: 'op-full',
     group: '操作方法',
-    title: '全量推送（旧接口）',
+    title: '同时推送参数和仓位',
     content: (
       <>
         <p>
-          老脚本可以继续 <code>POST /api/strategy</code>，一次带下单参数和
-          target。策略已存在时，服务端会丢掉请求里的下单参数，只更新
-          target，避免覆盖 Manager 改过的参数。
+          <code>POST /api/strategy</code> 一次提交下单参数和 target。新建策略时两者都会写入；策略已存在时只更新
+          target，下单参数保持 Redis 里已有的值，避免覆盖 Manager 改过的配置。
         </p>
-        <p>新策略首次接入仍可用这个接口同时写入参数和仓位。日常推仓请改用 <code>/api/targets</code>。</p>
+        <p>只改仓位用 <code>/api/targets</code>，只改下单参数用 Manager 的 <code>/api/order-parameters</code>。</p>
         <CodeBlock>{`python3 exec_config_client.py \\
   --url ${TRADE01_CONFIG}/ \\
   post @strategy.json`}</CodeBlock>
@@ -339,7 +338,7 @@ const chapters: Chapter[] = [
     title: 'POST /api/strategy',
     content: (
       <>
-        <p>旧的全量接口。请求体是 <code>strategy_name</code> + 完整 <code>config</code>（8 个参数和 <code>targets</code> 都要有）。</p>
+        <p>一次提交完整 <code>config</code>：8 个下单参数和 <code>targets</code> 都要有。</p>
         <p>
           URL：<code>{TRADE01_CONFIG}/api/strategy</code>
         </p>
@@ -448,7 +447,7 @@ curl --noproxy '*' '${TRADE01_CONFIG}/api/strategy?name=CTA_SK_C40V6PosT1_LXY_fi
             </tr>
             <tr>
               <td>404</td>
-              <td>路径不存在，或打到了没有账户前缀的旧入口</td>
+              <td>路径不存在，或请求未带账户前缀</td>
             </tr>
             <tr>
               <td>409</td>
@@ -485,7 +484,7 @@ python3 exec_config_client.py get CTA_SK_C40V6PosT1_LXY_filter_Position
 # 只推仓位
 python3 exec_config_client.py post-targets @targets.json
 
-# 全量旧接口
+# 同时推送参数和仓位
 python3 exec_config_client.py post @strategy.json`}</CodeBlock>
         <p>
           也可用 <code>--url</code> 覆盖。不要把 token 写进脚本或仓库；改参数请用 Manager 页面。

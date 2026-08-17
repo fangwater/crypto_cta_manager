@@ -11,7 +11,7 @@ const links: Array<{
   { id: 'workspace', href: '/', label: '综合总览', icon: LayoutDashboard },
   { id: 'manager', href: '/manager/', label: '净值中心', icon: Activity },
   { id: 'config', href: '/manager/config/', label: '下单配置', icon: Settings },
-  { id: 'docs', href: '/manager/docs/', label: 'GitBook', icon: BookOpen },
+  { id: 'docs', href: '/manager/docs/', label: '文档', icon: BookOpen },
 ]
 
 export function AppNav({ active }: { active: AppNavId }) {

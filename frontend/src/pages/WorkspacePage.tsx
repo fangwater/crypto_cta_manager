@@ -175,7 +175,7 @@ export function WorkspacePage() {
             <div className="workspace-heading-actions">
               <a className="gitbook-jump" href="/manager/docs/">
                 <BookOpen size={14} />
-                GitBook
+                文档
               </a>
               <span className="workspace-updated">
                 <Clock3 size={14} />
@@ -228,6 +228,21 @@ export function WorkspacePage() {
               重算 {dashboard?.generation_duration_ms ?? 0} ms
             </span>
           </div>
+
+          <a className="docs-entry-card" href="/manager/docs/">
+            <span className="docs-entry-card__mark" aria-hidden="true">
+              <BookOpen size={20} strokeWidth={2.1} />
+            </span>
+            <div>
+              <p className="eyebrow">DOCUMENTATION</p>
+              <h3>操作文档</h3>
+              <p>查看账户入口、推送仓位、改下单参数，以及 Config API</p>
+            </div>
+            <span className="docs-entry-card__go">
+              打开文档
+              <ArrowRight size={16} />
+            </span>
+          </a>
 
           {loading && !dashboard ? (
             <div className="account-grid account-grid--loading" aria-label="正在加载账户">
