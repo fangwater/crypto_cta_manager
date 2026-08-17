@@ -10,9 +10,11 @@ import {
   Server,
   Settings,
   WalletCards,
+  BookOpen,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getDashboard, getHealth } from '../api'
+import { AppNav } from '../components/AppNav'
 import { feeBps, integer, money, signedClass, timestampUs } from '../format'
 import type {
   DashboardAccount,
@@ -30,6 +32,7 @@ function fallbackAccounts(dashboard: DashboardSnapshot): DashboardAccount[] {
     venue: source.configured_venue,
     enabled: true,
     gateway_prefix: null,
+    configurable: false,
   }))
 }
 
@@ -131,14 +134,7 @@ export function WorkspacePage() {
             </div>
           </div>
           <div className="header-actions">
-            <a className="header-nav-link is-active" href="/">
-              <LayoutDashboard size={16} />
-              <span>综合总览</span>
-            </a>
-            <a className="header-nav-link" href="/manager/">
-              <Activity size={16} />
-              <span>净值中心</span>
-            </a>
+            <AppNav active="workspace" />
             <div className="header-state">
               <span
                 className={`status-dot ${health?.status === 'ok' ? 'status-dot--ready' : 'status-dot--warning'}`}
@@ -176,10 +172,16 @@ export function WorkspacePage() {
               <p className="eyebrow">CTA WORKSPACE</p>
               <h2 id="workspace-title">盘子总览</h2>
             </div>
-            <span className="workspace-updated">
-              <Clock3 size={14} />
-              {timestampUs(dashboard?.generated_at_us ?? null)}
-            </span>
+            <div className="workspace-heading-actions">
+              <a className="gitbook-jump" href="/manager/docs/">
+                <BookOpen size={14} />
+                GitBook
+              </a>
+              <span className="workspace-updated">
+                <Clock3 size={14} />
+                {timestampUs(dashboard?.generated_at_us ?? null)}
+              </span>
+            </div>
           </div>
 
           <div className="summary-strip workspace-summary">
@@ -351,27 +353,29 @@ function AccountCard({
           </span>
         )}
         {gatewayReady ? (
-          <>
-            <a className="account-action" href={`${account.gateway_prefix}/`}>
-              <ExternalLink size={15} />
-              Exec Viz
-            </a>
-            <a className="account-action" href={`${account.gateway_prefix}/config/`}>
-              <Settings size={15} />
-              配置
-            </a>
-          </>
+          <a className="account-action" href={`${account.gateway_prefix}/`}>
+            <ExternalLink size={15} />
+            Exec Viz
+          </a>
         ) : (
-          <>
-            <span className="account-action is-disabled">
-              <ExternalLink size={15} />
-              Exec Viz
-            </span>
-            <span className="account-action is-disabled">
-              <Settings size={15} />
-              配置
-            </span>
-          </>
+          <span className="account-action is-disabled">
+            <ExternalLink size={15} />
+            Exec Viz
+          </span>
+        )}
+        {ready && account.configurable ? (
+          <a
+            className="account-action"
+            href={`/manager/config/?source=${encodeURIComponent(account.source_id)}`}
+          >
+            <Settings size={15} />
+            配置
+          </a>
+        ) : (
+          <span className="account-action is-disabled">
+            <Settings size={15} />
+            配置
+          </span>
         )}
       </footer>
     </article>

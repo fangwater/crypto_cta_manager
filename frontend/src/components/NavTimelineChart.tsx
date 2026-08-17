@@ -11,9 +11,11 @@ import type {
   FeeMode,
   NavSeriesKey,
   NavTimelinePoint,
+  StrategyNavTimeline,
   SymbolNavTimeline,
   TimelineChartMode,
 } from '../types'
+import { strategyLabel } from '../format'
 
 echarts.use([
   LineChart,
@@ -26,6 +28,7 @@ echarts.use([
 interface Props {
   points: NavTimelinePoint[]
   symbolPoints: SymbolNavTimeline[]
+  strategyPoints: StrategyNavTimeline[]
   visibleSeries: NavSeriesKey[]
   mode: TimelineChartMode
   feeMode: FeeMode
@@ -84,6 +87,7 @@ function chartTime(value: number) {
 export function NavTimelineChart({
   points,
   symbolPoints,
+  strategyPoints,
   visibleSeries,
   mode,
   feeMode,
@@ -116,14 +120,17 @@ export function NavTimelineChart({
               emphasis: { focus: 'series' as const },
             }
           })
-        : symbolPoints.map((item, index) => {
+        : (mode === 'symbols' ? symbolPoints : strategyPoints).map((item, index) => {
             const color = symbolPalette[index % symbolPalette.length]
             const key =
               feeMode === 'after'
                 ? 'nav_change_after_fee_quote'
                 : 'nav_change_before_fee_quote'
             return {
-              name: item.symbol,
+              name:
+                mode === 'symbols'
+                  ? (item as SymbolNavTimeline).symbol
+                  : strategyLabel((item as StrategyNavTimeline).strategy),
               type: 'line' as const,
               data: item.points.map((point) => [
                 point.ts_us / 1_000,
@@ -215,13 +222,19 @@ export function NavTimelineChart({
       observer.disconnect()
       chart.dispose()
     }
-  }, [feeMode, mode, points, symbolPoints, visibleSeries])
+  }, [feeMode, mode, points, strategyPoints, symbolPoints, visibleSeries])
 
   return (
     <div
       ref={containerRef}
       className="pnl-chart"
-      aria-label={mode === 'portfolio' ? '组合净值时间曲线' : '分币净值时间曲线'}
+      aria-label={
+        mode === 'portfolio'
+          ? '组合净值时间曲线'
+          : mode === 'symbols'
+            ? '分币净值时间曲线'
+            : '分策略净值时间曲线'
+      }
     />
   )
 }

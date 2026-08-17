@@ -8,6 +8,7 @@ Requires=postgresql-cta.service
 Type=simple
 WorkingDirectory=/home/el01/binance_exec_trade01
 EnvironmentFile=/home/el01/.config/crypto-cta-manager/database.env
+EnvironmentFile=/home/el01/.config/crypto-cta-manager/config-write.env
 Environment=RUST_LOG=crypto_cta_manager=info,tower_http=info
 ExecStart=/home/el01/binance_exec_trade01/cta_web --config config/cta-manager.toml --bind 127.0.0.1:18201 --refresh-secs 60
 Restart=on-failure

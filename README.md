@@ -131,6 +131,11 @@ latest position snapshot for every enabled source from local PostgreSQL,
 rebuilds quantity FIFO from the later RocksDB fills once per minute, and keeps
 serving the last good report if a later refresh fails.
 
+The timeline can display the selected account as a portfolio, by symbol, or by
+the strategy suffix in `batch_exec:<strategy_name>`. Account-level initial
+snapshot positions are shown as unallocated initial positions because they do
+not contain historical strategy ownership.
+
 Build the API and frontend locally:
 
 ```bash
@@ -147,6 +152,7 @@ The known Exec deployment uses these loopback-only endpoints:
 CTA API:       127.0.0.1:18201
 User Nginx:    127.0.0.1:10051
 Manager:       /manager/
+Manager Config:/manager/config/
 Manager API:   /manager/api/
 Exec Viz:      /exec_trade01/
 Exec Config:   /exec_trade01/config/
@@ -179,11 +185,14 @@ are therefore:
 ```text
 http://172.16.30.42:10041/
 http://172.16.30.42:10041/manager/
+http://172.16.30.42:10041/manager/config/
 http://172.16.30.42:10041/exec_trade01/
 http://172.16.30.42:10041/exec_trade01/config/
 ```
 
 The root route is the multi-account workspace. It reads the account list and
 gateway prefixes from the Manager API, links into source-scoped NAV, Exec Viz,
-and Config views, and expands automatically when another configured source is
-added. `/manager/` remains the full NAV timeline and position workspace.
+and the Manager Config view, and expands automatically when another configured
+source is added. `/manager/` remains the full NAV timeline and position
+workspace. `/manager/config/` edits only the eight Exec order parameters; target
+positions remain read-only and owned by the strategy publisher.

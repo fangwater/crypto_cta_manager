@@ -100,7 +100,7 @@ limitations explicit.
 ## CTA Dashboard
 
 The CTA dashboard is a React/Vite application under `frontend/`, backed by the
-read-only `cta_web` API. The API refreshes its in-memory report every 60 seconds
+`cta_web` API. The API refreshes its in-memory report every 60 seconds
 from local PostgreSQL snapshots plus later RocksDB fills. It keeps the last good
 report when a refresh fails and must never expose database credentials or write
 to the live RocksDB.
@@ -116,6 +116,17 @@ points, and preserve extrema when a response must be downsampled. The browser
 must expose custom datetime-local start/end controls, `ALL`/`1D`/`7D`/`30D`
 quick ranges, aggregate and per-symbol curves, account scope, and symbol
 all/none selection.
+
+The timeline also attributes each account's NAV by Exec strategy. Parse only
+stable `batch_exec:<strategy_name>` values from `from_key_text`; group all
+other fills under `__unattributed__`. Keep strategy FIFO isolated by source,
+strategy, symbol, and venue, but mark every strategy bucket with the latest
+account-level fill for the same symbol and venue so strategy NAV remains
+additive to account NAV. Account-level PostgreSQL snapshots have no historical
+strategy allocation, so expose them as `__initial_position__` instead of
+assigning them to a CTA strategy. Keep `system_position_close` separate. The
+browser must provide portfolio, per-symbol, and per-strategy curves plus a
+strategy PnL table.
 
 CTA timeline series are NAV before estimated fees, NAV after estimated fees,
 realized PnL, floating PnL, and estimated trading fees. There is no baseline
@@ -150,7 +161,7 @@ The deployed Nginx routes are:
 
 The root multi-account workspace was deployed and browser-verified on
 2026-08-14 UTC at 1440x1000 and 390x1100. Its `trade01` card linked to the
-source-scoped NAV view, `/exec_trade01/`, and `/exec_trade01/config/`; the NAV
+source-scoped NAV view, `/exec_trade01/`, and `/manager/config/`; the NAV
 deep link selected the requested source, and the Viz WebSocket still returned
 `101 Switching Protocols` after the Nginx reload.
 
@@ -182,12 +193,23 @@ render source-scoped NAV, Exec Viz, and Config links. Never infer a gateway path
 from an account label or source ID. The root workspace may list multiple
 configured sources, while `/manager/` remains the detailed NAV timeline.
 
-The current `cta_web` API is read-only. Nginx already preserves request methods,
-bodies, and response statuses so future Manager endpoints can update
-Redis-backed strategy configuration without another gateway change. Do not let
-the browser connect directly to Redis. Implement writes in the Manager API with
-authentication, source/account scoping, input validation, and an audit trail;
-then expose them below `/manager/api/`.
+`/manager/config/` is the only browser editor for Exec order parameters. The
+Exec `/exec_trade01/config/` page stays read-only. The browser talks only to
+Manager endpoints below `/manager/api/order-config/`; it never connects to
+Redis or an Exec Config port. Writes accept exactly `single_order_usdt`,
+`orders_per_batch`, `maker_price_anchor`, `tick_spacing`, `batch_interval_ms`,
+`maker_timeout_ms`, `max_maker_requotes`, and `target_tolerance_usdt`. Never
+accept `targets`, create/remove strategies, or expose a position editor.
+
+Manager write requests require `CRYPTO_CTA_MANAGER_WRITE_TOKEN`, strict source
+scoping, a positive `expected_updated_at_us`, Redis optimistic concurrency, and
+a PostgreSQL audit row in `cta_exec_order_config_audit`. The Manager and the
+loopback Exec Config service read the same token from
+`~/.config/crypto-cta-manager/config-write.env` with mode `0600`; never commit,
+print, log, or return it. The browser holds a user-entered token in memory only.
+The Exec Config `POST /api/order-parameters` must reject writes when its token
+is missing, while the strategy publisher's `POST /api/strategy` remains the
+owner of target-position updates.
 
 End-to-end HTTP checks from both `el_dev` and the development host returned
 `200` for Manager, Manager API, Exec Viz, snapshot, and Config. The development

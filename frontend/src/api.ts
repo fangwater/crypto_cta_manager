@@ -1,32 +1,56 @@
 import type {
   DashboardSnapshot,
   HealthResponse,
+  OrderParameters,
+  OrderStrategyList,
+  OrderStrategyView,
   TimelineSnapshot,
 } from './types'
 
 const API_BASE = import.meta.env.VITE_CTA_API_BASE ?? '/manager/api'
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message)
+  }
+}
+
+interface RequestOptions {
+  signal?: AbortSignal
+  method?: 'GET' | 'POST'
+  body?: unknown
+  token?: string
+}
+
+async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json'
+  if (options.token) headers.Authorization = `Bearer ${options.token}`
   const response = await fetch(API_BASE + path, {
-    headers: { Accept: 'application/json' },
+    method: options.method ?? 'GET',
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
     cache: 'no-store',
-    signal,
+    signal: options.signal,
   })
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as
       | { error?: string }
       | null
-    throw new Error(payload?.error ?? `HTTP ${response.status}`)
+    throw new ApiError(payload?.error ?? `HTTP ${response.status}`, response.status)
   }
   return response.json() as Promise<T>
 }
 
 export function getDashboard(signal?: AbortSignal) {
-  return getJson<DashboardSnapshot>('/dashboard', signal)
+  return requestJson<DashboardSnapshot>('/dashboard', { signal })
 }
 
 export function getHealth(signal?: AbortSignal) {
-  return getJson<HealthResponse>('/health', signal)
+  return requestJson<HealthResponse>('/health', { signal })
 }
 
 export interface TimelineQuery {
@@ -45,5 +69,55 @@ export function getTimeline(query: TimelineQuery) {
   if (query.sourceIds?.length) params.set('sourceIds', query.sourceIds.join(','))
   if (query.symbols?.length) params.set('symbols', query.symbols.join(','))
   params.set('maxPoints', String(query.maxPoints ?? 3_000))
-  return getJson<TimelineSnapshot>(`/timeline?${params}`, query.signal)
+  return requestJson<TimelineSnapshot>(`/timeline?${params}`, {
+    signal: query.signal,
+  })
+}
+
+export function authenticateOrderConfig(token: string, signal?: AbortSignal) {
+  return requestJson<{ ok: boolean }>('/order-config/auth', {
+    method: 'POST',
+    token,
+    signal,
+  })
+}
+
+export function getOrderConfigStrategies(sourceId: string, signal?: AbortSignal) {
+  return requestJson<OrderStrategyList>(
+    `/order-config/${encodeURIComponent(sourceId)}/strategies`,
+    { signal },
+  )
+}
+
+export function getOrderConfigStrategy(
+  sourceId: string,
+  strategyName: string,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({ name: strategyName })
+  return requestJson<OrderStrategyView>(
+    `/order-config/${encodeURIComponent(sourceId)}/strategy?${query}`,
+    { signal },
+  )
+}
+
+export function saveOrderParameters(
+  sourceId: string,
+  strategyName: string,
+  expectedUpdatedAtUs: number,
+  orderParameters: OrderParameters,
+  token: string,
+) {
+  return requestJson<OrderStrategyView>(
+    `/order-config/${encodeURIComponent(sourceId)}/order-parameters`,
+    {
+      method: 'POST',
+      token,
+      body: {
+        strategy_name: strategyName,
+        expected_updated_at_us: expectedUpdatedAtUs,
+        order_parameters: orderParameters,
+      },
+    },
+  )
 }

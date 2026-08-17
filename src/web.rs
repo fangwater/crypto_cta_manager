@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use axum::extract::{Query, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPool;
@@ -15,6 +15,9 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use crate::config::{AppConfig, SourceConfig};
+use crate::order_config::{
+    ExecConfigClient, ExecConfigError, SaveOrderParametersRequest, validate_strategy_name,
+};
 use crate::{nav, postgres};
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
@@ -35,6 +38,7 @@ pub struct DashboardAccount {
     pub venue: String,
     pub enabled: bool,
     pub gateway_prefix: Option<String>,
+    pub configurable: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -66,6 +70,8 @@ struct WebState {
     cache: Arc<RwLock<CacheState>>,
     config: Arc<AppConfig>,
     pool: PgPool,
+    exec_config: ExecConfigClient,
+    order_config_write_token: Arc<str>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -76,6 +82,22 @@ struct TimelineQuery {
     source_ids: Option<String>,
     symbols: Option<String>,
     max_points: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StrategyQuery {
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct StrategyListResponse {
+    source_id: String,
+    strategies: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthResponse {
+    ok: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +136,11 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
 
     let database_url = config.database_url()?;
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
+    let order_config_write_token = config.order_config_write_token()?;
+    let exec_config = ExecConfigClient::new(
+        config.order_config.request_timeout_secs,
+        order_config_write_token.clone(),
+    )?;
     let first_dashboard = build_dashboard(&config, &pool, refresh_interval_secs).await?;
     let cache = Arc::new(RwLock::new(CacheState {
         last_attempt_at_us: first_dashboard.generated_at_us,
@@ -138,10 +165,25 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/health", get(health))
         .route("/api/dashboard", get(dashboard))
         .route("/api/timeline", get(timeline))
+        .route("/api/order-config/auth", post(order_config_auth))
+        .route(
+            "/api/order-config/{source_id}/strategies",
+            get(order_config_strategies),
+        )
+        .route(
+            "/api/order-config/{source_id}/strategy",
+            get(order_config_strategy),
+        )
+        .route(
+            "/api/order-config/{source_id}/order-parameters",
+            post(save_order_parameters),
+        )
         .with_state(WebState {
             cache,
             config: Arc::new(config),
             pool,
+            exec_config,
+            order_config_write_token: Arc::from(order_config_write_token),
         })
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind)
@@ -149,10 +191,13 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .with_context(|| format!("failed to bind CTA web API to {bind}"))?;
     info!(%bind, refresh_interval_secs, "CTA web API started");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("CTA web API stopped unexpectedly")
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("CTA web API stopped unexpectedly")
 }
 
 async fn dashboard(State(state): State<WebState>) -> impl IntoResponse {
@@ -247,6 +292,243 @@ async fn timeline(
         }),
     )
         .into_response())
+}
+
+async fn order_config_auth(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return unauthorized();
+    }
+    (NO_STORE, Json(AuthResponse { ok: true })).into_response()
+}
+
+async fn order_config_strategies(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+) -> Response {
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return response,
+    };
+    match state
+        .exec_config
+        .list_strategies(source.exec_config_url.as_deref().unwrap_or_default())
+        .await
+    {
+        Ok(strategies) => (
+            NO_STORE,
+            Json(StrategyListResponse {
+                source_id,
+                strategies,
+            }),
+        )
+            .into_response(),
+        Err(error) => exec_config_error_response(&error),
+    }
+}
+
+async fn order_config_strategy(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Query(query): Query<StrategyQuery>,
+) -> Response {
+    if let Err(message) = validate_strategy_name(&query.name) {
+        return bad_request(message);
+    }
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return response,
+    };
+    match state
+        .exec_config
+        .load_strategy(
+            &source_id,
+            source.exec_config_url.as_deref().unwrap_or_default(),
+            &query.name,
+        )
+        .await
+    {
+        Ok(strategy) => (NO_STORE, Json(strategy)).into_response(),
+        Err(error) => exec_config_error_response(&error),
+    }
+}
+
+async fn save_order_parameters(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<SaveOrderParametersRequest>,
+) -> Result<Response, ApiError> {
+    if !authorized(&headers, &state.order_config_write_token) {
+        return Ok(unauthorized());
+    }
+    if let Err(message) = validate_strategy_name(&request.strategy_name) {
+        return Ok(bad_request(message));
+    }
+    let Some(expected_updated_at_us) = request.expected_updated_at_us else {
+        return Ok(bad_request(
+            "expected_updated_at_us is required for order parameter updates".to_string(),
+        ));
+    };
+    if expected_updated_at_us <= 0 {
+        return Ok(bad_request(
+            "expected_updated_at_us must be positive".to_string(),
+        ));
+    }
+    if let Err(message) = request.order_parameters.validate() {
+        return Ok(bad_request(message));
+    }
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
+    let exec_config_url = source.exec_config_url.as_deref().unwrap_or_default();
+    let previous = match state
+        .exec_config
+        .load_strategy(&source_id, exec_config_url, &request.strategy_name)
+        .await
+    {
+        Ok(previous) => previous,
+        Err(error) => return Ok(exec_config_error_response(&error)),
+    };
+    if previous.updated_at_us != Some(expected_updated_at_us) {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "strategy config changed after it was loaded; reload before saving"
+                    .to_string(),
+            }),
+        )
+            .into_response());
+    }
+    let previous_json = serde_json::to_string(&previous.order_parameters)?;
+    let requested_json = serde_json::to_string(&request.order_parameters)?;
+    let client_addr = client_addr.ip().to_string();
+    let audit_id = postgres::begin_exec_order_config_audit(
+        &state.pool,
+        &source_id,
+        &request.strategy_name,
+        &client_addr,
+        request.expected_updated_at_us,
+        &previous_json,
+        &requested_json,
+    )
+    .await?;
+
+    let mut saved = match state
+        .exec_config
+        .save_order_parameters(&source_id, exec_config_url, &request)
+        .await
+    {
+        Ok(saved) => saved,
+        Err(error) => {
+            if let Err(audit_error) = postgres::complete_exec_order_config_audit(
+                &state.pool,
+                audit_id,
+                "failed",
+                None,
+                Some(error.public_message()),
+            )
+            .await
+            {
+                error!(audit_id, error = ?audit_error, "failed to record rejected order config update");
+            }
+            return Ok(exec_config_error_response(&error));
+        }
+    };
+    saved.target_count = previous.target_count;
+    saved.nonzero_target_count = previous.nonzero_target_count;
+    if let Err(audit_error) = postgres::complete_exec_order_config_audit(
+        &state.pool,
+        audit_id,
+        "applied",
+        saved.updated_at_us,
+        None,
+    )
+    .await
+    {
+        error!(audit_id, error = ?audit_error, "order config changed but audit completion failed");
+    }
+    info!(
+        audit_id,
+        source_id,
+        strategy_name = request.strategy_name,
+        client_addr,
+        updated_at_us = saved.updated_at_us,
+        "applied Exec order parameter update"
+    );
+    Ok((NO_STORE, Json(saved)).into_response())
+}
+
+fn resolve_order_config_source<'a>(
+    config: &'a AppConfig,
+    source_id: &str,
+) -> std::result::Result<&'a SourceConfig, Response> {
+    let Some(source) = config.sources.iter().find(|source| source.id == source_id) else {
+        return Err(bad_request(format!("unknown source_id: {source_id}")));
+    };
+    if !source.enabled {
+        return Err(bad_request(format!("source_id is disabled: {source_id}")));
+    }
+    if source.exec_config_url.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "order configuration is unavailable for this source".to_string(),
+            }),
+        )
+            .into_response());
+    }
+    Ok(source)
+}
+
+fn authorized(headers: &HeaderMap, expected: &str) -> bool {
+    let Some(candidate) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    constant_time_eq(candidate.as_bytes(), expected.as_bytes())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    let length = left.len().max(right.len());
+    for index in 0..length {
+        difference |= usize::from(
+            left.get(index).copied().unwrap_or_default()
+                ^ right.get(index).copied().unwrap_or_default(),
+        );
+    }
+    difference == 0
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        Json(ErrorResponse {
+            error: "write authorization is required".to_string(),
+        }),
+    )
+        .into_response()
+}
+
+fn exec_config_error_response(error: &ExecConfigError) -> Response {
+    let status = match error.status() {
+        Some(StatusCode::BAD_REQUEST) => StatusCode::BAD_REQUEST,
+        Some(StatusCode::NOT_FOUND) => StatusCode::NOT_FOUND,
+        Some(StatusCode::CONFLICT) => StatusCode::CONFLICT,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    let message = if status == StatusCode::BAD_GATEWAY {
+        "Exec Config service is unavailable".to_string()
+    } else {
+        error.public_message().to_string()
+    };
+    (status, Json(ErrorResponse { error: message })).into_response()
 }
 
 fn parse_csv(value: Option<&str>, uppercase: bool) -> Vec<String> {
@@ -372,6 +654,7 @@ async fn build_dashboard(
             venue: source.venue.clone(),
             enabled: source.enabled,
             gateway_prefix: source.gateway_prefix.clone(),
+            configurable: source.exec_config_url.is_some(),
         })
         .collect();
     let mut snapshots = nav::SourcePositionSnapshots::new();
@@ -462,5 +745,28 @@ mod tests {
         assert_eq!(milliseconds_to_microseconds(123, "startMs"), Ok(123_000));
         assert!(milliseconds_to_microseconds(-1, "startMs").is_err());
         assert!(milliseconds_to_microseconds(i64::MAX, "endMs").is_err());
+    }
+
+    #[test]
+    fn write_authorization_requires_an_exact_bearer_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer correct-token".parse().unwrap(),
+        );
+        assert!(authorized(&headers, "correct-token"));
+        assert!(!authorized(&headers, "correct-token-extra"));
+        headers.insert(
+            header::AUTHORIZATION,
+            "bearer correct-token".parse().unwrap(),
+        );
+        assert!(!authorized(&headers, "correct-token"));
+    }
+
+    #[test]
+    fn constant_time_comparison_handles_different_lengths() {
+        assert!(constant_time_eq(b"same", b"same"));
+        assert!(!constant_time_eq(b"same", b"different"));
+        assert!(!constant_time_eq(b"prefix", b"prefix-extra"));
     }
 }

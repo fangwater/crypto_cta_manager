@@ -10,6 +10,10 @@ safety_lag_secs = 5
 # Re-read a recent window on every poll; PostgreSQL upserts make this idempotent.
 overlap_secs = 300
 
+[order_config]
+write_token_env = "CRYPTO_CTA_MANAGER_WRITE_TOKEN"
+request_timeout_secs = 5
+
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"
@@ -17,6 +21,7 @@ venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade01/data/persist_manager"
 enabled = true
 gateway_prefix = "/exec_trade01"
+exec_config_url = "http://127.0.0.1:18161/"
 # Effective fee charged per unit of fill notional (4 bps in this example).
 estimated_fee_rate = 0.0004
 # Omit start_ts_us to backfill all available history on the first run.
@@ -29,4 +34,5 @@ estimated_fee_rate = 0.0004
 #rocksdb_path = "/home/el01/binance_exec_trade02/data/persist_manager"
 #enabled = true
 #gateway_prefix = "/exec_trade02"
+#exec_config_url = "http://127.0.0.1:18162/"
 #estimated_fee_rate = 0.0004

@@ -5,7 +5,6 @@ import {
   Clock3,
   Coins,
   Database,
-  LayoutDashboard,
   LoaderCircle,
   RefreshCw,
   Search,
@@ -15,7 +14,10 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { getDashboard, getHealth, getTimeline } from './api'
+import { AppNav } from './components/AppNav'
 import { WorkspacePage } from './pages/WorkspacePage'
+import { ConfigPage } from './pages/ConfigPage'
+import { DocsPage } from './pages/DocsPage'
 import {
   NavTimelineChart,
   navSeriesMeta,
@@ -26,6 +28,7 @@ import {
   money,
   quantity,
   signedClass,
+  strategyLabel,
   timestampUs,
 } from './format'
 import type {
@@ -119,7 +122,10 @@ function initialScope() {
 
 export default function App() {
   const path = window.location.pathname.replace(/\/+$/, '') || '/'
-  return path === '/' ? <WorkspacePage /> : <NavPage />
+  if (path === '/') return <WorkspacePage />
+  if (path === '/manager/config') return <ConfigPage />
+  if (path === '/manager/docs') return <DocsPage />
+  return <NavPage />
 }
 
 function NavPage() {
@@ -136,6 +142,7 @@ function NavPage() {
     'floating_pnl_quote',
   ])
   const [selectedSymbols, setSelectedSymbols] = useState<string[] | null>(null)
+  const [selectedStrategies, setSelectedStrategies] = useState<string[] | null>(null)
   const [query, setQuery] = useState('')
   const [startInput, setStartInput] = useState('')
   const [endInput, setEndInput] = useState('')
@@ -238,6 +245,7 @@ function NavPage() {
     [dashboard, scope],
   )
   const availableSymbols = timeline?.report.available_symbols ?? []
+  const availableStrategies = timeline?.report.available_strategies ?? []
   const selectedSet = useMemo(
     () =>
       new Set(
@@ -262,7 +270,24 @@ function NavPage() {
         left.symbol.localeCompare(right.symbol),
     )
   }, [query, timeline])
+  const selectedStrategySet = useMemo(
+    () => new Set(selectedStrategies ?? availableStrategies),
+    [availableStrategies, selectedStrategies],
+  )
+  const visibleStrategyPoints = useMemo(
+    () =>
+      (timeline?.report.strategy_points ?? [])
+        .filter((strategy) => selectedStrategySet.has(strategy.strategy))
+        .sort(
+          (left, right) =>
+            Math.abs(right.summary.nav_change_after_fee_quote) -
+              Math.abs(left.summary.nav_change_after_fee_quote) ||
+            left.strategy.localeCompare(right.strategy),
+        ),
+    [selectedStrategySet, timeline],
+  )
   const noSymbolsSelected = selectedSymbols?.length === 0
+  const noStrategiesSelected = selectedStrategies?.length === 0
   const totals = noSymbolsSelected
     ? ZERO_TOTALS
     : (timeline?.report.summary ?? null)
@@ -317,6 +342,7 @@ function NavPage() {
     else url.searchParams.set('source', nextScope)
     window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
     setSelectedSymbols(null)
+    setSelectedStrategies(null)
     setTimeline(null)
     if (!dashboard || endMs === null) return
     if (activeRange) {
@@ -352,6 +378,17 @@ function NavPage() {
     })
   }
 
+  function toggleStrategy(strategy: string) {
+    if (selectedStrategies === null) {
+      setSelectedStrategies(availableStrategies.filter((item) => item !== strategy))
+      return
+    }
+    const next = selectedStrategies.includes(strategy)
+      ? selectedStrategies.filter((item) => item !== strategy)
+      : [...selectedStrategies, strategy].sort()
+    setSelectedStrategies(next.length === availableStrategies.length ? null : next)
+  }
+
   async function manualRefresh() {
     await refreshDashboard(undefined, true)
     if (activeRange) applyQuickRange(activeRange, scope, Date.now())
@@ -374,10 +411,7 @@ function NavPage() {
             </div>
           </div>
           <div className="header-actions">
-            <a className="header-nav-link" href="/" title="综合总览">
-              <LayoutDashboard size={16} />
-              <span>综合总览</span>
-            </a>
+            <AppNav active="manager" />
             <div className="header-state">
               <span
                 className={`status-dot ${health?.status === 'ok' ? 'status-dot--ready' : 'status-dot--warning'}`}
@@ -561,20 +595,35 @@ function NavPage() {
                 >
                   分币
                 </button>
+                <button
+                  type="button"
+                  className={chartMode === 'strategies' ? 'is-active' : ''}
+                  onClick={() => setChartMode('strategies')}
+                >
+                  分策略
+                </button>
               </div>
               {chartMode === 'symbols' && (
                 <span className="symbol-series-count">
                   {selectedSet.size} 条币种曲线
                 </span>
               )}
+              {chartMode === 'strategies' && (
+                <span className="symbol-series-count">
+                  {selectedStrategySet.size} 条策略曲线
+                </span>
+              )}
             </div>
           </div>
           <div className="chart-body has-picker">
             <div className="chart-stage">
-              {timeline && !noSymbolsSelected && (
+              {timeline &&
+                !noSymbolsSelected &&
+                !(chartMode === 'strategies' && noStrategiesSelected) && (
                 <NavTimelineChart
                   points={timeline.report.points}
                   symbolPoints={timeline.report.symbol_points}
+                  strategyPoints={visibleStrategyPoints}
                   visibleSeries={visibleSeries}
                   mode={chartMode}
                   feeMode={feeMode}
@@ -583,6 +632,11 @@ function NavPage() {
               {noSymbolsSelected && (
                 <div className="chart-empty">当前未选择币种</div>
               )}
+              {!noSymbolsSelected &&
+                chartMode === 'strategies' &&
+                noStrategiesSelected && (
+                  <div className="chart-empty">当前未选择策略</div>
+                )}
               {!timeline && !timelineLoading && (
                 <div className="chart-empty">暂无净值时间线</div>
               )}
@@ -615,7 +669,7 @@ function NavPage() {
                   ))}
                 </div>
               </aside>
-            ) : (
+            ) : chartMode === 'symbols' ? (
               <aside className="symbol-curve-picker" aria-label="分币曲线选择">
                 <div className="symbol-curve-picker__header">
                   <strong>币种</strong>
@@ -649,6 +703,40 @@ function NavPage() {
                   ))}
                 </div>
               </aside>
+            ) : (
+              <aside className="symbol-curve-picker" aria-label="分策略曲线选择">
+                <div className="symbol-curve-picker__header">
+                  <strong>策略</strong>
+                  <div className="symbol-curve-picker__actions">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedStrategies(null)}
+                      disabled={selectedStrategies === null}
+                    >
+                      全选
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedStrategies([])}
+                      disabled={noStrategiesSelected}
+                    >
+                      全不选
+                    </button>
+                  </div>
+                </div>
+                <div className="symbol-curve-picker__list">
+                  {availableStrategies.map((strategy) => (
+                    <label key={strategy} title={strategy}>
+                      <input
+                        type="checkbox"
+                        checked={selectedStrategySet.has(strategy)}
+                        onChange={() => toggleStrategy(strategy)}
+                      />
+                      <span>{strategyLabel(strategy)}</span>
+                    </label>
+                  ))}
+                </div>
+              </aside>
             )}
           </div>
           {timeline && (
@@ -662,19 +750,102 @@ function NavPage() {
                   noSymbolsSelected
                     ? 0
                     : chartMode === 'portfolio'
-                    ? timeline.report.points.length
-                    : timeline.report.symbol_points.reduce(
-                        (count, item) => count + item.points.length,
-                        0,
-                      ),
+                      ? timeline.report.points.length
+                      : chartMode === 'symbols'
+                        ? timeline.report.symbol_points.reduce(
+                            (count, item) => count + item.points.length,
+                            0,
+                          )
+                        : visibleStrategyPoints.reduce(
+                            (count, item) => count + item.points.length,
+                            0,
+                          ),
                 )}{' '}
                 15min ticks
               </span>
-              <span>{noSymbolsSelected ? 0 : selectedSet.size} symbols</span>
+              <span>
+                {chartMode === 'strategies'
+                  ? `${selectedStrategySet.size} strategies`
+                  : `${noSymbolsSelected ? 0 : selectedSet.size} symbols`}
+              </span>
               <span>{timeline.generation_duration_ms} ms</span>
               {timeline.report.sampled && <span>sampled</span>}
             </div>
           )}
+        </section>
+
+        <section className="strategy-section" aria-labelledby="strategies-title">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">STRATEGY ATTRIBUTION</p>
+              <h2 id="strategies-title">策略盈亏</h2>
+            </div>
+            <span className="generation-time">
+              {visibleStrategyPoints.length} / {availableStrategies.length} strategies
+            </span>
+          </div>
+          <div className="table-wrap">
+            <table className="strategy-table">
+              <thead>
+                <tr>
+                  <th>策略</th>
+                  <th className="numeric">成交</th>
+                  <th className="numeric">持仓币种</th>
+                  <th className="numeric">期末总敞口</th>
+                  <th className="numeric">区间已实现</th>
+                  <th className="numeric">区间浮动盈亏</th>
+                  <th className="numeric">区间手续费</th>
+                  <th className="numeric">区间净值变化</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleStrategyPoints.map((strategy) => (
+                  <tr key={strategy.strategy}>
+                    <td className="strategy-cell" title={strategy.strategy}>
+                      <strong>{strategyLabel(strategy.strategy)}</strong>
+                      {strategyLabel(strategy.strategy) !== strategy.strategy && (
+                        <code>{strategy.strategy}</code>
+                      )}
+                    </td>
+                    <td className="numeric mono">
+                      {integer(strategy.summary.fill_count)}
+                    </td>
+                    <td className="numeric mono">{integer(strategy.symbol_count)}</td>
+                    <td className="numeric mono">
+                      {money(strategy.gross_position_value_quote)}
+                    </td>
+                    <td
+                      className={`numeric mono ${signedClass(
+                        realizedValue(strategy.summary, feeMode),
+                      )}`}
+                    >
+                      {money(realizedValue(strategy.summary, feeMode))}
+                    </td>
+                    <td
+                      className={`numeric mono ${signedClass(
+                        strategy.summary.floating_pnl_quote,
+                      )}`}
+                    >
+                      {money(strategy.summary.floating_pnl_quote)}
+                    </td>
+                    <td className="numeric mono">
+                      {money(strategy.summary.estimated_trading_fee_quote)}
+                    </td>
+                    <td
+                      className={`numeric mono nav-cell ${signedClass(
+                        navValue(strategy.summary, feeMode),
+                      )}`}
+                    >
+                      {money(navValue(strategy.summary, feeMode))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {visibleStrategyPoints.length === 0 && (
+              <div className="empty-state">没有选中的策略</div>
+            )}
+          </div>
         </section>
 
         <section className="positions-section" aria-labelledby="positions-title">

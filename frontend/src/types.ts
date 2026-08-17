@@ -81,6 +81,32 @@ export interface DashboardAccount {
   venue: string
   enabled: boolean
   gateway_prefix: string | null
+  configurable: boolean
+}
+
+export interface OrderParameters {
+  single_order_usdt: number
+  orders_per_batch: number
+  maker_price_anchor: 'own_best' | 'opposite_best_plus_one_tick'
+  tick_spacing: number
+  batch_interval_ms: number
+  maker_timeout_ms: number
+  max_maker_requotes: number
+  target_tolerance_usdt: number
+}
+
+export interface OrderStrategyView {
+  source_id: string
+  strategy_name: string
+  order_parameters: OrderParameters
+  updated_at_us: number | null
+  target_count: number
+  nonzero_target_count: number
+}
+
+export interface OrderStrategyList {
+  source_id: string
+  strategies: string[]
 }
 
 export interface DashboardSnapshot {
@@ -100,6 +126,15 @@ export interface SymbolNavTimeline {
   points: NavTimelinePoint[]
 }
 
+export interface StrategyNavTimeline {
+  strategy: string
+  symbol_count: number
+  gross_position_value_quote: number
+  net_position_value_quote: number
+  summary: NavTotals
+  points: NavTimelinePoint[]
+}
+
 export interface NavTimelineReport {
   valuation: string
   earliest_start_ts_us: number
@@ -108,10 +143,12 @@ export interface NavTimelineReport {
   selected_source_ids: string[]
   available_symbols: string[]
   selected_symbols: string[]
+  available_strategies: string[]
   summary: NavTotals
   symbols: AggregateSymbolNavReport[]
   points: NavTimelinePoint[]
   symbol_points: SymbolNavTimeline[]
+  strategy_points: StrategyNavTimeline[]
   sampled: boolean
 }
 
@@ -132,7 +169,7 @@ export interface HealthResponse {
 
 export type FeeMode = 'after' | 'before'
 export type ChartMode = 'nav' | 'exposure'
-export type TimelineChartMode = 'portfolio' | 'symbols'
+export type TimelineChartMode = 'portfolio' | 'symbols' | 'strategies'
 export type NavSeriesKey =
   | 'nav_change_before_fee_quote'
   | 'nav_change_after_fee_quote'

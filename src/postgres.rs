@@ -189,6 +189,75 @@ pub async fn load_latest_position_snapshot(
     Ok(Some(snapshot))
 }
 
+pub async fn begin_exec_order_config_audit(
+    pool: &PgPool,
+    source_id: &str,
+    strategy_name: &str,
+    client_addr: &str,
+    expected_updated_at_us: Option<i64>,
+    previous_order_parameters_json: &str,
+    requested_order_parameters_json: &str,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO cta_exec_order_config_audit (
+            source_id,
+            strategy_name,
+            client_addr,
+            expected_updated_at_us,
+            previous_order_parameters,
+            requested_order_parameters,
+            status
+        )
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, 'pending')
+        RETURNING audit_id
+        "#,
+    )
+    .bind(source_id)
+    .bind(strategy_name)
+    .bind(client_addr)
+    .bind(expected_updated_at_us)
+    .bind(previous_order_parameters_json)
+    .bind(requested_order_parameters_json)
+    .fetch_one(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to begin Exec order config audit source={source_id} strategy={strategy_name}"
+        )
+    })
+}
+
+pub async fn complete_exec_order_config_audit(
+    pool: &PgPool,
+    audit_id: i64,
+    status: &str,
+    result_updated_at_us: Option<i64>,
+    error: Option<&str>,
+) -> Result<()> {
+    if !matches!(status, "applied" | "failed") {
+        anyhow::bail!("invalid Exec order config audit status: {status}");
+    }
+    sqlx::query(
+        r#"
+        UPDATE cta_exec_order_config_audit
+        SET status = $2,
+            result_updated_at_us = $3,
+            error = $4,
+            completed_at = now()
+        WHERE audit_id = $1 AND status = 'pending'
+        "#,
+    )
+    .bind(audit_id)
+    .bind(status)
+    .bind(result_updated_at_us)
+    .bind(error)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to complete Exec order config audit id={audit_id}"))?;
+    Ok(())
+}
+
 pub async fn persist_poll(
     pool: &PgPool,
     source_id: &str,

@@ -8,6 +8,10 @@ poll_interval_secs = 60
 safety_lag_secs = 5
 overlap_secs = 300
 
+[order_config]
+write_token_env = "CRYPTO_CTA_MANAGER_WRITE_TOKEN"
+request_timeout_secs = 5
+
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"
@@ -15,4 +19,5 @@ venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade01/data/persist_manager"
 enabled = true
 gateway_prefix = "/exec_trade01"
+exec_config_url = "http://127.0.0.1:18161/"
 estimated_fee_rate = 0.0004

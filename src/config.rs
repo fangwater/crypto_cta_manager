@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -11,6 +12,8 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub ingestion: IngestionConfig,
+    #[serde(default)]
+    pub order_config: OrderConfigSettings,
     pub sources: Vec<SourceConfig>,
 }
 
@@ -32,6 +35,13 @@ pub struct IngestionConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OrderConfigSettings {
+    pub write_token_env: String,
+    pub request_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
     /// Stable, globally unique deployment identity, such as binance_exec_trade01.
@@ -48,6 +58,8 @@ pub struct SourceConfig {
     pub estimated_fee_rate: Option<f64>,
     /// Same-origin gateway path for this account's Exec Viz, for example /exec_trade01.
     pub gateway_prefix: Option<String>,
+    /// Loopback-only Exec Config service used by the Manager backend.
+    pub exec_config_url: Option<String>,
 }
 
 impl Default for IngestionConfig {
@@ -56,6 +68,15 @@ impl Default for IngestionConfig {
             poll_interval_secs: 60,
             safety_lag_secs: 5,
             overlap_secs: 300,
+        }
+    }
+}
+
+impl Default for OrderConfigSettings {
+    fn default() -> Self {
+        Self {
+            write_token_env: "CRYPTO_CTA_MANAGER_WRITE_TOKEN".to_string(),
+            request_timeout_secs: 5,
         }
     }
 }
@@ -79,6 +100,12 @@ impl AppConfig {
         }
         if self.ingestion.poll_interval_secs == 0 {
             bail!("ingestion.poll_interval_secs must be greater than zero");
+        }
+        if self.order_config.write_token_env.trim().is_empty() {
+            bail!("order_config.write_token_env must not be empty");
+        }
+        if self.order_config.request_timeout_secs == 0 {
+            bail!("order_config.request_timeout_secs must be greater than zero");
         }
         if self.sources.is_empty() {
             bail!("at least one [[sources]] entry is required");
@@ -127,6 +154,9 @@ impl AppConfig {
                     bail!("duplicate source gateway_prefix: {gateway_prefix}");
                 }
             }
+            if let Some(exec_config_url) = &source.exec_config_url {
+                validate_exec_config_url(&source.id, exec_config_url)?;
+            }
             if !ids.insert(source.id.clone()) {
                 bail!("duplicate source id: {}", source.id);
             }
@@ -148,6 +178,18 @@ impl AppConfig {
         let env_name = self.database.url_env.trim();
         std::env::var(env_name)
             .with_context(|| format!("database URL environment variable {env_name} is not set"))
+    }
+
+    pub fn order_config_write_token(&self) -> Result<String> {
+        let env_name = self.order_config.write_token_env.trim();
+        let token = std::env::var(env_name).with_context(|| {
+            format!("order config write token environment variable {env_name} is not set")
+        })?;
+        let token = token.trim().to_string();
+        if token.len() < 32 || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            bail!("order config write token must contain at least 32 non-whitespace bytes");
+        }
+        Ok(token)
     }
 }
 
@@ -192,6 +234,34 @@ fn validate_gateway_prefix(source_id: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_exec_config_url(source_id: &str, value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value)
+        .with_context(|| format!("source {source_id} has invalid exec_config_url"))?;
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        bail!(
+            "source {source_id} exec_config_url must be a loopback HTTP origin without credentials, path, query, or fragment"
+        );
+    }
+    let host = url
+        .host_str()
+        .with_context(|| format!("source {source_id} exec_config_url has no host"))?;
+    let normalized_host = host.trim_matches(['[', ']']);
+    let loopback = normalized_host.eq_ignore_ascii_case("localhost")
+        || normalized_host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if !loopback {
+        bail!("source {source_id} exec_config_url host must be loopback");
+    }
+    Ok(())
+}
+
 fn default_database_url_env() -> String {
     "CRYPTO_CTA_LOCAL_DATABASE_URL".to_string()
 }
@@ -215,6 +285,7 @@ mod tests {
                 max_connections: 4,
             },
             ingestion: IngestionConfig::default(),
+            order_config: OrderConfigSettings::default(),
             sources,
         }
     }
@@ -230,6 +301,7 @@ mod tests {
             poll_interval_secs: None,
             estimated_fee_rate: Some(0.0004),
             gateway_prefix: Some(format!("/{id}")),
+            exec_config_url: None,
         }
     }
 
@@ -312,6 +384,23 @@ mod tests {
             .validate()
             .unwrap();
         assert!(without_rate.nav_fee_rate().is_err());
+    }
+
+    #[test]
+    fn exec_config_url_must_be_a_loopback_http_origin() {
+        let mut valid = source("binance_exec_trade01", "/srv/trade01/persist_manager");
+        valid.exec_config_url = Some("http://127.0.0.1:18161/".to_string());
+        config_with_sources(vec![valid]).validate().unwrap();
+
+        for url in [
+            "https://127.0.0.1:18161/",
+            "http://172.16.30.42:18161/",
+            "http://127.0.0.1:18161/api/",
+        ] {
+            let mut invalid = source("binance_exec_trade01", "/srv/trade01/persist_manager");
+            invalid.exec_config_url = Some(url.to_string());
+            assert!(config_with_sources(vec![invalid]).validate().is_err());
+        }
     }
 
     #[test]

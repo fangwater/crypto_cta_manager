@@ -14,6 +14,9 @@ pub type SourceMarkOverrides = BTreeMap<String, VenueMarkOverrides>;
 pub type SourcePositionSnapshots = BTreeMap<String, PositionSnapshot>;
 
 const NAV_TICK_INTERVAL_US: i64 = 15 * 60 * 1_000_000;
+const BATCH_EXEC_FROM_KEY_PREFIX: &str = "batch_exec:";
+const INITIAL_POSITION_STRATEGY: &str = "__initial_position__";
+const UNATTRIBUTED_STRATEGY: &str = "__unattributed__";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct NavTotals {
@@ -142,6 +145,16 @@ pub struct SymbolNavTimeline {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StrategyNavTimeline {
+    pub strategy: String,
+    pub symbol_count: usize,
+    pub gross_position_value_quote: f64,
+    pub net_position_value_quote: f64,
+    pub summary: NavTotals,
+    pub points: Vec<NavTimelinePoint>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NavTimelineReport {
     pub valuation: &'static str,
     pub earliest_start_ts_us: i64,
@@ -150,10 +163,12 @@ pub struct NavTimelineReport {
     pub selected_source_ids: Vec<String>,
     pub available_symbols: Vec<String>,
     pub selected_symbols: Vec<String>,
+    pub available_strategies: Vec<String>,
     pub summary: NavTotals,
     pub symbols: Vec<AggregateSymbolNavReport>,
     pub points: Vec<NavTimelinePoint>,
     pub symbol_points: Vec<SymbolNavTimeline>,
+    pub strategy_points: Vec<StrategyNavTimeline>,
     pub sampled: bool,
 }
 
@@ -252,7 +267,10 @@ struct TimelineSourceState {
     fee_rate: f64,
     snapshot_ts_us: Option<i64>,
     pending_initial_states: Option<BTreeMap<(String, i16), VenueState>>,
+    pending_initial_strategy_states: Option<BTreeMap<(String, String, i16), VenueState>>,
     states: BTreeMap<(String, i16), VenueState>,
+    strategy_states: BTreeMap<(String, String, i16), VenueState>,
+    latest_marks: BTreeMap<(String, i16), f64>,
 }
 
 impl TimelineSourceState {
@@ -262,7 +280,19 @@ impl TimelineSourceState {
             .is_some_and(|snapshot_ts| snapshot_ts <= ts_us)
             && let Some(initial_states) = self.pending_initial_states.take()
         {
+            self.latest_marks.extend(
+                initial_states
+                    .iter()
+                    .map(|(key, state)| (key.clone(), state.latest_fill_price)),
+            );
             self.states = initial_states;
+        }
+        if self
+            .snapshot_ts_us
+            .is_some_and(|snapshot_ts| snapshot_ts <= ts_us)
+            && let Some(initial_states) = self.pending_initial_strategy_states.take()
+        {
+            self.strategy_states = initial_states;
         }
     }
 
@@ -271,7 +301,7 @@ impl TimelineSourceState {
         let key = (fill.event.symbol.clone(), fill.event.venue_code);
         let state = self
             .states
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| VenueState::new(&fill.event));
         state
             .apply_fill(&fill.event, fill.side, self.fee_rate, fill.fill_ts_us)
@@ -280,7 +310,24 @@ impl TimelineSourceState {
                     "failed to apply source {} record {}",
                     self.source_id, fill.event.record_key
                 )
-            })
+            })?;
+
+        let strategy = strategy_from_from_key(&fill.event.from_key_text);
+        let strategy_key = (strategy, fill.event.symbol.clone(), fill.event.venue_code);
+        let strategy_state = self
+            .strategy_states
+            .entry(strategy_key)
+            .or_insert_with(|| VenueState::new(&fill.event));
+        strategy_state
+            .apply_fill(&fill.event, fill.side, self.fee_rate, fill.fill_ts_us)
+            .with_context(|| {
+                format!(
+                    "failed to apply strategy attribution for source {} record {}",
+                    self.source_id, fill.event.record_key
+                )
+            })?;
+        self.latest_marks.insert(key, fill.event.price);
+        Ok(())
     }
 }
 
@@ -928,6 +975,7 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
     let mut runtimes = Vec::<TimelineSourceState>::with_capacity(selected.len());
     let mut timeline_events = Vec::<TimelineEvent>::new();
     let mut available_symbols = BTreeSet::<String>::new();
+    let mut available_strategies = BTreeSet::<String>::new();
     let mut source_anchors = Vec::<i64>::new();
     let selected_source_ids = selected
         .iter()
@@ -975,6 +1023,9 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
             .collect::<Vec<_>>();
         if let Some(snapshot_ts_us) = snapshot_ts_us {
             available_symbols.extend(initial_symbols.iter().cloned());
+            if !prepared.initial_states.is_empty() {
+                available_strategies.insert(INITIAL_POSITION_STRATEGY.to_string());
+            }
             timeline_events.push(TimelineEvent::Snapshot {
                 source_index,
                 source_id: source.id.clone(),
@@ -985,6 +1036,7 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
         for fill in prepared.fill_events {
             if fill.fill_ts_us <= request.end_ts_us {
                 available_symbols.insert(fill.event.symbol.clone());
+                available_strategies.insert(strategy_from_from_key(&fill.event.from_key_text));
                 timeline_events.push(TimelineEvent::Fill {
                     source_index,
                     source_id: source.id.clone(),
@@ -992,12 +1044,31 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
                 });
             }
         }
+        let initial_strategy_states = prepared
+            .initial_states
+            .iter()
+            .map(|((symbol, venue_code), state)| {
+                (
+                    (
+                        INITIAL_POSITION_STRATEGY.to_string(),
+                        symbol.clone(),
+                        *venue_code,
+                    ),
+                    state.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         runtimes.push(TimelineSourceState {
             source_id: source.id.clone(),
             fee_rate,
             snapshot_ts_us: prepared.snapshot_ts_us,
             pending_initial_states: prepared.snapshot_ts_us.map(|_| prepared.initial_states),
+            pending_initial_strategy_states: prepared
+                .snapshot_ts_us
+                .map(|_| initial_strategy_states),
             states: BTreeMap::new(),
+            strategy_states: BTreeMap::new(),
+            latest_marks: BTreeMap::new(),
         });
     }
 
@@ -1016,6 +1087,7 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
     }
 
     let available_symbols = available_symbols.into_iter().collect::<Vec<_>>();
+    let available_strategies = available_strategies.into_iter().collect::<Vec<_>>();
     let selected_symbols =
         select_timeline_symbols(&available_symbols, request.selected_symbols.into_iter())?;
     let selected_symbol_set = selected_symbols.iter().cloned().collect::<BTreeSet<_>>();
@@ -1040,6 +1112,7 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
     }
 
     let baselines = timeline_totals_by_symbol(&runtimes);
+    let strategy_baselines = timeline_totals_by_strategy_symbol(&runtimes);
     let mut points = vec![timeline_point(
         start_ts_us,
         &runtimes,
@@ -1052,6 +1125,20 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
         .map(|symbol| {
             let point = timeline_symbol_point(start_ts_us, &symbol, &runtimes, &baselines);
             (symbol, vec![point])
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut points_by_strategy = available_strategies
+        .iter()
+        .cloned()
+        .map(|strategy| {
+            let point = timeline_strategy_point(
+                start_ts_us,
+                &strategy,
+                &runtimes,
+                &strategy_baselines,
+                &selected_symbol_set,
+            );
+            (strategy, vec![point])
         })
         .collect::<BTreeMap<_, _>>();
 
@@ -1077,6 +1164,18 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
                     );
                 }
             }
+            for (strategy, strategy_points) in &mut points_by_strategy {
+                push_or_replace_timeline_point(
+                    strategy_points,
+                    timeline_strategy_point(
+                        event.ts_us(),
+                        strategy,
+                        &runtimes,
+                        &strategy_baselines,
+                        &selected_symbol_set,
+                    ),
+                );
+            }
         }
     }
     for runtime in &mut runtimes {
@@ -1098,6 +1197,18 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
                 timeline_symbol_point(request.end_ts_us, symbol, &runtimes, &baselines),
             );
         }
+    }
+    for (strategy, strategy_points) in &mut points_by_strategy {
+        push_or_replace_timeline_point(
+            strategy_points,
+            timeline_strategy_point(
+                request.end_ts_us,
+                strategy,
+                &runtimes,
+                &strategy_baselines,
+                &selected_symbol_set,
+            ),
+        );
     }
 
     let current_totals = timeline_totals_by_symbol(&runtimes);
@@ -1140,6 +1251,27 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
             }
         })
         .collect();
+    let strategy_points = available_strategies
+        .iter()
+        .map(|strategy| {
+            let raw = points_by_strategy.remove(strategy).unwrap_or_default();
+            let resampled =
+                resample_timeline_points(raw, start_ts_us, request.end_ts_us, NAV_TICK_INTERVAL_US);
+            let resampled_len = resampled.len();
+            let points = downsample_timeline_points(resampled, symbol_max_points);
+            sampled |= points.len() < resampled_len;
+            let (symbol_count, gross_position_value_quote, net_position_value_quote) =
+                timeline_strategy_position_values(strategy, &runtimes, &selected_symbol_set);
+            StrategyNavTimeline {
+                strategy: strategy.clone(),
+                symbol_count,
+                gross_position_value_quote,
+                net_position_value_quote,
+                summary: points.last().map(|point| point.totals).unwrap_or_default(),
+                points,
+            }
+        })
+        .collect();
 
     Ok(NavTimelineReport {
         valuation: "quantity_fifo_window_delta",
@@ -1149,10 +1281,12 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
         selected_source_ids,
         available_symbols,
         selected_symbols,
+        available_strategies,
         summary,
         symbols,
         points,
         symbol_points,
+        strategy_points,
         sampled,
     })
 }
@@ -1255,6 +1389,58 @@ fn timeline_totals_by_symbol(runtimes: &[TimelineSourceState]) -> BTreeMap<Strin
     totals
 }
 
+fn timeline_totals_by_strategy_symbol(
+    runtimes: &[TimelineSourceState],
+) -> BTreeMap<(String, String), NavTotals> {
+    let mut totals = BTreeMap::<(String, String), NavTotals>::new();
+    for runtime in runtimes {
+        for ((strategy, symbol, venue_code), state) in &runtime.strategy_states {
+            let mark = runtime
+                .latest_marks
+                .get(&(symbol.clone(), *venue_code))
+                .copied();
+            totals
+                .entry((strategy.clone(), symbol.clone()))
+                .or_default()
+                .add(state.report(mark).totals);
+        }
+    }
+    totals
+}
+
+fn timeline_strategy_position_values(
+    strategy: &str,
+    runtimes: &[TimelineSourceState],
+    selected_symbols: &BTreeSet<String>,
+) -> (usize, f64, f64) {
+    let mut symbols = BTreeSet::new();
+    let mut gross_position_value_quote = 0.0;
+    let mut net_position_value_quote = 0.0;
+    for runtime in runtimes {
+        for ((state_strategy, symbol, venue_code), state) in &runtime.strategy_states {
+            if state_strategy != strategy || !selected_symbols.contains(symbol) {
+                continue;
+            }
+            let mark = runtime
+                .latest_marks
+                .get(&(symbol.clone(), *venue_code))
+                .copied();
+            let report = state.report(mark);
+            if report.long_quantity.abs() > 1e-12 || report.short_quantity.abs() > 1e-12 {
+                symbols.insert(symbol.clone());
+            }
+            gross_position_value_quote +=
+                report.long_position_value_quote.abs() + report.short_position_value_quote.abs();
+            net_position_value_quote += report.net_position_value_quote;
+        }
+    }
+    (
+        symbols.len(),
+        clean_zero(gross_position_value_quote),
+        clean_zero(net_position_value_quote),
+    )
+}
+
 fn timeline_symbol_reports(runtimes: &[TimelineSourceState]) -> Vec<AggregateSymbolNavReport> {
     let mut aggregate = BTreeMap::<String, AggregateSymbolBuilder>::new();
     for runtime in runtimes {
@@ -1315,6 +1501,47 @@ fn timeline_symbol_point(
             .copied()
             .unwrap_or_default()
             .difference(baselines.get(symbol).copied().unwrap_or_default()),
+    }
+}
+
+fn timeline_strategy_point(
+    ts_us: i64,
+    strategy: &str,
+    runtimes: &[TimelineSourceState],
+    baselines: &BTreeMap<(String, String), NavTotals>,
+    selected_symbols: &BTreeSet<String>,
+) -> NavTimelinePoint {
+    let current = timeline_totals_by_strategy_symbol(runtimes);
+    let mut totals = NavTotals::default();
+    for symbol in selected_symbols {
+        let key = (strategy.to_string(), symbol.clone());
+        totals.add(
+            current
+                .get(&key)
+                .copied()
+                .unwrap_or_default()
+                .difference(baselines.get(&key).copied().unwrap_or_default()),
+        );
+    }
+    NavTimelinePoint {
+        ts_us,
+        totals: totals.cleaned(),
+    }
+}
+
+fn strategy_from_from_key(from_key: &str) -> String {
+    let Some(strategy) = from_key.strip_prefix(BATCH_EXEC_FROM_KEY_PREFIX) else {
+        return UNATTRIBUTED_STRATEGY.to_string();
+    };
+    let valid = !strategy.is_empty()
+        && strategy.len() <= 256
+        && strategy
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if valid {
+        strategy.to_string()
+    } else {
+        UNATTRIBUTED_STRATEGY.to_string()
     }
 }
 
@@ -1538,7 +1765,7 @@ mod tests {
     use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 
     use super::*;
-    use crate::config::{DatabaseConfig, IngestionConfig};
+    use crate::config::{DatabaseConfig, IngestionConfig, OrderConfigSettings};
     use crate::model::UNIFORM_ORDERS_CF;
     use crate::snapshot::SnapshotPosition;
 
@@ -1553,6 +1780,7 @@ mod tests {
             poll_interval_secs: None,
             estimated_fee_rate: fee_rate,
             gateway_prefix: None,
+            exec_config_url: None,
         }
     }
 
@@ -1664,6 +1892,30 @@ mod tests {
         event
     }
 
+    fn strategy_event_at(
+        record_ts_us: i64,
+        fill_ts_us: i64,
+        symbol: &str,
+        venue_code: i16,
+        side_code: i16,
+        price: f64,
+        quantity: f64,
+        strategy: &str,
+    ) -> UniformOrderEvent {
+        let mut event = event_at(
+            record_ts_us,
+            fill_ts_us,
+            symbol,
+            venue_code,
+            side_code,
+            price,
+            quantity,
+        );
+        event.from_key_text = format!("batch_exec:{strategy}");
+        event.from_key = event.from_key_text.as_bytes().to_vec();
+        event
+    }
+
     fn write_events(path: &std::path::Path, events: &[UniformOrderEvent]) {
         let mut options = Options::default();
         options.create_if_missing(true);
@@ -1695,6 +1947,7 @@ mod tests {
                 max_connections: 1,
             },
             ingestion: IngestionConfig::default(),
+            order_config: OrderConfigSettings::default(),
             sources,
         }
     }
@@ -2102,6 +2355,114 @@ mod tests {
     }
 
     #[test]
+    fn timeline_splits_one_source_nav_by_batch_exec_strategy() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("trade01");
+        let strategy_a = "CTA_SK_C40V6PosT1_LXY_filter_Position";
+        let strategy_b = "CTA_SK_C40V6PosV5_V2_LXY_filter_Position";
+        write_events(
+            &path,
+            &[
+                strategy_event_at(1, 1, "BTCUSDT", 1, 1, 100.0, 1.0, strategy_a),
+                strategy_event_at(2, 2, "BTCUSDT", 1, 2, 110.0, 1.0, strategy_b),
+                strategy_event_at(3, 3, "BTCUSDT", 1, 2, 120.0, 1.0, strategy_a),
+            ],
+        );
+
+        let report = rebuild_nav_timeline_from_rocksdb_with_snapshots(
+            &app_config(vec![source_at("trade01", &path, 0.0)]),
+            timeline_request(1, 3, Vec::new(), Vec::new()),
+            &SourcePositionSnapshots::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.available_strategies,
+            vec![strategy_a.to_string(), strategy_b.to_string()]
+        );
+        let strategy_a_nav = report
+            .strategy_points
+            .iter()
+            .find(|strategy| strategy.strategy == strategy_a)
+            .unwrap()
+            .summary
+            .nav_change_before_fee_quote;
+        let strategy_b_nav = report
+            .strategy_points
+            .iter()
+            .find(|strategy| strategy.strategy == strategy_b)
+            .unwrap()
+            .summary
+            .nav_change_before_fee_quote;
+        assert_close(strategy_a_nav, 20.0);
+        assert_close(strategy_b_nav, -10.0);
+        assert_close(
+            strategy_a_nav + strategy_b_nav,
+            report.summary.nav_change_before_fee_quote,
+        );
+    }
+
+    #[test]
+    fn timeline_keeps_system_close_and_initial_position_attribution_separate() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("trade01");
+        write_events(
+            &path,
+            &[strategy_event_at(
+                1,
+                200,
+                "BTCUSDT",
+                1,
+                2,
+                110.0,
+                1.0,
+                "system_position_close",
+            )],
+        );
+        let mut snapshots = SourcePositionSnapshots::new();
+        snapshots.insert(
+            "trade01".to_string(),
+            position_snapshot("trade01", 100, 1.0, Some(100.0)),
+        );
+
+        let report = rebuild_nav_timeline_from_rocksdb_with_snapshots(
+            &app_config(vec![source_at("trade01", &path, 0.0)]),
+            timeline_request(100, 200, Vec::new(), Vec::new()),
+            &snapshots,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.available_strategies,
+            vec![
+                INITIAL_POSITION_STRATEGY.to_string(),
+                "system_position_close".to_string(),
+            ]
+        );
+        let attributed_nav = report
+            .strategy_points
+            .iter()
+            .map(|strategy| strategy.summary.nav_change_before_fee_quote)
+            .sum::<f64>();
+        assert_close(attributed_nav, report.summary.nav_change_before_fee_quote);
+        assert_close(report.summary.nav_change_before_fee_quote, 10.0);
+    }
+
+    #[test]
+    fn strategy_from_key_accepts_only_stable_batch_exec_names() {
+        assert_eq!(
+            strategy_from_from_key("batch_exec:CTA_SK_C40V6PosT1_LXY_filter_Position"),
+            "CTA_SK_C40V6PosT1_LXY_filter_Position"
+        );
+        assert_eq!(
+            strategy_from_from_key("batch_exec:system_position_close"),
+            "system_position_close"
+        );
+        assert_eq!(strategy_from_from_key("other:alpha"), UNATTRIBUTED_STRATEGY);
+        assert_eq!(strategy_from_from_key("batch_exec:"), UNATTRIBUTED_STRATEGY);
+    }
+
+    #[test]
     fn timeline_symbol_selection_changes_only_the_portfolio_curve() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("trade01");
@@ -2282,6 +2643,7 @@ mod tests {
                 max_connections: 1,
             },
             ingestion: IngestionConfig::default(),
+            order_config: OrderConfigSettings::default(),
             sources: vec![source],
         };
 
