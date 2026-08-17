@@ -31,6 +31,7 @@ pub struct AccountBinding {
     pub binding_name: String,
     pub position_strategy_name: String,
     pub order_strategy_name: String,
+    pub shares: f64,
     pub position_equity_usdt: f64,
     pub allocation_ratio: f64,
     pub updated_at_us: i64,
@@ -70,10 +71,77 @@ pub struct SaveBindingRequest {
     pub binding_name: String,
     pub position_strategy_name: String,
     pub order_strategy_name: String,
+    #[serde(default = "default_shares")]
+    pub shares: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveBindingSharesRequest {
+    pub shares: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveAllocationsRequest {
+    pub allocations: BTreeMap<String, f64>,
+}
+
+fn default_shares() -> f64 {
+    1.0
 }
 
 fn default_position_equity() -> f64 {
     DEFAULT_POSITION_EQUITY_USDT
+}
+
+pub fn allocated_equity(binding: &AccountBinding) -> f64 {
+    binding.shares * binding.position_equity_usdt
+}
+
+pub fn scale_targets(targets: &BTreeMap<String, f64>, shares: f64) -> BTreeMap<String, f64> {
+    targets
+        .iter()
+        .map(|(symbol, quantity)| (symbol.clone(), *quantity * shares))
+        .collect()
+}
+
+pub fn apply_allocation_ratios(
+    bindings: &[AccountBinding],
+    allocations: &BTreeMap<String, f64>,
+) -> Result<Vec<(String, f64)>, String> {
+    if bindings.is_empty() {
+        return Err("no bindings to allocate".to_string());
+    }
+    if allocations.len() != bindings.len() {
+        return Err("allocations must include every enabled strategy".to_string());
+    }
+    let mut ratio_sum = 0.0;
+    for binding in bindings {
+        let Some(ratio) = allocations.get(&binding.binding_name) else {
+            return Err(format!("missing allocation for {}", binding.binding_name));
+        };
+        validate_equity(*ratio, "allocation")?;
+        ratio_sum += *ratio;
+    }
+    if !ratio_sum.is_finite() || ratio_sum <= 0.0 {
+        return Err("allocations must sum to a positive finite value".to_string());
+    }
+    if (ratio_sum - 1.0).abs() > 1e-4 {
+        return Err("allocations must sum to 1 (100%)".to_string());
+    }
+    let total = bindings.iter().map(allocated_equity).sum::<f64>();
+    if total <= 0.0 {
+        return Err("bound equity must be greater than zero".to_string());
+    }
+    Ok(bindings
+        .iter()
+        .map(|binding| {
+            let ratio = allocations[&binding.binding_name] / ratio_sum;
+            (
+                binding.binding_name.clone(),
+                ratio * total / binding.position_equity_usdt,
+            )
+        })
+        .collect())
 }
 
 pub fn validate_targets(targets: &BTreeMap<String, f64>) -> Result<(), String> {
@@ -116,15 +184,12 @@ impl AccountStudio {
         bindings: Vec<AccountBinding>,
     ) -> Result<Self, String> {
         validate_equity(leverage, "leverage")?;
-        let bound_equity_usdt = bindings
-            .iter()
-            .map(|binding| binding.position_equity_usdt)
-            .sum();
+        let bound_equity_usdt = bindings.iter().map(allocated_equity).sum();
         let bindings = bindings
             .into_iter()
             .map(|mut binding| {
                 binding.allocation_ratio =
-                    allocation_ratio(binding.position_equity_usdt, bound_equity_usdt);
+                    allocation_ratio(allocated_equity(&binding), bound_equity_usdt);
                 binding
             })
             .collect();
@@ -350,6 +415,7 @@ pub async fn save_binding(
     validate_strategy_name(&request.position_strategy_name)
         .map_err(|error| anyhow::anyhow!(error))?;
     validate_strategy_name(&request.order_strategy_name).map_err(|error| anyhow::anyhow!(error))?;
+    validate_equity(request.shares, "shares").map_err(|error| anyhow::anyhow!(error))?;
     if !list_position_strategies(pool)
         .await?
         .iter()
@@ -370,12 +436,13 @@ pub async fn save_binding(
     sqlx::query(
         r#"
         INSERT INTO cta_account_strategy_bindings (
-            source_id, binding_name, position_strategy_name, order_strategy_name, updated_at_us
+            source_id, binding_name, position_strategy_name, order_strategy_name, shares, updated_at_us
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (source_id, binding_name) DO UPDATE SET
             position_strategy_name = EXCLUDED.position_strategy_name,
             order_strategy_name = EXCLUDED.order_strategy_name,
+            shares = EXCLUDED.shares,
             updated_at_us = EXCLUDED.updated_at_us
         "#,
     )
@@ -383,6 +450,7 @@ pub async fn save_binding(
     .bind(&request.binding_name)
     .bind(&request.position_strategy_name)
     .bind(&request.order_strategy_name)
+    .bind(request.shares)
     .bind(updated_at_us)
     .execute(pool)
     .await
@@ -392,6 +460,70 @@ pub async fn save_binding(
             request.position_strategy_name, request.order_strategy_name, request.binding_name
         )
     })?;
+    load_account_studio(pool, source_id, updated_at_us).await
+}
+
+pub async fn save_binding_shares(
+    pool: &PgPool,
+    source_id: &str,
+    binding_name: &str,
+    request: &SaveBindingSharesRequest,
+    updated_at_us: i64,
+) -> Result<AccountStudio> {
+    validate_strategy_name(binding_name).map_err(|error| anyhow::anyhow!(error))?;
+    validate_equity(request.shares, "shares").map_err(|error| anyhow::anyhow!(error))?;
+    let result = sqlx::query(
+        r#"
+        UPDATE cta_account_strategy_bindings
+        SET shares = $3, updated_at_us = $4
+        WHERE source_id = $1 AND binding_name = $2
+        "#,
+    )
+    .bind(source_id)
+    .bind(binding_name)
+    .bind(request.shares)
+    .bind(updated_at_us)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to save shares for {binding_name} on {source_id}"))?;
+    if result.rows_affected() == 0 {
+        bail!("binding is unknown: {binding_name}");
+    }
+    load_account_studio(pool, source_id, updated_at_us).await
+}
+
+pub async fn save_allocations(
+    pool: &PgPool,
+    source_id: &str,
+    request: &SaveAllocationsRequest,
+    updated_at_us: i64,
+) -> Result<AccountStudio> {
+    let studio = load_account_studio(pool, source_id, updated_at_us).await?;
+    let updates = apply_allocation_ratios(&studio.bindings, &request.allocations)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let mut tx = pool.begin().await?;
+    for (binding_name, shares) in updates {
+        let result = sqlx::query(
+            r#"
+            UPDATE cta_account_strategy_bindings
+            SET shares = $3, updated_at_us = $4
+            WHERE source_id = $1 AND binding_name = $2
+            "#,
+        )
+        .bind(source_id)
+        .bind(&binding_name)
+        .bind(shares)
+        .bind(updated_at_us)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("failed to save allocation for {binding_name} on {source_id}"))?;
+        if result.rows_affected() == 0 {
+            bail!("binding is unknown: {binding_name}");
+        }
+    }
+    tx.commit()
+        .await
+        .context("failed to commit allocation updates")?;
     load_account_studio(pool, source_id, updated_at_us).await
 }
 
@@ -414,7 +546,7 @@ pub async fn load_binding_parts(
     pool: &PgPool,
     source_id: &str,
     binding_name: &str,
-) -> Result<Option<(PositionStrategy, OrderStrategy)>> {
+) -> Result<Option<(PositionStrategy, OrderStrategy, f64)>> {
     let row = sqlx::query(
         r#"
         SELECT
@@ -431,7 +563,8 @@ pub async fn load_binding_parts(
             o.maker_timeout_ms,
             o.max_maker_requotes,
             o.target_tolerance_usdt,
-            o.updated_at_us AS order_updated_at_us
+            o.updated_at_us AS order_updated_at_us,
+            b.shares
         FROM cta_account_strategy_bindings b
         JOIN cta_position_strategies p ON p.strategy_name = b.position_strategy_name
         JOIN cta_order_strategies o ON o.strategy_name = b.order_strategy_name
@@ -467,6 +600,7 @@ pub async fn load_binding_parts(
             },
             updated_at_us: row.try_get("order_updated_at_us")?,
         },
+        row.try_get("shares")?,
     )))
 }
 
@@ -477,6 +611,7 @@ async fn list_bindings(pool: &PgPool, source_id: &str) -> Result<Vec<AccountBind
             b.binding_name,
             b.position_strategy_name,
             b.order_strategy_name,
+            b.shares,
             b.updated_at_us,
             p.equity_usdt
         FROM cta_account_strategy_bindings b
@@ -496,6 +631,7 @@ async fn list_bindings(pool: &PgPool, source_id: &str) -> Result<Vec<AccountBind
                 binding_name: row.try_get("binding_name")?,
                 position_strategy_name: row.try_get("position_strategy_name")?,
                 order_strategy_name: row.try_get("order_strategy_name")?,
+                shares: row.try_get("shares")?,
                 position_equity_usdt: row.try_get("equity_usdt")?,
                 allocation_ratio: 0.0,
                 updated_at_us: row.try_get("updated_at_us")?,
@@ -546,6 +682,7 @@ mod tests {
                     binding_name: "combo_a".into(),
                     position_strategy_name: "pos_a".into(),
                     order_strategy_name: "ord_a".into(),
+                    shares: 1.0,
                     position_equity_usdt: 10_000.0,
                     allocation_ratio: 0.0,
                     updated_at_us: 1,
@@ -555,6 +692,7 @@ mod tests {
                     binding_name: "combo_b".into(),
                     position_strategy_name: "pos_b".into(),
                     order_strategy_name: "ord_b".into(),
+                    shares: 1.0,
                     position_equity_usdt: 30_000.0,
                     allocation_ratio: 0.0,
                     updated_at_us: 1,
@@ -566,6 +704,55 @@ mod tests {
         assert_eq!(studio.bound_equity_usdt, 40_000.0);
         assert!((studio.bindings[0].allocation_ratio - 0.25).abs() < 1e-12);
         assert!((studio.bindings[1].allocation_ratio - 0.75).abs() < 1e-12);
+    }
+
+    #[test]
+    fn binding_shares_scale_allocation_and_targets() {
+        let studio = AccountStudio::from_parts(
+            "binance_exec_trade01".into(),
+            1.0,
+            1,
+            vec![
+                AccountBinding {
+                    source_id: "binance_exec_trade01".into(),
+                    binding_name: "cta_a".into(),
+                    position_strategy_name: "cta_a".into(),
+                    order_strategy_name: "default_order".into(),
+                    shares: 1.0,
+                    position_equity_usdt: 10_000.0,
+                    allocation_ratio: 0.0,
+                    updated_at_us: 1,
+                },
+                AccountBinding {
+                    source_id: "binance_exec_trade01".into(),
+                    binding_name: "cta_b".into(),
+                    position_strategy_name: "cta_b".into(),
+                    order_strategy_name: "default_order".into(),
+                    shares: 3.0,
+                    position_equity_usdt: 10_000.0,
+                    allocation_ratio: 0.0,
+                    updated_at_us: 1,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(studio.bound_equity_usdt, 40_000.0);
+        assert!((studio.bindings[0].allocation_ratio - 0.25).abs() < 1e-12);
+        assert!((studio.bindings[1].allocation_ratio - 0.75).abs() < 1e-12);
+        let scaled = scale_targets(&BTreeMap::from([("BTCUSDT".into(), -0.006)]), 3.0);
+        assert!((scaled["BTCUSDT"] + 0.018).abs() < 1e-12);
+        let next = apply_allocation_ratios(
+            &studio.bindings,
+            &BTreeMap::from([("cta_a".into(), 0.5), ("cta_b".into(), 0.5)]),
+        )
+        .unwrap();
+        assert!((next[0].1 - 2.0).abs() < 1e-9);
+        assert!((next[1].1 - 2.0).abs() < 1e-9);
+        let rejected = apply_allocation_ratios(
+            &studio.bindings,
+            &BTreeMap::from([("cta_a".into(), 0.4), ("cta_b".into(), 0.4)]),
+        );
+        assert!(rejected.is_err());
     }
 
     #[test]

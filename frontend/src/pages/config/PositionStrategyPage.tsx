@@ -104,7 +104,7 @@ export function PositionStrategyPage() {
                   </Label>
                 </div>
                 <FieldHint>
-                  一份仓位策略的名义。账户可配置份数 = 实时权益 × 杠杆率 / 这份参考权益。多条策略之间仍按各自参考权益分配比例。
+                  一份仓位策略的名义，默认 10,000 USDT。账户给这条策略配几份，发布时目标仓位按份数放大；多条策略的占比 = 各自（份数 × 单份参考权益）/ 合计。
                 </FieldHint>
                 <TargetPositionsEditor
                   targets={selectedPosition.targets}

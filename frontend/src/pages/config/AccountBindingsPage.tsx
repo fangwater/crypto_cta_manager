@@ -6,15 +6,17 @@ import {
   getAccountStudio,
   getDashboard,
   publishAccountBinding,
+  saveAccountAllocations,
   saveAccountBinding,
   saveAccountLeverage,
 } from '../../api'
+import { AllocationEditor } from '../../components/AllocationEditor'
 import { CapacityPanel, LeverageToolbar } from '../../components/CapacityPanel'
 import { ConfigShell } from '../../components/ConfigShell'
 import { Alert } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/Card'
-import { FieldHint, Label, Select } from '../../components/ui/Field'
+import { FieldHint, Input, Label, Select } from '../../components/ui/Field'
 import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { money } from '../../format'
@@ -34,6 +36,7 @@ export function AccountBindingsPage() {
   const [leverage, setLeverage] = useState('1')
   const [newPosition, setNewPosition] = useState('')
   const [newOrder, setNewOrder] = useState('')
+  const [newShares, setNewShares] = useState('1')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -115,15 +118,21 @@ export function AccountBindingsPage() {
     return () => window.clearInterval(timer)
   }, [sourceId])
 
-  async function bindExecution(positionStrategyName: string, orderStrategyName: string) {
+  async function bindExecution(
+    positionStrategyName: string,
+    orderStrategyName: string,
+    shares: number,
+  ) {
     await saveAccountBinding(
       sourceId,
       positionStrategyName,
       positionStrategyName,
       orderStrategyName,
+      shares,
     )
     const next = await getAccountStudio(sourceId)
     setStudio(next)
+    setCapacity(next.capacity ?? null)
     await reloadCatalog()
   }
 
@@ -131,7 +140,7 @@ export function AccountBindingsPage() {
     <ConfigShell
       section="bindings"
       title="策略启用"
-      description="把已创建的仓位策略挂到本账户，并为每条策略选择一个执行算法。Exec 上的策略名与仓位策略名相同。"
+      description="把已创建的仓位策略挂到本账户，并为每条策略选择一个执行算法。占比双击修改后统一保存，合计必须等于 100%。Exec 上的策略名与仓位策略名相同。"
       saving={saving}
       error={error ?? catalogError ?? writeError}
       notice={notice}
@@ -208,12 +217,13 @@ export function AccountBindingsPage() {
                 </p>
               ) : (
                 <form
-                  className="grid gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto]"
+                  className="grid gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_7.5rem_auto]"
                   onSubmit={(event) => {
                     event.preventDefault()
                     void withWrite(async () => {
-                      await bindExecution(newPosition, newOrder)
+                      await bindExecution(newPosition, newOrder, Number(newShares))
                       setNewPosition('')
+                      setNewShares('1')
                     })
                   }}
                 >
@@ -239,6 +249,15 @@ export function AccountBindingsPage() {
                     </Select>
                     <FieldHint>通常选 default_order，多条策略可共用。</FieldHint>
                   </Label>
+                  <Label>
+                    份数
+                    <Input
+                      value={newShares}
+                      inputMode="decimal"
+                      onChange={(event) => setNewShares(event.target.value)}
+                    />
+                    <FieldHint>初始份数；启用后再用下方占比统一调整</FieldHint>
+                  </Label>
                   <Button type="submit" variant="primary" className="md:self-end" disabled={saving}>
                     <Plus size={15} /> 启用
                   </Button>
@@ -246,6 +265,21 @@ export function AccountBindingsPage() {
               )}
             </CardContent>
           </Card>
+
+          {(studio?.bindings ?? []).length > 0 ? (
+            <AllocationEditor
+              bindings={studio?.bindings ?? []}
+              boundEquity={studio?.bound_equity_usdt ?? 0}
+              saving={saving}
+              onSave={(allocations) =>
+                void withWrite(async () => {
+                  const next = await saveAccountAllocations(sourceId, allocations)
+                  setStudio(next)
+                  setCapacity(next.capacity ?? null)
+                })
+              }
+            />
+          ) : null}
 
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm font-medium text-ink">
@@ -274,14 +308,10 @@ export function AccountBindingsPage() {
                         {percent(binding.allocation_ratio)}
                       </span>
                     </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-canvas">
-                      <div
-                        className="h-full rounded-full bg-brand transition-all"
-                        style={{ width: `${Math.max(binding.allocation_ratio * 100, 4)}%` }}
-                      />
-                    </div>
                     <FieldHint>
-                      参考权益 {money(binding.position_equity_usdt)} USDT · 占比按各策略参考权益自动计算
+                      {binding.shares} 份 × {money(binding.position_equity_usdt)} USDT ={' '}
+                      {money(binding.shares * binding.position_equity_usdt)} USDT。占比在上方统一编辑，合计必须等于
+                      100%。
                     </FieldHint>
                     <div className="flex flex-wrap items-end gap-3">
                       <Label className="min-w-[200px] flex-1">
@@ -290,7 +320,11 @@ export function AccountBindingsPage() {
                           value={binding.order_strategy_name}
                           onChange={(event) =>
                             void withWrite(async () => {
-                              await bindExecution(binding.position_strategy_name, event.target.value)
+                              await bindExecution(
+                                binding.position_strategy_name,
+                                event.target.value,
+                                binding.shares,
+                              )
                             })
                           }
                         >

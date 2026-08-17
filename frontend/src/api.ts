@@ -196,6 +196,7 @@ export function saveAccountBinding(
   bindingName: string,
   positionStrategyName: string,
   orderStrategyName: string,
+  shares = 1,
 ) {
   return requestJson<AccountStudio>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings`,
@@ -205,7 +206,31 @@ export function saveAccountBinding(
         binding_name: bindingName,
         position_strategy_name: positionStrategyName,
         order_strategy_name: orderStrategyName,
+        shares,
       },
+    },
+  )
+}
+
+export function saveBindingShares(sourceId: string, bindingName: string, shares: number) {
+  return requestJson<AccountStudio>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings/${encodeURIComponent(bindingName)}/shares`,
+    {
+      method: 'PUT',
+      body: { shares },
+    },
+  )
+}
+
+export function saveAccountAllocations(
+  sourceId: string,
+  allocations: Record<string, number>,
+) {
+  return requestJson<AccountStudio>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/allocations`,
+    {
+      method: 'PUT',
+      body: { allocations },
     },
   )
 }

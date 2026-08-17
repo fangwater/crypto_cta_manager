@@ -129,6 +129,7 @@ export interface AccountBinding {
   binding_name: string
   position_strategy_name: string
   order_strategy_name: string
+  shares: number
   position_equity_usdt: number
   allocation_ratio: number
   updated_at_us: number

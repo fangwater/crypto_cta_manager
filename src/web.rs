@@ -21,8 +21,8 @@ use crate::order_config::{
     ExecConfigClient, ExecConfigError, SaveOrderParametersRequest, validate_strategy_name,
 };
 use crate::strategy_catalog::{
-    self, SaveAccountSettingsRequest, SaveBindingRequest, SaveOrderStrategyRequest,
-    SavePositionStrategyRequest,
+    self, SaveAccountSettingsRequest, SaveAllocationsRequest, SaveBindingRequest,
+    SaveBindingSharesRequest, SaveOrderStrategyRequest, SavePositionStrategyRequest,
 };
 use crate::{nav, postgres};
 
@@ -222,12 +222,20 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             get(get_account_live),
         )
         .route(
+            "/api/catalog/accounts/{source_id}/allocations",
+            put(save_account_allocations),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/bindings",
             post(save_account_binding),
         )
         .route(
             "/api/catalog/accounts/{source_id}/bindings/{binding_name}",
             delete(delete_account_binding),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bindings/{binding_name}/shares",
+            put(save_account_binding_shares),
         )
         .route(
             "/api/catalog/accounts/{source_id}/bindings/{binding_name}/publish",
@@ -670,6 +678,47 @@ async fn save_account_binding(
     }
 }
 
+async fn save_account_binding_shares(
+    State(state): State<WebState>,
+    Path((source_id, binding_name)): Path<(String, String)>,
+    Json(request): Json<SaveBindingSharesRequest>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+        return Ok(response);
+    }
+    match strategy_catalog::save_binding_shares(
+        &state.pool,
+        &source_id,
+        &binding_name,
+        &request,
+        unix_now_us(),
+    )
+    .await
+    {
+        Ok(studio) => {
+            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
+        }
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn save_account_allocations(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Json(request): Json<SaveAllocationsRequest>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+        return Ok(response);
+    }
+    match strategy_catalog::save_allocations(&state.pool, &source_id, &request, unix_now_us()).await
+    {
+        Ok(studio) => {
+            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
+        }
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
 async fn delete_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
@@ -689,12 +738,13 @@ async fn publish_account_binding(
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
-    let Some((position, order)) =
+    let Some((position, order, shares)) =
         strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name).await?
     else {
         return Ok(not_found("binding was not found"));
     };
     let exec_config_url = source.exec_config_url.as_deref().unwrap_or_default();
+    let targets = strategy_catalog::scale_targets(&position.targets, shares);
     let existing = state
         .exec_config
         .load_strategy(&source_id, exec_config_url, &binding_name)
@@ -703,7 +753,7 @@ async fn publish_account_binding(
         Ok(current) => {
             if let Err(error) = state
                 .exec_config
-                .save_targets(exec_config_url, &binding_name, &position.targets)
+                .save_targets(exec_config_url, &binding_name, &targets)
                 .await
             {
                 return Ok(exec_config_error_response(&error));
@@ -732,7 +782,7 @@ async fn publish_account_binding(
                     exec_config_url,
                     &binding_name,
                     &order.order_parameters,
-                    &position.targets,
+                    &targets,
                 )
                 .await
             {
@@ -758,6 +808,10 @@ fn catalog_error(error: anyhow::Error) -> Response {
         || message.contains("unknown")
         || message.contains("invalid")
         || message.contains("must be")
+        || message.contains("must sum")
+        || message.contains("must include")
+        || message.contains("missing allocation")
+        || message.contains("no bindings")
         || message.contains("violates")
     {
         StatusCode::BAD_REQUEST

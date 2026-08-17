@@ -222,10 +222,7 @@ export function AccountOverviewPage() {
                         <div className="grid gap-3 sm:grid-cols-2">
                           <MiniStat label="仓位策略" value={binding.position_strategy_name} mono />
                           <MiniStat label="执行算法" value={binding.order_strategy_name} mono />
-                          <MiniStat
-                            label="参考权益"
-                            value={`${money(binding.position_equity_usdt)} USDT`}
-                          />
+                          <MiniStat label="份数" value={String(binding.shares)} />
                           <MiniStat
                             label="比例"
                             value={percent(binding.allocation_ratio)}

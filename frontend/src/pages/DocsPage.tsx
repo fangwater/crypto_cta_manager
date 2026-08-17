@@ -19,6 +19,8 @@ type ChapterId =
   | 'api-targets'
   | 'api-params'
   | 'api-leverage'
+  | 'api-allocations'
+  | 'api-shares'
   | 'api-strategy'
   | 'api-read'
   | 'api-errors'
@@ -168,7 +170,7 @@ const chapters: Chapter[] = [
           </tbody>
         </table>
         <p>
-          账户权益从本机 account_monitor 的 Iceoryx 通道实时读取。杠杆率是 CTA 配置倍数：可用名义 = 实时权益 × 杠杆率；可配置份数 = 可用名义 / 单份参考权益（默认 10000 USDT）。绑定后的分配比例 = 该仓位策略参考权益 / 账户已绑定参考权益合计。例如两份策略分别是 1 万和 3 万，比例就是 25% 和 75%。杠杆不参与交易所保证金计算。同一份仓位或下单策略可以绑到多个账户。
+          账户权益从本机 account_monitor 的 Iceoryx 通道实时读取。杠杆率是 CTA 配置倍数：可用名义 = 实时权益 × 杠杆率；可配置份数 = 可用名义 / 单份参考权益（默认 10000 USDT）。占用参考权益 = 份数 × 该仓位策略的单份参考权益；占比 = 该策略占用 / 已绑定合计。页面上双击各策略百分比后统一保存，合计必须等于 100%；系统按总占用参考权益反推份数，不会因为调高一条就自动挤占另一条。发布到 Exec 时，目标仓位按份数放大。例如两条策略都是 1 万单份、占比 25% 和 75%，第二条的 target 会乘 3。杠杆不参与交易所保证金计算。同一份仓位或下单策略可以绑到多个账户。
         </p>
         <p>
           浏览器在 <a href="/manager/config/position/">/manager/config/position/</a> 完成创建、绑定和发布。发布时：
@@ -253,7 +255,7 @@ const chapters: Chapter[] = [
           </li>
           <li>在「仓位策略」里创建或编辑 target 和权益金额</li>
           <li>在「下单策略」里创建或编辑 8 个下单参数</li>
-          <li>在「账户组合」里设置杠杆（或直接调杠杆 API），再把仓位策略和下单策略绑成发布名</li>
+          <li>在「账户组合」里双击各策略百分比，合计等于 100% 后点「保存占比」（或调 allocations API）</li>
           <li>点「发布到 Exec」。未发布的组合不会进入交易进程</li>
         </ol>
         <p>
@@ -419,6 +421,60 @@ const chapters: Chapter[] = [
           成功返回账户 studio 和最新 <code>capacity</code>（含 <code>buying_power_usdt</code>、
           <code>configurable_shares</code>）。查询实时权益用{' '}
           <code>GET /manager/api/catalog/accounts/binance_exec_trade01/live</code>。
+        </p>
+      </>
+    ),
+  },
+  {
+    id: 'api-allocations',
+    group: 'API',
+    title: 'PUT /api/catalog/accounts/{id}/allocations',
+    content: (
+      <>
+        <p>
+          一次提交本账户全部已启用策略的占比。请求必须覆盖每一条绑定，每条占比大于 0，合计必须等于 1（100%）。
+          页面上的「保存占比」走这条接口。系统保持已绑定参考权益合计不变，按占比反推各策略份数，不会把一条策略的增加自动从另一条扣掉。
+        </p>
+        <p>
+          URL：
+          <code>{GATEWAY}/manager/api/catalog/accounts/binance_exec_trade01/allocations</code>
+        </p>
+        <CodeBlock>{`curl --noproxy '*' -sS -X PUT \\
+  '${GATEWAY}/manager/api/catalog/accounts/binance_exec_trade01/allocations' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"allocations":{"CTA_A":0.25,"CTA_B":0.75}}'`}</CodeBlock>
+        <p>
+          键是 <code>binding_name</code>（与仓位策略名相同）。这只改 Manager 本地绑定；要让 Exec
+          仓位跟着变，保存后再点各策略的「发布到 Exec」。
+        </p>
+      </>
+    ),
+  },
+  {
+    id: 'api-shares',
+    group: 'API',
+    title: 'PUT /api/catalog/accounts/{id}/bindings/{name}/shares',
+    content: (
+      <>
+        <p>
+          给本账户上的某条已启用策略单独设置份数。占比会按「份数 × 单份参考权益」自动重算。
+          浏览器主交互是 allocations 接口；这条留给脚本按份数精确调整。
+          这只改 Manager 本地绑定；要让 Exec 仓位跟着变，保存后再点「发布到 Exec」，target 会按份数放大。
+        </p>
+        <p>
+          URL：
+          <code>
+            {GATEWAY}/manager/api/catalog/accounts/binance_exec_trade01/bindings/CTA_NAME/shares
+          </code>
+        </p>
+        <CodeBlock>{`curl --noproxy '*' -sS -X PUT \\
+  '${GATEWAY}/manager/api/catalog/accounts/binance_exec_trade01/bindings/CTA_SK_C40V6PosT1_LXY_filter_Position/shares' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"shares": 3}'`}</CodeBlock>
+        <p>
+          <code>shares</code> 必须大于 0。启用策略时也可在{' '}
+          <code>POST /manager/api/catalog/accounts/&lt;source_id&gt;/bindings</code> 里带上{' '}
+          <code>shares</code>，默认 1。
         </p>
       </>
     ),

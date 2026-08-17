@@ -107,6 +107,7 @@ mod tests {
                 binding_name: "cta_a".into(),
                 position_strategy_name: "cta_a".into(),
                 order_strategy_name: "default_order".into(),
+                shares: 1.0,
                 position_equity_usdt: 10_000.0,
                 allocation_ratio: 0.0,
                 updated_at_us: 1,
