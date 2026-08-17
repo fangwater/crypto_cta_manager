@@ -505,12 +505,8 @@ async fn list_position_strategies(State(state): State<WebState>) -> Result<Respo
 
 async fn save_position_strategy(
     State(state): State<WebState>,
-    headers: HeaderMap,
     Json(request): Json<SavePositionStrategyRequest>,
 ) -> Result<Response, ApiError> {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return Ok(unauthorized());
-    }
     match strategy_catalog::upsert_position_strategy(&state.pool, &request, unix_now_us()).await {
         Ok(saved) => Ok((NO_STORE, Json(saved)).into_response()),
         Err(error) => Ok(catalog_error(error)),
@@ -519,12 +515,8 @@ async fn save_position_strategy(
 
 async fn delete_position_strategy(
     State(state): State<WebState>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return Ok(unauthorized());
-    }
     match strategy_catalog::delete_position_strategy(&state.pool, &name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("position strategy was not found")),
@@ -539,12 +531,8 @@ async fn list_order_strategies(State(state): State<WebState>) -> Result<Response
 
 async fn save_order_strategy(
     State(state): State<WebState>,
-    headers: HeaderMap,
     Json(request): Json<SaveOrderStrategyRequest>,
 ) -> Result<Response, ApiError> {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return Ok(unauthorized());
-    }
     match strategy_catalog::upsert_order_strategy(&state.pool, &request, unix_now_us()).await {
         Ok(saved) => Ok((NO_STORE, Json(saved)).into_response()),
         Err(error) => Ok(catalog_error(error)),
@@ -553,12 +541,8 @@ async fn save_order_strategy(
 
 async fn delete_order_strategy(
     State(state): State<WebState>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return Ok(unauthorized());
-    }
     match strategy_catalog::delete_order_strategy(&state.pool, &name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("order strategy was not found")),
@@ -582,12 +566,8 @@ async fn get_account_studio(
 async fn save_account_studio(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
-    headers: HeaderMap,
     Json(request): Json<SaveAccountSettingsRequest>,
 ) -> Result<Response, ApiError> {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return Ok(unauthorized());
-    }
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
@@ -602,12 +582,8 @@ async fn save_account_studio(
 async fn save_account_binding(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
-    headers: HeaderMap,
     Json(request): Json<SaveBindingRequest>,
 ) -> Result<Response, ApiError> {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return Ok(unauthorized());
-    }
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
@@ -620,11 +596,7 @@ async fn save_account_binding(
 async fn delete_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
-    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return Ok(unauthorized());
-    }
     match strategy_catalog::delete_binding(&state.pool, &source_id, &binding_name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("binding was not found")),
@@ -635,11 +607,7 @@ async fn delete_account_binding(
 async fn publish_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
-    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return Ok(unauthorized());
-    }
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
         Err(response) => return Ok(response),

@@ -243,7 +243,7 @@ const chapters: Chapter[] = [
         </p>
         <ol>
           <li>
-            打开 <a href="/manager/config/">策略组合</a>，解锁写权限 token
+            打开 <a href="/manager/config/">策略组合</a>
           </li>
           <li>在「仓位策略」里创建或编辑 target 和权益金额</li>
           <li>在「下单策略」里创建或编辑 8 个下单参数</li>

@@ -130,10 +130,9 @@ export function listPositionStrategies(signal?: AbortSignal) {
   return requestJson<PositionStrategy[]>('/catalog/position-strategies', { signal })
 }
 
-export function savePositionStrategy(body: PositionStrategy, token: string) {
+export function savePositionStrategy(body: PositionStrategy) {
   return requestJson<PositionStrategy>('/catalog/position-strategies', {
     method: 'POST',
-    token,
     body: {
       strategy_name: body.strategy_name,
       equity_usdt: body.equity_usdt,
@@ -142,10 +141,9 @@ export function savePositionStrategy(body: PositionStrategy, token: string) {
   })
 }
 
-export function deletePositionStrategy(name: string, token: string) {
+export function deletePositionStrategy(name: string) {
   return requestJson<void>(`/catalog/position-strategies/${encodeURIComponent(name)}`, {
     method: 'DELETE',
-    token,
   })
 }
 
@@ -153,10 +151,9 @@ export function listOrderStrategies(signal?: AbortSignal) {
   return requestJson<CatalogOrderStrategy[]>('/catalog/order-strategies', { signal })
 }
 
-export function saveOrderStrategy(body: CatalogOrderStrategy, token: string) {
+export function saveOrderStrategy(body: CatalogOrderStrategy) {
   return requestJson<CatalogOrderStrategy>('/catalog/order-strategies', {
     method: 'POST',
-    token,
     body: {
       strategy_name: body.strategy_name,
       order_parameters: body.order_parameters,
@@ -164,10 +161,9 @@ export function saveOrderStrategy(body: CatalogOrderStrategy, token: string) {
   })
 }
 
-export function deleteOrderStrategy(name: string, token: string) {
+export function deleteOrderStrategy(name: string) {
   return requestJson<void>(`/catalog/order-strategies/${encodeURIComponent(name)}`, {
     method: 'DELETE',
-    token,
   })
 }
 
@@ -177,10 +173,9 @@ export function getAccountStudio(sourceId: string, signal?: AbortSignal) {
   })
 }
 
-export function saveAccountStudio(sourceId: string, leverage: number, token: string) {
+export function saveAccountStudio(sourceId: string, leverage: number) {
   return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}`, {
     method: 'PUT',
-    token,
     body: { leverage },
   })
 }
@@ -190,13 +185,11 @@ export function saveAccountBinding(
   bindingName: string,
   positionStrategyName: string,
   orderStrategyName: string,
-  token: string,
 ) {
   return requestJson<AccountStudio>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings`,
     {
       method: 'POST',
-      token,
       body: {
         binding_name: bindingName,
         position_strategy_name: positionStrategyName,
@@ -206,16 +199,16 @@ export function saveAccountBinding(
   )
 }
 
-export function deleteAccountBinding(sourceId: string, bindingName: string, token: string) {
+export function deleteAccountBinding(sourceId: string, bindingName: string) {
   return requestJson<void>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings/${encodeURIComponent(bindingName)}`,
-    { method: 'DELETE', token },
+    { method: 'DELETE' },
   )
 }
 
-export function publishAccountBinding(sourceId: string, bindingName: string, token: string) {
+export function publishAccountBinding(sourceId: string, bindingName: string) {
   return requestJson<OrderStrategyView>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings/${encodeURIComponent(bindingName)}/publish`,
-    { method: 'POST', token },
+    { method: 'POST' },
   )
 }

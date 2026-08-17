@@ -1,17 +1,7 @@
-import {
-  CheckCircle2,
-  LockKeyhole,
-  Plus,
-  RefreshCw,
-  Save,
-  Settings,
-  Trash2,
-  UnlockKeyhole,
-} from 'lucide-react'
+import { CheckCircle2, Plus, RefreshCw, Save, Settings, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ApiError,
-  authenticateOrderConfig,
   deleteAccountBinding,
   deleteOrderStrategy,
   deletePositionStrategy,
@@ -111,8 +101,6 @@ export function ConfigPage() {
   const [bindingName, setBindingName] = useState('')
   const [bindPosition, setBindPosition] = useState('')
   const [bindOrder, setBindOrder] = useState('')
-  const [token, setToken] = useState('')
-  const [unlocked, setUnlocked] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -184,10 +172,6 @@ export function ConfigPage() {
   }, [sourceId])
 
   async function withWrite<T>(action: () => Promise<T>) {
-    if (!unlocked) {
-      setError('请先解锁写权限')
-      return
-    }
     setSaving(true)
     setError(null)
     setNotice(null)
@@ -196,21 +180,6 @@ export function ConfigPage() {
       setNotice('已保存')
       return result
     } catch (reason: unknown) {
-      setError(reason instanceof ApiError ? reason.message : String(reason))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function unlock() {
-    setSaving(true)
-    try {
-      await authenticateOrderConfig(token)
-      setUnlocked(true)
-      setError(null)
-      setNotice('写权限已解锁')
-    } catch (reason: unknown) {
-      setUnlocked(false)
       setError(reason instanceof ApiError ? reason.message : String(reason))
     } finally {
       setSaving(false)
@@ -245,21 +214,6 @@ export function ConfigPage() {
             <div>
               <p className="eyebrow">STRATEGY STUDIO</p>
               <h2>仓位策略、下单策略、账户绑定</h2>
-            </div>
-            <div className="config-auth">
-              {unlocked ? <UnlockKeyhole size={16} /> : <LockKeyhole size={16} />}
-              <input
-                type="password"
-                value={token}
-                placeholder="写权限 token"
-                onChange={(event) => {
-                  setToken(event.target.value)
-                  setUnlocked(false)
-                }}
-              />
-              <button type="button" className="command-button" disabled={saving} onClick={() => void unlock()}>
-                {unlocked ? '已解锁' : '解锁'}
-              </button>
             </div>
           </div>
           <div className="studio-tabs">
@@ -328,7 +282,6 @@ export function ConfigPage() {
                       equity_usdt: Number(selectedPosition.equity_usdt),
                       targets: parseTargets(targetsText),
                     },
-                    token,
                   )
                   setSelectedPosition(saved)
                   setTargetsText(JSON.stringify(saved.targets, null, 2))
@@ -382,7 +335,7 @@ export function ConfigPage() {
                     disabled={saving}
                     onClick={() =>
                       void withWrite(async () => {
-                        await deletePositionStrategy(selectedPosition.strategy_name, token)
+                        await deletePositionStrategy(selectedPosition.strategy_name)
                         setSelectedPosition(emptyPosition())
                         setTargetsText('{}')
                         await reloadCatalog()
@@ -425,7 +378,7 @@ export function ConfigPage() {
               onSubmit={(event) => {
                 event.preventDefault()
                 void withWrite(async () => {
-                  const saved = await saveOrderStrategy(selectedOrder, token)
+                  const saved = await saveOrderStrategy(selectedOrder)
                   setSelectedOrder(saved)
                   await reloadCatalog()
                 })
@@ -498,7 +451,7 @@ export function ConfigPage() {
                     disabled={saving}
                     onClick={() =>
                       void withWrite(async () => {
-                        await deleteOrderStrategy(selectedOrder.strategy_name, token)
+                        await deleteOrderStrategy(selectedOrder.strategy_name)
                         setSelectedOrder(emptyOrder())
                         await reloadCatalog()
                       })
@@ -536,7 +489,7 @@ export function ConfigPage() {
                 disabled={saving}
                 onClick={() =>
                   void withWrite(async () => {
-                    const next = await saveAccountStudio(sourceId, Number(leverage), token)
+                    const next = await saveAccountStudio(sourceId, Number(leverage))
                     setStudio(next)
                   })
                 }
@@ -560,7 +513,6 @@ export function ConfigPage() {
                     bindingName,
                     bindPosition,
                     bindOrder,
-                    token,
                   )
                   setStudio(next)
                 })
@@ -630,7 +582,7 @@ export function ConfigPage() {
                       disabled={saving}
                       onClick={() =>
                         void withWrite(async () => {
-                          await publishAccountBinding(sourceId, binding.binding_name, token)
+                          await publishAccountBinding(sourceId, binding.binding_name)
                         })
                       }
                     >
@@ -642,7 +594,7 @@ export function ConfigPage() {
                       disabled={saving}
                       onClick={() =>
                         void withWrite(async () => {
-                          await deleteAccountBinding(sourceId, binding.binding_name, token)
+                          await deleteAccountBinding(sourceId, binding.binding_name)
                           const next = await getAccountStudio(sourceId)
                           setStudio(next)
                         })
