@@ -21,3 +21,6 @@ enabled = true
 gateway_prefix = "/exec_trade01"
 exec_config_url = "http://127.0.0.1:18161/"
 estimated_fee_rate = 0.0004
+ipc_namespace = "binance_exec_trade01"
+account_ipc_service = "account_pubs/binance_pm"
+share_unit_usdt = 10000

@@ -1,4 +1,5 @@
 import type {
+  AccountCapacity,
   AccountStudio,
   CatalogOrderStrategy,
   DashboardSnapshot,
@@ -171,6 +172,13 @@ export function getAccountStudio(sourceId: string, signal?: AbortSignal) {
   return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}`, {
     signal,
   })
+}
+
+export function getAccountLive(sourceId: string, signal?: AbortSignal) {
+  return requestJson<AccountCapacity>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/live`,
+    { signal },
+  )
 }
 
 export function saveAccountStudio(sourceId: string, leverage: number) {

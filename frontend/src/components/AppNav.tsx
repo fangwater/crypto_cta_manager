@@ -11,7 +11,7 @@ const links: Array<{
 }> = [
   { id: 'workspace', href: '/', label: '总览', icon: LayoutDashboard },
   { id: 'manager', href: '/manager/', label: '净值', icon: Activity },
-  { id: 'config', href: '/manager/config/', label: '策略', icon: Settings },
+  { id: 'config', href: '/manager/config/position/', label: '策略', icon: Settings },
   { id: 'docs', href: '/manager/docs/', label: '文档', icon: BookOpen },
 ]
 

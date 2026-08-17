@@ -16,8 +16,12 @@ import './nav-dashboard.css'
 import { getDashboard, getHealth, getTimeline } from './api'
 import { AppShell } from './components/AppShell'
 import { WorkspacePage } from './pages/WorkspacePage'
-import { ConfigPage } from './pages/ConfigPage'
+import { AccountOverviewPage } from './pages/AccountOverviewPage'
+import { PositionStrategyPage } from './pages/config/PositionStrategyPage'
+import { OrderStrategyPage } from './pages/config/OrderStrategyPage'
+import { AccountBindingsPage } from './pages/config/AccountBindingsPage'
 import { DocsPage } from './pages/DocsPage'
+import { normalizePath, readSourceId, routes } from './lib/routes'
 import {
   NavTimelineChart,
   navSeriesMeta,
@@ -121,9 +125,17 @@ function initialScope() {
 }
 
 export default function App() {
-  const path = window.location.pathname.replace(/\/+$/, '') || '/'
+  const path = normalizePath(window.location.pathname)
   if (path === '/') return <WorkspacePage />
-  if (path === '/manager/config') return <ConfigPage />
+  if (path === '/manager/account') return <AccountOverviewPage />
+  if (path === '/manager/config') {
+    const source = readSourceId()
+    window.location.replace(source ? routes.configBindings(source) : routes.configPosition)
+    return null
+  }
+  if (path === '/manager/config/position') return <PositionStrategyPage />
+  if (path === '/manager/config/order') return <OrderStrategyPage />
+  if (path === '/manager/config/bindings') return <AccountBindingsPage />
   if (path === '/manager/docs') return <DocsPage />
   return <NavPage />
 }

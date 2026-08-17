@@ -60,6 +60,15 @@ pub struct SourceConfig {
     pub gateway_prefix: Option<String>,
     /// Loopback-only Exec Config service used by the Manager backend.
     pub exec_config_url: Option<String>,
+    /// Iceoryx namespace used by this Exec's account_monitor. Defaults to source id.
+    #[serde(default)]
+    pub ipc_namespace: Option<String>,
+    /// Iceoryx service path after the namespace, for example account_pubs/binance_pm.
+    #[serde(default)]
+    pub account_ipc_service: Option<String>,
+    /// One CTA share equals this many USDT of reference equity.
+    #[serde(default)]
+    pub share_unit_usdt: Option<f64>,
 }
 
 impl Default for IngestionConfig {
@@ -157,6 +166,15 @@ impl AppConfig {
             if let Some(exec_config_url) = &source.exec_config_url {
                 validate_exec_config_url(&source.id, exec_config_url)?;
             }
+            if source
+                .share_unit_usdt
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            {
+                bail!(
+                    "source {} share_unit_usdt must be finite and greater than zero",
+                    source.id
+                );
+            }
             if !ids.insert(source.id.clone()) {
                 bail!("duplicate source id: {}", source.id);
             }
@@ -206,6 +224,31 @@ impl SourceConfig {
                 self.id
             )
         })
+    }
+
+    pub fn share_unit_usdt(&self) -> f64 {
+        self.share_unit_usdt
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(10_000.0)
+    }
+
+    pub fn account_ipc_service_name(&self) -> Option<String> {
+        let namespace = self
+            .ipc_namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(self.id.as_str());
+        if namespace.is_empty() {
+            return None;
+        }
+        let service = self
+            .account_ipc_service
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("account_pubs/binance_pm");
+        Some(format!("{namespace}/{service}"))
     }
 }
 
@@ -302,6 +345,9 @@ mod tests {
             estimated_fee_rate: Some(0.0004),
             gateway_prefix: Some(format!("/{id}")),
             exec_config_url: None,
+            ipc_namespace: None,
+            account_ipc_service: None,
+            share_unit_usdt: None,
         }
     }
 

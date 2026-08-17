@@ -16,6 +16,7 @@ import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { feeBps, integer, money, signedClass, timestampUs } from '../format'
 import { cn } from '../lib/cn'
+import { routes } from '../lib/routes'
 import type {
   DashboardAccount,
   DashboardSnapshot,
@@ -141,7 +142,7 @@ export function WorkspacePage() {
       <PageIntro
         eyebrow="Workspace"
         title="盘子总览"
-        description="从这里进入各账户净值、Exec Viz 和策略组合配置。"
+        description="从这里进入各账户配置概览、净值曲线与 Exec Viz。"
         actions={
           <div className="flex items-center gap-2 text-xs text-muted">
             <Clock3 size={14} />
@@ -279,20 +280,38 @@ function AccountCard({
             value={report ? `${money(report.nav_change_after_fee_quote)} USDT` : '--'}
             tone={report ? signedClass(report.nav_change_after_fee_quote) : ''}
           />
+          <Metric
+            label="实时权益"
+            value={
+              account.live_equity_usdt != null
+                ? `${money(account.live_equity_usdt)} USDT`
+                : '--'
+            }
+          />
           <Metric label="当前持仓" value={report ? `${openPositions} symbols` : '--'} />
           <Metric label="估算费率" value={report ? feeBps(report.estimated_fee_rate) : '--'} />
           <Metric label="最近成交" value={timestampUs(report?.last_fill_ts_us ?? null)} />
         </div>
         <div className="flex flex-wrap gap-2 border-t border-border-soft pt-4">
           {ready ? (
-            <ActionLink
-              href={`/manager/?source=${encodeURIComponent(account.source_id)}`}
-              primary
-              icon={<Activity size={15} />}
-              label="净值"
-            />
+            <>
+              <ActionLink
+                href={routes.account(account.source_id)}
+                primary
+                icon={<Settings size={15} />}
+                label="查看配置"
+              />
+              <ActionLink
+                href={routes.nav(account.source_id)}
+                icon={<Activity size={15} />}
+                label="净值"
+              />
+            </>
           ) : (
-            <ActionDisabled icon={<Activity size={15} />} label="净值" />
+            <>
+              <ActionDisabled icon={<Settings size={15} />} label="查看配置" />
+              <ActionDisabled icon={<Activity size={15} />} label="净值" />
+            </>
           )}
           {gatewayReady ? (
             <ActionLink
@@ -302,15 +321,6 @@ function AccountCard({
             />
           ) : (
             <ActionDisabled icon={<ExternalLink size={15} />} label="Exec Viz" />
-          )}
-          {ready && account.configurable ? (
-            <ActionLink
-              href={`/manager/config/?source=${encodeURIComponent(account.source_id)}`}
-              icon={<Settings size={15} />}
-              label="配置"
-            />
-          ) : (
-            <ActionDisabled icon={<Settings size={15} />} label="配置" />
           )}
         </div>
       </CardContent>

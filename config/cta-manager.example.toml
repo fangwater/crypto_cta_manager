@@ -24,6 +24,11 @@ gateway_prefix = "/exec_trade01"
 exec_config_url = "http://127.0.0.1:18161/"
 # Effective fee charged per unit of fill notional (4 bps in this example).
 estimated_fee_rate = 0.0004
+# Iceoryx namespace of this Exec's account_monitor. Defaults to source id.
+ipc_namespace = "binance_exec_trade01"
+account_ipc_service = "account_pubs/binance_pm"
+# One CTA share equals this many USDT of position-strategy reference equity.
+share_unit_usdt = 10000
 # Omit start_ts_us to backfill all available history on the first run.
 
 # Additional accounts are independent workers with independent checkpoints.

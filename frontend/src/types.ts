@@ -82,6 +82,8 @@ export interface DashboardAccount {
   enabled: boolean
   gateway_prefix: string | null
   configurable: boolean
+  live_equity_usdt?: number | null
+  live_equity_status?: 'ok' | 'stale' | string | null
 }
 
 export interface OrderParameters {
@@ -138,6 +140,28 @@ export interface AccountStudio {
   bound_equity_usdt: number
   bindings: AccountBinding[]
   updated_at_us: number
+  capacity?: AccountCapacity
+}
+
+export interface LiveEquity {
+  status: 'ok' | 'stale' | string
+  source: string
+  equity_usdt: number
+  wallet_balance_usdt: number
+  unrealized_pnl_usdt: number
+  available_balance_usdt: number
+  ts_ms: number
+  age_ms: number
+}
+
+export interface AccountCapacity {
+  live: LiveEquity | null
+  leverage: number
+  share_unit_usdt: number
+  buying_power_usdt: number | null
+  configurable_shares: number | null
+  bound_shares: number
+  remaining_shares: number | null
 }
 
 export interface DashboardSnapshot {

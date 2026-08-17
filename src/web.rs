@@ -14,6 +14,8 @@ use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
+use crate::account_ipc::LiveEquityHub;
+use crate::capacity::{self, AccountCapacityView};
 use crate::config::{AppConfig, SourceConfig};
 use crate::order_config::{
     ExecConfigClient, ExecConfigError, SaveOrderParametersRequest, validate_strategy_name,
@@ -43,6 +45,8 @@ pub struct DashboardAccount {
     pub enabled: bool,
     pub gateway_prefix: Option<String>,
     pub configurable: bool,
+    pub live_equity_usdt: Option<f64>,
+    pub live_equity_status: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -76,6 +80,7 @@ struct WebState {
     pool: PgPool,
     exec_config: ExecConfigClient,
     order_config_write_token: Arc<str>,
+    live_equity: LiveEquityHub,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -147,7 +152,9 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         config.order_config.request_timeout_secs,
         order_config_write_token.clone(),
     )?;
-    let first_dashboard = build_dashboard(&config, &pool, refresh_interval_secs).await?;
+    let live_equity = LiveEquityHub::spawn(&config.sources);
+    let first_dashboard =
+        build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await?;
     let cache = Arc::new(RwLock::new(CacheState {
         last_attempt_at_us: first_dashboard.generated_at_us,
         dashboard: first_dashboard,
@@ -157,11 +164,13 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let refresh_cache = Arc::clone(&cache);
     let refresh_config = config.clone();
     let refresh_pool = pool.clone();
+    let refresh_live = live_equity.clone();
     tokio::spawn(async move {
         refresh_loop(
             refresh_config,
             refresh_pool,
             refresh_cache,
+            refresh_live,
             refresh_interval_secs,
         )
         .await;
@@ -205,6 +214,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             get(get_account_studio).put(save_account_studio),
         )
         .route(
+            "/api/catalog/accounts/{source_id}/live",
+            get(get_account_live),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/bindings",
             post(save_account_binding),
         )
@@ -222,6 +235,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             pool,
             exec_config,
             order_config_write_token: Arc::from(order_config_write_token),
+            live_equity,
         })
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind)
@@ -239,7 +253,15 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
 }
 
 async fn dashboard(State(state): State<WebState>) -> impl IntoResponse {
-    let dashboard = state.cache.read().await.dashboard.clone();
+    let mut dashboard = state.cache.read().await.dashboard.clone();
+    let now_ms = unix_now_ms();
+    for account in &mut dashboard.accounts {
+        if let Some(snapshot) = state.live_equity.get(&account.source_id) {
+            let live = capacity::live_equity_view(&snapshot, now_ms);
+            account.live_equity_usdt = Some(live.equity_usdt);
+            account.live_equity_status = Some(live.status);
+        }
+    }
     (NO_STORE, Json(dashboard))
 }
 
@@ -550,6 +572,34 @@ async fn delete_order_strategy(
     }
 }
 
+#[derive(Debug, Serialize)]
+struct AccountStudioResponse {
+    #[serde(flatten)]
+    studio: strategy_catalog::AccountStudio,
+    capacity: AccountCapacityView,
+}
+
+fn unix_now_ms() -> i64 {
+    unix_now_us() / 1_000
+}
+
+fn studio_response(
+    state: &WebState,
+    source_id: &str,
+    studio: strategy_catalog::AccountStudio,
+) -> AccountStudioResponse {
+    let share_unit = state
+        .config
+        .sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .map(SourceConfig::share_unit_usdt)
+        .unwrap_or(10_000.0);
+    let live = state.live_equity.get(source_id);
+    let capacity = capacity::capacity_view(&studio, live.as_ref(), share_unit, unix_now_ms());
+    AccountStudioResponse { studio, capacity }
+}
+
 async fn get_account_studio(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
@@ -558,7 +608,26 @@ async fn get_account_studio(
         return Ok(response);
     }
     match strategy_catalog::load_account_studio(&state.pool, &source_id, unix_now_us()).await {
-        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+        Ok(studio) => {
+            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
+        }
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn get_account_live(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+        return Ok(response);
+    }
+    match strategy_catalog::load_account_studio(&state.pool, &source_id, unix_now_us()).await {
+        Ok(studio) => Ok((
+            NO_STORE,
+            Json(studio_response(&state, &source_id, studio).capacity),
+        )
+            .into_response()),
         Err(error) => Ok(catalog_error(error)),
     }
 }
@@ -574,7 +643,9 @@ async fn save_account_studio(
     match strategy_catalog::save_account_settings(&state.pool, &source_id, &request, unix_now_us())
         .await
     {
-        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+        Ok(studio) => {
+            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
+        }
         Err(error) => Ok(catalog_error(error)),
     }
 }
@@ -588,7 +659,9 @@ async fn save_account_binding(
         return Ok(response);
     }
     match strategy_catalog::save_binding(&state.pool, &source_id, &request, unix_now_us()).await {
-        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+        Ok(studio) => {
+            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
+        }
         Err(error) => Ok(catalog_error(error)),
     }
 }
@@ -847,6 +920,7 @@ async fn refresh_loop(
     config: AppConfig,
     pool: PgPool,
     cache: Arc<RwLock<CacheState>>,
+    live_equity: LiveEquityHub,
     refresh_interval_secs: u64,
 ) {
     let period = Duration::from_secs(refresh_interval_secs);
@@ -856,7 +930,7 @@ async fn refresh_loop(
     loop {
         interval.tick().await;
         let attempted_at_us = unix_now_us();
-        match build_dashboard(&config, &pool, refresh_interval_secs).await {
+        match build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await {
             Ok(dashboard) => {
                 info!(
                     source_count = dashboard.report.source_count,
@@ -883,18 +957,27 @@ async fn build_dashboard(
     config: &AppConfig,
     pool: &PgPool,
     refresh_interval_secs: u64,
+    live_equity: &LiveEquityHub,
 ) -> Result<DashboardSnapshot> {
     let started = Instant::now();
+    let now_ms = unix_now_ms();
     let accounts = config
         .sources
         .iter()
-        .map(|source| DashboardAccount {
-            source_id: source.id.clone(),
-            account: source.account.clone(),
-            venue: source.venue.clone(),
-            enabled: source.enabled,
-            gateway_prefix: source.gateway_prefix.clone(),
-            configurable: source.exec_config_url.is_some(),
+        .map(|source| {
+            let live = live_equity
+                .get(&source.id)
+                .map(|snapshot| capacity::live_equity_view(&snapshot, now_ms));
+            DashboardAccount {
+                source_id: source.id.clone(),
+                account: source.account.clone(),
+                venue: source.venue.clone(),
+                enabled: source.enabled,
+                gateway_prefix: source.gateway_prefix.clone(),
+                configurable: source.exec_config_url.is_some(),
+                live_equity_usdt: live.as_ref().map(|view| view.equity_usdt),
+                live_equity_status: live.as_ref().map(|view| view.status),
+            }
         })
         .collect();
     let mut snapshots = nav::SourcePositionSnapshots::new();

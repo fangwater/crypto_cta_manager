@@ -69,7 +69,7 @@ const chapters: Chapter[] = [
         <ul>
           <li>
             浏览器配置组合：打开{' '}
-            <a href="/manager/config/">/manager/config/</a>
+            <a href="/manager/config/position/">/manager/config/position/</a>
           </li>
           <li>
             脚本直接推仓位：<code>POST /exec_trade01/config/api/targets</code>
@@ -167,10 +167,10 @@ const chapters: Chapter[] = [
           </tbody>
         </table>
         <p>
-          账户权益是实时变动的，不在这里填写，也不用它卡容量。绑定后的分配比例 = 该仓位策略参考权益 / 账户已绑定参考权益合计。例如两份策略分别是 1 万和 3 万，比例就是 25% 和 75%。杠杆只表示账户愿意放大多少，不参与容量校验。同一份仓位或下单策略可以绑到多个账户。
+          账户权益从本机 account_monitor 的 Iceoryx 通道实时读取。杠杆率是 CTA 配置倍数：可用名义 = 实时权益 × 杠杆率；可配置份数 = 可用名义 / 单份参考权益（默认 10000 USDT）。绑定后的分配比例 = 该仓位策略参考权益 / 账户已绑定参考权益合计。例如两份策略分别是 1 万和 3 万，比例就是 25% 和 75%。杠杆不参与交易所保证金计算。同一份仓位或下单策略可以绑到多个账户。
         </p>
         <p>
-          浏览器在 <a href="/manager/config/">/manager/config/</a> 完成创建、绑定和发布。发布时：
+          浏览器在 <a href="/manager/config/position/">/manager/config/position/</a> 完成创建、绑定和发布。发布时：
         </p>
         <ul>
           <li>Exec 上还没有这个发布名：走 <code>POST /api/strategy</code> 一次写入参数和 target</li>
@@ -213,7 +213,7 @@ const chapters: Chapter[] = [
             <tr>
               <td>下单配置（浏览器）</td>
               <td>
-                <a href="/manager/config/">{GATEWAY}/manager/config/</a>
+                <a href="/manager/config/position/">{GATEWAY}/manager/config/position/</a>
               </td>
             </tr>
             <tr>
@@ -248,7 +248,7 @@ const chapters: Chapter[] = [
         </p>
         <ol>
           <li>
-            打开 <a href="/manager/config/">策略组合</a>
+            打开 <a href="/manager/config/position/">策略组合</a>
           </li>
           <li>在「仓位策略」里创建或编辑 target 和权益金额</li>
           <li>在「下单策略」里创建或编辑 8 个下单参数</li>
