@@ -567,4 +567,12 @@ mod tests {
         assert!((studio.bindings[0].allocation_ratio - 0.25).abs() < 1e-12);
         assert!((studio.bindings[1].allocation_ratio - 0.75).abs() < 1e-12);
     }
+
+    #[test]
+    fn leverage_must_be_positive_and_finite() {
+        assert!(validate_equity(2.0, "leverage").is_ok());
+        assert!(validate_equity(0.0, "leverage").is_err());
+        assert!(validate_equity(-1.0, "leverage").is_err());
+        assert!(validate_equity(f64::NAN, "leverage").is_err());
+    }
 }

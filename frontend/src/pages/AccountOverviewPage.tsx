@@ -10,15 +10,16 @@ import {
   WalletCards,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getAccountLive, getAccountStudio, getDashboard } from '../api'
+import { getAccountLive, getAccountStudio, getDashboard, saveAccountLeverage } from '../api'
 import { AppShell, PageIntro } from '../components/AppShell'
-import { CapacityPanel } from '../components/CapacityPanel'
+import { CapacityPanel, LeverageToolbar } from '../components/CapacityPanel'
 import { OrderParametersView } from '../components/OrderParametersView'
 import { TargetPositionsView } from '../components/TargetPositionsView'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
+import { useConfigWrite } from '../hooks/useConfigWrite'
 import { money, signedClass, timestampUs } from '../format'
 import { percent } from '../lib/strategyDefaults'
 import { readSourceId, routes } from '../lib/routes'
@@ -40,9 +41,11 @@ function venueMark(venue: string) {
 export function AccountOverviewPage() {
   const sourceId = readSourceId()
   const { positions, orders, loading: catalogLoading } = useStrategyCatalog()
+  const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
   const [studio, setStudio] = useState<AccountStudio | null>(null)
   const [capacity, setCapacity] = useState<AccountCapacity | null>(null)
+  const [leverage, setLeverage] = useState('1')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -53,6 +56,7 @@ export function AccountOverviewPage() {
     setDashboard(snapshot)
     setStudio(nextStudio)
     setCapacity(nextStudio.capacity ?? null)
+    setLeverage(String(nextStudio.leverage))
   }, [sourceId])
 
   useEffect(() => {
@@ -131,6 +135,8 @@ export function AccountOverviewPage() {
       ) : (
         <>
           {error && <Alert tone="error" className="mb-4">{error}</Alert>}
+          {writeError && <Alert tone="error" className="mb-4">{writeError}</Alert>}
+          {notice && <Alert tone="success" className="mb-4">{notice}</Alert>}
 
           <PageIntro
             eyebrow="Account Overview"
@@ -157,7 +163,23 @@ export function AccountOverviewPage() {
           />
 
           <div className="mb-8">
-            <CapacityPanel capacity={capacity ?? studio?.capacity} />
+            <CapacityPanel
+              capacity={capacity ?? studio?.capacity}
+              toolbar={
+                <LeverageToolbar
+                  leverage={leverage}
+                  saving={saving}
+                  onLeverageChange={setLeverage}
+                  onSave={() =>
+                    void withWrite(async () => {
+                      const next = await saveAccountLeverage(sourceId, Number(leverage))
+                      setStudio(next)
+                      setCapacity(next.capacity ?? null)
+                    })
+                  }
+                />
+              }
+            />
           </div>
 
           <section className="mb-8">

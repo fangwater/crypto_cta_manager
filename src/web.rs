@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPool;
@@ -211,7 +211,11 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .route(
             "/api/catalog/accounts/{source_id}",
-            get(get_account_studio).put(save_account_studio),
+            get(get_account_studio).put(save_account_leverage),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/leverage",
+            put(save_account_leverage),
         )
         .route(
             "/api/catalog/accounts/{source_id}/live",
@@ -632,7 +636,7 @@ async fn get_account_live(
     }
 }
 
-async fn save_account_studio(
+async fn save_account_leverage(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
     Json(request): Json<SaveAccountSettingsRequest>,

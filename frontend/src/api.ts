@@ -181,11 +181,14 @@ export function getAccountLive(sourceId: string, signal?: AbortSignal) {
   )
 }
 
-export function saveAccountStudio(sourceId: string, leverage: number) {
-  return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}`, {
-    method: 'PUT',
-    body: { leverage },
-  })
+export function saveAccountLeverage(sourceId: string, leverage: number) {
+  return requestJson<AccountStudio>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/leverage`,
+    {
+      method: 'PUT',
+      body: { leverage },
+    },
+  )
 }
 
 export function saveAccountBinding(

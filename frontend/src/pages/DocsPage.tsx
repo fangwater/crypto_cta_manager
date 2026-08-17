@@ -18,6 +18,7 @@ type ChapterId =
   | 'op-full'
   | 'api-targets'
   | 'api-params'
+  | 'api-leverage'
   | 'api-strategy'
   | 'api-read'
   | 'api-errors'
@@ -252,7 +253,7 @@ const chapters: Chapter[] = [
           </li>
           <li>在「仓位策略」里创建或编辑 target 和权益金额</li>
           <li>在「下单策略」里创建或编辑 8 个下单参数</li>
-          <li>在「账户组合」里设置杠杆，再把仓位策略和下单策略绑成发布名，页面会显示分配比例</li>
+          <li>在「账户组合」里设置杠杆（或直接调杠杆 API），再把仓位策略和下单策略绑成发布名</li>
           <li>点「发布到 Exec」。未发布的组合不会进入交易进程</li>
         </ol>
         <p>
@@ -389,6 +390,35 @@ const chapters: Chapter[] = [
 }`}</CodeBlock>
         <p>
           只接受上述 8 个参数字段。带 <code>targets</code> 会被拒绝。版本不一致返回 409，需要重新 GET 后再写。
+        </p>
+      </>
+    ),
+  },
+  {
+    id: 'api-leverage',
+    group: 'API',
+    title: 'PUT /api/catalog/accounts/{id}/leverage',
+    content: (
+      <>
+        <p>
+          修改账户级 CTA 杠杆率。这是 Manager 本地配置，不写交易所保证金杠杆，也不改 Exec Redis。
+          可用名义 = 实时权益 × 杠杆率；可配置份数 = 可用名义 / 单份参考权益。
+        </p>
+        <p>
+          URL：<code>{GATEWAY}/manager/api/catalog/accounts/binance_exec_trade01/leverage</code>
+        </p>
+        <p>
+          请求体只接受 <code>leverage</code>，必须是大于 0 的有限数字。页面保存和脚本走同一条接口。
+          旧路径 <code>PUT /manager/api/catalog/accounts/&lt;source_id&gt;</code> 仍然可用。
+        </p>
+        <CodeBlock>{`curl --noproxy '*' -sS -X PUT \\
+  '${GATEWAY}/manager/api/catalog/accounts/binance_exec_trade01/leverage' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"leverage": 2}'`}</CodeBlock>
+        <p>
+          成功返回账户 studio 和最新 <code>capacity</code>（含 <code>buying_power_usdt</code>、
+          <code>configurable_shares</code>）。查询实时权益用{' '}
+          <code>GET /manager/api/catalog/accounts/binance_exec_trade01/live</code>。
         </p>
       </>
     ),

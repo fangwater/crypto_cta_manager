@@ -1,8 +1,11 @@
+import type { ReactNode } from 'react'
 import { money } from '../format'
 import { cn } from '../lib/cn'
 import type { AccountCapacity } from '../types'
 import { Badge } from './ui/Badge'
+import { Button } from './ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/Card'
+import { Input } from './ui/Field'
 
 function sharesText(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) return '--'
@@ -12,9 +15,11 @@ function sharesText(value: number | null | undefined) {
 export function CapacityPanel({
   capacity,
   compact = false,
+  toolbar,
 }: {
   capacity?: AccountCapacity | null
   compact?: boolean
+  toolbar?: ReactNode
 }) {
   const live = capacity?.live
   const status = live?.status ?? 'unavailable'
@@ -37,7 +42,8 @@ export function CapacityPanel({
         </Badge>
       </CardHeader>
       <CardContent className="space-y-4 pt-0">
-        <div className={cn('grid gap-3', compact ? 'sm:grid-cols-2' : 'sm:grid-cols-2 xl:grid-cols-4')}>
+        {toolbar}
+        <div className={cn('grid gap-3', compact ? 'grid-cols-2' : 'grid-cols-2 lg:grid-cols-4')}>
           <Metric
             label="实时权益"
             value={live ? `${money(live.equity_usdt)} USDT` : '--'}
@@ -50,7 +56,7 @@ export function CapacityPanel({
           <Metric
             label="杠杆率"
             value={capacity ? `${capacity.leverage}x` : '--'}
-            hint="账户愿意把实时权益放大到多少名义"
+            hint="CTA 配置倍数，不是交易所保证金杠杆"
           />
           <Metric
             label="可用名义"
@@ -83,11 +89,53 @@ export function CapacityPanel({
           </p>
           <p className="mt-2">
             例如权益 25,000 USDT、杠杆 2x、单份 10,000 USDT，则可配置 5.00 份。已启用两条各 1
-            份的仓位策略时，剩余 3.00 份。
+            份的仓位策略时，剩余 3.00 份。页面和脚本都通过{' '}
+            <code className="text-[12px] text-ink">PUT /api/catalog/accounts/&lt;source_id&gt;/leverage</code>{' '}
+            修改。
           </p>
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+export function LeverageToolbar({
+  account,
+  leverage,
+  saving,
+  onLeverageChange,
+  onSave,
+}: {
+  account?: ReactNode
+  leverage: string
+  saving?: boolean
+  onLeverageChange: (value: string) => void
+  onSave: () => void
+}) {
+  return (
+    <form
+      className={cn(
+        'grid items-end gap-3',
+        account ? 'grid-cols-[minmax(0,1fr)_7.5rem_auto]' : 'grid-cols-[7.5rem_auto]',
+      )}
+      onSubmit={(event) => {
+        event.preventDefault()
+        onSave()
+      }}
+    >
+      {account}
+      <label className="grid gap-1.5 text-xs font-medium text-muted">
+        杠杆率
+        <Input
+          value={leverage}
+          inputMode="decimal"
+          onChange={(event) => onLeverageChange(event.target.value)}
+        />
+      </label>
+      <Button type="submit" variant="primary" disabled={saving}>
+        保存
+      </Button>
+    </form>
   )
 }
 
