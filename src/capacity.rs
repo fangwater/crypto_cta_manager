@@ -1,17 +1,16 @@
 use serde::Serialize;
 
 use crate::account_ipc::LiveEquitySnapshot;
-use crate::strategy_catalog::{AccountStudio, DEFAULT_POSITION_EQUITY_USDT};
+use crate::strategy_catalog::AccountStudio;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AccountCapacityView {
     pub live: Option<LiveEquityView>,
     pub leverage: f64,
-    pub share_unit_usdt: f64,
     pub buying_power_usdt: Option<f64>,
-    pub configurable_shares: Option<f64>,
-    pub bound_shares: f64,
-    pub remaining_shares: Option<f64>,
+    /// Σ(份数 × 该策略单份参考权益)。各策略 equity 可以不同。
+    pub bound_notional_usdt: f64,
+    pub remaining_notional_usdt: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -54,40 +53,24 @@ pub fn buying_power_usdt(equity_usdt: f64, leverage: f64) -> Option<f64> {
     }
 }
 
-pub fn shares(notional_usdt: f64, share_unit_usdt: f64) -> Option<f64> {
-    if share_unit_usdt.is_finite() && share_unit_usdt > 0.0 && notional_usdt.is_finite() {
-        Some(notional_usdt / share_unit_usdt)
-    } else {
-        None
-    }
-}
-
 pub fn capacity_view(
     studio: &AccountStudio,
     live: Option<&LiveEquitySnapshot>,
-    share_unit_usdt: f64,
     now_ms: i64,
 ) -> AccountCapacityView {
-    let unit = if share_unit_usdt.is_finite() && share_unit_usdt > 0.0 {
-        share_unit_usdt
-    } else {
-        DEFAULT_POSITION_EQUITY_USDT
-    };
     let live_view = live.map(|snapshot| live_equity_view(snapshot, now_ms));
     let buying_power_usdt = live_view
         .as_ref()
         .and_then(|view| buying_power_usdt(view.equity_usdt, studio.leverage));
-    let configurable_shares = buying_power_usdt.and_then(|value| shares(value, unit));
-    let bound_shares = shares(studio.bound_equity_usdt, unit).unwrap_or(0.0);
-    let remaining_shares = configurable_shares.map(|value| value - bound_shares);
+    let bound_notional_usdt = studio.bound_equity_usdt;
+    let remaining_notional_usdt =
+        buying_power_usdt.map(|value| value - bound_notional_usdt);
     AccountCapacityView {
         live: live_view,
         leverage: studio.leverage,
-        share_unit_usdt: unit,
         buying_power_usdt,
-        configurable_shares,
-        bound_shares,
-        remaining_shares,
+        bound_notional_usdt,
+        remaining_notional_usdt,
     }
 }
 
@@ -97,21 +80,33 @@ mod tests {
     use crate::strategy_catalog::AccountBinding;
 
     #[test]
-    fn two_times_leverage_doubles_available_shares() {
+    fn aggregates_by_notional_across_different_share_units() {
         let studio = AccountStudio::from_parts(
             "binance_exec_trade01".into(),
             2.0,
             1,
-            vec![AccountBinding {
-                source_id: "binance_exec_trade01".into(),
-                binding_name: "cta_a".into(),
-                position_strategy_name: "cta_a".into(),
-                order_strategy_name: "default_order".into(),
-                shares: 1.0,
-                position_equity_usdt: 10_000.0,
-                allocation_ratio: 0.0,
-                updated_at_us: 1,
-            }],
+            vec![
+                AccountBinding {
+                    source_id: "binance_exec_trade01".into(),
+                    binding_name: "cta_a".into(),
+                    position_strategy_name: "cta_a".into(),
+                    order_strategy_name: "default_order".into(),
+                    shares: 1.0,
+                    position_equity_usdt: 10_000.0,
+                    allocation_ratio: 0.0,
+                    updated_at_us: 1,
+                },
+                AccountBinding {
+                    source_id: "binance_exec_trade01".into(),
+                    binding_name: "cta_b".into(),
+                    position_strategy_name: "cta_b".into(),
+                    order_strategy_name: "default_order".into(),
+                    shares: 1.0,
+                    position_equity_usdt: 20_000.0,
+                    allocation_ratio: 0.0,
+                    updated_at_us: 1,
+                },
+            ],
         )
         .unwrap();
         let live = LiveEquitySnapshot {
@@ -122,11 +117,13 @@ mod tests {
             available_balance_usdt: 20_000.0,
             ts_ms: 1_000,
         };
-        let view = capacity_view(&studio, Some(&live), 10_000.0, 1_000);
+        let view = capacity_view(&studio, Some(&live), 1_000);
         assert_eq!(view.live.as_ref().unwrap().status, "ok");
         assert!((view.buying_power_usdt.unwrap() - 50_000.0).abs() < 1e-9);
-        assert!((view.configurable_shares.unwrap() - 5.0).abs() < 1e-9);
-        assert!((view.bound_shares - 1.0).abs() < 1e-9);
-        assert!((view.remaining_shares.unwrap() - 4.0).abs() < 1e-9);
+        // 1×10k + 1×20k，不能按统一 1 万份折算成 3 份
+        assert!((view.bound_notional_usdt - 30_000.0).abs() < 1e-9);
+        assert!((view.remaining_notional_usdt.unwrap() - 20_000.0).abs() < 1e-9);
+        assert!((studio.bindings[0].allocation_ratio - 1.0 / 3.0).abs() < 1e-12);
+        assert!((studio.bindings[1].allocation_ratio - 2.0 / 3.0).abs() < 1e-12);
     }
 }

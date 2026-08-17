@@ -7,11 +7,6 @@ import { Button } from './ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/Card'
 import { Input } from './ui/Field'
 
-function sharesText(value: number | null | undefined) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '--'
-  return value.toFixed(2)
-}
-
 export function CapacityPanel({
   capacity,
   compact = false,
@@ -25,16 +20,15 @@ export function CapacityPanel({
   const status = live?.status ?? 'unavailable'
   const statusLabel =
     status === 'ok' ? '实时' : status === 'stale' ? '延迟' : '未接入 account monitor'
-  const remaining = capacity?.remaining_shares
+  const remaining = capacity?.remaining_notional_usdt
 
   return (
     <Card className="overflow-hidden">
       <CardHeader className="flex flex-row items-start justify-between gap-3">
         <div>
-          <CardTitle>权益与可配置份数</CardTitle>
+          <CardTitle>权益与可配置名义</CardTitle>
           <CardDescription>
-            一份 = {capacity ? money(capacity.share_unit_usdt) : '10,000'} USDT 参考权益。可用名义 =
-            实时权益 × 杠杆率。
+            已配置名义 = Σ(份数 × 该策略单份参考权益)。各策略参考权益可以不同，按名义金额聚合，不按统一份数折算。
           </CardDescription>
         </div>
         <Badge tone={status === 'ok' ? 'success' : status === 'stale' ? 'warning' : 'neutral'}>
@@ -68,13 +62,19 @@ export function CapacityPanel({
             hint="实时权益 × 杠杆率"
           />
           <Metric
-            label="可配置份数"
-            value={sharesText(capacity?.configurable_shares)}
-            hint={`已启用 ${sharesText(capacity?.bound_shares)} 份 · 剩余 ${sharesText(remaining)} 份`}
+            label="已配置名义"
+            value={
+              capacity ? `${money(capacity.bound_notional_usdt)} USDT` : '--'
+            }
+            hint={
+              remaining != null
+                ? `剩余 ${money(remaining)} USDT`
+                : 'Σ(份数 × 策略参考权益)'
+            }
             tone={
               remaining != null && remaining < 0
                 ? 'text-rose-700'
-                : remaining != null && remaining < 0.5
+                : remaining != null && remaining < 1_000
                   ? 'text-amber-700'
                   : undefined
             }
@@ -83,15 +83,16 @@ export function CapacityPanel({
         <div className="rounded-xl border border-border-soft bg-canvas/60 px-4 py-3 text-sm leading-relaxed text-muted">
           <p className="font-medium text-ink">杠杆率是什么？</p>
           <p className="mt-1">
-            这里的杠杆不是交易所保证金杠杆，也不是当前持仓名义 / 权益。它是账户级的
+            这里的杠杆不是交易所保证金杠杆。它是账户级的
             <strong className="font-medium text-ink"> CTA 配置倍数</strong>
-            ：Manager 用「实时权益 × 杠杆率」得到这本账能配置的总名义，再除以单份参考权益得到份数。
+            ：可用名义 = 实时权益 × 杠杆率。已配置名义按各策略自己的参考权益加权求和，例如 1 份 ×
+            10,000 + 1 份 × 20,000 = 30,000 USDT，不是统一按 10,000 折成 3 份。
           </p>
           <p className="mt-2">
-            例如权益 25,000 USDT、杠杆 2x、单份 10,000 USDT，则可配置 5.00 份。已启用两条各 1
-            份的仓位策略时，剩余 3.00 份。页面和脚本都通过{' '}
+            例如权益 25,000 USDT、杠杆 2x，可用名义 50,000 USDT；若已配置名义 30,000，则剩余
+            20,000。页面和脚本都通过{' '}
             <code className="text-[12px] text-ink">PUT /api/catalog/accounts/&lt;source_id&gt;/leverage</code>{' '}
-            修改。
+            修改杠杆。
           </p>
         </div>
       </CardContent>

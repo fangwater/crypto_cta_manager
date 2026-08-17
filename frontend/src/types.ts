@@ -158,11 +158,10 @@ export interface LiveEquity {
 export interface AccountCapacity {
   live: LiveEquity | null
   leverage: number
-  share_unit_usdt: number
   buying_power_usdt: number | null
-  configurable_shares: number | null
-  bound_shares: number
-  remaining_shares: number | null
+  /** Σ(份数 × 该策略单份参考权益) */
+  bound_notional_usdt: number
+  remaining_notional_usdt: number | null
 }
 
 export interface DashboardSnapshot {

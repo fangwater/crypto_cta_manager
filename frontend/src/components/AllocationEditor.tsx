@@ -3,7 +3,6 @@ import { Button } from './ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/Card'
 import { FieldHint, Input } from './ui/Field'
 import { cn } from '../lib/cn'
-import { money } from '../format'
 import type { AccountBinding } from '../types'
 
 const BAR_COLORS = ['#2563eb', '#0d9488', '#d97706', '#7c3aed', '#db2777', '#059669']
@@ -111,10 +110,7 @@ export function AllocationEditor({
     <Card>
       <CardHeader>
         <CardTitle>策略占比</CardTitle>
-        <CardDescription>
-          双击某条策略的百分比直接改数字，改完后点一次「保存占比」。各策略互不挤占；保存时校验合计等于
-          100%。这只改 Manager 本地份数，还需要再点各策略的「发布到 Exec」才会改仓位。
-        </CardDescription>
+        <CardDescription>双击百分比后点「保存占比」，合计须为 100%。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex h-3 overflow-hidden rounded-full bg-canvas">
@@ -140,7 +136,6 @@ export function AllocationEditor({
                 <th className="px-3 py-2 text-left font-medium">策略</th>
                 <th className="w-36 px-3 py-2 text-right font-medium">占比</th>
                 <th className="w-28 px-3 py-2 text-right font-medium">折合份数</th>
-                <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">占用参考权益</th>
               </tr>
             </thead>
             <tbody>
@@ -150,10 +145,6 @@ export function AllocationEditor({
                   percentValue === null || boundEquity <= 0
                     ? null
                     : ((percentValue / 100) * boundEquity) / binding.position_equity_usdt
-                const occupied =
-                  percentValue === null || boundEquity <= 0
-                    ? null
-                    : (percentValue / 100) * boundEquity
                 const isEditing = editing === binding.binding_name
                 return (
                   <tr key={binding.binding_name} className="border-t border-border-soft">
@@ -210,9 +201,6 @@ export function AllocationEditor({
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-muted">
                       {shares === null ? '—' : formatShares(shares)}
-                    </td>
-                    <td className="hidden px-3 py-2 text-right tabular-nums text-muted sm:table-cell">
-                      {occupied === null ? '—' : `${money(occupied)} USDT`}
                     </td>
                   </tr>
                 )

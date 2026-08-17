@@ -19,7 +19,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import { FieldHint, Input, Label, Select } from '../../components/ui/Field'
 import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
-import { money } from '../../format'
 import { percent } from '../../lib/strategyDefaults'
 import { readSourceId, routes } from '../../lib/routes'
 import type { AccountCapacity, AccountStudio, DashboardSnapshot } from '../../types'
@@ -140,7 +139,7 @@ export function AccountBindingsPage() {
     <ConfigShell
       section="bindings"
       title="策略启用"
-      description="把已创建的仓位策略挂到本账户，并为每条策略选择一个执行算法。占比双击修改后统一保存，合计必须等于 100%。Exec 上的策略名与仓位策略名相同。"
+      description="把仓位策略挂到本账户，指定执行算法后发布。Exec 策略名与仓位策略名相同。"
       saving={saving}
       error={error ?? catalogError ?? writeError}
       notice={notice}
@@ -256,7 +255,7 @@ export function AccountBindingsPage() {
                       inputMode="decimal"
                       onChange={(event) => setNewShares(event.target.value)}
                     />
-                    <FieldHint>初始份数；启用后再用下方占比统一调整</FieldHint>
+                    <FieldHint>初始份数</FieldHint>
                   </Label>
                   <Button type="submit" variant="primary" className="md:self-end" disabled={saving}>
                     <Plus size={15} /> 启用
@@ -308,11 +307,6 @@ export function AccountBindingsPage() {
                         {percent(binding.allocation_ratio)}
                       </span>
                     </div>
-                    <FieldHint>
-                      {binding.shares} 份 × {money(binding.position_equity_usdt)} USDT ={' '}
-                      {money(binding.shares * binding.position_equity_usdt)} USDT。占比在上方统一编辑，合计必须等于
-                      100%。
-                    </FieldHint>
                     <div className="flex flex-wrap items-end gap-3">
                       <Label className="min-w-[200px] flex-1">
                         更换执行算法

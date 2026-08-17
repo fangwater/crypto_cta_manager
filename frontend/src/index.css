@@ -60,13 +60,12 @@
   }
 
   .docs-prose {
-    @apply text-sm leading-7 text-ink;
+    @apply max-w-none text-sm leading-7 text-ink;
   }
 
   .docs-prose p,
   .docs-prose ul,
-  .docs-prose ol,
-  .docs-prose table {
+  .docs-prose ol {
     @apply my-4;
   }
 
@@ -75,29 +74,28 @@
     @apply pl-5;
   }
 
+  .docs-prose ul {
+    @apply list-disc;
+  }
+
+  .docs-prose ol {
+    @apply list-decimal;
+  }
+
   .docs-prose li + li {
-    @apply mt-1;
+    @apply mt-1.5;
   }
 
   .docs-prose a {
-    @apply font-medium text-brand hover:text-brand-hover;
+    @apply font-medium text-brand underline-offset-2 hover:text-brand-hover hover:underline;
   }
 
   .docs-prose code {
-    @apply rounded bg-canvas px-1.5 py-0.5 font-mono text-[12px] text-ink;
+    @apply rounded-md bg-canvas px-1.5 py-0.5 font-mono text-[12px] text-ink;
   }
 
-  .docs-prose table {
-    @apply w-full border-collapse overflow-hidden rounded-xl border border-border text-[13px];
-  }
-
-  .docs-prose th,
-  .docs-prose td {
-    @apply border border-border px-3 py-2 text-left align-top;
-  }
-
-  .docs-prose th {
-    @apply bg-canvas font-semibold;
+  .docs-prose strong {
+    @apply font-semibold text-ink;
   }
 }
 

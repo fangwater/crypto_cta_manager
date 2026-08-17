@@ -600,15 +600,8 @@ fn studio_response(
     source_id: &str,
     studio: strategy_catalog::AccountStudio,
 ) -> AccountStudioResponse {
-    let share_unit = state
-        .config
-        .sources
-        .iter()
-        .find(|source| source.id == source_id)
-        .map(SourceConfig::share_unit_usdt)
-        .unwrap_or(10_000.0);
     let live = state.live_equity.get(source_id);
-    let capacity = capacity::capacity_view(&studio, live.as_ref(), share_unit, unix_now_ms());
+    let capacity = capacity::capacity_view(&studio, live.as_ref(), unix_now_ms());
     AccountStudioResponse { studio, capacity }
 }
 
