@@ -208,5 +208,11 @@ workspace. `/manager/config/` owns strategy catalog, account bindings, and
 publish. The Exec `/exec_trade01/config/` page stays read-only. Runtime Redis
 JSON is written only by Manager publish through the token-gated Exec Config
 `POST /api/strategy`. Each target is `{qty, signal}`; `signal=±1` means that
-symbol uses taker-only for the current execution. Scripts must not POST
-targets or full configs directly.
+symbol uses taker-only for the current execution. External push scripts must
+update the Manager catalog and then call publish:
+
+```text
+http://172.16.30.42:10041/manager/api/manager_publish_client.py
+```
+
+Do not POST targets or full configs to Exec Config.

@@ -483,14 +483,27 @@ const chapters: Chapter[] = [
     id: 'client',
     group: '附录',
     title: '客户端',
-    lead: 'exec_config_client.py 只读 trade01 Exec。写 Redis 走 Manager publish。',
+    lead: '仓位推送脚本挂在 Manager。旧的 exec_config_client.py 已删除。',
     content: (
       <>
-        <CodeBlock label="shell">{`export EXEC_CONFIG_URL=${GATEWAY}/exec_trade01/config/
+        <CodeBlock label="download">{`wget ${MANAGER}/manager_publish_client.py
+# 或
+curl --noproxy '*' -fsS -o manager_publish_client.py ${MANAGER}/manager_publish_client.py`}</CodeBlock>
+        <CodeBlock label="update + publish">{`export MANAGER_API_URL=${MANAGER}/
 
-python3 exec_config_client.py get
-python3 exec_config_client.py get CTA_SK_C40V6PosT1_LXY_filter_Position`}</CodeBlock>
-        <Note tone="warn">客户端不再提供 post / post-targets / remove。仓位发布只走 Manager。</Note>
+python3 manager_publish_client.py put-position @cta.json
+python3 manager_publish_client.py publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position`}</CodeBlock>
+        <CodeBlock label="cta.json">{`{
+  "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
+  "equity_usdt": 10000,
+  "targets": {
+    "BTCUSDT": { "qty": -0.006, "signal": -1 },
+    "ETHUSDT": { "qty": -0.54, "signal": 0 }
+  }
+}`}</CodeBlock>
+        <Note tone="warn">
+          不要再 POST Exec Config。旧的 exec_config_client.py 已删除；裸数字 qty 仍可读，会当成 signal=0。
+        </Note>
       </>
     ),
   },

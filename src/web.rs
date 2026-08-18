@@ -27,6 +27,7 @@ use crate::strategy_catalog::{
 use crate::{nav, postgres};
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
+const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DashboardSnapshot {
@@ -179,6 +180,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
 
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/manager_publish_client.py", get(manager_publish_client))
         .route("/api/dashboard", get(dashboard))
         .route("/api/timeline", get(timeline))
         .route("/api/order-config/auth", post(order_config_auth))
@@ -276,6 +278,20 @@ async fn dashboard(State(state): State<WebState>) -> impl IntoResponse {
         }
     }
     (NO_STORE, Json(dashboard))
+}
+
+async fn manager_publish_client() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/x-python; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"manager_publish_client.py\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        MANAGER_PUBLISH_CLIENT,
+    )
 }
 
 async fn health(State(state): State<WebState>) -> impl IntoResponse {
@@ -1104,5 +1120,19 @@ mod tests {
         assert!(constant_time_eq(b"same", b"same"));
         assert!(!constant_time_eq(b"same", b"different"));
         assert!(!constant_time_eq(b"prefix", b"prefix-extra"));
+    }
+
+    #[test]
+    fn manager_publish_client_download_is_the_checked_in_script() {
+        let script = std::str::from_utf8(MANAGER_PUBLISH_CLIENT).unwrap();
+        assert!(script.contains("put-position"));
+        assert!(script.contains("catalog/accounts/"));
+        assert!(script.contains("/bindings/"));
+        assert!(script.contains("/publish"));
+        assert!(!script.contains("/exec_trade01/config/api/strategy"));
+        assert_eq!(
+            MANAGER_PUBLISH_CLIENT,
+            include_bytes!("../scripts/manager_publish_client.py")
+        );
     }
 }

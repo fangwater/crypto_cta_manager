@@ -221,6 +221,9 @@ read the same token from `~/.config/crypto-cta-manager/config-write.env` with
 mode `0600`; never commit, print, log, or return it. The browser holds a
 user-entered token in memory only. Exec Config rejects Redis writes when its
 token is missing. Scripts must not write Redis through Exec Config.
+The replacement push client is `scripts/manager_publish_client.py`, served at
+`GET /api/manager_publish_client.py` (`/manager/api/manager_publish_client.py`
+through Nginx). It writes the catalog then publishes; it never talks to Redis.
 
 End-to-end HTTP checks from both `el_dev` and the development host returned
 `200` for Manager, Manager API, Exec Viz, snapshot, and Config. The development
