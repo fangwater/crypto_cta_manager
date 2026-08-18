@@ -11,6 +11,8 @@ do not couple the two projects through relative paths or shared runtime state.
 The crate was initialized as a Rust 2024 binary. Keep application code under
 `src/`, database migrations under `migrations/`, deployment files under
 `deploy/`, and operational scripts under `scripts/` as those areas are added.
+Manager may keep its own TWAP RocksDB. It must never write into an Exec
+`persist_manager` RocksDB or publish through persist_manager.
 
 ## Build And Test
 
@@ -103,7 +105,14 @@ The CTA dashboard is a React/Vite application under `frontend/`, backed by the
 `cta_web` API. The API refreshes its in-memory report every 60 seconds
 from local PostgreSQL snapshots plus later RocksDB fills. It keeps the last good
 report when a refresh fails and must never expose database credentials or write
-to the live RocksDB.
+to the live Exec RocksDB. When `[twap]` is enabled, `cta_web` also records
+5-second mid TWAP bars from `spread_pbs/<venue>/ask_bid_spread` into a
+host-global Manager RocksDB, default `/home/el01/crypto_cta_manager/db`.
+This is public BBO, not an Exec-account store, so it must not live under
+`binance_exec_trade01`. Each configured catalog symbol uses column family
+`SYMBOL:binance-futures`, values are 21-byte binary bars, and rows older than
+30 days are deleted then compacted. This path must not join the Exec order
+hot path.
 
 The main NAV display is a time series, not a per-symbol contribution bar chart.
 `GET /api/timeline` rebuilds it on demand and accepts camel-case `startMs`,

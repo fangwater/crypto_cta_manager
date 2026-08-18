@@ -3,7 +3,8 @@
 `crypto_cta_manager` reads order events from one or more local CTA Exec
 `persist_manager` RocksDB databases. It supports both PostgreSQL order ingestion
 and a PostgreSQL-independent CTA PnL/NAV-change reconstruction. Neither path
-creates Parquet or other export files.
+creates Parquet or other export files. `cta_web` can also keep a Manager-owned
+TWAP archive from `spread_pbs` BBO; that RocksDB is separate from Exec.
 
 Each configured source is isolated by a stable `source_id`. PostgreSQL order
 keys and ingestion checkpoints include that ID, so accounts such as `trade01`
@@ -30,6 +31,15 @@ is a decimal rate applied to every fill's `price * amount_update`; for example,
 Set an explicit one-segment `gateway_prefix`, such as `/exec_trade01`, for each
 account whose Exec Viz and Config services are exposed through the unified
 gateway. The dashboard never derives service paths from account names.
+
+When `[twap]` is enabled, `cta_web` records 5-second mid TWAP bars for symbols
+that appear in the position-strategy catalog. This is public BBO, not
+account-private data, so the archive lives in a host-global Manager directory
+such as `/home/el01/crypto_cta_manager/db`, not under
+`binance_exec_trade01`. It subscribes to `spread_pbs/<venue>/ask_bid_spread`
+and writes compact binary rows, one column family per `SYMBOL:venue`. Bars
+older than `retain_days` are deleted and compacted. Never point
+`twap.rocksdb_path` at an Exec `persist_manager` directory.
 
 If the account already had positions when its RocksDB history began, store an
 immutable position snapshot in PostgreSQL with `nav_snapshot`. Position

@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub ingestion: IngestionConfig,
     #[serde(default)]
     pub order_config: OrderConfigSettings,
+    #[serde(default)]
+    pub twap: TwapConfig,
     pub sources: Vec<SourceConfig>,
 }
 
@@ -39,6 +41,18 @@ pub struct IngestionConfig {
 pub struct OrderConfigSettings {
     pub write_token_env: String,
     pub request_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TwapConfig {
+    pub enabled: bool,
+    pub rocksdb_path: PathBuf,
+    pub venue: String,
+    pub interval_ms: u32,
+    pub retain_days: u32,
+    pub catalog_reload_secs: u64,
+    pub compact_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +104,20 @@ impl Default for OrderConfigSettings {
     }
 }
 
+impl Default for TwapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rocksdb_path: PathBuf::from("/home/el01/crypto_cta_manager/db"),
+            venue: "binance-futures".to_string(),
+            interval_ms: 5_000,
+            retain_days: 30,
+            catalog_reload_secs: 30,
+            compact_interval_secs: 3_600,
+        }
+    }
+}
+
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
@@ -115,6 +143,37 @@ impl AppConfig {
         }
         if self.order_config.request_timeout_secs == 0 {
             bail!("order_config.request_timeout_secs must be greater than zero");
+        }
+        if self.twap.enabled {
+            if !self.twap.rocksdb_path.is_absolute() {
+                bail!(
+                    "twap.rocksdb_path must be absolute: {}",
+                    self.twap.rocksdb_path.display()
+                );
+            }
+            if self.twap.venue.trim().is_empty() {
+                bail!("twap.venue must not be empty");
+            }
+            if self.twap.interval_ms == 0 {
+                bail!("twap.interval_ms must be greater than zero");
+            }
+            if self.twap.retain_days == 0 {
+                bail!("twap.retain_days must be greater than zero");
+            }
+            if self.twap.catalog_reload_secs == 0 {
+                bail!("twap.catalog_reload_secs must be greater than zero");
+            }
+            if self.twap.compact_interval_secs == 0 {
+                bail!("twap.compact_interval_secs must be greater than zero");
+            }
+            for source in &self.sources {
+                if source.enabled && source.rocksdb_path == self.twap.rocksdb_path {
+                    bail!(
+                        "twap.rocksdb_path must not reuse an Exec persist_manager path: {}",
+                        self.twap.rocksdb_path.display()
+                    );
+                }
+            }
         }
         if self.sources.is_empty() {
             bail!("at least one [[sources]] entry is required");
@@ -329,6 +388,7 @@ mod tests {
             },
             ingestion: IngestionConfig::default(),
             order_config: OrderConfigSettings::default(),
+            twap: TwapConfig::default(),
             sources,
         }
     }
@@ -455,5 +515,25 @@ mod tests {
             toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
         config.validate().unwrap();
         assert_eq!(config.sources[0].id, "binance_exec_trade01");
+        assert!(config.twap.enabled);
+        assert_eq!(config.twap.interval_ms, 5_000);
+        assert_eq!(config.twap.retain_days, 30);
+    }
+
+    #[test]
+    fn twap_path_must_not_reuse_exec_persist_manager() {
+        let mut config = config_with_sources(vec![source(
+            "binance_exec_trade01",
+            "/srv/trade01/persist_manager",
+        )]);
+        config.twap.enabled = true;
+        config.twap.rocksdb_path = PathBuf::from("/srv/trade01/persist_manager");
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("must not reuse")
+        );
     }
 }

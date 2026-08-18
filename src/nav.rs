@@ -1951,6 +1951,7 @@ mod tests {
             },
             ingestion: IngestionConfig::default(),
             order_config: OrderConfigSettings::default(),
+            twap: crate::config::TwapConfig::default(),
             sources,
         }
     }
@@ -2647,6 +2648,7 @@ mod tests {
             },
             ingestion: IngestionConfig::default(),
             order_config: OrderConfigSettings::default(),
+            twap: crate::config::TwapConfig::default(),
             sources: vec![source],
         };
 

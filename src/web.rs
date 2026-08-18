@@ -153,6 +153,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         order_config_write_token.clone(),
     )?;
     let live_equity = LiveEquityHub::spawn(&config.sources);
+    crate::twap::spawn(pool.clone(), config.twap.clone());
     let first_dashboard =
         build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await?;
     let cache = Arc::new(RwLock::new(CacheState {

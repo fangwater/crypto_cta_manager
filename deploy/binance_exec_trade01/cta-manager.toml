@@ -12,6 +12,15 @@ overlap_secs = 300
 write_token_env = "CRYPTO_CTA_MANAGER_WRITE_TOKEN"
 request_timeout_secs = 5
 
+[twap]
+enabled = true
+rocksdb_path = "/home/el01/crypto_cta_manager/db"
+venue = "binance-futures"
+interval_ms = 5000
+retain_days = 30
+catalog_reload_secs = 30
+compact_interval_secs = 3600
+
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"
