@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """BatchExec Redis configuration server.
 
-POST /api/strategy          full publisher payload: order parameters + targets
-POST /api/targets           targets only for an existing strategy
-POST /api/order-parameters  order parameters only; requires write token
+GET  remains public. Redis writes require CRYPTO_CTA_MANAGER_WRITE_TOKEN.
+
+POST /api/strategy          Manager publish: full order parameters + targets
+POST /api/order-parameters  order parameters only; strategy must already exist
+DELETE /api/strategy        request strategy removal
 """
 
 from __future__ import annotations
@@ -219,6 +221,26 @@ def decode_strategy_names(raw: Any, label: str) -> List[str]:
     return sorted(names)
 
 
+class WriteNotConfigured(RuntimeError):
+    """Raised when Redis writes are disabled because the token file is missing."""
+
+
+class WriteUnauthorized(ValueError):
+    """Raised when a Redis write is missing a valid bearer token."""
+
+
+def authorize_redis_write(token: Optional[str], authorization: str) -> None:
+    if not token:
+        raise WriteNotConfigured("Redis writes are not configured")
+    expected = f"Bearer {token}"
+    try:
+        authorized = hmac.compare_digest(authorization, expected)
+    except Exception:
+        authorized = False
+    if not authorized:
+        raise WriteUnauthorized("write authorization is required")
+
+
 def decode_stored_exec_config(raw: Any) -> Optional[Dict[str, Any]]:
     if raw is None:
         return None
@@ -275,11 +297,7 @@ class ExecConfigStore:
                 raise ValueError(f"strategy removal already requested: {name}")
             strategy_names = self.list_strategy_names()
             current = self.load(name) if name in strategy_names else None
-            if current is not None:
-                # Existing strategy publishers own targets; the Config page owns order params.
-                for field in ORDER_PARAMETER_FIELDS:
-                    normalized[field] = current[field]
-            # Receipt time is authoritative even when a publisher repeats an unchanged target map.
+            # Manager publishes the assembled runtime JSON: parameters + scaled targets.
             next_version = time.time_ns() // 1_000
             if current is not None and current.get("updated_at_us") is not None:
                 next_version = max(next_version, current["updated_at_us"] + 1)
@@ -295,30 +313,6 @@ class ExecConfigStore:
                     json.dumps(sorted(strategy_names), ensure_ascii=False, separators=(",", ":")),
                 )
         return normalized
-
-    def save_targets(self, strategy_name: str, targets: Any) -> Dict[str, Any]:
-        name = validate_strategy_name(strategy_name)
-        normalized_targets = normalize_targets(targets)
-        with self._save_lock:
-            if name in self.list_removed_strategy_names():
-                raise ValueError(f"strategy removal already requested: {name}")
-            strategy_names = self.list_strategy_names()
-            if name not in strategy_names:
-                raise ValueError(f"strategy is not active: {name}")
-            current = self.load(name)
-            if current is None:
-                raise ValueError(f"strategy config is missing: {name}")
-            updated = dict(current)
-            updated["targets"] = normalized_targets
-            next_version = time.time_ns() // 1_000
-            if current.get("updated_at_us") is not None:
-                next_version = max(next_version, current["updated_at_us"] + 1)
-            updated["updated_at_us"] = next_version
-            self.client.set(
-                self.key(name),
-                json.dumps(updated, ensure_ascii=False, separators=(",", ":")),
-            )
-        return updated
 
     def save_order_parameters(
         self,
@@ -699,37 +693,34 @@ def make_handler(
             except Exception as exc:
                 self.send_error_json(500, exc)
 
+        def authorize_write(self) -> Optional[int]:
+            try:
+                authorize_redis_write(
+                    order_parameter_token,
+                    self.headers.get("Authorization", ""),
+                )
+            except WriteNotConfigured as exc:
+                response = {"ok": False, "error": str(exc)}
+                self.log_update_response(503, response)
+                self.send_json(503, response)
+                return 503
+            except WriteUnauthorized as exc:
+                response = {"ok": False, "error": str(exc)}
+                self.log_update_response(401, response)
+                self.send_json(401, response)
+                return 401
+            return None
+
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             try:
-                if parsed.path not in {
-                    "/api/strategy",
-                    "/api/targets",
-                    "/api/order-parameters",
-                }:
+                if parsed.path not in {"/api/strategy", "/api/order-parameters"}:
                     response = {"ok": False, "error": "not found"}
                     self.log_update_response(404, response)
                     self.send_json(404, response)
                     return
-                if parsed.path == "/api/order-parameters":
-                    if not order_parameter_token:
-                        response = {
-                            "ok": False,
-                            "error": "order parameter writes are not configured",
-                        }
-                        self.log_update_response(503, response)
-                        self.send_json(503, response)
-                        return
-                    authorization = self.headers.get("Authorization", "")
-                    expected = f"Bearer {order_parameter_token}"
-                    if not hmac.compare_digest(authorization, expected):
-                        response = {
-                            "ok": False,
-                            "error": "write authorization is required",
-                        }
-                        self.log_update_response(401, response)
-                        self.send_json(401, response)
-                        return
+                if self.authorize_write() is not None:
+                    return
                 payload = self.read_json()
                 if parsed.path == "/api/order-parameters":
                     require_exact_fields(
@@ -758,22 +749,9 @@ def make_handler(
                     self.log_update_response(200, response)
                     self.send_json(200, response)
                     return
-                if parsed.path == "/api/targets":
-                    require_exact_fields(payload, {"strategy_name", "targets"})
-                    name = validate_strategy_name(payload["strategy_name"])
-                    config = store.save_targets(name, payload["targets"])
-                    response = {
-                        "ok": True,
-                        "strategy_name": name,
-                        "key": store.key(name),
-                        "targets": config["targets"],
-                        "updated_at_us": config["updated_at_us"],
-                    }
-                    self.log_update_response(200, response)
-                    self.send_json(200, response)
-                    return
-                name = validate_strategy_name(payload.get("strategy_name"))
-                config = store.save(name, payload.get("config"))
+                require_exact_fields(payload, {"strategy_name", "config"})
+                name = validate_strategy_name(payload["strategy_name"])
+                config = store.save(name, payload["config"])
                 response = {
                     "ok": True,
                     "strategy_name": name,
@@ -802,6 +780,8 @@ def make_handler(
                     response = {"ok": False, "error": "not found"}
                     self.log_update_response(404, response)
                     self.send_json(404, response)
+                    return
+                if self.authorize_write() is not None:
                     return
                 query = parse_qs(parsed.query)
                 name = validate_strategy_name((query.get("name") or [""])[0])

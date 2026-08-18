@@ -4,6 +4,9 @@ from __future__ import annotations
 import unittest
 
 from exec_config_server import (
+    WriteNotConfigured,
+    WriteUnauthorized,
+    authorize_redis_write,
     normalize_targets,
     require_exact_fields,
     validate_strategy_name,
@@ -46,6 +49,21 @@ class NormalizeTargetsTests(unittest.TestCase):
             normalize_targets({"btc-usdt": 1})
         with self.assertRaisesRegex(ValueError, "must be a number"):
             normalize_targets({"BTCUSDT": "n/a"})
+
+
+class AuthorizeRedisWriteTests(unittest.TestCase):
+    def test_rejects_missing_token_configuration(self) -> None:
+        with self.assertRaises(WriteNotConfigured):
+            authorize_redis_write(None, "Bearer unused")
+
+    def test_rejects_missing_or_wrong_bearer(self) -> None:
+        with self.assertRaises(WriteUnauthorized):
+            authorize_redis_write("a" * 32, "")
+        with self.assertRaises(WriteUnauthorized):
+            authorize_redis_write("a" * 32, "Bearer wrong")
+
+    def test_accepts_exact_bearer(self) -> None:
+        authorize_redis_write("a" * 32, f"Bearer {'a' * 32}")
 
 
 class StrategyNameTests(unittest.TestCase):

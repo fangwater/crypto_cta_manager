@@ -60,13 +60,13 @@
   }
 
   .docs-prose {
-    @apply max-w-none text-sm leading-7 text-ink;
+    @apply max-w-none text-[14px] leading-7 text-ink;
   }
 
   .docs-prose p,
   .docs-prose ul,
   .docs-prose ol {
-    @apply my-4;
+    @apply my-3;
   }
 
   .docs-prose ul,
@@ -83,7 +83,7 @@
   }
 
   .docs-prose li + li {
-    @apply mt-1.5;
+    @apply mt-1;
   }
 
   .docs-prose a {
@@ -91,7 +91,7 @@
   }
 
   .docs-prose code {
-    @apply rounded-md bg-canvas px-1.5 py-0.5 font-mono text-[12px] text-ink;
+    @apply rounded bg-canvas px-1 py-0.5 font-mono text-[12px] text-ink;
   }
 
   .docs-prose strong {

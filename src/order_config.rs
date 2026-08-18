@@ -112,6 +112,12 @@ struct SaveResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct StrategyPublishResponse {
+    strategy_name: String,
+    config: Option<ExecConfigPayload>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UpstreamErrorResponse {
     error: Option<String>,
 }
@@ -301,35 +307,14 @@ impl ExecConfigClient {
         })
     }
 
-    pub async fn save_targets(
+    pub async fn publish_strategy(
         &self,
-        base_url: &str,
-        strategy_name: &str,
-        targets: &BTreeMap<String, f64>,
-    ) -> std::result::Result<(), ExecConfigError> {
-        validate_strategy_name(strategy_name).map_err(ExecConfigError::invalid)?;
-        let url = endpoint(base_url, "targets")?;
-        let response = self
-            .http
-            .post(url)
-            .json(&serde_json::json!({
-                "strategy_name": strategy_name,
-                "targets": targets,
-            }))
-            .send()
-            .await
-            .map_err(ExecConfigError::transport)?;
-        let _: serde_json::Value = decode_response(response).await?;
-        Ok(())
-    }
-
-    pub async fn save_full_strategy(
-        &self,
+        source_id: &str,
         base_url: &str,
         strategy_name: &str,
         order_parameters: &OrderParameters,
         targets: &BTreeMap<String, f64>,
-    ) -> std::result::Result<(), ExecConfigError> {
+    ) -> std::result::Result<OrderStrategyView, ExecConfigError> {
         validate_strategy_name(strategy_name).map_err(ExecConfigError::invalid)?;
         order_parameters
             .validate()
@@ -338,6 +323,7 @@ impl ExecConfigClient {
         let response = self
             .http
             .post(url)
+            .bearer_auth(self.write_token.as_ref())
             .json(&serde_json::json!({
                 "strategy_name": strategy_name,
                 "config": {
@@ -355,8 +341,33 @@ impl ExecConfigClient {
             .send()
             .await
             .map_err(ExecConfigError::transport)?;
-        let _: serde_json::Value = decode_response(response).await?;
-        Ok(())
+        let payload: StrategyPublishResponse = decode_response(response).await?;
+        if payload.strategy_name != strategy_name {
+            return Err(ExecConfigError::invalid(
+                "Exec Config returned a different strategy_name",
+            ));
+        }
+        let published = payload
+            .config
+            .ok_or_else(|| ExecConfigError::invalid("Exec Config omitted published config"))?;
+        let published_parameters = published.order_parameters();
+        published_parameters
+            .validate()
+            .map_err(ExecConfigError::invalid)?;
+        let target_count = published.targets.len();
+        let nonzero_target_count = published
+            .targets
+            .values()
+            .filter(|quantity| quantity.abs() > 0.0)
+            .count();
+        Ok(OrderStrategyView {
+            source_id: source_id.to_string(),
+            strategy_name: payload.strategy_name,
+            order_parameters: published_parameters,
+            updated_at_us: published.updated_at_us,
+            target_count,
+            nonzero_target_count,
+        })
     }
 }
 

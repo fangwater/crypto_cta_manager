@@ -194,5 +194,7 @@ The root route is the multi-account workspace. It reads the account list and
 gateway prefixes from the Manager API, links into source-scoped NAV, Exec Viz,
 and the Manager Config view, and expands automatically when another configured
 source is added. `/manager/` remains the full NAV timeline and position
-workspace. `/manager/config/` edits only the eight Exec order parameters; target
-positions remain read-only and owned by the strategy publisher.
+workspace. `/manager/config/` owns strategy catalog, account bindings, and
+publish. The Exec `/exec_trade01/config/` page stays read-only. Runtime Redis
+JSON is written only by Manager publish through the token-gated Exec Config
+`POST /api/strategy`; scripts must not POST targets or full configs directly.

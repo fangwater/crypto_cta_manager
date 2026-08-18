@@ -738,61 +738,20 @@ async fn publish_account_binding(
     };
     let exec_config_url = source.exec_config_url.as_deref().unwrap_or_default();
     let targets = strategy_catalog::scale_targets(&position.targets, shares);
-    let existing = state
+    match state
         .exec_config
-        .load_strategy(&source_id, exec_config_url, &binding_name)
-        .await;
-    let published = match existing {
-        Ok(current) => {
-            if let Err(error) = state
-                .exec_config
-                .save_targets(exec_config_url, &binding_name, &targets)
-                .await
-            {
-                return Ok(exec_config_error_response(&error));
-            }
-            match state
-                .exec_config
-                .save_order_parameters(
-                    &source_id,
-                    exec_config_url,
-                    &SaveOrderParametersRequest {
-                        strategy_name: binding_name.clone(),
-                        expected_updated_at_us: current.updated_at_us,
-                        order_parameters: order.order_parameters.clone(),
-                    },
-                )
-                .await
-            {
-                Ok(saved) => saved,
-                Err(error) => return Ok(exec_config_error_response(&error)),
-            }
-        }
-        Err(error) if error.status() == Some(StatusCode::NOT_FOUND) => {
-            if let Err(error) = state
-                .exec_config
-                .save_full_strategy(
-                    exec_config_url,
-                    &binding_name,
-                    &order.order_parameters,
-                    &targets,
-                )
-                .await
-            {
-                return Ok(exec_config_error_response(&error));
-            }
-            match state
-                .exec_config
-                .load_strategy(&source_id, exec_config_url, &binding_name)
-                .await
-            {
-                Ok(saved) => saved,
-                Err(error) => return Ok(exec_config_error_response(&error)),
-            }
-        }
-        Err(error) => return Ok(exec_config_error_response(&error)),
-    };
-    Ok((NO_STORE, Json(published)).into_response())
+        .publish_strategy(
+            &source_id,
+            exec_config_url,
+            &binding_name,
+            &order.order_parameters,
+            &targets,
+        )
+        .await
+    {
+        Ok(published) => Ok((NO_STORE, Json(published)).into_response()),
+        Err(error) => Ok(exec_config_error_response(&error)),
+    }
 }
 
 fn catalog_error(error: anyhow::Error) -> Response {
@@ -883,8 +842,10 @@ fn unauthorized() -> Response {
 fn exec_config_error_response(error: &ExecConfigError) -> Response {
     let status = match error.status() {
         Some(StatusCode::BAD_REQUEST) => StatusCode::BAD_REQUEST,
+        Some(StatusCode::UNAUTHORIZED) => StatusCode::BAD_GATEWAY,
         Some(StatusCode::NOT_FOUND) => StatusCode::NOT_FOUND,
         Some(StatusCode::CONFLICT) => StatusCode::CONFLICT,
+        Some(StatusCode::SERVICE_UNAVAILABLE) => StatusCode::BAD_GATEWAY,
         _ => StatusCode::BAD_GATEWAY,
     };
     let message = if status == StatusCode::BAD_GATEWAY {

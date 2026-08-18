@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Read, publish, or explicitly remove Exec strategies through the config API."""
+"""Read Exec strategies through the config API.
+
+Redis writes are owned by Manager publish. This client is read-only.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +10,6 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlparse
@@ -77,22 +79,6 @@ def request_json(
     return decoded
 
 
-def load_json_source(source: str) -> Dict[str, Any]:
-    if source == "-":
-        decoded = json.load(sys.stdin)
-    elif source.startswith("@"):
-        path = source[1:]
-        if not path:
-            raise ValueError("JSON file path is empty")
-        with Path(path).open("r", encoding="utf-8") as handle:
-            decoded = json.load(handle)
-    else:
-        decoded = json.loads(source)
-    if not isinstance(decoded, dict):
-        raise ValueError("POST JSON must be an object")
-    return decoded
-
-
 def get_api_path(strategy_name: Optional[str]) -> str:
     if strategy_name is None:
         return "strategies"
@@ -109,17 +95,14 @@ def print_json(payload: Any, *, stream: Any = sys.stdout) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Read, publish, or remove strategies through the Exec config API",
+        description="Read Exec strategies through the config API",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   %(prog)s get
   %(prog)s get cta_alpha
   %(prog)s get cta_alpha > cta_alpha.json
-  %(prog)s post @cta_alpha.json
-  %(prog)s post '{"strategy_name":"cta_alpha","config":{...}}'
-  %(prog)s post-targets '{"strategy_name":"cta_alpha","targets":{"BTCUSDT":1.0}}'
-  %(prog)s remove cta_alpha
-  cat cta_alpha.json | %(prog)s post -
+
+Redis writes go through Manager publish, not this client.
 """,
     )
     parser.add_argument(
@@ -136,57 +119,15 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="omit to GET the strategy-name list",
     )
-
-    post_parser = commands.add_parser("post", help="POST full strategy JSON")
-    post_parser.add_argument(
-        "json",
-        help="inline JSON, @path/to/file.json, or - for stdin",
-    )
-
-    targets_parser = commands.add_parser(
-        "post-targets",
-        help="POST targets only for an existing strategy",
-    )
-    targets_parser.add_argument(
-        "json",
-        help="inline JSON, @path/to/file.json, or - for stdin",
-    )
-
-    remove_parser = commands.add_parser("remove", help="Request strategy removal")
-    remove_parser.add_argument("strategy_name")
     return parser
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.command == "get":
-        response = request_json(
-            args.url,
-            get_api_path(args.strategy_name),
-            timeout=args.timeout,
-        )
-    elif args.command == "post":
-        response = request_json(
-            args.url,
-            "strategy",
-            method="POST",
-            payload=load_json_source(args.json),
-            timeout=args.timeout,
-        )
-    elif args.command == "post-targets":
-        response = request_json(
-            args.url,
-            "targets",
-            method="POST",
-            payload=load_json_source(args.json),
-            timeout=args.timeout,
-        )
-    else:
-        response = request_json(
-            args.url,
-            get_api_path(args.strategy_name),
-            method="DELETE",
-            timeout=args.timeout,
-        )
+    response = request_json(
+        args.url,
+        get_api_path(args.strategy_name),
+        timeout=args.timeout,
+    )
     print_json(response)
     return 0
 

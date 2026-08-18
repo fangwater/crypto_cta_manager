@@ -193,23 +193,21 @@ render source-scoped NAV, Exec Viz, and Config links. Never infer a gateway path
 from an account label or source ID. The root workspace may list multiple
 configured sources, while `/manager/` remains the detailed NAV timeline.
 
-`/manager/config/` is the only browser editor for Exec order parameters. The
-Exec `/exec_trade01/config/` page stays read-only. The browser talks only to
-Manager endpoints below `/manager/api/order-config/`; it never connects to
-Redis or an Exec Config port. Writes accept exactly `single_order_usdt`,
-`orders_per_batch`, `maker_price_anchor`, `tick_spacing`, `batch_interval_ms`,
-`maker_timeout_ms`, `max_maker_requotes`, and `target_tolerance_usdt`. Never
-accept `targets`, create/remove strategies, or expose a position editor.
-
-Manager write requests require `CRYPTO_CTA_MANAGER_WRITE_TOKEN`, strict source
-scoping, a positive `expected_updated_at_us`, Redis optimistic concurrency, and
-a PostgreSQL audit row in `cta_exec_order_config_audit`. The Manager and the
-loopback Exec Config service read the same token from
-`~/.config/crypto-cta-manager/config-write.env` with mode `0600`; never commit,
-print, log, or return it. The browser holds a user-entered token in memory only.
-The Exec Config `POST /api/order-parameters` must reject writes when its token
-is missing, while the strategy publisher's `POST /api/strategy` remains the
-owner of target-position updates.
+`/manager/config/` is the browser editor for strategy catalog, account bindings,
+and publish. The Exec `/exec_trade01/config/` page stays read-only. The browser
+talks only to Manager endpoints below `/manager/api/`; it never connects to
+Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Runtime
+Redis JSON is written only when Manager publish scales `targets` by shares,
+assembles the Exec payload, and `POST`s `/api/strategy` with
+`CRYPTO_CTA_MANAGER_WRITE_TOKEN`. `POST /api/targets` is gone. Parameter-only
+updates of an existing strategy still use token-gated
+`POST /api/order-parameters` and require a positive `expected_updated_at_us`,
+Redis optimistic concurrency, and a PostgreSQL audit row in
+`cta_exec_order_config_audit`. The Manager and the loopback Exec Config service
+read the same token from `~/.config/crypto-cta-manager/config-write.env` with
+mode `0600`; never commit, print, log, or return it. The browser holds a
+user-entered token in memory only. Exec Config rejects Redis writes when its
+token is missing. Scripts must not write Redis through Exec Config.
 
 End-to-end HTTP checks from both `el_dev` and the development host returned
 `200` for Manager, Manager API, Exec Viz, snapshot, and Config. The development

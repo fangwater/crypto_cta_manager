@@ -1,39 +1,34 @@
-import { BookOpen, ChevronLeft, ChevronRight, Globe, Settings2, Target, Terminal } from 'lucide-react'
+import { BookOpen, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { AppShell } from '../components/AppShell'
 import {
-  Callout,
+  ApiTable,
   CodeBlock,
   Endpoint,
-  FormulaGrid,
-  MethodBadge,
-  QuickLinks,
-  StatusTable,
-  Steps,
-  type HttpMethod,
+  Note,
+  SpecTable,
 } from '../components/docs/DocsPrimitives'
 import { cn } from '../lib/cn'
 
 const GATEWAY = 'http://172.16.30.42:10041'
-const TRADE01_CONFIG = `${GATEWAY}/exec_trade01/config`
-const MANAGER_ACCOUNT = `${GATEWAY}/manager/api/catalog/accounts/binance_exec_trade01`
+const MANAGER = `${GATEWAY}/manager/api`
+const CATALOG = `${MANAGER}/catalog`
+const EXEC = `${GATEWAY}/exec_trade01/config/api`
+const ACCOUNT = `${CATALOG}/accounts/binance_exec_trade01`
 
 type ChapterId =
   | 'overview'
   | 'model'
-  | 'studio'
-  | 'entry'
-  | 'op-params'
-  | 'op-targets'
-  | 'op-full'
-  | 'api-targets'
-  | 'api-params'
-  | 'api-leverage'
-  | 'api-allocations'
-  | 'api-shares'
-  | 'api-strategy'
-  | 'api-read'
-  | 'api-errors'
+  | 'bases'
+  | 'catalog-position'
+  | 'catalog-order'
+  | 'account-studio'
+  | 'account-bind'
+  | 'account-alloc'
+  | 'account-publish'
+  | 'exec-read'
+  | 'exec-params'
+  | 'errors'
   | 'client'
 
 interface Chapter {
@@ -44,322 +39,219 @@ interface Chapter {
   content: ReactNode
 }
 
-function FieldTable({
+function FieldRows({
   rows,
 }: {
   rows: Array<{ field: string; detail: ReactNode }>
 }) {
   return (
-    <div className="not-prose my-5 overflow-hidden rounded-2xl border border-border">
-      <table className="w-full text-sm">
-        <thead className="bg-canvas text-left text-xs text-muted">
-          <tr>
-            <th className="px-4 py-2.5 font-medium">字段</th>
-            <th className="px-4 py-2.5 font-medium">说明</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.field} className="border-t border-border-soft">
-              <td className="px-4 py-3 align-top">
-                <code className="rounded-md bg-canvas px-1.5 py-0.5 font-mono text-[12px]">{row.field}</code>
-              </td>
-              <td className="px-4 py-3 text-[13px] leading-6 text-ink">{row.detail}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-function RouteTable({
-  rows,
-}: {
-  rows: Array<{ method?: HttpMethod; label: string; path: ReactNode }>
-}) {
-  return (
-    <div className="not-prose my-5 overflow-hidden rounded-2xl border border-border">
-      {rows.map((row) => (
-        <div
-          key={row.label}
-          className="flex flex-wrap items-center gap-3 border-b border-border-soft px-4 py-3 last:border-b-0"
-        >
-          {row.method ? <MethodBadge method={row.method} /> : null}
-          <div className="min-w-32 text-sm font-medium text-ink">{row.label}</div>
-          <div className="min-w-0 flex-1 font-mono text-[12.5px] text-muted">{row.path}</div>
-        </div>
-      ))}
-    </div>
+    <SpecTable
+      headers={['字段', '说明']}
+      rows={rows.map((row) => [
+        <code key="f" className="font-mono text-[12px]">
+          {row.field}
+        </code>,
+        row.detail,
+      ])}
+    />
   )
 }
 
 const chapters: Chapter[] = [
   {
     id: 'overview',
-    group: '开始',
+    group: '概念',
     title: '概述',
-    lead: '仓位策略和下单策略在 Manager 独立配置，绑定到账户后再发布到 Exec。',
+    lead: '策略是全局目录；账户只负责启用、占比和发布。Exec 前缀只表示落到哪台交易机。',
     content: (
       <>
-        <QuickLinks
-          items={[
+        <p>配置与发送分三层，不要混：</p>
+        <SpecTable
+          headers={['层', '归属', '做什么']}
+          rows={[
+            [
+              '策略目录',
+              '全局，不挂账户',
+              '维护仓位策略（targets + 参考权益）和下单策略（执行参数）',
+            ],
+            [
+              '账户绑定',
+              'trade01 / trade02',
+              '启用哪些策略、杠杆、占比；点发布后写入该账户 Exec',
+            ],
+            [
+              'Exec 运行时',
+              '该账户 Redis',
+              '只读查询；写入只能由 Manager publish 带 token 完成',
+            ],
+          ]}
+        />
+        <ApiTable
+          rows={[
             {
-              href: '/manager/config/position/',
-              title: '浏览器配置',
-              detail: '创建仓位、执行算法，再绑定到账户。',
-              icon: Settings2,
+              method: 'POST',
+              path: `${CATALOG}/position-strategies`,
+              summary: '创建/更新仓位策略（全局）',
             },
             {
-              href: '#op-targets',
-              title: '脚本推仓位',
-              detail: 'POST /exec_trade01/config/api/targets',
-              icon: Target,
+              method: 'POST',
+              path: `${CATALOG}/order-strategies`,
+              summary: '创建/更新下单策略（全局）',
             },
             {
-              href: '#op-full',
-              title: '参数 + 仓位',
-              detail: 'POST /exec_trade01/config/api/strategy',
-              icon: Terminal,
+              method: 'POST',
+              path: `${ACCOUNT}/bindings/{name}/publish`,
+              summary: '算 qty、拼 JSON，带 token 写入该账户 Redis',
             },
             {
-              href: '/',
-              title: '综合总览',
-              detail: '当前入口与账户状态。',
-              icon: Globe,
+              method: 'GET',
+              path: `${EXEC}/strategy?name=...`,
+              summary: '只读查看该账户运行时；不能 POST 改 Redis',
             },
           ]}
         />
-        <Callout>当前已部署账户只有 trade01。trade02 会使用独立前缀，不能和 trade01 共用入口。</Callout>
+        <Note tone="warn">当前只部署了 trade01。trade02 会有独立 Exec 前缀，策略目录仍全局共用。</Note>
       </>
     ),
   },
   {
     id: 'model',
-    group: '开始',
-    title: '账户与策略',
-    lead: '账户是 URL 前缀，策略是 JSON 里的 strategy_name，不要混用。',
+    group: '概念',
+    title: '数据模型',
+    lead: '仓位策略与下单策略独立存在；账户通过绑定把二者组合，再用份数放大 target。',
     content: (
       <>
-        <div className="not-prose my-5 grid gap-3 sm:grid-cols-2">
-          <div className="rounded-2xl border border-border bg-canvas/70 p-4">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-brand">账户</p>
-            <p className="mt-2 font-mono text-sm text-ink">trade01 / trade02</p>
-            <p className="mt-2 text-xs leading-5 text-muted">放在路径里，例如 /exec_trade01/</p>
-          </div>
-          <div className="rounded-2xl border border-border bg-canvas/70 p-4">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-brand">策略</p>
-            <p className="mt-2 break-all font-mono text-sm text-ink">CTA_SK_…_Position</p>
-            <p className="mt-2 text-xs leading-5 text-muted">放在 JSON 的 strategy_name</p>
-          </div>
-        </div>
-        <p>
-          每个策略自己有一份 target 和一份 Exec 实际仓位。同一账户里，两个策略的 BTC target 可以不同。
-        </p>
-        <p>
-          Exec 仍按「账户 + 策略名」落 Redis。Manager 把仓位策略和下单策略拆开，组合后再发布成 Exec 策略名。
-        </p>
-      </>
-    ),
-  },
-  {
-    id: 'studio',
-    group: '开始',
-    title: '策略组合',
-    lead: '账户只负责杠杆和绑定。权益金额是仓位策略的参考尺度。',
-    content: (
-      <>
-        <div className="not-prose my-5 overflow-hidden rounded-2xl border border-border">
-          <table className="w-full text-sm">
-            <thead className="bg-canvas text-left text-xs text-muted">
-              <tr>
-                <th className="px-4 py-2.5 font-medium">对象</th>
-                <th className="px-4 py-2.5 font-medium">配置什么</th>
-                <th className="px-4 py-2.5 font-medium">默认</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr className="border-t border-border-soft">
-                <td className="px-4 py-3 font-medium">仓位策略</td>
-                <td className="px-4 py-3 text-muted">策略名、equity_usdt、targets</td>
-                <td className="px-4 py-3">10,000 USDT</td>
-              </tr>
-              <tr className="border-t border-border-soft">
-                <td className="px-4 py-3 font-medium">下单策略</td>
-                <td className="px-4 py-3 text-muted">策略名和 8 个下单参数</td>
-                <td className="px-4 py-3">与 Exec 默认一致</td>
-              </tr>
-              <tr className="border-t border-border-soft">
-                <td className="px-4 py-3 font-medium">账户</td>
-                <td className="px-4 py-3 text-muted">杠杆率</td>
-                <td className="px-4 py-3">1</td>
-              </tr>
-              <tr className="border-t border-border-soft">
-                <td className="px-4 py-3 font-medium">绑定</td>
-                <td className="px-4 py-3 text-muted">仓位策略 × 下单策略</td>
-                <td className="px-4 py-3">无</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <FormulaGrid
-          items={[
-            { label: '可用名义', value: '实时权益 × 杠杆率' },
-            { label: '已配置名义', value: 'Σ(份数 × 该策略参考权益)' },
-            { label: '占比', value: '按已配置名义加权，合计 = 100%' },
-            { label: '发布仓位', value: 'target × 份数' },
+        <SpecTable
+          headers={['对象', '关键字段', '说明']}
+          rows={[
+            [
+              '仓位策略',
+              <code>strategy_name / equity_usdt / targets</code>,
+              '全局模板。equity 是单份参考名义，默认 10000，可按策略改。',
+            ],
+            [
+              '下单策略',
+              <code>strategy_name + 8 个参数</code>,
+              '全局模板，多账户可共用同一个 default_order。',
+            ],
+            [
+              '账户',
+              <code>leverage</code>,
+              '只存杠杆。可用名义 = 实时权益 × 杠杆。',
+            ],
+            [
+              '绑定',
+              <code>position × order × shares</code>,
+              '账户启用记录。Exec 策略名 = 仓位策略名。',
+            ],
           ]}
         />
-        <Callout>
-          各策略的单份参考权益可以不同，容量按名义金额聚合，不按统一 10,000
-          折成份数。权益来自本机 account_monitor。未点「发布到 Exec」前，组合只存在 Manager 本地。
-        </Callout>
-        <p>发布规则：</p>
-        <ul>
-          <li>Exec 上还没有这个名字：走 POST /api/strategy</li>
-          <li>已经存在：分别走 POST /api/targets 和 POST /api/order-parameters</li>
-        </ul>
+        <SpecTable
+          headers={['量', '公式']}
+          rows={[
+            ['可用名义', '实时权益 × 杠杆率'],
+            ['已配置名义', 'Σ(份数 × 该策略 equity_usdt)'],
+            ['占比', '该策略已配置名义 / 已配置名义合计'],
+            ['发布到 Exec 的 target', '仓位策略 targets × 份数'],
+          ]}
+        />
+        <Note>
+          容量按名义聚合。1×10000 + 1×20000 = 30000 USDT，不会按统一 10000 折成「3 份」。
+        </Note>
       </>
     ),
   },
   {
-    id: 'entry',
-    group: '开始',
-    title: '入口地址',
-    lead: '对外入口是网关。脚本必须带账户前缀。',
+    id: 'bases',
+    group: '概念',
+    title: '基址',
+    lead: 'Manager 管目录与绑定；Exec Config 管交易机运行时。',
     content: (
       <>
-        <CodeBlock label="trade01 Config 基址">{`${TRADE01_CONFIG}/`}</CodeBlock>
-        <RouteTable
+        <SpecTable
+          headers={['用途', '基址']}
           rows={[
-            { label: '综合总览', path: <a href="/">{GATEWAY}/</a> },
-            { label: '净值中心', path: <a href="/manager/">{GATEWAY}/manager/</a> },
+            ['浏览器 / Manager API', <code>{MANAGER}</code>],
+            ['策略目录', <code>{CATALOG}</code>],
+            ['trade01 Exec Config', <code>{EXEC}</code>],
+            ['文档页', <a href="/manager/docs/">{GATEWAY}/manager/docs/</a>],
+          ]}
+        />
+        <Note tone="warn">
+          不要打 <code>{GATEWAY}/config/</code>。没有账户前缀时无法区分 trade01 / trade02。
+        </Note>
+      </>
+    ),
+  },
+  {
+    id: 'catalog-position',
+    group: '策略目录',
+    title: '仓位策略',
+    lead: '全局接口，路径里没有账户 ID。',
+    content: (
+      <>
+        <ApiTable
+          rows={[
             {
-              label: '策略配置',
-              path: <a href="/manager/config/position/">{GATEWAY}/manager/config/position/</a>,
+              method: 'GET',
+              path: `${CATALOG}/position-strategies`,
+              summary: '列出全部仓位策略',
             },
-            { label: 'Exec Config API', path: <code>{TRADE01_CONFIG}/api/...</code> },
-            { label: 'Exec Viz', path: <code>{GATEWAY}/exec_trade01/</code> },
+            {
+              method: 'POST',
+              path: `${CATALOG}/position-strategies`,
+              summary: '按 strategy_name upsert',
+            },
+            {
+              method: 'DELETE',
+              path: `${CATALOG}/position-strategies/{name}`,
+              summary: '删除模板；已绑定账户需先停用',
+            },
           ]}
         />
-        <Callout tone="warning">
-          不要使用 {GATEWAY}/config/，它无法区分 trade01 / trade02。
-        </Callout>
-      </>
-    ),
-  },
-  {
-    id: 'op-params',
-    group: '操作方法',
-    title: '浏览器配置',
-    lead: '下单参数属于独立的下单策略。Exec Config 页面保持只读。',
-    content: (
-      <>
-        <Steps
-          items={[
-            <>
-              打开 <a href="/manager/config/position/">策略配置</a>
-            </>,
-            '在「仓位策略」里编辑 target 和权益金额',
-            '在「下单策略」里编辑 8 个下单参数',
-            '在「账户组合」里保存占比，合计等于 100%',
-            '点「发布到 Exec」',
-          ]}
-        />
-        <p>8 个下单参数：</p>
-        <p>
-          <code>single_order_usdt</code>、<code>orders_per_batch</code>、
-          <code>maker_price_anchor</code>、<code>tick_spacing</code>、
-          <code>batch_interval_ms</code>、<code>maker_timeout_ms</code>、
-          <code>max_maker_requotes</code>、<code>target_tolerance_usdt</code>
-        </p>
-      </>
-    ),
-  },
-  {
-    id: 'op-targets',
-    group: '操作方法',
-    title: '推送目标仓位',
-    lead: '只打 POST /api/targets。策略必须已经存在，不会顺手创建算法。',
-    content: (
-      <>
-        <Callout>targets 是整表替换。没写到的品种会从该策略 target 里消失。</Callout>
-        <CodeBlock label="exec_config_client.py">{`python3 exec_config_client.py \\
-  --url ${TRADE01_CONFIG}/ \\
-  post-targets @targets.json`}</CodeBlock>
-        <CodeBlock label="targets.json">{`{
+        <CodeBlock label="POST body">{`{
   "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
-  "targets": {
-    "BTCUSDT": -0.006,
-    "ETHUSDT": -0.54
-  }
+  "equity_usdt": 10000,
+  "targets": { "BTCUSDT": -0.006, "ETHUSDT": -0.54 }
 }`}</CodeBlock>
-        <p>
-          同一账户下另一个策略要另发一次，换 <code>strategy_name</code>。trade02 部署后把{' '}
-          <code>--url</code> 改成 <code>/exec_trade02/config/</code>。
-        </p>
-      </>
-    ),
-  },
-  {
-    id: 'op-full',
-    group: '操作方法',
-    title: '同时推送参数和仓位',
-    lead: 'POST /api/strategy 一次提交下单参数和 target。',
-    content: (
-      <>
-        <p>新建策略时两者都会写入；策略已存在时只更新 target，避免覆盖 Manager 改过的参数。</p>
-        <p>
-          只改仓位用 <code>/api/targets</code>，只改下单参数用 Manager。
-        </p>
-        <CodeBlock label="exec_config_client.py">{`python3 exec_config_client.py \\
-  --url ${TRADE01_CONFIG}/ \\
-  post @strategy.json`}</CodeBlock>
-      </>
-    ),
-  },
-  {
-    id: 'api-targets',
-    group: 'API',
-    title: '改目标仓位',
-    lead: '改某个已有策略的目标仓位，不需要 token。',
-    content: (
-      <>
-        <Endpoint method="POST" path={`${TRADE01_CONFIG}/api/targets`} />
-        <CodeBlock label="curl">{`curl --noproxy '*' -X POST ${TRADE01_CONFIG}/api/targets \\
-  -H 'Content-Type: application/json' \\
-  -d '{
-    "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
-    "targets": {"BTCUSDT": -0.006, "ETHUSDT": -0.54}
-  }'`}</CodeBlock>
-        <FieldTable
+        <FieldRows
           rows={[
-            { field: 'strategy_name', detail: '已存在的策略名' },
-            { field: 'targets', detail: '品种到数量的对象，数量可为 0 或负数。整表替换。' },
+            { field: 'strategy_name', detail: '全局唯一；发布到 Exec 时原样使用' },
+            { field: 'equity_usdt', detail: '单份参考名义，必须 > 0' },
+            { field: 'targets', detail: '品种 → 数量；数量可为 0 或负数' },
           ]}
         />
-        <p>
-          成功返回 <code>strategy_name</code>、<code>targets</code>、<code>updated_at_us</code>。未知策略返回 400：
-          <code>strategy is not active</code>。
-        </p>
       </>
     ),
   },
   {
-    id: 'api-params',
-    group: 'API',
-    title: '改下单参数',
-    lead: '只改下单参数，不改仓位。必须带写权限 token，且策略必须已存在。',
+    id: 'catalog-order',
+    group: '策略目录',
+    title: '下单策略',
+    lead: '同样是全局目录。浏览器主路径走这里，不要直接改 Exec 参数页。',
     content: (
       <>
-        <Endpoint
-          method="POST"
-          path={`${TRADE01_CONFIG}/api/order-parameters`}
-          note="Authorization: Bearer <token>。浏览器请走 Manager。"
+        <ApiTable
+          rows={[
+            {
+              method: 'GET',
+              path: `${CATALOG}/order-strategies`,
+              summary: '列出全部下单策略',
+            },
+            {
+              method: 'POST',
+              path: `${CATALOG}/order-strategies`,
+              summary: '按 strategy_name upsert',
+            },
+            {
+              method: 'DELETE',
+              path: `${CATALOG}/order-strategies/{name}`,
+              summary: '删除模板',
+            },
+          ]}
         />
-        <CodeBlock label="JSON">{`{
-  "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
-  "expected_updated_at_us": 1786683845088869,
+        <CodeBlock label="POST body">{`{
+  "strategy_name": "default_order",
   "order_parameters": {
     "single_order_usdt": 100.0,
     "orders_per_batch": 3,
@@ -371,154 +263,196 @@ const chapters: Chapter[] = [
     "target_tolerance_usdt": 10.0
   }
 }`}</CodeBlock>
-        <Callout tone="warning">
-          只接受上述 8 个参数字段。带 targets 会被拒绝。版本不一致返回 409，需要重新 GET 后再写。
-        </Callout>
+        <Note>只接受上述 8 个参数字段。改完后要对该账户已启用绑定再点「发布到 Exec」才会进交易进程。</Note>
       </>
     ),
   },
   {
-    id: 'api-leverage',
-    group: 'API',
-    title: '改杠杆率',
-    lead: '账户级 CTA 杠杆。不写交易所保证金，也不改 Exec Redis。',
+    id: 'account-studio',
+    group: '账户绑定',
+    title: '账户视图与杠杆',
+    lead: '账户层只有杠杆、实时权益和绑定列表。策略模板不在这里。',
     content: (
       <>
-        <Endpoint method="PUT" path={`${MANAGER_ACCOUNT}/leverage`} />
-        <CodeBlock label="curl">{`curl --noproxy '*' -sS -X PUT \\
-  '${MANAGER_ACCOUNT}/leverage' \\
-  -H 'Content-Type: application/json' \\
-  -d '{"leverage": 2}'`}</CodeBlock>
-        <p>
-          请求体只接受大于 0 的 <code>leverage</code>。成功返回 studio 和最新{' '}
-          <code>capacity</code>（含 <code>buying_power_usdt</code>、
-          <code>bound_notional_usdt</code>、<code>remaining_notional_usdt</code>）。实时权益：
-        </p>
-        <Endpoint method="GET" path={`${MANAGER_ACCOUNT}/live`} />
-      </>
-    ),
-  },
-  {
-    id: 'api-allocations',
-    group: 'API',
-    title: '改策略占比',
-    lead: '一次提交本账户全部已启用策略的占比。页面「保存占比」走这条接口。',
-    content: (
-      <>
-        <Endpoint method="PUT" path={`${MANAGER_ACCOUNT}/allocations`} />
-        <CodeBlock label="curl">{`curl --noproxy '*' -sS -X PUT \\
-  '${MANAGER_ACCOUNT}/allocations' \\
-  -H 'Content-Type: application/json' \\
-  -d '{"allocations":{"CTA_A":0.25,"CTA_B":0.75}}'`}</CodeBlock>
-        <FieldTable
+        <ApiTable
           rows={[
-            { field: 'allocations', detail: '必须覆盖每一条绑定。每条大于 0，合计必须等于 1。键是 binding_name。' },
+            {
+              method: 'GET',
+              path: `${ACCOUNT}`,
+              summary: 'studio + capacity',
+            },
+            {
+              method: 'GET',
+              path: `${ACCOUNT}/live`,
+              summary: '只取 capacity（含实时权益）',
+            },
+            {
+              method: 'PUT',
+              path: `${ACCOUNT}/leverage`,
+              summary: '改 CTA 配置倍数',
+            },
           ]}
         />
-        <Callout>这只改 Manager 本地绑定。要让 Exec 仓位跟着变，保存后再点「发布到 Exec」。</Callout>
-      </>
-    ),
-  },
-  {
-    id: 'api-shares',
-    group: 'API',
-    title: '改份数',
-    lead: '给某条已启用策略单独设份数。浏览器主交互走占比接口，这条留给脚本。',
-    content: (
-      <>
-        <Endpoint method="PUT" path={`${MANAGER_ACCOUNT}/bindings/CTA_NAME/shares`} />
         <CodeBlock label="curl">{`curl --noproxy '*' -sS -X PUT \\
-  '${MANAGER_ACCOUNT}/bindings/CTA_SK_C40V6PosT1_LXY_filter_Position/shares' \\
+  '${ACCOUNT}/leverage' \\
   -H 'Content-Type: application/json' \\
-  -d '{"shares": 3}'`}</CodeBlock>
-        <p>
-          <code>shares</code> 必须大于 0。启用策略时也可在 POST bindings 里带上，默认 1。
-        </p>
+  -d '{"leverage": 2}'`}</CodeBlock>
+        <FieldRows
+          rows={[
+            { field: 'buying_power_usdt', detail: '实时权益 × 杠杆' },
+            { field: 'bound_notional_usdt', detail: 'Σ(份数 × 策略 equity)' },
+            { field: 'remaining_notional_usdt', detail: '可用名义 − 已配置名义' },
+          ]}
+        />
       </>
     ),
   },
   {
-    id: 'api-strategy',
-    group: 'API',
-    title: '全量推送',
-    lead: '一次提交完整 config：8 个下单参数和 targets 都要有。',
+    id: 'account-bind',
+    group: '账户绑定',
+    title: '启用 / 停用',
+    lead: '把全局仓位策略挂到本账户，并指定用哪套下单策略执行。',
     content: (
       <>
-        <Endpoint method="POST" path={`${TRADE01_CONFIG}/api/strategy`} />
-        <ul>
-          <li>新策略：参数和 target 都会写入</li>
-          <li>已有策略：只更新 target，参数保持 Redis 里的值</li>
-        </ul>
-        <CodeBlock label="JSON">{`{
-  "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
-  "config": {
-    "single_order_usdt": 100.0,
-    "orders_per_batch": 3,
-    "maker_price_anchor": "own_best",
-    "tick_spacing": 1,
-    "batch_interval_ms": 500,
-    "maker_timeout_ms": 1000,
-    "max_maker_requotes": 2,
-    "target_tolerance_usdt": 10.0,
-    "targets": {"BTCUSDT": -0.006}
-  }
+        <ApiTable
+          rows={[
+            {
+              method: 'POST',
+              path: `${ACCOUNT}/bindings`,
+              summary: '启用；binding_name 通常等于仓位策略名',
+            },
+            {
+              method: 'DELETE',
+              path: `${ACCOUNT}/bindings/{name}`,
+              summary: '停用本地绑定，不自动删 Exec',
+            },
+          ]}
+        />
+        <CodeBlock label="POST body">{`{
+  "binding_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
+  "position_strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
+  "order_strategy_name": "default_order",
+  "shares": 1
 }`}</CodeBlock>
       </>
     ),
   },
   {
-    id: 'api-read',
-    group: 'API',
-    title: '查询与删除',
-    lead: '这些路径都在 trade01 Config 基址下。',
+    id: 'account-alloc',
+    group: '账户绑定',
+    title: '占比与份数',
+    lead: '占比按已配置名义加权。各策略独立填写，合计必须等于 100%。',
     content: (
       <>
-        <RouteTable
-          rows={[
-            { method: 'GET', label: '账户信息', path: <code>/api/bootstrap</code> },
-            { method: 'GET', label: '策略名单', path: <code>/api/strategies</code> },
-            { method: 'GET', label: '单个策略', path: <code>/api/strategy?name=...</code> },
-            { method: 'DELETE', label: '移除策略', path: <code>/api/strategy?name=...</code> },
-          ]}
+        <Endpoint
+          method="PUT"
+          path={`${ACCOUNT}/allocations`}
+          summary="一次提交全部绑定的占比；保存后按总名义反推份数"
         />
-        <CodeBlock label="curl">{`curl --noproxy '*' '${TRADE01_CONFIG}/api/strategies'
-curl --noproxy '*' '${TRADE01_CONFIG}/api/strategy?name=CTA_SK_C40V6PosT1_LXY_filter_Position'`}</CodeBlock>
+        <CodeBlock label="curl">{`curl --noproxy '*' -sS -X PUT \\
+  '${ACCOUNT}/allocations' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"allocations":{"CTA_A":0.25,"CTA_B":0.75}}'`}</CodeBlock>
+        <Endpoint
+          method="PUT"
+          path={`${ACCOUNT}/bindings/{name}/shares`}
+          summary="脚本按份数精确调整；浏览器主交互走 allocations"
+        />
+        <Note>这两条只改 Manager 本地。要让 Exec 仓位变化，还要 publish。</Note>
       </>
     ),
   },
   {
-    id: 'api-errors',
-    group: 'API',
+    id: 'account-publish',
+    group: '账户绑定',
+    title: '发布到 Exec',
+    lead: '把账户绑定物化成该账户 Exec 上的策略：参数来自下单策略，target = 仓位策略 × 份数。',
+    content: (
+      <>
+        <Endpoint method="POST" path={`${ACCOUNT}/bindings/{name}/publish`} />
+        <p>
+          Manager 用仓位策略 <code>targets × shares</code> 和下单策略参数拼成 Exec
+          标准 JSON，再带写 token 调用该账户 <code>POST /api/strategy</code>。新建和更新都走这一次完整写入。
+        </p>
+        <Note tone="warn">未 publish 的绑定只存在 Manager PostgreSQL，交易进程看不到。</Note>
+      </>
+    ),
+  },
+  {
+    id: 'exec-read',
+    group: 'Exec 运行时',
+    title: '只读查询',
+    lead: 'Exec Config 页面和脚本只能读 Redis。仓位与完整策略写入走 Manager publish。',
+    content: (
+      <ApiTable
+        rows={[
+          { method: 'GET', path: `${EXEC}/bootstrap`, summary: '账户 / venue / key 前缀' },
+          { method: 'GET', path: `${EXEC}/strategies`, summary: '策略名单' },
+          { method: 'GET', path: `${EXEC}/strategy?name=...`, summary: '单个策略运行时 JSON' },
+        ]}
+      />
+    ),
+  },
+  {
+    id: 'exec-params',
+    group: 'Exec 运行时',
+    title: '内部写口',
+    lead: '这些接口只给 Manager 用，必须带写 token。浏览器和脚本不要直接打。',
+    content: (
+      <>
+        <Endpoint
+          method="POST"
+          path={`${EXEC}/strategy`}
+          summary="Manager publish：完整参数 + 已按份数放大的 targets"
+        />
+        <Endpoint
+          method="POST"
+          path={`${EXEC}/order-parameters`}
+          summary="只改已存在策略的 8 个参数；带 targets 会被拒绝"
+        />
+        <Endpoint
+          method="DELETE"
+          path={`${EXEC}/strategy?name=...`}
+          summary="请求移除策略；同样需要 token"
+        />
+        <Note tone="warn">
+          <code>POST /api/targets</code> 已删除。无 token 或 token 错误返回 401；未配置 token 返回 503。
+        </Note>
+      </>
+    ),
+  },
+  {
+    id: 'errors',
+    group: '附录',
     title: '状态码',
     lead: '错误体形如 {"ok":false,"error":"..."}。',
     content: (
-      <StatusTable
+      <SpecTable
+        headers={['HTTP', '含义']}
         rows={[
-          { code: '200', meaning: '写入或查询成功', tone: 'ok' },
-          { code: '202', meaning: '删除已受理', tone: 'ok' },
-          { code: '400', meaning: '字段缺失、策略不存在、JSON 无效', tone: 'bad' },
-          { code: '401', meaning: '改 order-parameters 时 token 不对', tone: 'bad' },
-          { code: '404', meaning: '路径不存在，或请求未带账户前缀', tone: 'bad' },
-          { code: '409', meaning: '参数乐观锁冲突，需要重新加载', tone: 'warn' },
-          { code: '503', meaning: 'Exec Config 未配置写 token', tone: 'warn' },
+          ['200', '成功'],
+          ['202', '删除已受理'],
+          ['400', '字段缺失、策略不存在、占比合计不为 1'],
+          ['401', 'Exec Redis 写 token 错误或缺失'],
+          ['404', '路径不存在、缺少账户前缀，或 /api/targets 已移除'],
+          ['409', '参数乐观锁冲突'],
+          ['503', 'Exec 未配置写 token'],
         ]}
       />
     ),
   },
   {
     id: 'client',
-    group: '客户端',
-    title: 'exec_config_client',
-    lead: '可从 Config 页下载，或使用 Exec 上的 scripts/exec_config_client.py。',
+    group: '附录',
+    title: '客户端',
+    lead: 'exec_config_client.py 只读 trade01 Exec。写 Redis 走 Manager publish。',
     content: (
       <>
-        <CodeBlock label="常用命令">{`export EXEC_CONFIG_URL=${TRADE01_CONFIG}/
+        <CodeBlock label="shell">{`export EXEC_CONFIG_URL=${GATEWAY}/exec_trade01/config/
 
 python3 exec_config_client.py get
-python3 exec_config_client.py get CTA_SK_C40V6PosT1_LXY_filter_Position
-python3 exec_config_client.py post-targets @targets.json
-python3 exec_config_client.py post @strategy.json`}</CodeBlock>
-        <Callout tone="warning">不要把 token 写进脚本或仓库。改参数请用 Manager 页面。</Callout>
+python3 exec_config_client.py get CTA_SK_C40V6PosT1_LXY_filter_Position`}</CodeBlock>
+        <Note tone="warn">客户端不再提供 post / post-targets / remove。仓位发布只走 Manager。</Note>
       </>
     ),
   },
@@ -543,6 +477,7 @@ export function DocsPage() {
   const previous = activeIndex > 0 ? chapters[activeIndex - 1] : null
   const next =
     activeIndex >= 0 && activeIndex < chapters.length - 1 ? chapters[activeIndex + 1] : null
+
   const groups = useMemo(() => {
     const seen: string[] = []
     for (const chapter of chapters) {
@@ -560,27 +495,35 @@ export function DocsPage() {
   }
 
   return (
-    <AppShell active="docs" title="文档" subtitle="操作方法与 API" icon={BookOpen}>
-      <div className="grid gap-6 xl:grid-cols-[260px_minmax(0,1fr)]">
-        <aside className="h-fit overflow-hidden rounded-2xl border border-border bg-surface shadow-[var(--shadow-card)] xl:sticky xl:top-24">
-          <div className="border-b border-border-soft px-5 py-4">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-brand">目录</p>
+    <AppShell
+      active="docs"
+      title="文档"
+      subtitle="策略目录 · 账户绑定 · Exec 推送"
+      icon={BookOpen}
+      className="!max-w-none !px-0 !py-0"
+    >
+      <div className="min-h-[calc(100vh-3.75rem)] lg:grid lg:grid-cols-[220px_minmax(0,1fr)]">
+        <aside className="border-b border-border bg-surface lg:sticky lg:top-[3.75rem] lg:h-[calc(100vh-3.75rem)] lg:overflow-y-auto lg:border-b-0 lg:border-r">
+          <div className="px-4 py-4">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted">API</p>
             <p className="mt-1 text-sm font-semibold text-ink">CTA Manager</p>
           </div>
-          <nav className="space-y-5 p-4">
+          <nav className="space-y-5 px-2 pb-6">
             {groups.map((group) => (
               <section key={group.group}>
-                <h2 className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-subtle">
+                <h2 className="px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-subtle">
                   {group.group}
                 </h2>
-                <ul className="space-y-0.5">
+                <ul className="mt-1.5 space-y-0.5">
                   {group.items.map((chapter) => (
                     <li key={chapter.id}>
                       <button
                         type="button"
                         className={cn(
-                          'docs-sidebar-link',
-                          chapter.id === active.id && 'is-active',
+                          'w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors',
+                          chapter.id === active.id
+                            ? 'bg-ink text-white'
+                            : 'text-muted hover:bg-canvas hover:text-ink',
                         )}
                         onClick={() => openChapter(chapter.id)}
                       >
@@ -594,46 +537,45 @@ export function DocsPage() {
           </nav>
         </aside>
 
-        <article className="overflow-hidden rounded-2xl border border-border bg-surface shadow-[var(--shadow-card)]">
-          <header className="border-b border-border-soft bg-[linear-gradient(180deg,#f8fafc_0%,#ffffff_100%)] px-6 py-8 sm:px-10">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-brand">
-              {active.group}
-            </p>
-            <h2 id="gitbook-title" className="mt-2 text-3xl font-semibold tracking-tight text-ink">
+        <div className="bg-[linear-gradient(180deg,#f7f8fa_0%,#ffffff_140px)]">
+          <article className="mx-auto w-full max-w-3xl px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
+            <p className="text-[11px] font-medium tracking-[0.14em] text-muted">{active.group}</p>
+            <h2 id="gitbook-title" className="mt-2 text-[1.75rem] font-semibold tracking-tight text-ink">
               {active.title}
             </h2>
-            <p className="mt-3 max-w-2xl text-sm leading-7 text-muted">{active.lead}</p>
-          </header>
-          <div className="docs-prose px-6 py-8 sm:px-10">{active.content}</div>
-          <nav className="grid gap-3 border-t border-border-soft p-4 sm:grid-cols-2 sm:p-6">
-            {previous ? (
-              <button
-                type="button"
-                className="rounded-2xl border border-border px-4 py-4 text-left transition-colors hover:border-brand-ring hover:bg-brand-soft/40"
-                onClick={() => openChapter(previous.id)}
-              >
-                <span className="flex items-center gap-1 text-xs text-subtle">
-                  <ChevronLeft size={14} /> 上一章
-                </span>
-                <span className="mt-1 block text-sm font-semibold text-ink">{previous.title}</span>
-              </button>
-            ) : (
-              <span />
-            )}
-            {next ? (
-              <button
-                type="button"
-                className="rounded-2xl border border-border px-4 py-4 text-right transition-colors hover:border-brand-ring hover:bg-brand-soft/40"
-                onClick={() => openChapter(next.id)}
-              >
-                <span className="flex items-center justify-end gap-1 text-xs text-subtle">
-                  下一章 <ChevronRight size={14} />
-                </span>
-                <span className="mt-1 block text-sm font-semibold text-ink">{next.title}</span>
-              </button>
-            ) : null}
-          </nav>
-        </article>
+            <p className="mt-3 text-[15px] leading-7 text-muted">{active.lead}</p>
+            <div className="docs-prose mt-8 border-t border-border-soft pt-6">{active.content}</div>
+
+            <nav className="mt-12 grid gap-3 border-t border-border-soft pt-6 sm:grid-cols-2">
+              {previous ? (
+                <button
+                  type="button"
+                  className="rounded-lg border border-border bg-surface px-4 py-3 text-left hover:bg-canvas"
+                  onClick={() => openChapter(previous.id)}
+                >
+                  <span className="flex items-center gap-1 text-[11px] text-subtle">
+                    <ChevronLeft size={13} /> 上一章
+                  </span>
+                  <span className="mt-1 block text-sm font-medium text-ink">{previous.title}</span>
+                </button>
+              ) : (
+                <span />
+              )}
+              {next ? (
+                <button
+                  type="button"
+                  className="rounded-lg border border-border bg-surface px-4 py-3 text-right hover:bg-canvas"
+                  onClick={() => openChapter(next.id)}
+                >
+                  <span className="flex items-center justify-end gap-1 text-[11px] text-subtle">
+                    下一章 <ChevronRight size={13} />
+                  </span>
+                  <span className="mt-1 block text-sm font-medium text-ink">{next.title}</span>
+                </button>
+              ) : null}
+            </nav>
+          </article>
+        </div>
       </div>
     </AppShell>
   )
