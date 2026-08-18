@@ -63,8 +63,7 @@ pub fn capacity_view(
         .as_ref()
         .and_then(|view| buying_power_usdt(view.equity_usdt, studio.leverage));
     let bound_notional_usdt = studio.bound_equity_usdt;
-    let remaining_notional_usdt =
-        buying_power_usdt.map(|value| value - bound_notional_usdt);
+    let remaining_notional_usdt = buying_power_usdt.map(|value| value - bound_notional_usdt);
     AccountCapacityView {
         live: live_view,
         leverage: studio.leverage,
