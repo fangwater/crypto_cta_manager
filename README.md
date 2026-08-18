@@ -197,4 +197,6 @@ source is added. `/manager/` remains the full NAV timeline and position
 workspace. `/manager/config/` owns strategy catalog, account bindings, and
 publish. The Exec `/exec_trade01/config/` page stays read-only. Runtime Redis
 JSON is written only by Manager publish through the token-gated Exec Config
-`POST /api/strategy`; scripts must not POST targets or full configs directly.
+`POST /api/strategy`. Each target is `{qty, signal}`; `signal=±1` means that
+symbol uses taker-only for the current execution. Scripts must not POST
+targets or full configs directly.

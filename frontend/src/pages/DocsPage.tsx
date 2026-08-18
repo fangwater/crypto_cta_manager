@@ -21,6 +21,7 @@ type ChapterId =
   | 'model'
   | 'bases'
   | 'catalog-position'
+  | 'target-signal'
   | 'catalog-order'
   | 'account-studio'
   | 'account-bind'
@@ -152,7 +153,7 @@ const chapters: Chapter[] = [
             ['可用名义', '实时权益 × 杠杆率'],
             ['已配置名义', 'Σ(份数 × 该策略 equity_usdt)'],
             ['占比', '该策略已配置名义 / 已配置名义合计'],
-            ['发布到 Exec 的 target', '仓位策略 targets × 份数'],
+            ['发布到 Exec 的 target', '仓位策略 qty × 份数；signal 原样带上'],
           ]}
         />
         <Note>
@@ -212,15 +213,51 @@ const chapters: Chapter[] = [
         <CodeBlock label="POST body">{`{
   "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
   "equity_usdt": 10000,
-  "targets": { "BTCUSDT": -0.006, "ETHUSDT": -0.54 }
+  "targets": {
+    "BTCUSDT": { "qty": -0.006, "signal": -1 },
+    "ETHUSDT": { "qty": -0.54, "signal": 0 }
+  }
 }`}</CodeBlock>
         <FieldRows
           rows={[
             { field: 'strategy_name', detail: '全局唯一；发布到 Exec 时原样使用' },
             { field: 'equity_usdt', detail: '单份参考名义，必须 > 0' },
-            { field: 'targets', detail: '品种 → 数量；数量可为 0 或负数' },
+            {
+              field: 'targets',
+              detail: '品种 → { qty, signal }。旧格式裸数字仍可读，视为 signal=0',
+            },
+            { field: 'qty', detail: '目标数量，可为 0 或负数；发布时按份数放大' },
+            {
+              field: 'signal',
+              detail: '整数，只允许 -2/-1/0/1/2；省略按 0。±1 表示该品种本轮全部用 taker',
+            },
           ]}
         />
+      </>
+    ),
+  },
+  {
+    id: 'target-signal',
+    group: '策略目录',
+    title: 'qty 与 signal',
+    lead: '运行时每条仓位是对象，不再是裸数字。signal 只影响该品种这一轮怎么成交。',
+    content: (
+      <>
+        <CodeBlock label="发布到 Redis 的 targets">{`{
+  "BTCUSDT": { "qty": -0.018, "signal": -1 },
+  "ETHUSDT": { "qty": -1.62, "signal": 0 }
+}`}</CodeBlock>
+        <SpecTable
+          headers={['signal', 'Exec 行为']}
+          rows={[
+            ['0 或省略', '默认：taker 转 maker'],
+            ['+1 / -1', '该品种本轮全部用 taker，不再转 maker'],
+            ['+2 / -2', '预留整数；当前按默认路径处理，直到 Exec 定义用途'],
+          ]}
+        />
+        <Note>
+          ±1 只作用于这一次该 symbol 的执行。下一轮若仍要 taker，需要再次发布同样的 signal。份数只乘 qty。
+        </Note>
       </>
     ),
   },
@@ -366,13 +403,14 @@ const chapters: Chapter[] = [
     id: 'account-publish',
     group: '账户绑定',
     title: '发布到 Exec',
-    lead: '把账户绑定物化成该账户 Exec 上的策略：参数来自下单策略，target = 仓位策略 × 份数。',
+    lead: '把账户绑定物化成该账户 Exec 上的策略：参数来自下单策略，qty = 仓位策略 × 份数。',
     content: (
       <>
         <Endpoint method="POST" path={`${ACCOUNT}/bindings/{name}/publish`} />
         <p>
-          Manager 用仓位策略 <code>targets × shares</code> 和下单策略参数拼成 Exec
-          标准 JSON，再带写 token 调用该账户 <code>POST /api/strategy</code>。新建和更新都走这一次完整写入。
+          Manager 用仓位策略 <code>qty × shares</code> 和下单策略参数拼成 Exec
+          标准 JSON，<code>signal</code> 不随份数放大。再带写 token 调用该账户{' '}
+          <code>POST /api/strategy</code>。新建和更新都走这一次完整写入。
         </p>
         <Note tone="warn">未 publish 的绑定只存在 Manager PostgreSQL，交易进程看不到。</Note>
       </>

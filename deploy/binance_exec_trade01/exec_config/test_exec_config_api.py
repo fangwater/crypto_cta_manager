@@ -32,15 +32,32 @@ class RequireExactFieldsTests(unittest.TestCase):
 
 
 class NormalizeTargetsTests(unittest.TestCase):
-    def test_normalizes_symbols_and_sorts_keys(self) -> None:
+    def test_normalizes_legacy_qty_and_sorts_keys(self) -> None:
         self.assertEqual(
             normalize_targets({"ethusdt": -1.5, "BTCUSDT": 2.0}),
-            {"BTCUSDT": 2.0, "ETHUSDT": -1.5},
+            {
+                "BTCUSDT": {"qty": 2.0, "signal": 0},
+                "ETHUSDT": {"qty": -1.5, "signal": 0},
+            },
+        )
+
+    def test_accepts_signal_objects_and_omitted_signal(self) -> None:
+        self.assertEqual(
+            normalize_targets(
+                {
+                    "BTCUSDT": {"qty": -0.006, "signal": -1},
+                    "ETHUSDT": {"qty": -0.54},
+                }
+            ),
+            {
+                "BTCUSDT": {"qty": -0.006, "signal": -1},
+                "ETHUSDT": {"qty": -0.54, "signal": 0},
+            },
         )
 
     def test_allows_empty_and_zero_quantities(self) -> None:
         self.assertEqual(normalize_targets({}), {})
-        self.assertEqual(normalize_targets({"BTCUSDT": 0}), {"BTCUSDT": 0.0})
+        self.assertEqual(normalize_targets({"BTCUSDT": 0}), {"BTCUSDT": {"qty": 0.0, "signal": 0}})
 
     def test_rejects_invalid_targets(self) -> None:
         with self.assertRaisesRegex(ValueError, "targets must be an object"):
@@ -49,6 +66,8 @@ class NormalizeTargetsTests(unittest.TestCase):
             normalize_targets({"btc-usdt": 1})
         with self.assertRaisesRegex(ValueError, "must be a number"):
             normalize_targets({"BTCUSDT": "n/a"})
+        with self.assertRaisesRegex(ValueError, "signal must be one of"):
+            normalize_targets({"BTCUSDT": {"qty": 1, "signal": 3}})
 
 
 class AuthorizeRedisWriteTests(unittest.TestCase):

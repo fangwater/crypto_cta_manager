@@ -2,6 +2,13 @@ import { Minus, Plus, Search, Trash2, TrendingDown, TrendingUp } from 'lucide-re
 import { useMemo, useState } from 'react'
 import { quantity } from '../format'
 import { cn } from '../lib/cn'
+import {
+  ALLOWED_TARGET_SIGNALS,
+  signalLabel,
+  type TargetMap,
+  type TargetPosition,
+  type TargetSignal,
+} from '../lib/targetPositions'
 import { Badge } from './ui/Badge'
 import { Button } from './ui/Button'
 import { Input } from './ui/Field'
@@ -39,23 +46,25 @@ export function TargetPositionsEditor({
   targets,
   onChange,
 }: {
-  targets: Record<string, number>
-  onChange: (targets: Record<string, number>) => void
+  targets: TargetMap
+  onChange: (targets: TargetMap) => void
 }) {
   const [search, setSearch] = useState('')
   const [hideZero, setHideZero] = useState(true)
   const [newSymbol, setNewSymbol] = useState('')
   const [newQty, setNewQty] = useState('')
+  const [newSignal, setNewSignal] = useState<TargetSignal>(0)
   const [draftSymbols, setDraftSymbols] = useState<Record<string, string>>({})
 
   const stats = useMemo(() => {
     const entries = Object.entries(targets)
-    const quantities = entries.map(([, value]) => value)
+    const quantities = entries.map(([, value]) => value.qty)
     return {
       total: entries.length,
       active: quantities.filter((value) => value !== 0).length,
       long: quantities.filter((value) => value > 0).length,
       short: quantities.filter((value) => value < 0).length,
+      taker: entries.filter(([, value]) => Math.abs(value.signal) === 1).length,
     }
   }, [targets])
 
@@ -64,7 +73,7 @@ export function TargetPositionsEditor({
     return Object.entries(targets)
       .map(([symbol, value]) => ({ symbol, value }))
       .filter(({ symbol, value }) => {
-        if (hideZero && value === 0) return false
+        if (hideZero && value.qty === 0) return false
         if (query && !symbol.toUpperCase().includes(query)) return false
         return true
       })
@@ -83,19 +92,24 @@ export function TargetPositionsEditor({
     if (!nextSymbol || nextSymbol === oldSymbol) return
     if (nextSymbol in targets) return
     const next = { ...targets }
-    next[nextSymbol] = next[oldSymbol] ?? 0
+    next[nextSymbol] = next[oldSymbol] ?? { qty: 0, signal: 0 }
     delete next[oldSymbol]
     onChange(next)
   }
 
+  function updateTarget(symbol: string, patch: Partial<TargetPosition>) {
+    const current = targets[symbol] ?? { qty: 0, signal: 0 }
+    onChange({ ...targets, [symbol]: { ...current, ...patch } })
+  }
+
   function updateQuantity(symbol: string, raw: string) {
     if (raw.trim() === '' || raw.trim() === '-') {
-      onChange({ ...targets, [symbol]: 0 })
+      updateTarget(symbol, { qty: 0 })
       return
     }
     const value = Number(raw)
     if (!Number.isFinite(value)) return
-    onChange({ ...targets, [symbol]: value })
+    updateTarget(symbol, { qty: value })
   }
 
   function removeSymbol(symbol: string) {
@@ -116,9 +130,10 @@ export function TargetPositionsEditor({
     if (!symbol) return
     if (!Number.isFinite(value)) return
     if (symbol in targets) return
-    onChange({ ...targets, [symbol]: value })
+    onChange({ ...targets, [symbol]: { qty: value, signal: newSignal } })
     setNewSymbol('')
     setNewQty('')
+    setNewSignal(0)
   }
 
   return (
@@ -130,6 +145,7 @@ export function TargetPositionsEditor({
           <Badge tone="brand">{stats.active} 非零</Badge>
           {stats.long > 0 && <Badge tone="success">{stats.long} 多</Badge>}
           {stats.short > 0 && <Badge tone="warning">{stats.short} 空</Badge>}
+          {stats.taker > 0 && <Badge tone="brand">{stats.taker} 本轮 taker</Badge>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <label className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs text-muted">
@@ -166,18 +182,19 @@ export function TargetPositionsEditor({
         </div>
       ) : (
         <div className="max-h-[420px] overflow-auto">
-          <table className="w-full min-w-[520px] border-collapse text-sm">
+          <table className="w-full min-w-[640px] border-collapse text-sm">
             <thead className="sticky top-0 z-10 bg-canvas/95 backdrop-blur-sm">
               <tr className="border-b border-border-soft text-left text-[11px] uppercase tracking-[0.12em] text-subtle">
                 <th className="px-4 py-2.5 font-medium">品种</th>
                 <th className="px-3 py-2.5 font-medium">方向</th>
                 <th className="px-3 py-2.5 font-medium">目标数量</th>
+                <th className="px-3 py-2.5 font-medium">Signal</th>
                 <th className="px-4 py-2.5 text-right font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
               {rows.map(({ symbol, value }) => {
-                const meta = directionMeta(value)
+                const meta = directionMeta(value.qty)
                 const DirectionIcon = meta.icon
                 return (
                   <tr
@@ -201,9 +218,9 @@ export function TargetPositionsEditor({
                       <span
                         className={cn(
                           'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
-                          value > 0 && 'bg-emerald-50 text-emerald-700',
-                          value < 0 && 'bg-amber-50 text-amber-700',
-                          value === 0 && 'bg-slate-100 text-subtle',
+                          value.qty > 0 && 'bg-emerald-50 text-emerald-700',
+                          value.qty < 0 && 'bg-amber-50 text-amber-700',
+                          value.qty === 0 && 'bg-slate-100 text-subtle',
                         )}
                       >
                         <DirectionIcon size={12} />
@@ -214,10 +231,27 @@ export function TargetPositionsEditor({
                       <Input
                         type="number"
                         step="any"
-                        value={Number.isFinite(value) ? value : 0}
+                        value={Number.isFinite(value.qty) ? value.qty : 0}
                         onChange={(event) => updateQuantity(symbol, event.target.value)}
                         className={cn('h-9 tabular-nums text-right font-mono text-[13px]', meta.valueClass)}
                       />
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <select
+                        className="h-9 w-full rounded-lg border border-border bg-surface px-2 text-[13px] text-ink"
+                        value={value.signal}
+                        onChange={(event) =>
+                          updateTarget(symbol, {
+                            signal: Number(event.target.value) as TargetSignal,
+                          })
+                        }
+                      >
+                        {ALLOWED_TARGET_SIGNALS.map((signal) => (
+                          <option key={signal} value={signal}>
+                            {signal} · {signalLabel(signal)}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td className="px-4 py-2.5 text-right">
                       <button
@@ -238,7 +272,7 @@ export function TargetPositionsEditor({
       )}
 
       <div className="border-t border-border-soft bg-surface/80 px-4 py-3">
-        <div className="grid gap-2 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto] sm:items-end">
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
           <label className="grid gap-1.5 text-xs font-medium text-muted">
             新增品种
             <Input
@@ -259,6 +293,20 @@ export function TargetPositionsEditor({
               className="tabular-nums text-right font-mono"
             />
           </label>
+          <label className="grid gap-1.5 text-xs font-medium text-muted">
+            Signal
+            <select
+              className="h-10 rounded-lg border border-border bg-surface px-3 text-sm text-ink"
+              value={newSignal}
+              onChange={(event) => setNewSignal(Number(event.target.value) as TargetSignal)}
+            >
+              {ALLOWED_TARGET_SIGNALS.map((signal) => (
+                <option key={signal} value={signal}>
+                  {signal} · {signalLabel(signal)}
+                </option>
+              ))}
+            </select>
+          </label>
           <Button
             type="button"
             variant="secondary"
@@ -273,7 +321,9 @@ export function TargetPositionsEditor({
         {stats.total > 0 && (
           <p className="mt-2 text-[11px] text-subtle">
             当前共 {stats.total} 个品种，其中 {stats.active} 个非零仓位。
-            {stats.active > 0 && ` 预览：${quantity(Object.values(targets).reduce((sum, value) => sum + Math.abs(value), 0))} 绝对量合计。`}
+            {stats.active > 0 &&
+              ` 预览：${quantity(Object.values(targets).reduce((sum, value) => sum + Math.abs(value.qty), 0))} 绝对量合计。`}
+            {stats.taker > 0 && ' ±1 表示该品种本轮全部用 taker，不走 taker 转 maker。'}
           </p>
         )}
       </div>

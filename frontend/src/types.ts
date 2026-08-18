@@ -111,10 +111,15 @@ export interface OrderStrategyList {
   strategies: string[]
 }
 
+export interface TargetPosition {
+  qty: number
+  signal: number
+}
+
 export interface PositionStrategy {
   strategy_name: string
   equity_usdt: number
-  targets: Record<string, number>
+  targets: Record<string, TargetPosition>
   updated_at_us: number
 }
 

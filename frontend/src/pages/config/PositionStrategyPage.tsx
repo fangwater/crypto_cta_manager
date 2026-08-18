@@ -48,7 +48,7 @@ export function PositionStrategyPage() {
             renderMeta={(name) => {
               const item = positions.find((entry) => entry.strategy_name === name)
               if (!item) return ''
-              const active = Object.values(item.targets).filter((value) => value !== 0).length
+              const active = Object.values(item.targets).filter((value) => value.qty !== 0).length
               return `参考权益 ${money(item.equity_usdt)} USDT · ${active} 非零`
             }}
           />

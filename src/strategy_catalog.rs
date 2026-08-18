@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use sqlx::postgres::PgPool;
 
-use crate::order_config::{OrderParameters, validate_strategy_name};
+use crate::order_config::{OrderParameters, TargetPosition, validate_strategy_name};
 
 pub const DEFAULT_POSITION_EQUITY_USDT: f64 = 10_000.0;
 pub const DEFAULT_ACCOUNT_LEVERAGE: f64 = 1.0;
@@ -14,7 +14,7 @@ pub const DEFAULT_ACCOUNT_LEVERAGE: f64 = 1.0;
 pub struct PositionStrategy {
     pub strategy_name: String,
     pub equity_usdt: f64,
-    pub targets: BTreeMap<String, f64>,
+    pub targets: BTreeMap<String, TargetPosition>,
     pub updated_at_us: i64,
 }
 
@@ -52,7 +52,7 @@ pub struct SavePositionStrategyRequest {
     #[serde(default = "default_position_equity")]
     pub equity_usdt: f64,
     #[serde(default)]
-    pub targets: BTreeMap<String, f64>,
+    pub targets: BTreeMap<String, TargetPosition>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,10 +97,21 @@ pub fn allocated_equity(binding: &AccountBinding) -> f64 {
     binding.shares * binding.position_equity_usdt
 }
 
-pub fn scale_targets(targets: &BTreeMap<String, f64>, shares: f64) -> BTreeMap<String, f64> {
+pub fn scale_targets(
+    targets: &BTreeMap<String, TargetPosition>,
+    shares: f64,
+) -> BTreeMap<String, TargetPosition> {
     targets
         .iter()
-        .map(|(symbol, quantity)| (symbol.clone(), *quantity * shares))
+        .map(|(symbol, target)| {
+            (
+                symbol.clone(),
+                TargetPosition {
+                    qty: target.qty * shares,
+                    signal: target.signal,
+                },
+            )
+        })
         .collect()
 }
 
@@ -144,8 +155,8 @@ pub fn apply_allocation_ratios(
         .collect())
 }
 
-pub fn validate_targets(targets: &BTreeMap<String, f64>) -> Result<(), String> {
-    for (symbol, quantity) in targets {
+pub fn validate_targets(targets: &BTreeMap<String, TargetPosition>) -> Result<(), String> {
+    for (symbol, target) in targets {
         if symbol.is_empty()
             || !symbol
                 .bytes()
@@ -153,9 +164,11 @@ pub fn validate_targets(targets: &BTreeMap<String, f64>) -> Result<(), String> {
         {
             return Err(format!("invalid symbol: {symbol}"));
         }
-        if !quantity.is_finite() {
-            return Err(format!("targets.{symbol} must be finite"));
+        if !target.qty.is_finite() {
+            return Err(format!("targets.{symbol}.qty must be finite"));
         }
+        crate::order_config::validate_target_signal(target.signal)
+            .map_err(|error| format!("targets.{symbol}.{error}"))?;
     }
     Ok(())
 }
@@ -739,8 +752,18 @@ mod tests {
         assert_eq!(studio.bound_equity_usdt, 40_000.0);
         assert!((studio.bindings[0].allocation_ratio - 0.25).abs() < 1e-12);
         assert!((studio.bindings[1].allocation_ratio - 0.75).abs() < 1e-12);
-        let scaled = scale_targets(&BTreeMap::from([("BTCUSDT".into(), -0.006)]), 3.0);
-        assert!((scaled["BTCUSDT"] + 0.018).abs() < 1e-12);
+        let scaled = scale_targets(
+            &BTreeMap::from([(
+                "BTCUSDT".into(),
+                TargetPosition {
+                    qty: -0.006,
+                    signal: -1,
+                },
+            )]),
+            3.0,
+        );
+        assert!((scaled["BTCUSDT"].qty + 0.018).abs() < 1e-12);
+        assert_eq!(scaled["BTCUSDT"].signal, -1);
         let next = apply_allocation_ratios(
             &studio.bindings,
             &BTreeMap::from([("cta_a".into(), 0.5), ("cta_b".into(), 0.5)]),

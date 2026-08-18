@@ -2,6 +2,7 @@ import { Minus, TrendingDown, TrendingUp } from 'lucide-react'
 import { useMemo } from 'react'
 import { quantity } from '../format'
 import { cn } from '../lib/cn'
+import { signalLabel, type TargetMap } from '../lib/targetPositions'
 import { Badge } from './ui/Badge'
 
 function directionMeta(value: number) {
@@ -14,14 +15,14 @@ export function TargetPositionsView({
   targets,
   compact = false,
 }: {
-  targets: Record<string, number>
+  targets: TargetMap
   compact?: boolean
 }) {
   const rows = useMemo(
     () =>
       Object.entries(targets)
         .map(([symbol, value]) => ({ symbol, value }))
-        .filter(({ value }) => value !== 0)
+        .filter(({ value }) => value.qty !== 0)
         .sort((left, right) => left.symbol.localeCompare(right.symbol)),
     [targets],
   )
@@ -50,11 +51,12 @@ export function TargetPositionsView({
               <th className="px-4 py-2 font-medium">品种</th>
               <th className="px-3 py-2 font-medium">方向</th>
               <th className="px-4 py-2 text-right font-medium">数量</th>
+              <th className="px-3 py-2 font-medium">Signal</th>
             </tr>
           </thead>
           <tbody>
             {visible.map(({ symbol, value }) => {
-              const meta = directionMeta(value)
+              const meta = directionMeta(value.qty)
               const Icon = meta.icon
               return (
                 <tr key={symbol} className="border-b border-border-soft/70 last:border-0">
@@ -66,7 +68,10 @@ export function TargetPositionsView({
                     </span>
                   </td>
                   <td className={cn('px-4 py-2 text-right font-mono tabular-nums text-[13px]', meta.valueClass)}>
-                    {quantity(value)}
+                    {quantity(value.qty)}
+                  </td>
+                  <td className="px-3 py-2 text-[12px] text-muted">
+                    {value.signal} · {signalLabel(value.signal)}
                   </td>
                 </tr>
               )

@@ -1,3 +1,4 @@
+import { normalizeTargetMap } from './lib/targetPositions'
 import type {
   AccountCapacity,
   AccountStudio,
@@ -127,12 +128,19 @@ export function saveOrderParameters(
   )
 }
 
-export function listPositionStrategies(signal?: AbortSignal) {
-  return requestJson<PositionStrategy[]>('/catalog/position-strategies', { signal })
+function decodePositionStrategy(raw: PositionStrategy): PositionStrategy {
+  return { ...raw, targets: normalizeTargetMap(raw.targets) }
 }
 
-export function savePositionStrategy(body: PositionStrategy) {
-  return requestJson<PositionStrategy>('/catalog/position-strategies', {
+export async function listPositionStrategies(signal?: AbortSignal) {
+  const strategies = await requestJson<PositionStrategy[]>('/catalog/position-strategies', {
+    signal,
+  })
+  return strategies.map(decodePositionStrategy)
+}
+
+export async function savePositionStrategy(body: PositionStrategy) {
+  const saved = await requestJson<PositionStrategy>('/catalog/position-strategies', {
     method: 'POST',
     body: {
       strategy_name: body.strategy_name,
@@ -140,6 +148,7 @@ export function savePositionStrategy(body: PositionStrategy) {
       targets: body.targets,
     },
   })
+  return decodePositionStrategy(saved)
 }
 
 export function deletePositionStrategy(name: string) {

@@ -197,9 +197,13 @@ configured sources, while `/manager/` remains the detailed NAV timeline.
 and publish. The Exec `/exec_trade01/config/` page stays read-only. The browser
 talks only to Manager endpoints below `/manager/api/`; it never connects to
 Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Runtime
-Redis JSON is written only when Manager publish scales `targets` by shares,
-assembles the Exec payload, and `POST`s `/api/strategy` with
-`CRYPTO_CTA_MANAGER_WRITE_TOKEN`. `POST /api/targets` is gone. Parameter-only
+Redis JSON is written only when Manager publish scales each target `qty` by
+shares, copies `signal` unchanged, assembles the Exec payload, and `POST`s
+`/api/strategy` with `CRYPTO_CTA_MANAGER_WRITE_TOKEN`. Each target is
+`{"qty": <f64>, "signal": <int>}` with `signal` in `-2,-1,0,1,2`; omitted or
+legacy bare-number targets become `signal=0`. `signal=±1` means that symbol's
+current execution is all-taker and must not convert taker to maker. `POST
+/api/targets` is gone. Parameter-only
 updates of an existing strategy still use token-gated
 `POST /api/order-parameters` and require a positive `expected_updated_at_us`,
 Redis optimistic concurrency, and a PostgreSQL audit row in

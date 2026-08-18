@@ -38,6 +38,7 @@ ORDER_PARAMETER_FIELDS = (
 )
 CONFIG_FIELDS = set(ORDER_PARAMETER_FIELDS) | {"targets"}
 OPTIONAL_CONFIG_FIELDS = {"updated_at_us"}
+ALLOWED_TARGET_SIGNALS = (-2, -1, 0, 1, 2)
 DEFAULT_CONFIG: Dict[str, Any] = {
     "single_order_usdt": 100.0,
     "orders_per_batch": 3,
@@ -120,15 +121,47 @@ def require_exact_fields(payload: Any, required: set[str]) -> Dict[str, Any]:
     return payload
 
 
-def normalize_targets(raw: Any) -> Dict[str, float]:
+def signed_integer(raw: Any, field: str) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f"{field} must be an integer")
+    return raw
+
+
+def normalize_target_signal(raw: Any, field: str) -> int:
+    if raw is None:
+        return 0
+    value = signed_integer(raw, field)
+    if value not in ALLOWED_TARGET_SIGNALS:
+        allowed = ", ".join(str(item) for item in ALLOWED_TARGET_SIGNALS)
+        raise ValueError(f"{field} must be one of {allowed}")
+    return value
+
+
+def normalize_target_position(raw: Any, field: str) -> Dict[str, Any]:
+    if isinstance(raw, bool) or isinstance(raw, (int, float, str)):
+        return {"qty": finite_float(raw, f"{field}.qty"), "signal": 0}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{field} must be a number or an object with qty")
+    unknown = sorted(set(raw) - {"qty", "signal"})
+    if unknown:
+        raise ValueError(f"unknown {field} fields: {', '.join(unknown)}")
+    if "qty" not in raw:
+        raise ValueError(f"{field}.qty is required")
+    return {
+        "qty": finite_float(raw["qty"], f"{field}.qty"),
+        "signal": normalize_target_signal(raw.get("signal"), f"{field}.signal"),
+    }
+
+
+def normalize_targets(raw: Any) -> Dict[str, Dict[str, Any]]:
     if not isinstance(raw, dict):
         raise ValueError("targets must be an object")
-    targets: Dict[str, float] = {}
-    for raw_symbol, raw_qty in raw.items():
+    targets: Dict[str, Dict[str, Any]] = {}
+    for raw_symbol, raw_target in raw.items():
         symbol = normalize_symbol(raw_symbol)
         if symbol in targets:
             raise ValueError(f"duplicate symbol: {symbol}")
-        targets[symbol] = finite_float(raw_qty, f"targets.{symbol}")
+        targets[symbol] = normalize_target_position(raw_target, f"targets.{symbol}")
     return dict(sorted(targets.items()))
 
 
@@ -499,7 +532,7 @@ INDEX_HTML = r"""<!doctype html>
           <span class="readonly-state">Read only</span>
         </div>
         <div class="targets">
-          <table><thead><tr><th>Symbol</th><th>Target Qty</th></tr></thead><tbody id="target-rows"></tbody></table>
+          <table><thead><tr><th>Symbol</th><th>Target Qty</th><th>Signal</th></tr></thead><tbody id="target-rows"></tbody></table>
           <div id="target-empty" class="empty">No non-zero target positions</div>
         </div>
       </section>
@@ -525,15 +558,19 @@ INDEX_HTML = r"""<!doctype html>
           select.innerHTML = '<option value="">Select strategy</option>' + state.names.map((name) => `<option value="${name}">${name}</option>`).join("");
           select.value = state.name;
         }
+        function targetQty(raw) { return raw && typeof raw === "object" ? Number(raw.qty) : Number(raw); }
+        function targetSignal(raw) { return raw && typeof raw === "object" && raw.signal != null ? Number(raw.signal) : 0; }
         function renderTargets(targets) {
           const tbody = el("target-rows");
           tbody.innerHTML = "";
           Object.entries(targets || {})
-            .filter(([, qty]) => Number(qty) !== 0)
+            .filter(([, raw]) => targetQty(raw) !== 0)
             .sort(([a], [b]) => a.localeCompare(b))
-            .forEach(([symbol, qty]) => {
+            .forEach(([symbol, raw]) => {
               const tr = document.createElement("tr");
-              tr.innerHTML = `<td>${String(symbol).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</td><td>${qty}</td>`;
+              const qty = targetQty(raw);
+              const signal = targetSignal(raw);
+              tr.innerHTML = `<td>${String(symbol).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</td><td>${qty}</td><td>${signal}</td>`;
               tbody.appendChild(tr);
             });
           el("target-empty").style.display = tbody.children.length ? "none" : "block";

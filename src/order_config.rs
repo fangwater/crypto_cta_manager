@@ -74,6 +74,71 @@ struct StrategyResponse {
     config: ExecConfigPayload,
 }
 
+pub const ALLOWED_TARGET_SIGNALS: [i32; 5] = [-2, -1, 0, 1, 2];
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TargetPosition {
+    pub qty: f64,
+    pub signal: i32,
+}
+
+impl TargetPosition {
+    pub fn new(qty: f64, signal: i32) -> std::result::Result<Self, String> {
+        if !qty.is_finite() {
+            return Err("qty must be finite".to_string());
+        }
+        validate_target_signal(signal)?;
+        Ok(Self { qty, signal })
+    }
+}
+
+impl<'de> Deserialize<'de> for TargetPosition {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum TargetPositionDe {
+            Qty(f64),
+            Object(TargetPositionObject),
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TargetPositionObject {
+            qty: f64,
+            #[serde(default)]
+            signal: Option<i32>,
+        }
+
+        match TargetPositionDe::deserialize(deserializer)? {
+            TargetPositionDe::Qty(qty) => {
+                TargetPosition::new(qty, 0).map_err(serde::de::Error::custom)
+            }
+            TargetPositionDe::Object(value) => {
+                TargetPosition::new(value.qty, value.signal.unwrap_or(0))
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
+pub fn validate_target_signal(signal: i32) -> std::result::Result<(), String> {
+    if ALLOWED_TARGET_SIGNALS.contains(&signal) {
+        Ok(())
+    } else {
+        Err(format!(
+            "signal must be one of {}",
+            ALLOWED_TARGET_SIGNALS
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ExecConfigPayload {
     single_order_usdt: f64,
@@ -85,7 +150,7 @@ struct ExecConfigPayload {
     max_maker_requotes: u32,
     target_tolerance_usdt: f64,
     #[serde(default)]
-    targets: BTreeMap<String, f64>,
+    targets: BTreeMap<String, TargetPosition>,
     updated_at_us: Option<i64>,
 }
 
@@ -243,7 +308,7 @@ impl ExecConfigClient {
             .config
             .targets
             .values()
-            .filter(|quantity| quantity.abs() > 0.0)
+            .filter(|target| target.qty.abs() > 0.0)
             .count();
         Ok(OrderStrategyView {
             source_id: source_id.to_string(),
@@ -313,7 +378,7 @@ impl ExecConfigClient {
         base_url: &str,
         strategy_name: &str,
         order_parameters: &OrderParameters,
-        targets: &BTreeMap<String, f64>,
+        targets: &BTreeMap<String, TargetPosition>,
     ) -> std::result::Result<OrderStrategyView, ExecConfigError> {
         validate_strategy_name(strategy_name).map_err(ExecConfigError::invalid)?;
         order_parameters
@@ -358,7 +423,7 @@ impl ExecConfigClient {
         let nonzero_target_count = published
             .targets
             .values()
-            .filter(|quantity| quantity.abs() > 0.0)
+            .filter(|target| target.qty.abs() > 0.0)
             .count();
         Ok(OrderStrategyView {
             source_id: source_id.to_string(),
@@ -472,5 +537,39 @@ mod tests {
         assert!(validate_strategy_name("CTA_SK_01.alpha").is_ok());
         assert!(validate_strategy_name("../strategy").is_err());
         assert!(validate_strategy_name("SYSTEM_POSITION_CLOSE").is_err());
+    }
+
+    #[test]
+    fn target_position_accepts_legacy_qty_and_signal_object() {
+        let legacy: TargetPosition = serde_json::from_value(serde_json::json!(-0.006)).unwrap();
+        assert_eq!(
+            legacy,
+            TargetPosition {
+                qty: -0.006,
+                signal: 0
+            }
+        );
+        let object: TargetPosition = serde_json::from_value(serde_json::json!({
+            "qty": -0.54,
+            "signal": -1
+        }))
+        .unwrap();
+        assert_eq!(
+            object,
+            TargetPosition {
+                qty: -0.54,
+                signal: -1
+            }
+        );
+        let omitted: TargetPosition =
+            serde_json::from_value(serde_json::json!({ "qty": 1.0 })).unwrap();
+        assert_eq!(omitted.signal, 0);
+        assert!(
+            serde_json::from_value::<TargetPosition>(serde_json::json!({
+                "qty": 1.0,
+                "signal": 3
+            }))
+            .is_err()
+        );
     }
 }
