@@ -54,7 +54,7 @@ class ManagerPublishClientTests(unittest.TestCase):
         )
         self.assertNotIn("/exec_trade01/config/", CLIENT.DEFAULT_BASE_URL)
 
-    def test_put_then_publish_hits_real_client_entry_points(self) -> None:
+    def test_put_position_hits_catalog_only(self) -> None:
         seen: list[dict[str, Any]] = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -90,9 +90,6 @@ class ManagerPublishClientTests(unittest.TestCase):
             put = CLIENT.main(
                 ["--url", url, "put-position", f"@{json_path}"]
             )
-            publish = CLIENT.main(
-                ["--url", url, "publish", "binance_exec_trade01", "CTA_A"]
-            )
         finally:
             server.shutdown()
             server.server_close()
@@ -101,16 +98,11 @@ class ManagerPublishClientTests(unittest.TestCase):
                 Path(json_path).unlink(missing_ok=True)
 
         self.assertEqual(put, 0)
-        self.assertEqual(publish, 0)
         self.assertEqual(
             [item["path"] for item in seen],
-            [
-                "/manager/api/catalog/position-strategies",
-                "/manager/api/catalog/accounts/binance_exec_trade01/bindings/CTA_A/publish",
-            ],
+            ["/manager/api/catalog/position-strategies"],
         )
         self.assertIn('"signal": -1', seen[0]["body"])
-        self.assertEqual(seen[1]["body"], "")
 
 
 if __name__ == "__main__":

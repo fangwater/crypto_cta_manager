@@ -224,12 +224,34 @@ pub async fn list_binding_source_ids_for_position(
     pool: &PgPool,
     strategy_name: &str,
 ) -> Result<Vec<String>> {
+    let bindings = list_bindings_for_position(pool, strategy_name).await?;
+    let mut source_ids = bindings
+        .into_iter()
+        .map(|binding| binding.source_id)
+        .collect::<Vec<_>>();
+    source_ids.sort();
+    source_ids.dedup();
+    Ok(source_ids)
+}
+
+pub async fn list_bindings_for_position(
+    pool: &PgPool,
+    strategy_name: &str,
+) -> Result<Vec<AccountBinding>> {
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT source_id
-        FROM cta_account_strategy_bindings
-        WHERE position_strategy_name = $1
-        ORDER BY source_id
+        SELECT
+            b.source_id,
+            b.binding_name,
+            b.position_strategy_name,
+            b.order_strategy_name,
+            b.shares,
+            b.updated_at_us,
+            p.equity_usdt
+        FROM cta_account_strategy_bindings b
+        JOIN cta_position_strategies p ON p.strategy_name = b.position_strategy_name
+        WHERE b.position_strategy_name = $1
+        ORDER BY b.source_id, b.binding_name
         "#,
     )
     .bind(strategy_name)
@@ -237,9 +259,19 @@ pub async fn list_binding_source_ids_for_position(
     .await
     .with_context(|| format!("failed to list bindings for position strategy {strategy_name}"))?;
     rows.into_iter()
-        .map(|row| row.try_get("source_id"))
-        .collect::<Result<Vec<_>, _>>()
-        .context("failed to decode binding source ids")
+        .map(|row| {
+            Ok(AccountBinding {
+                source_id: row.try_get("source_id")?,
+                binding_name: row.try_get("binding_name")?,
+                position_strategy_name: row.try_get("position_strategy_name")?,
+                order_strategy_name: row.try_get("order_strategy_name")?,
+                shares: row.try_get("shares")?,
+                position_equity_usdt: row.try_get("equity_usdt")?,
+                allocation_ratio: 0.0,
+                updated_at_us: row.try_get("updated_at_us")?,
+            })
+        })
+        .collect()
 }
 
 pub async fn list_position_strategies(pool: &PgPool) -> Result<Vec<PositionStrategy>> {

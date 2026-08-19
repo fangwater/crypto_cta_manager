@@ -19,7 +19,8 @@ use crate::capacity::{self, AccountCapacityView};
 use crate::config::{AppConfig, SourceConfig};
 use crate::manager_db::ManagerDb;
 use crate::order_config::{
-    ExecConfigClient, ExecConfigError, SaveOrderParametersRequest, validate_strategy_name,
+    ExecConfigClient, ExecConfigError, OrderStrategyView, SaveOrderParametersRequest,
+    validate_strategy_name,
 };
 use crate::position_archive::PositionArchive;
 use crate::strategy_catalog::{
@@ -117,6 +118,22 @@ struct AuthResponse {
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BindingPublishResult {
+    source_id: String,
+    binding_name: String,
+    shares: f64,
+    published: Option<OrderStrategyView>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SavedPositionStrategyResponse {
+    #[serde(flatten)]
+    strategy: strategy_catalog::PositionStrategy,
+    publishes: Vec<BindingPublishResult>,
 }
 
 struct ApiError(anyhow::Error);
@@ -574,7 +591,36 @@ async fn save_position_strategy(
                 );
                 return Err(error.into());
             }
-            Ok((NO_STORE, Json(saved)).into_response())
+            let publishes = publish_bound_accounts(&state, &saved.strategy_name).await;
+            if let Some(failed) = publishes.iter().find(|item| item.error.is_some()) {
+                let source_id = failed.source_id.as_str();
+                let binding_name = failed.binding_name.as_str();
+                let error = failed.error.as_deref().unwrap_or("publish failed");
+                error!(
+                    strategy_name = %saved.strategy_name,
+                    source_id,
+                    binding_name,
+                    error,
+                    "position strategy saved but bound-account publish failed"
+                );
+                return Ok((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "position strategy saved, but publish failed for {source_id}/{binding_name}: {error}"
+                        ),
+                    }),
+                )
+                    .into_response());
+            }
+            Ok((
+                NO_STORE,
+                Json(SavedPositionStrategyResponse {
+                    strategy: saved,
+                    publishes,
+                }),
+            )
+                .into_response())
         }
         Err(error) => Ok(catalog_error(error)),
     }
@@ -760,31 +806,165 @@ async fn publish_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let source = match resolve_order_config_source(&state.config, &source_id) {
+    match publish_binding(&state, &source_id, &binding_name).await {
+        Ok(published) => Ok((NO_STORE, Json(published)).into_response()),
+        Err(error) => Ok(publish_failure_response(error)),
+    }
+}
+
+async fn publish_bound_accounts(
+    state: &WebState,
+    strategy_name: &str,
+) -> Vec<BindingPublishResult> {
+    let bindings =
+        match strategy_catalog::list_bindings_for_position(&state.pool, strategy_name).await {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                warn!(
+                    strategy_name,
+                    error = %error,
+                    "failed to list bound accounts for position publish"
+                );
+                return vec![BindingPublishResult {
+                    source_id: String::new(),
+                    binding_name: strategy_name.to_string(),
+                    shares: 0.0,
+                    published: None,
+                    error: Some("failed to list bound accounts".to_string()),
+                }];
+            }
+        };
+    let mut publishes = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        match publish_binding(state, &binding.source_id, &binding.binding_name).await {
+            Ok(published) => {
+                info!(
+                    strategy_name,
+                    source_id = %binding.source_id,
+                    binding_name = %binding.binding_name,
+                    shares = binding.shares,
+                    "published bound account after position update"
+                );
+                publishes.push(BindingPublishResult {
+                    source_id: binding.source_id,
+                    binding_name: binding.binding_name,
+                    shares: binding.shares,
+                    published: Some(published),
+                    error: None,
+                });
+            }
+            Err(error) => {
+                warn!(
+                    strategy_name,
+                    source_id = %binding.source_id,
+                    binding_name = %binding.binding_name,
+                    error = %error.message,
+                    "bound-account publish failed after position update"
+                );
+                publishes.push(BindingPublishResult {
+                    source_id: binding.source_id,
+                    binding_name: binding.binding_name,
+                    shares: binding.shares,
+                    published: None,
+                    error: Some(error.message),
+                });
+            }
+        }
+    }
+    publishes
+}
+
+struct PublishFailure {
+    status: StatusCode,
+    message: String,
+}
+
+async fn publish_binding(
+    state: &WebState,
+    source_id: &str,
+    binding_name: &str,
+) -> std::result::Result<OrderStrategyView, PublishFailure> {
+    let source = match resolve_publish_source(&state.config, source_id) {
         Ok(source) => source,
-        Err(response) => return Ok(response),
+        Err(error) => return Err(error),
     };
-    let Some((position, order, shares)) =
-        strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name).await?
-    else {
-        return Ok(not_found("binding was not found"));
+    let loaded = strategy_catalog::load_binding_parts(&state.pool, source_id, binding_name)
+        .await
+        .map_err(|error| PublishFailure {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: error.to_string(),
+        })?;
+    let Some((position, order, shares)) = loaded else {
+        return Err(PublishFailure {
+            status: StatusCode::NOT_FOUND,
+            message: "binding was not found".to_string(),
+        });
     };
     let exec_config_url = source.exec_config_url.as_deref().unwrap_or_default();
     let targets = strategy_catalog::scale_targets(&position.targets, shares);
-    match state
+    state
         .exec_config
         .publish_strategy(
-            &source_id,
+            source_id,
             exec_config_url,
-            &binding_name,
+            binding_name,
             &order.order_parameters,
             &targets,
         )
         .await
-    {
-        Ok(published) => Ok((NO_STORE, Json(published)).into_response()),
-        Err(error) => Ok(exec_config_error_response(&error)),
+        .map_err(publish_failure_from_exec)
+}
+
+fn resolve_publish_source<'a>(
+    config: &'a AppConfig,
+    source_id: &str,
+) -> std::result::Result<&'a SourceConfig, PublishFailure> {
+    let Some(source) = config.sources.iter().find(|source| source.id == source_id) else {
+        return Err(PublishFailure {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("unknown source_id: {source_id}"),
+        });
+    };
+    if !source.enabled {
+        return Err(PublishFailure {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("source_id is disabled: {source_id}"),
+        });
     }
+    if source.exec_config_url.is_none() {
+        return Err(PublishFailure {
+            status: StatusCode::NOT_FOUND,
+            message: "order configuration is unavailable for this source".to_string(),
+        });
+    }
+    Ok(source)
+}
+
+fn publish_failure_from_exec(error: ExecConfigError) -> PublishFailure {
+    let status = match error.status() {
+        Some(StatusCode::BAD_REQUEST) => StatusCode::BAD_REQUEST,
+        Some(StatusCode::UNAUTHORIZED) => StatusCode::BAD_GATEWAY,
+        Some(StatusCode::NOT_FOUND) => StatusCode::NOT_FOUND,
+        Some(StatusCode::CONFLICT) => StatusCode::CONFLICT,
+        Some(StatusCode::SERVICE_UNAVAILABLE) => StatusCode::BAD_GATEWAY,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    let message = if status == StatusCode::BAD_GATEWAY {
+        "Exec Config service is unavailable".to_string()
+    } else {
+        error.public_message().to_string()
+    };
+    PublishFailure { status, message }
+}
+
+fn publish_failure_response(error: PublishFailure) -> Response {
+    (
+        error.status,
+        Json(ErrorResponse {
+            error: error.message,
+        }),
+    )
+        .into_response()
 }
 
 async fn load_factual_positions(
@@ -1130,9 +1310,50 @@ mod tests {
     }
 
     #[test]
+    fn resolve_publish_source_requires_enabled_exec_config() {
+        let mut config = crate::config::AppConfig {
+            database: crate::config::DatabaseConfig {
+                url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),
+                max_connections: 1,
+            },
+            ingestion: crate::config::IngestionConfig::default(),
+            order_config: crate::config::OrderConfigSettings::default(),
+            twap: crate::config::TwapConfig::default(),
+            sources: vec![crate::config::SourceConfig {
+                id: "binance_exec_trade01".into(),
+                account: "trade01".into(),
+                venue: "binance-futures".into(),
+                rocksdb_path: std::path::PathBuf::from("/tmp/missing"),
+                enabled: true,
+                start_ts_us: None,
+                poll_interval_secs: None,
+                estimated_fee_rate: None,
+                gateway_prefix: Some("/exec_trade01".into()),
+                exec_config_url: Some("http://127.0.0.1:18161/".into()),
+                exec_viz_url: None,
+                ipc_namespace: None,
+                account_ipc_service: None,
+                share_unit_usdt: None,
+            }],
+        };
+        assert!(resolve_publish_source(&config, "binance_exec_trade01").is_ok());
+        config.sources[0].enabled = false;
+        let disabled = resolve_publish_source(&config, "binance_exec_trade01").unwrap_err();
+        assert_eq!(disabled.status, StatusCode::BAD_REQUEST);
+        config.sources[0].enabled = true;
+        config.sources[0].exec_config_url = None;
+        let missing = resolve_publish_source(&config, "binance_exec_trade01").unwrap_err();
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        let unknown = resolve_publish_source(&config, "missing").unwrap_err();
+        assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn manager_publish_client_download_is_the_checked_in_script() {
         let script = std::str::from_utf8(MANAGER_PUBLISH_CLIENT).unwrap();
         assert!(script.contains("put-position"));
+        assert!(script.contains("automatically republishes every bound"));
+        assert!(script.contains(r#"{"strategy_name":"CTA_A","targets":{"BTCUSDT":-0.006}}"#));
         assert!(script.contains("catalog/accounts/"));
         assert!(script.contains("/bindings/"));
         assert!(script.contains("/publish"));

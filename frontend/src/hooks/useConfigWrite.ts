@@ -12,7 +12,7 @@ export function useConfigWrite() {
     setNotice(null)
     try {
       const result = await action()
-      setNotice('已保存')
+      setNotice(typeof result === 'string' && result.trim() ? result : '已保存')
       return result
     } catch (reason: unknown) {
       setError(reason instanceof ApiError ? reason.message : String(reason))

@@ -230,11 +230,12 @@ On el01, `/` redirects into `/manager/workspace/`. On jp-meta, `/` stays the
 host Nginx welcome page; the CTA workspace is `/manager/workspace/`.
 `/manager/` is the NAV timeline. `/manager/config/` owns strategy catalog,
 account bindings, and publish. The Exec `/exec_trade01/config/` page stays
-read-only. Runtime Redis JSON is written only by Manager publish through the
-loopback Exec Config `POST /api/strategy`. There is no write token. Each target
-is `{qty, signal}`; `signal=±1` means that symbol uses taker-only for the
-current execution. External push scripts must update the Manager catalog and
-then call publish through the same Nginx:
+read-only. Runtime Redis JSON is written only by Manager through the loopback
+Exec Config `POST /api/strategy`. There is no write token. Each target is
+`{qty, signal}`; `signal=±1` means that symbol uses taker-only for the current
+execution. A successful `POST /api/catalog/position-strategies` republishes
+every bound account automatically. External push scripts only POST the catalog
+through the same Nginx:
 
 ```text
 el01     http://172.16.30.42:10041/manager/api/manager_publish_client.py

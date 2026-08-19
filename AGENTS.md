@@ -251,9 +251,11 @@ configured sources, while `/manager/` remains the detailed NAV timeline.
 and publish. The Exec `/exec_trade01/config/` page stays read-only. The browser
 talks only to Manager endpoints below `/manager/api/`; it never connects to
 Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Runtime
-Redis JSON is written only when Manager publish scales each target `qty` by
-shares, copies `signal` unchanged, assembles the Exec payload, and `POST`s
-`/api/strategy`. There is no write token. Each target is
+Redis JSON is written when Manager scales each target `qty` by shares, copies
+`signal` unchanged, assembles the Exec payload, and `POST`s `/api/strategy`.
+A successful `POST /api/catalog/position-strategies` does that automatically
+for every account bound to the strategy. The per-binding publish endpoint
+remains only as a manual republish. There is no write token. Each target is
 `{"qty": <f64>, "signal": <int>}` with `signal` in `-2,-1,0,1,2`; omitted or
 legacy bare-number targets become `signal=0`. `signal=±1` means that symbol's
 current execution is all-taker and must not convert taker to maker. `POST
@@ -264,7 +266,8 @@ Redis optimistic concurrency, and a PostgreSQL audit row in
 `cta_exec_order_config_audit`. Scripts must not write Redis through Exec Config.
 The replacement push client is `scripts/manager_publish_client.py`, served at
 `GET /api/manager_publish_client.py` (`/manager/api/manager_publish_client.py`
-through Nginx). It writes the catalog then publishes; it never talks to Redis.
+through Nginx). It writes the catalog; bound accounts are republished by
+Manager. It never talks to Redis.
 
 End-to-end HTTP checks from both `el_dev` and the development host returned
 `200` for Manager, Manager API, Exec Viz, snapshot, and Config. The development

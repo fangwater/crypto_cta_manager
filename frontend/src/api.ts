@@ -9,6 +9,7 @@ import type {
   OrderStrategyList,
   OrderStrategyView,
   PositionStrategy,
+  SavedPositionStrategy,
   TimelineSnapshot,
 } from './types'
 
@@ -135,7 +136,7 @@ export async function listPositionStrategies(signal?: AbortSignal) {
 }
 
 export async function savePositionStrategy(body: PositionStrategy) {
-  const saved = await requestJson<PositionStrategy>('/catalog/position-strategies', {
+  const saved = await requestJson<SavedPositionStrategy>('/catalog/position-strategies', {
     method: 'POST',
     body: {
       strategy_name: body.strategy_name,
@@ -143,7 +144,10 @@ export async function savePositionStrategy(body: PositionStrategy) {
       targets: body.targets,
     },
   })
-  return decodePositionStrategy(saved)
+  return {
+    ...decodePositionStrategy(saved),
+    publishes: saved.publishes ?? [],
+  }
 }
 
 export function deletePositionStrategy(name: string) {

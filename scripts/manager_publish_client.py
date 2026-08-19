@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Update Manager position templates and publish them to Exec.
+"""Update Manager position templates.
 
-Redis writes go through Manager publish, not Exec Config.
+A successful POST writes the catalog, then Manager republishes every bound
+account automatically. Redis writes still go through Manager, not Exec Config.
 """
 
 from __future__ import annotations
@@ -172,18 +173,19 @@ def publish_path(source_id: str, binding_name: str) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Update Manager position templates and publish them to Exec",
+        description="Update Manager position templates",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   %(prog)s get-position
   %(prog)s get-position CTA_SK_C40V6PosT1_LXY_filter_Position
   %(prog)s put-position @cta.json
-  %(prog)s put-position '{"strategy_name":"CTA_A","targets":{"BTCUSDT":{"qty":-0.006,"signal":-1}}}'
+  %(prog)s put-position '{"strategy_name":"CTA_A","targets":{"BTCUSDT":-0.006}}'
   %(prog)s get-bindings binance_exec_trade01
   %(prog)s publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position
 
-put-position writes Manager PostgreSQL only. publish scales qty by shares,
-keeps signal unchanged, and POSTs the assembled JSON to Exec.
+put-position writes the catalog and automatically republishes every bound
+account. qty is scaled by that account's shares; signal is copied unchanged.
+The optional publish command only republishes one existing binding.
 """,
     )
     parser.add_argument(
@@ -199,7 +201,7 @@ keeps signal unchanged, and POSTs the assembled JSON to Exec.
 
     put_parser = commands.add_parser(
         "put-position",
-        help="POST position strategy JSON to the Manager catalog",
+        help="POST position JSON; Manager republishes every bound account",
     )
     put_parser.add_argument(
         "json",
@@ -211,7 +213,7 @@ keeps signal unchanged, and POSTs the assembled JSON to Exec.
 
     publish_parser = commands.add_parser(
         "publish",
-        help="Publish one account binding to Exec Redis",
+        help="Republish one existing account binding to Exec Redis",
     )
     publish_parser.add_argument("source_id")
     publish_parser.add_argument("binding_name")

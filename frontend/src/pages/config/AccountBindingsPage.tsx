@@ -235,7 +235,7 @@ export function AccountBindingsPage() {
                         </option>
                       ))}
                     </Select>
-                    <FieldHint>即 Exec 上的 CTA 策略名，发布时原样使用。</FieldHint>
+                    <FieldHint>即 Exec 上的 CTA 策略名；仓位更新后按这个名字自动写入 Redis。</FieldHint>
                   </Label>
                   <Label>
                     执行算法
@@ -340,7 +340,7 @@ export function AccountBindingsPage() {
                             })
                           }
                         >
-                          <CheckCircle2 size={15} /> 发布到 Exec
+                          <CheckCircle2 size={15} /> 重推到 Exec
                         </Button>
                         <Button
                           type="button"

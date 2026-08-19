@@ -123,6 +123,18 @@ export interface PositionStrategy {
   updated_at_us: number
 }
 
+export interface BindingPublishResult {
+  source_id: string
+  binding_name: string
+  shares: number
+  published?: OrderStrategyView | null
+  error?: string | null
+}
+
+export interface SavedPositionStrategy extends PositionStrategy {
+  publishes?: BindingPublishResult[]
+}
+
 export interface CatalogOrderStrategy {
   strategy_name: string
   order_parameters: OrderParameters

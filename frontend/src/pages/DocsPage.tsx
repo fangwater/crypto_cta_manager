@@ -95,7 +95,7 @@ function buildChapters(gateway: string): Chapter[] {
             [
               '账户绑定',
               'trade01 / 预留 trade02-04',
-              '启用哪些策略、杠杆、占比；点发布后写入该账户 Exec',
+              '启用哪些策略、杠杆、占比；仓位更新后按份数自动写入该账户 Exec',
             ],
             [
               'Exec 运行时',
@@ -109,7 +109,7 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'POST',
               path: `${CATALOG_PATH}/position-strategies`,
-              summary: '创建/更新仓位策略（全局）',
+              summary: '创建/更新仓位策略，并自动推送到全部绑定账户',
             },
             {
               method: 'POST',
@@ -119,7 +119,7 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'POST',
               path: `${ACCOUNT_PATH}/bindings/{name}/publish`,
-              summary: '算 qty、拼 JSON，写入该账户 Redis',
+              summary: '手工重推一个已有绑定；日常仓位更新不必再调',
             },
             {
               method: 'GET',
@@ -255,7 +255,7 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'POST',
               path: `${CATALOG_PATH}/position-strategies`,
-              summary: '按 strategy_name upsert',
+              summary: '按 strategy_name upsert，并自动推送到全部绑定账户',
             },
             {
               method: 'DELETE',
@@ -264,7 +264,14 @@ function buildChapters(gateway: string): Chapter[] {
             },
           ]}
         />
-        <CodeBlock label="POST body">{`{
+        <CodeBlock label="精简 POST body">{`{
+  "strategy_name": "CTA_SK_C4V6PosT1_LXY_filter_Position",
+  "targets": {
+    "BTCUSDT": 0.004,
+    "ETHUSDT": -0.016
+  }
+}`}</CodeBlock>
+        <CodeBlock label="完整 POST body">{`{
   "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
   "equity_usdt": 10000,
   "targets": {
@@ -274,19 +281,25 @@ function buildChapters(gateway: string): Chapter[] {
 }`}</CodeBlock>
         <FieldRows
           rows={[
-            { field: 'strategy_name', detail: '全局唯一；发布到 Exec 时原样使用' },
-            { field: 'equity_usdt', detail: '单份参考名义，必须 > 0' },
+            { field: 'strategy_name', detail: '必填，全局唯一；写入 Redis 时原样使用' },
+            {
+              field: 'equity_usdt',
+              detail: '可省略，默认 10000。单份参考名义，必须 > 0；只影响账户配比，不进 Redis',
+            },
             {
               field: 'targets',
-              detail: '品种 → { qty, signal }。旧格式裸数字仍可读，视为 signal=0',
+              detail: '品种 → 数量。精简写法是裸数字；完整写法是 { qty, signal }',
             },
-            { field: 'qty', detail: '目标数量，可为 0 或负数；发布时按份数放大' },
+            { field: 'qty', detail: '目标数量，可为 0 或负数；自动推送时按该账户份数放大' },
             {
               field: 'signal',
-              detail: '整数，只允许 -2/-1/0/1/2；省略按 0。±1 表示该品种本轮全部用 taker',
+              detail: '可省略，默认 0。只允许 -2/-1/0/1/2。±1 表示该品种本轮全部用 taker',
             },
           ]}
         />
+        <Note>
+          日常推仓位用精简版即可：只传策略名和裸数字 qty。省略的 signal 按 0，省略的 equity_usdt 按 10000。
+        </Note>
       </>
     ),
   },
@@ -294,7 +307,7 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'target-signal',
     group: '策略目录',
     title: 'qty 与 signal',
-    lead: '运行时每条仓位是对象，不再是裸数字。signal 只影响该品种这一轮怎么成交。',
+    lead: 'POST 可以用裸数字；写入 Redis 后每条仓位都是 {qty, signal}。signal 只影响该品种这一轮怎么成交。',
     content: (
       <>
         <CodeBlock label="发布到 Redis 的 targets">{`{
@@ -449,7 +462,7 @@ function buildChapters(gateway: string): Chapter[] {
           path={`${ACCOUNT_PATH}/bindings/{name}/shares`}
           summary="脚本按份数精确调整；浏览器主交互走 allocations"
         />
-        <Note>这两条只改 Manager 本地。要让 Exec 仓位变化，还要 publish。</Note>
+        <Note>改份数或占比只改 Manager 本地。下一次仓位 POST 会按新份数自动推 Redis；也可以点重推。</Note>
       </>
     ),
   },
@@ -457,16 +470,17 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'account-publish',
     group: '账户绑定',
     title: '发布到 Exec',
-    lead: '把账户绑定物化成该账户 Exec 上的策略：参数来自下单策略，qty = 仓位策略 × 份数。',
+    lead: '日常仓位更新会自动推到全部绑定账户。这条接口只用于手工重推一个已有绑定。',
     content: (
       <>
         <Endpoint method="POST" path={`${ACCOUNT_PATH}/bindings/{name}/publish`} />
         <p>
-          Manager 用仓位策略 <code>qty × shares</code> 和下单策略参数拼成 Exec
-          标准 JSON，<code>signal</code> 不随份数放大。再调用该账户{' '}
-          <code>POST /api/strategy</code>。新建和更新都走这一次完整写入。
+          每次 <code>POST /catalog/position-strategies</code> 成功后，Manager
+          找出所有绑定了该策略的账户，用各自 <code>qty × shares</code> 和下单参数拼成 Exec
+          标准 JSON，<code>signal</code> 不随份数放大，再写入该账户 Redis。
+          手工 publish 做的是同一件事，只作用于一个绑定。
         </p>
-        <Note tone="warn">未 publish 的绑定只存在 Manager PostgreSQL，交易进程看不到。</Note>
+        <Note tone="warn">还没有绑定账户时，仓位 POST 只写目录，不会写 Redis。</Note>
       </>
     ),
   },
@@ -542,12 +556,18 @@ function buildChapters(gateway: string): Chapter[] {
 curl --noproxy '*' -fsS -o manager_publish_client.py ${joinGateway(EL01_GATEWAY, `${MANAGER_PATH}/manager_publish_client.py`)}
 # jp-meta
 curl --noproxy '*' -fsS -o manager_publish_client.py ${joinGateway(JP_GATEWAY, `${MANAGER_PATH}/manager_publish_client.py`)}`}</CodeBlock>
-        <CodeBlock label="update + publish">{`# 当前页所在环境的 Nginx 入口；jp-meta 必须是 ${JP_GATEWAY}/manager/api/
+        <CodeBlock label="update">{`# 当前页所在环境的 Nginx 入口；jp-meta 必须是 ${JP_GATEWAY}/manager/api/
 export MANAGER_API_URL=${manager}/
 
-python3 manager_publish_client.py put-position @cta.json
-python3 manager_publish_client.py publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position`}</CodeBlock>
-        <CodeBlock label="cta.json">{`{
+python3 manager_publish_client.py put-position @cta.json`}</CodeBlock>
+        <CodeBlock label="cta.json 精简版">{`{
+  "strategy_name": "CTA_SK_C4V6PosT1_LXY_filter_Position",
+  "targets": {
+    "BTCUSDT": 0.004,
+    "ETHUSDT": -0.016
+  }
+}`}</CodeBlock>
+        <CodeBlock label="cta.json 完整版">{`{
   "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
   "equity_usdt": 10000,
   "targets": {
@@ -561,15 +581,12 @@ import json
 
 # 当前页所在环境的 Nginx。jp-meta 必须是 ${JP_GATEWAY}
 MANAGER = "${manager}"
-SOURCE_ID = "binance_exec_trade01"
-STRATEGY = "CTA_SK_C40V6PosT1_LXY_filter_Position"
 
 payload = {
-    "strategy_name": STRATEGY,
-    "equity_usdt": 10000,
+    "strategy_name": "CTA_SK_C4V6PosT1_LXY_filter_Position",
     "targets": {
-        "BTCUSDT": {"qty": -0.006, "signal": -1},
-        "ETHUSDT": {"qty": -0.54, "signal": 0},
+        "BTCUSDT": 0.004,
+        "ETHUSDT": -0.016,
     },
 }
 
@@ -583,18 +600,13 @@ def request(method, path, body=None):
         raw = resp.read()
         return json.loads(raw) if raw else {"ok": True, "http_status": resp.status}
 
-saved = request("POST", "catalog/position-strategies", payload)
-published = request(
-    "POST",
-    f"catalog/accounts/{SOURCE_ID}/bindings/{STRATEGY}/publish",
-)
-print(json.dumps({"saved": saved, "published": published}, ensure_ascii=False, indent=2))
+print(json.dumps(request("POST", "catalog/position-strategies", payload), ensure_ascii=False, indent=2))
 `}</CodeBlock>
         <Note>
-          标准库即可，不必先下载脚本。先 POST 仓位模板，再 POST publish；qty 按份数放大，signal 原样进 Redis。
+          标准库即可，不必先下载脚本。日常用精简 payload：只传策略名和裸数字 qty。一次 POST 后 Manager 按各绑定账户份数放大 qty，省略的 signal 按 0 写入 Redis。
         </Note>
         <Note tone="warn">
-          不要再 POST Exec Config。旧的 exec_config_client.py 已删除；裸数字 qty 仍可读，会当成 signal=0。
+          不要再 POST Exec Config。旧的 exec_config_client.py 已删除。需要 taker-only 时再用完整对象写 signal=±1。
         </Note>
       </>
     ),
