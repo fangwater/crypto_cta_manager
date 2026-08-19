@@ -555,6 +555,44 @@ python3 manager_publish_client.py publish binance_exec_trade01 CTA_SK_C40V6PosT1
     "ETHUSDT": { "qty": -0.54, "signal": 0 }
   }
 }`}</CodeBlock>
+        <CodeBlock label="python">{`#!/usr/bin/env python3
+from urllib.request import Request, urlopen
+import json
+
+# 当前页所在环境的 Nginx。jp-meta 必须是 ${JP_GATEWAY}
+MANAGER = "${manager}"
+SOURCE_ID = "binance_exec_trade01"
+STRATEGY = "CTA_SK_C40V6PosT1_LXY_filter_Position"
+
+payload = {
+    "strategy_name": STRATEGY,
+    "equity_usdt": 10000,
+    "targets": {
+        "BTCUSDT": {"qty": -0.006, "signal": -1},
+        "ETHUSDT": {"qty": -0.54, "signal": 0},
+    },
+}
+
+def request(method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = Request(MANAGER + path, data=data, headers=headers, method=method)
+    with urlopen(req, timeout=5) as resp:
+        raw = resp.read()
+        return json.loads(raw) if raw else {"ok": True, "http_status": resp.status}
+
+saved = request("POST", "catalog/position-strategies", payload)
+published = request(
+    "POST",
+    f"catalog/accounts/{SOURCE_ID}/bindings/{STRATEGY}/publish",
+)
+print(json.dumps({"saved": saved, "published": published}, ensure_ascii=False, indent=2))
+`}</CodeBlock>
+        <Note>
+          标准库即可，不必先下载脚本。先 POST 仓位模板，再 POST publish；qty 按份数放大，signal 原样进 Redis。
+        </Note>
         <Note tone="warn">
           不要再 POST Exec Config。旧的 exec_config_client.py 已删除；裸数字 qty 仍可读，会当成 signal=0。
         </Note>
