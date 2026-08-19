@@ -39,7 +39,6 @@ pub struct IngestionConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OrderConfigSettings {
-    pub write_token_env: String,
     pub request_timeout_secs: u64,
 }
 
@@ -100,7 +99,6 @@ impl Default for IngestionConfig {
 impl Default for OrderConfigSettings {
     fn default() -> Self {
         Self {
-            write_token_env: "CRYPTO_CTA_MANAGER_WRITE_TOKEN".to_string(),
             request_timeout_secs: 5,
         }
     }
@@ -139,9 +137,6 @@ impl AppConfig {
         }
         if self.ingestion.poll_interval_secs == 0 {
             bail!("ingestion.poll_interval_secs must be greater than zero");
-        }
-        if self.order_config.write_token_env.trim().is_empty() {
-            bail!("order_config.write_token_env must not be empty");
         }
         if self.order_config.request_timeout_secs == 0 {
             bail!("order_config.request_timeout_secs must be greater than zero");
@@ -251,7 +246,8 @@ impl AppConfig {
             enabled += usize::from(source.enabled);
         }
         if enabled == 0 {
-            bail!("at least one source must be enabled");
+            // A host may reserve sources for later Exec accounts and still run
+            // Manager catalog/publish against an empty NAV set.
         }
         Ok(())
     }
@@ -260,18 +256,6 @@ impl AppConfig {
         let env_name = self.database.url_env.trim();
         std::env::var(env_name)
             .with_context(|| format!("database URL environment variable {env_name} is not set"))
-    }
-
-    pub fn order_config_write_token(&self) -> Result<String> {
-        let env_name = self.order_config.write_token_env.trim();
-        let token = std::env::var(env_name).with_context(|| {
-            format!("order config write token environment variable {env_name} is not set")
-        })?;
-        let token = token.trim().to_string();
-        if token.len() < 32 || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
-            bail!("order config write token must contain at least 32 non-whitespace bytes");
-        }
-        Ok(token)
     }
 }
 
@@ -535,6 +519,21 @@ mod tests {
         assert!(config.twap.enabled);
         assert_eq!(config.twap.interval_ms, 5_000);
         assert_eq!(config.twap.retain_days, 30);
+    }
+
+    #[test]
+    fn jp_meta_config_enables_trade01_and_reserves_later_accounts() {
+        let config: AppConfig =
+            toml::from_str(include_str!("../deploy/jp_meta/cta-manager.toml")).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.sources.len(), 4);
+        assert_eq!(config.sources[0].id, "binance_exec_trade01");
+        assert!(config.sources[0].enabled);
+        assert!(config.sources[1..].iter().all(|source| !source.enabled));
+        assert_eq!(
+            config.twap.rocksdb_path.as_os_str(),
+            "/home/ubuntu/crypto_cta_manager/db"
+        );
     }
 
     #[test]

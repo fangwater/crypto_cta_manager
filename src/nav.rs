@@ -985,8 +985,12 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
     for source in selected {
         let fee_rate = source.nav_fee_rate()?;
         validate_fee_rate(fee_rate, &source.id)?;
-        let records = rocks_source::read_uniform_orders(&source.rocksdb_path, 0, i64::MAX)
-            .with_context(|| format!("failed to read source {} RocksDB", source.id))?;
+        let records = if source.rocksdb_path.is_dir() {
+            rocks_source::read_uniform_orders(&source.rocksdb_path, 0, i64::MAX)
+                .with_context(|| format!("failed to read source {} RocksDB", source.id))?
+        } else {
+            Vec::new()
+        };
         let mut events = Vec::with_capacity(records.len());
         for record in records {
             events.push(
@@ -1072,16 +1076,19 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
         });
     }
 
-    let earliest_start_ts_us = source_anchors
-        .into_iter()
-        .min()
+    let earliest_start_ts_us = source_anchors.into_iter().min();
+    let start_ts_us = request
+        .start_ts_us
+        .or(earliest_start_ts_us)
         .unwrap_or(request.end_ts_us);
-    let start_ts_us = request.start_ts_us.unwrap_or(earliest_start_ts_us);
-    if start_ts_us < earliest_start_ts_us {
-        bail!(
-            "start timestamp must be greater than or equal to earliest source timestamp {earliest_start_ts_us}"
-        );
+    if let Some(earliest) = earliest_start_ts_us {
+        if start_ts_us < earliest {
+            bail!(
+                "start timestamp must be greater than or equal to earliest source timestamp {earliest}"
+            );
+        }
     }
+    let earliest_start_ts_us = earliest_start_ts_us.unwrap_or(start_ts_us);
     if request.end_ts_us < start_ts_us {
         bail!("end timestamp must be greater than or equal to start timestamp");
     }
@@ -1316,8 +1323,12 @@ fn rebuild_nav_from_rocksdb_with_inputs(
     let empty_marks = VenueMarkOverrides::new();
     let mut sources = Vec::with_capacity(selected.len());
     for source in selected {
-        let records = rocks_source::read_uniform_orders(&source.rocksdb_path, 0, i64::MAX)
-            .with_context(|| format!("failed to read source {} RocksDB", source.id))?;
+        let records = if source.rocksdb_path.is_dir() {
+            rocks_source::read_uniform_orders(&source.rocksdb_path, 0, i64::MAX)
+                .with_context(|| format!("failed to read source {} RocksDB", source.id))?
+        } else {
+            Vec::new()
+        };
         let mut events = Vec::with_capacity(records.len());
         for record in records {
             let event = decode_uniform_order(&record.key, &record.value).with_context(|| {
@@ -1674,7 +1685,7 @@ fn select_sources<'a>(
             source.enabled && (requested.is_empty() || requested.contains(source.id.as_str()))
         })
         .collect::<Vec<_>>();
-    if selected.is_empty() {
+    if selected.is_empty() && !requested.is_empty() {
         bail!("no enabled sources selected for NAV reconstruction");
     }
     Ok(selected)
@@ -2492,6 +2503,43 @@ mod tests {
         assert_eq!(report.symbols.len(), 2);
         assert_eq!(report.symbol_points.len(), 1);
         assert_close(report.summary.nav_change_before_fee_quote, 10.0);
+    }
+
+    #[test]
+    fn missing_rocksdb_directory_is_an_empty_source_not_an_error() {
+        let missing = tempfile::tempdir().unwrap().path().join("absent_persist");
+        let config = app_config(vec![source_at("trade01", &missing, 0.0)]);
+        let report =
+            rebuild_nav_from_rocksdb_with_snapshots(&config, &[], &SourcePositionSnapshots::new())
+                .unwrap();
+        assert_eq!(report.sources.len(), 1);
+        assert_eq!(report.sources[0].source_id, "trade01");
+        assert_eq!(report.sources[0].totals.fill_count, 0);
+        assert_eq!(report.aggregate.totals.fill_count, 0);
+
+        let timeline = rebuild_nav_timeline_from_rocksdb_with_snapshots(
+            &config,
+            timeline_request(1, 2, Vec::new(), Vec::new()),
+            &SourcePositionSnapshots::new(),
+        )
+        .unwrap();
+        assert_eq!(timeline.selected_source_ids, vec!["trade01".to_string()]);
+        assert_eq!(timeline.summary.fill_count, 0);
+        assert!(timeline.available_symbols.is_empty());
+    }
+
+    #[test]
+    fn all_disabled_sources_rebuild_an_empty_nav_report() {
+        let mut disabled = source_at("trade01", tempfile::tempdir().unwrap().path(), 0.0);
+        disabled.enabled = false;
+        let report = rebuild_nav_from_rocksdb_with_snapshots(
+            &app_config(vec![disabled]),
+            &[],
+            &SourcePositionSnapshots::new(),
+        )
+        .unwrap();
+        assert!(report.sources.is_empty());
+        assert_eq!(report.aggregate.totals.fill_count, 0);
     }
 
     #[test]

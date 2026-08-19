@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -235,20 +234,16 @@ impl std::error::Error for ExecConfigError {}
 #[derive(Clone)]
 pub struct ExecConfigClient {
     http: Client,
-    write_token: Arc<str>,
 }
 
 impl ExecConfigClient {
-    pub fn new(timeout_secs: u64, write_token: String) -> Result<Self> {
+    pub fn new(timeout_secs: u64) -> Result<Self> {
         let http = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .no_proxy()
             .build()
             .context("failed to build Exec Config HTTP client")?;
-        Ok(Self {
-            http,
-            write_token: Arc::from(write_token),
-        })
+        Ok(Self { http })
     }
 
     pub async fn list_strategies(
@@ -343,7 +338,6 @@ impl ExecConfigClient {
         let response = self
             .http
             .post(url)
-            .bearer_auth(self.write_token.as_ref())
             .json(&UpstreamSaveRequest {
                 strategy_name: &request.strategy_name,
                 expected_updated_at_us: request.expected_updated_at_us,
@@ -388,7 +382,6 @@ impl ExecConfigClient {
         let response = self
             .http
             .post(url)
-            .bearer_auth(self.write_token.as_ref())
             .json(&serde_json::json!({
                 "strategy_name": strategy_name,
                 "config": {

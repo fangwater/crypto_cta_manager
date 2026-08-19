@@ -27,13 +27,11 @@ interface RequestOptions {
   signal?: AbortSignal
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   body?: unknown
-  token?: string
 }
 
 async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
-  if (options.token) headers.Authorization = `Bearer ${options.token}`
   const response = await fetch(API_BASE + path, {
     method: options.method ?? 'GET',
     headers,
@@ -80,10 +78,9 @@ export function getTimeline(query: TimelineQuery) {
   })
 }
 
-export function authenticateOrderConfig(token: string, signal?: AbortSignal) {
+export function authenticateOrderConfig(signal?: AbortSignal) {
   return requestJson<{ ok: boolean }>('/order-config/auth', {
     method: 'POST',
-    token,
     signal,
   })
 }
@@ -112,13 +109,11 @@ export function saveOrderParameters(
   strategyName: string,
   expectedUpdatedAtUs: number,
   orderParameters: OrderParameters,
-  token: string,
 ) {
   return requestJson<OrderStrategyView>(
     `/order-config/${encodeURIComponent(sourceId)}/order-parameters`,
     {
       method: 'POST',
-      token,
       body: {
         strategy_name: strategyName,
         expected_updated_at_us: expectedUpdatedAtUs,

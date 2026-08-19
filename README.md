@@ -170,15 +170,25 @@ User Nginx:    127.0.0.1:10051
 Manager:       /manager/
 Manager Config:/manager/config/
 Manager API:   /manager/api/
-Exec Viz:      /exec_trade01/
+Exec Viz:      /exec_trade01/  (reserved: /exec_trade02/ /exec_trade03/ /exec_trade04/)
 Exec Config:   /exec_trade01/config/
 ```
 
 Nginx is installed without `sudo` by `scripts/install_nginx_user.sh`. The
 script extracts pinned Ubuntu Noble packages under `~/.local/opt/nginx`, uses
 the Tencent Ubuntu mirror by default, and verifies both package hashes before
-installing. The service files and Nginx configuration for the first account are
-under `deploy/binance_exec_trade01/`.
+installing. Host-global Manager, frontend, and Nginx files live under
+`deploy/crypto_cta_manager/` and are installed to
+`/home/el01/crypto_cta_manager` on the Exec host. They must not live under an
+Exec account directory such as `binance_exec_trade01`.
+
+jp-meta uses `deploy/jp_meta/` and installs to `/home/ubuntu/crypto_cta_manager`.
+That host already has system PostgreSQL, Redis, and Nginx on port `4191`;
+Manager publish is added as `/manager/` on that existing gateway instead of a
+second user Nginx. `trade01` is enabled for catalog/publish against the
+reserved Exec Config on `127.0.0.1:18161`. `trade02`/`trade03`/`trade04`
+stay reserved and disabled. Do not regenerate the whole 4191 site from
+`nginx_locations.txt`; install the CTA snippet instead.
 
 Keep the service loopback-only like the existing Exec Viz deployment. Access it
 through an SSH tunnel:
@@ -189,36 +199,46 @@ ssh -N -L 10051:127.0.0.1:10051 cta_exec
 
 Then open `http://127.0.0.1:10051/manager/`. The same Nginx entry point also
 proxies the Exec dashboard, WebSocket, snapshots, and configuration service
-below `/exec_trade01/`. Add another account as a separate Nginx upstream and
-path prefix only after that account's local Viz port has been deployed.
+below `/exec_trade01/`. `trade02`/`trade03`/`trade04` already have reserved
+prefixes and loopback ports; keep those sources disabled until the matching
+Exec account and Viz/Config listeners exist.
 
-`el_dev` exposes the same gateway through one internal port. Its user service
-forwards `172.16.30.42:10041` to the loopback-only Nginx listener above; the
+GET and POST from browsers and scripts must go through that environment's
+Nginx. Do not call loopback `18201` or `18161` from outside the host.
+
+el01 is reached from `el_dev` at `http://172.16.30.42:10041`. The user service
+forwards that address to the Exec host's loopback Nginx on port `10051`; the
 SSH destination is stored only in
-`~/.config/crypto-cta-manager/gateway-tunnel.env` on `el_dev`. Browser routes
-are therefore:
+`~/.config/crypto-cta-manager/gateway-tunnel.env` on `el_dev`. jp-meta is
+reached directly at `http://13.115.227.29:4191`. The two hosts do not share an
+IP or port.
 
 ```text
-http://172.16.30.42:10041/
-http://172.16.30.42:10041/manager/
-http://172.16.30.42:10041/manager/config/
-http://172.16.30.42:10041/exec_trade01/
-http://172.16.30.42:10041/exec_trade01/config/
+el01     http://172.16.30.42:10041/manager/
+el01     http://172.16.30.42:10041/manager/workspace/
+el01     http://172.16.30.42:10041/manager/api/
+el01     http://172.16.30.42:10041/exec_trade01/
+el01     http://172.16.30.42:10041/exec_trade01/config/
+jp-meta  http://13.115.227.29:4191/manager/
+jp-meta  http://13.115.227.29:4191/manager/workspace/
+jp-meta  http://13.115.227.29:4191/manager/api/
+jp-meta  http://13.115.227.29:4191/exec_trade01/
+jp-meta  http://13.115.227.29:4191/exec_trade01/config/
 ```
 
-The root route is the multi-account workspace. It reads the account list and
-gateway prefixes from the Manager API, links into source-scoped NAV, Exec Viz,
-and the Manager Config view, and expands automatically when another configured
-source is added. `/manager/` remains the full NAV timeline and position
-workspace. `/manager/config/` owns strategy catalog, account bindings, and
-publish. The Exec `/exec_trade01/config/` page stays read-only. Runtime Redis
-JSON is written only by Manager publish through the token-gated Exec Config
-`POST /api/strategy`. Each target is `{qty, signal}`; `signal=±1` means that
-symbol uses taker-only for the current execution. External push scripts must
-update the Manager catalog and then call publish:
+On el01, `/` redirects into `/manager/workspace/`. On jp-meta, `/` stays the
+host Nginx welcome page; the CTA workspace is `/manager/workspace/`.
+`/manager/` is the NAV timeline. `/manager/config/` owns strategy catalog,
+account bindings, and publish. The Exec `/exec_trade01/config/` page stays
+read-only. Runtime Redis JSON is written only by Manager publish through the
+loopback Exec Config `POST /api/strategy`. There is no write token. Each target
+is `{qty, signal}`; `signal=±1` means that symbol uses taker-only for the
+current execution. External push scripts must update the Manager catalog and
+then call publish through the same Nginx:
 
 ```text
-http://172.16.30.42:10041/manager/api/manager_publish_client.py
+el01     http://172.16.30.42:10041/manager/api/manager_publish_client.py
+jp-meta  http://13.115.227.29:4191/manager/api/manager_publish_client.py
 ```
 
 Do not POST targets or full configs to Exec Config.

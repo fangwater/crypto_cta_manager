@@ -10,11 +10,25 @@ import {
 } from '../components/docs/DocsPrimitives'
 import { cn } from '../lib/cn'
 
-const GATEWAY = 'http://172.16.30.42:10041'
-const MANAGER = `${GATEWAY}/manager/api`
-const CATALOG = `${MANAGER}/catalog`
-const EXEC = `${GATEWAY}/exec_trade01/config/api`
-const ACCOUNT = `${CATALOG}/accounts/binance_exec_trade01`
+const EL01_GATEWAY = 'http://172.16.30.42:10041'
+const JP_GATEWAY = 'http://13.115.227.29:4191'
+
+const MANAGER_PATH = '/manager/api'
+const CATALOG_PATH = `${MANAGER_PATH}/catalog`
+const EXEC_PATH = '/exec_trade01/config/api'
+const ACCOUNT_PATH = `${CATALOG_PATH}/accounts/binance_exec_trade01`
+
+function currentGatewayOrigin() {
+  if (typeof window === 'undefined') return EL01_GATEWAY
+  const { protocol, hostname, port } = window.location
+  if (!hostname) return EL01_GATEWAY
+  const host = port ? `${hostname}:${port}` : hostname
+  return `${protocol}//${host}`
+}
+
+function joinGateway(origin: string, path: string) {
+  return `${origin.replace(/\/+$/, '')}${path.startsWith('/') ? path : `/${path}`}`
+}
 
 type ChapterId =
   | 'overview'
@@ -58,7 +72,10 @@ function FieldRows({
   )
 }
 
-const chapters: Chapter[] = [
+function buildChapters(gateway: string): Chapter[] {
+  const manager = joinGateway(gateway, MANAGER_PATH)
+  const account = joinGateway(gateway, ACCOUNT_PATH)
+  return [
   {
     id: 'overview',
     group: '概念',
@@ -77,13 +94,13 @@ const chapters: Chapter[] = [
             ],
             [
               '账户绑定',
-              'trade01 / trade02',
+              'trade01 / 预留 trade02-04',
               '启用哪些策略、杠杆、占比；点发布后写入该账户 Exec',
             ],
             [
               'Exec 运行时',
               '该账户 Redis',
-              '只读查询；写入只能由 Manager publish 带 token 完成',
+              '只读查询；写入只能由 Manager publish 完成',
             ],
           ]}
         />
@@ -91,27 +108,27 @@ const chapters: Chapter[] = [
           rows={[
             {
               method: 'POST',
-              path: `${CATALOG}/position-strategies`,
+              path: `${CATALOG_PATH}/position-strategies`,
               summary: '创建/更新仓位策略（全局）',
             },
             {
               method: 'POST',
-              path: `${CATALOG}/order-strategies`,
+              path: `${CATALOG_PATH}/order-strategies`,
               summary: '创建/更新下单策略（全局）',
             },
             {
               method: 'POST',
-              path: `${ACCOUNT}/bindings/{name}/publish`,
-              summary: '算 qty、拼 JSON，带 token 写入该账户 Redis',
+              path: `${ACCOUNT_PATH}/bindings/{name}/publish`,
+              summary: '算 qty、拼 JSON，写入该账户 Redis',
             },
             {
               method: 'GET',
-              path: `${EXEC}/strategy?name=...`,
+              path: `${EXEC_PATH}/strategy?name=...`,
               summary: '只读查看该账户运行时；不能 POST 改 Redis',
             },
           ]}
         />
-        <Note tone="warn">当前只部署了 trade01。trade02 会有独立 Exec 前缀，策略目录仍全局共用。</Note>
+        <Note tone="warn">当前只部署了 trade01。trade02 / trade03 / trade04 已预留独立 Exec 前缀，策略目录仍全局共用。</Note>
       </>
     ),
   },
@@ -166,20 +183,57 @@ const chapters: Chapter[] = [
     id: 'bases',
     group: '概念',
     title: '基址',
-    lead: 'Manager 管目录与绑定；Exec Config 管交易机运行时。',
+    lead: 'el01 和 jp-meta 的 IP、端口不同。浏览器与脚本的 GET/POST 都走该环境 Nginx，不要打 loopback 18201 / 18161。',
     content: (
       <>
         <SpecTable
-          headers={['用途', '基址']}
+          headers={['环境', 'Nginx 入口', '说明']}
           rows={[
-            ['浏览器 / Manager API', <code>{MANAGER}</code>],
-            ['策略目录', <code>{CATALOG}</code>],
-            ['trade01 Exec Config', <code>{EXEC}</code>],
-            ['文档页', <a href="/manager/docs/">{GATEWAY}/manager/docs/</a>],
+            [
+              'el01',
+              <code>{EL01_GATEWAY}</code>,
+              'el_dev 把 172.16.30.42:10041 转到 Exec 机 loopback Nginx :10051',
+            ],
+            [
+              'jp-meta',
+              <code>{JP_GATEWAY}</code>,
+              '公网直达主机系统 Nginx :4191；根路径不是 CTA',
+            ],
           ]}
         />
+        <p className="mt-6 text-[13px] font-medium text-ink">el01 · {EL01_GATEWAY}</p>
+        <SpecTable
+          headers={['用途', 'Nginx 地址']}
+          rows={[
+            ['浏览器 / Manager API', <code>{joinGateway(EL01_GATEWAY, MANAGER_PATH)}</code>],
+            ['策略目录', <code>{joinGateway(EL01_GATEWAY, CATALOG_PATH)}</code>],
+            ['trade01 Exec Config', <code>{joinGateway(EL01_GATEWAY, EXEC_PATH)}</code>],
+            [
+              '文档页',
+              <a href="/manager/docs/">{joinGateway(EL01_GATEWAY, '/manager/docs/')}</a>,
+            ],
+          ]}
+        />
+        <p className="mt-6 text-[13px] font-medium text-ink">jp-meta · {JP_GATEWAY}</p>
+        <SpecTable
+          headers={['用途', 'Nginx 地址']}
+          rows={[
+            ['浏览器 / Manager API', <code>{joinGateway(JP_GATEWAY, MANAGER_PATH)}</code>],
+            ['策略目录', <code>{joinGateway(JP_GATEWAY, CATALOG_PATH)}</code>],
+            ['trade01 Exec Config', <code>{joinGateway(JP_GATEWAY, EXEC_PATH)}</code>],
+            [
+              '文档页',
+              <a href="/manager/docs/">{joinGateway(JP_GATEWAY, '/manager/docs/')}</a>,
+            ],
+          ]}
+        />
+        <Note>
+          当前页若从某一侧打开，下面 curl 示例会用该页 origin。jp-meta 必须是{' '}
+          <code>{JP_GATEWAY}</code>，不要写成 el01 的 <code>:10041</code>。
+        </Note>
         <Note tone="warn">
-          不要打 <code>{GATEWAY}/config/</code>。没有账户前缀时无法区分 trade01 / trade02。
+          不要打 <code>/config/</code>。没有账户前缀时无法区分 trade01 / trade02 / trade03 / trade04。
+          也不要直接打 <code>127.0.0.1:18201</code> 或 <code>:18161</code>。
         </Note>
       </>
     ),
@@ -195,17 +249,17 @@ const chapters: Chapter[] = [
           rows={[
             {
               method: 'GET',
-              path: `${CATALOG}/position-strategies`,
+              path: `${CATALOG_PATH}/position-strategies`,
               summary: '列出全部仓位策略',
             },
             {
               method: 'POST',
-              path: `${CATALOG}/position-strategies`,
+              path: `${CATALOG_PATH}/position-strategies`,
               summary: '按 strategy_name upsert',
             },
             {
               method: 'DELETE',
-              path: `${CATALOG}/position-strategies/{name}`,
+              path: `${CATALOG_PATH}/position-strategies/{name}`,
               summary: '删除模板；已绑定账户需先停用',
             },
           ]}
@@ -272,17 +326,17 @@ const chapters: Chapter[] = [
           rows={[
             {
               method: 'GET',
-              path: `${CATALOG}/order-strategies`,
+              path: `${CATALOG_PATH}/order-strategies`,
               summary: '列出全部下单策略',
             },
             {
               method: 'POST',
-              path: `${CATALOG}/order-strategies`,
+              path: `${CATALOG_PATH}/order-strategies`,
               summary: '按 strategy_name upsert',
             },
             {
               method: 'DELETE',
-              path: `${CATALOG}/order-strategies/{name}`,
+              path: `${CATALOG_PATH}/order-strategies/{name}`,
               summary: '删除模板',
             },
           ]}
@@ -315,23 +369,23 @@ const chapters: Chapter[] = [
           rows={[
             {
               method: 'GET',
-              path: `${ACCOUNT}`,
+              path: `${ACCOUNT_PATH}`,
               summary: 'studio + capacity',
             },
             {
               method: 'GET',
-              path: `${ACCOUNT}/live`,
+              path: `${ACCOUNT_PATH}/live`,
               summary: '只取 capacity（含实时权益）',
             },
             {
               method: 'PUT',
-              path: `${ACCOUNT}/leverage`,
+              path: `${ACCOUNT_PATH}/leverage`,
               summary: '改 CTA 配置倍数',
             },
           ]}
         />
         <CodeBlock label="curl">{`curl --noproxy '*' -sS -X PUT \\
-  '${ACCOUNT}/leverage' \\
+  '${account}/leverage' \\
   -H 'Content-Type: application/json' \\
   -d '{"leverage": 2}'`}</CodeBlock>
         <FieldRows
@@ -355,12 +409,12 @@ const chapters: Chapter[] = [
           rows={[
             {
               method: 'POST',
-              path: `${ACCOUNT}/bindings`,
+              path: `${ACCOUNT_PATH}/bindings`,
               summary: '启用；binding_name 通常等于仓位策略名',
             },
             {
               method: 'DELETE',
-              path: `${ACCOUNT}/bindings/{name}`,
+              path: `${ACCOUNT_PATH}/bindings/{name}`,
               summary: '停用本地绑定，不自动删 Exec',
             },
           ]}
@@ -383,16 +437,16 @@ const chapters: Chapter[] = [
       <>
         <Endpoint
           method="PUT"
-          path={`${ACCOUNT}/allocations`}
+          path={`${ACCOUNT_PATH}/allocations`}
           summary="一次提交全部绑定的占比；保存后按总名义反推份数"
         />
         <CodeBlock label="curl">{`curl --noproxy '*' -sS -X PUT \\
-  '${ACCOUNT}/allocations' \\
+  '${account}/allocations' \\
   -H 'Content-Type: application/json' \\
   -d '{"allocations":{"CTA_A":0.25,"CTA_B":0.75}}'`}</CodeBlock>
         <Endpoint
           method="PUT"
-          path={`${ACCOUNT}/bindings/{name}/shares`}
+          path={`${ACCOUNT_PATH}/bindings/{name}/shares`}
           summary="脚本按份数精确调整；浏览器主交互走 allocations"
         />
         <Note>这两条只改 Manager 本地。要让 Exec 仓位变化，还要 publish。</Note>
@@ -406,10 +460,10 @@ const chapters: Chapter[] = [
     lead: '把账户绑定物化成该账户 Exec 上的策略：参数来自下单策略，qty = 仓位策略 × 份数。',
     content: (
       <>
-        <Endpoint method="POST" path={`${ACCOUNT}/bindings/{name}/publish`} />
+        <Endpoint method="POST" path={`${ACCOUNT_PATH}/bindings/{name}/publish`} />
         <p>
           Manager 用仓位策略 <code>qty × shares</code> 和下单策略参数拼成 Exec
-          标准 JSON，<code>signal</code> 不随份数放大。再带写 token 调用该账户{' '}
+          标准 JSON，<code>signal</code> 不随份数放大。再调用该账户{' '}
           <code>POST /api/strategy</code>。新建和更新都走这一次完整写入。
         </p>
         <Note tone="warn">未 publish 的绑定只存在 Manager PostgreSQL，交易进程看不到。</Note>
@@ -424,9 +478,9 @@ const chapters: Chapter[] = [
     content: (
       <ApiTable
         rows={[
-          { method: 'GET', path: `${EXEC}/bootstrap`, summary: '账户 / venue / key 前缀' },
-          { method: 'GET', path: `${EXEC}/strategies`, summary: '策略名单' },
-          { method: 'GET', path: `${EXEC}/strategy?name=...`, summary: '单个策略运行时 JSON' },
+          { method: 'GET', path: `${EXEC_PATH}/bootstrap`, summary: '账户 / venue / key 前缀' },
+          { method: 'GET', path: `${EXEC_PATH}/strategies`, summary: '策略名单' },
+          { method: 'GET', path: `${EXEC_PATH}/strategy?name=...`, summary: '单个策略运行时 JSON' },
         ]}
       />
     ),
@@ -435,26 +489,26 @@ const chapters: Chapter[] = [
     id: 'exec-params',
     group: 'Exec 运行时',
     title: '内部写口',
-    lead: '这些接口只给 Manager 用，必须带写 token。浏览器和脚本不要直接打。',
+    lead: '这些接口只给 Manager 用。浏览器和脚本不要直接打。',
     content: (
       <>
         <Endpoint
           method="POST"
-          path={`${EXEC}/strategy`}
-          summary="Manager publish：完整参数 + 已按份数放大的 targets"
+          path={`${EXEC_PATH}/strategy`}
+          summary="Manager 在本机 loopback 调用；浏览器和脚本不要打这条"
         />
         <Endpoint
           method="POST"
-          path={`${EXEC}/order-parameters`}
+          path={`${EXEC_PATH}/order-parameters`}
           summary="只改已存在策略的 8 个参数；带 targets 会被拒绝"
         />
         <Endpoint
           method="DELETE"
-          path={`${EXEC}/strategy?name=...`}
-          summary="请求移除策略；同样需要 token"
+          path={`${EXEC_PATH}/strategy?name=...`}
+          summary="请求移除策略"
         />
         <Note tone="warn">
-          <code>POST /api/targets</code> 已删除。无 token 或 token 错误返回 401；未配置 token 返回 503。
+          <code>POST /api/targets</code> 已删除。不再使用写 token。
         </Note>
       </>
     ),
@@ -471,10 +525,8 @@ const chapters: Chapter[] = [
           ['200', '成功'],
           ['202', '删除已受理'],
           ['400', '字段缺失、策略不存在、占比合计不为 1'],
-          ['401', 'Exec Redis 写 token 错误或缺失'],
           ['404', '路径不存在、缺少账户前缀，或 /api/targets 已移除'],
           ['409', '参数乐观锁冲突'],
-          ['503', 'Exec 未配置写 token'],
         ]}
       />
     ),
@@ -486,10 +538,12 @@ const chapters: Chapter[] = [
     lead: '仓位推送脚本挂在 Manager。旧的 exec_config_client.py 已删除。',
     content: (
       <>
-        <CodeBlock label="download">{`wget ${MANAGER}/manager_publish_client.py
-# 或
-curl --noproxy '*' -fsS -o manager_publish_client.py ${MANAGER}/manager_publish_client.py`}</CodeBlock>
-        <CodeBlock label="update + publish">{`export MANAGER_API_URL=${MANAGER}/
+        <CodeBlock label="download">{`# el01
+curl --noproxy '*' -fsS -o manager_publish_client.py ${joinGateway(EL01_GATEWAY, `${MANAGER_PATH}/manager_publish_client.py`)}
+# jp-meta
+curl --noproxy '*' -fsS -o manager_publish_client.py ${joinGateway(JP_GATEWAY, `${MANAGER_PATH}/manager_publish_client.py`)}`}</CodeBlock>
+        <CodeBlock label="update + publish">{`# 当前页所在环境的 Nginx 入口；jp-meta 必须是 ${JP_GATEWAY}/manager/api/
+export MANAGER_API_URL=${manager}/
 
 python3 manager_publish_client.py put-position @cta.json
 python3 manager_publish_client.py publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position`}</CodeBlock>
@@ -507,15 +561,35 @@ python3 manager_publish_client.py publish binance_exec_trade01 CTA_SK_C40V6PosT1
       </>
     ),
   },
+  ]
+}
+
+const CHAPTER_IDS: ChapterId[] = [
+  'overview',
+  'model',
+  'bases',
+  'catalog-position',
+  'target-signal',
+  'catalog-order',
+  'account-studio',
+  'account-bind',
+  'account-alloc',
+  'account-publish',
+  'exec-read',
+  'exec-params',
+  'errors',
+  'client',
 ]
 
 function chapterFromHash(hash: string): ChapterId {
   const id = hash.replace(/^#/, '') as ChapterId
-  return chapters.some((chapter) => chapter.id === id) ? id : 'overview'
+  return CHAPTER_IDS.includes(id) ? id : 'overview'
 }
 
 export function DocsPage() {
   const [activeId, setActiveId] = useState(() => chapterFromHash(window.location.hash))
+  const gateway = currentGatewayOrigin()
+  const chapters = useMemo(() => buildChapters(gateway), [gateway])
 
   useEffect(() => {
     const onHashChange = () => setActiveId(chapterFromHash(window.location.hash))
@@ -538,7 +612,7 @@ export function DocsPage() {
       group,
       items: chapters.filter((chapter) => chapter.group === group),
     }))
-  }, [])
+  }, [chapters])
 
   function openChapter(id: ChapterId) {
     window.history.replaceState(null, '', `/manager/docs/#${id}`)

@@ -150,14 +150,46 @@ summary. PostgreSQL snapshots remain immutable source-specific initial-position
 anchors. Never merge FIFO state across source ID, symbol, or venue.
 
 The unified gateway below was deployed and verified on 2026-08-14 UTC. At that
-time only `binance_exec_trade01` existed on the CTA Exec host; do not assume a
-`trade02` upstream exists without checking the remote deployment and listeners.
+time only `binance_exec_trade01` existed on the CTA Exec host. `trade02`,
+`trade03`, and `trade04` are reserved in Manager config and Nginx with distinct
+prefixes and loopback ports, but remain `enabled = false` until those Exec
+accounts are actually deployed. Do not enable a reserved source or assume its
+upstream exists without checking the remote deployment and listeners.
 
-On `binance_exec_trade01`, `cta_web` binds to `127.0.0.1:18201` and
+On the CTA Exec host, Manager is host-global under
+`/home/el01/crypto_cta_manager`. `cta_web` binds to `127.0.0.1:18201` and
 `crypto-cta-nginx.service` binds to `127.0.0.1:10051`. Both are active
-`systemd --user` services. The Nginx service is the single loopback gateway and
-must not replace, restart, or reconfigure the existing Viz service on port
-`10041`, its Config service on port `18161`, or any trading process.
+`systemd --user` services.
+
+jp-meta is a different host: user `ubuntu`, system PostgreSQL 16 on
+`127.0.0.1:5432`, system Redis on `127.0.0.1:6379`, and the existing
+host Nginx on port `4191`. Manager there lives under
+`/home/ubuntu/crypto_cta_manager` and is exposed as `/manager/` on that
+existing 4191 gateway. It must not reuse el01 paths, the user-level
+PostgreSQL on `15432`, or a second user Nginx. `binance_exec_trade01`
+stays enabled so catalog/publish can target the reserved Exec Config on
+`127.0.0.1:18161`; a missing persist_manager directory is an empty NAV
+source. `trade02`/`trade03`/`trade04` prefixes and loopback ports are
+reserved and stay disabled until those Exec accounts exist. Do not
+regenerate the whole 4191 site from `nginx_locations.txt`; that file is
+incomplete relative to the live conf (for example `/ops-api/`). Add CTA
+routes through `deploy/jp_meta/crypto-cta-nginx-snippet.conf`. Manager binaries, config, frontend webroot, Nginx
+prefix, and the Manager RocksDB live in that tree and must not live under an
+Exec account such as `binance_exec_trade01`. The Nginx service is the single
+loopback gateway and must not replace, restart, or reconfigure the existing
+Viz service on port `10041`, its Config service on port `18161`, or any
+trading process.
+
+The host-global Manager layout is:
+
+```text
+/home/el01/crypto_cta_manager/bin/{cta_web,nav_rebuild,nav_snapshot}
+/home/el01/crypto_cta_manager/config/cta-manager.toml
+/home/el01/crypto_cta_manager/nginx/{nginx.conf,logs,run,tmp}
+/home/el01/crypto_cta_manager/webroot -> web-releases/<timestamp>
+/home/el01/crypto_cta_manager/web-releases/
+/home/el01/crypto_cta_manager/db/
+```
 
 The deployed Nginx routes are:
 
@@ -169,6 +201,9 @@ The deployed Nginx routes are:
 /exec_trade01/ws          -> Exec Viz WebSocket
 /exec_trade01/snapshot    -> Exec Viz snapshot
 /exec_trade01/config/     -> Exec Viz's Config proxy
+/exec_trade02/            -> reserved Exec Viz (127.0.0.1:10042)
+/exec_trade03/            -> reserved Exec Viz (127.0.0.1:10043)
+/exec_trade04/            -> reserved Exec Viz (127.0.0.1:10044)
 /cta/                     -> compatibility redirect to /manager/
 /cta-api/                 -> compatibility proxy to cta_web /api/
 ```
@@ -187,10 +222,12 @@ The WebSocket is the long-lived real-time Viz channel; HTTP serves the page,
 snapshot, and Config requests. An end-to-end WebSocket handshake through the
 gateway returned `101 Switching Protocols` during deployment verification.
 
-The single internal entry point is `http://172.16.30.42:10041`. On `el_dev`,
-`cta-exec-gateway-tunnel.service` forwards that address to the Exec host's
-loopback Nginx on port `10051`; it must not bypass Nginx by forwarding directly
-to Viz. The normal unit is installed under `~/.config/systemd/user/`, is active
+The el01 internal entry point is `http://172.16.30.42:10041`. The jp-meta
+public entry point is `http://13.115.227.29:4191`. Browser and script GET/POST
+must use that host's Nginx, never loopback `18201` or `18161`. On `el_dev`,
+`cta-exec-gateway-tunnel.service` forwards `172.16.30.42:10041` to the Exec
+host's loopback Nginx on port `10051`; it must not bypass Nginx by forwarding
+directly to Viz. The normal unit is installed under `~/.config/systemd/user/`, is active
 and enabled, and replaced the old transient `el01-exec-viz-tunnel.service`.
 Linger is enabled for `fanghaizhou`, so the user manager can start the tunnel
 after reboot without an interactive login. Keep the real SSH destination only
@@ -198,9 +235,12 @@ in `~/.config/crypto-cta-manager/gateway-tunnel.env` on `el_dev`, with mode
 `0600`; never copy it into this repository, logs, or chat.
 
 Additional Exec accounts receive distinct path prefixes and loopback Viz
-ports. After an account is actually deployed, add one named Nginx upstream and
-one account-prefixed proxy location; the external port and SSH tunnel remain
-unchanged. Never route two account prefixes to the same upstream by accident.
+ports. `trade02`/`trade03`/`trade04` are already reserved as
+`/exec_trade02`:`10042`/`18162`, `/exec_trade03`:`10043`/`18163`, and
+`/exec_trade04`:`10044`/`18164`. After an account is actually deployed, enable
+that source and start its own Viz/Config listeners; the external port and SSH
+tunnel remain unchanged. Never route two account prefixes to the same upstream
+by accident.
 Each source must declare its explicit one-segment `gateway_prefix`; the API
 exposes that prefix with sanitized account metadata so the root workspace can
 render source-scoped NAV, Exec Viz, and Config links. Never infer a gateway path
@@ -213,19 +253,15 @@ talks only to Manager endpoints below `/manager/api/`; it never connects to
 Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Runtime
 Redis JSON is written only when Manager publish scales each target `qty` by
 shares, copies `signal` unchanged, assembles the Exec payload, and `POST`s
-`/api/strategy` with `CRYPTO_CTA_MANAGER_WRITE_TOKEN`. Each target is
+`/api/strategy`. There is no write token. Each target is
 `{"qty": <f64>, "signal": <int>}` with `signal` in `-2,-1,0,1,2`; omitted or
 legacy bare-number targets become `signal=0`. `signal=±1` means that symbol's
 current execution is all-taker and must not convert taker to maker. `POST
 /api/targets` is gone. Parameter-only
-updates of an existing strategy still use token-gated
+updates of an existing strategy still use
 `POST /api/order-parameters` and require a positive `expected_updated_at_us`,
 Redis optimistic concurrency, and a PostgreSQL audit row in
-`cta_exec_order_config_audit`. The Manager and the loopback Exec Config service
-read the same token from `~/.config/crypto-cta-manager/config-write.env` with
-mode `0600`; never commit, print, log, or return it. The browser holds a
-user-entered token in memory only. Exec Config rejects Redis writes when its
-token is missing. Scripts must not write Redis through Exec Config.
+`cta_exec_order_config_audit`. Scripts must not write Redis through Exec Config.
 The replacement push client is `scripts/manager_publish_client.py`, served at
 `GET /api/manager_publish_client.py` (`/manager/api/manager_publish_client.py`
 through Nginx). It writes the catalog then publishes; it never talks to Redis.
@@ -253,8 +289,8 @@ broad globs or recursive cleanup rooted at a runtime directory.
 
 Install the pinned Ubuntu Noble Nginx package without sudo through
 `scripts/install_nginx_user.sh`. Its default mirror is Tencent Cloud and its
-package checksums are fixed in the script. Deployment files live under
-`deploy/binance_exec_trade01/`.
+package checksums are fixed in the script. Host-global Manager, frontend, and
+Nginx deployment files live under `deploy/crypto_cta_manager/`.
 
 ## Central PostgreSQL Layout
 

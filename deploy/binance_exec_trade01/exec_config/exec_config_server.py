@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """BatchExec Redis configuration server.
 
-GET  remains public. Redis writes require CRYPTO_CTA_MANAGER_WRITE_TOKEN.
+GET remains public. Redis writes are accepted from the loopback Manager
+without a shared write token.
 
 POST /api/strategy          Manager publish: full order parameters + targets
 POST /api/order-parameters  order parameters only; strategy must already exist
@@ -12,7 +13,6 @@ DELETE /api/strategy        request strategy removal
 from __future__ import annotations
 
 import argparse
-import hmac
 import json
 import math
 import os
@@ -20,7 +20,6 @@ import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -51,7 +50,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "targets": {},
 }
 POSITION_CLOSE_STRATEGY_NAME = "SYSTEM_POSITION_CLOSE"
-ORDER_PARAMETER_TOKEN_ENV = "CRYPTO_CTA_MANAGER_WRITE_TOKEN"
 
 
 class ConfigVersionConflict(ValueError):
@@ -250,26 +248,6 @@ def decode_strategy_names(raw: Any, label: str) -> List[str]:
     if len(names) != len(set(names)):
         raise ValueError(f"{label} contains duplicate names")
     return sorted(names)
-
-
-class WriteNotConfigured(RuntimeError):
-    """Raised when Redis writes are disabled because the token file is missing."""
-
-
-class WriteUnauthorized(ValueError):
-    """Raised when a Redis write is missing a valid bearer token."""
-
-
-def authorize_redis_write(token: Optional[str], authorization: str) -> None:
-    if not token:
-        raise WriteNotConfigured("Redis writes are not configured")
-    expected = f"Bearer {token}"
-    try:
-        authorized = hmac.compare_digest(authorization, expected)
-    except Exception:
-        authorized = False
-    if not authorized:
-        raise WriteUnauthorized("write authorization is required")
 
 
 def decode_stored_exec_config(raw: Any) -> Optional[Dict[str, Any]]:
@@ -616,7 +594,6 @@ INDEX_HTML = r"""<!doctype html>
 def make_handler(
     store: ExecConfigStore,
     dashboard_url: str,
-    order_parameter_token: Optional[str] = None,
 ):
     html = INDEX_HTML.replace(
         "__DEFAULTS__", json.dumps(DEFAULT_CONFIG, ensure_ascii=False)
@@ -708,24 +685,6 @@ def make_handler(
             except Exception as exc:
                 self.send_error_json(500, exc)
 
-        def authorize_write(self) -> Optional[int]:
-            try:
-                authorize_redis_write(
-                    order_parameter_token,
-                    self.headers.get("Authorization", ""),
-                )
-            except WriteNotConfigured as exc:
-                response = {"ok": False, "error": str(exc)}
-                self.log_update_response(503, response)
-                self.send_json(503, response)
-                return 503
-            except WriteUnauthorized as exc:
-                response = {"ok": False, "error": str(exc)}
-                self.log_update_response(401, response)
-                self.send_json(401, response)
-                return 401
-            return None
-
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             try:
@@ -733,8 +692,6 @@ def make_handler(
                     response = {"ok": False, "error": "not found"}
                     self.log_update_response(404, response)
                     self.send_json(404, response)
-                    return
-                if self.authorize_write() is not None:
                     return
                 payload = self.read_json()
                 if parsed.path == "/api/order-parameters":
@@ -796,8 +753,6 @@ def make_handler(
                     self.log_update_response(404, response)
                     self.send_json(404, response)
                     return
-                if self.authorize_write() is not None:
-                    return
                 query = parse_qs(parsed.query)
                 name = validate_strategy_name((query.get("name") or [""])[0])
                 if not store.remove(name):
@@ -844,51 +799,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dashboard-url", default=os.environ.get("DASHBOARD_URL", "../"))
     parser.add_argument(
         "--order-parameter-token-file",
-        default=os.environ.get("ORDER_PARAMETER_TOKEN_FILE", ""),
+        default="",
+        help=argparse.SUPPRESS,
     )
     return parser.parse_args()
-
-
-def load_order_parameter_token(raw_path: str) -> Optional[str]:
-    path_text = str(raw_path or "").strip()
-    if not path_text:
-        return None
-    path = Path(path_text)
-    mode = path.stat().st_mode & 0o777
-    if mode & 0o077:
-        raise ValueError("order parameter token file must not be accessible by group or other")
-    contents = path.read_text(encoding="utf-8")
-    assignments = []
-    for raw_line in contents.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line.removeprefix("export ").lstrip()
-        key, separator, value = line.partition("=")
-        if separator and key.strip() == ORDER_PARAMETER_TOKEN_ENV:
-            assignments.append(value.strip())
-    if len(assignments) > 1:
-        raise ValueError(f"duplicate {ORDER_PARAMETER_TOKEN_ENV} assignments")
-    token = assignments[0] if assignments else contents.strip()
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
-        token = token[1:-1]
-    if len(token) < 32 or any(character.isspace() for character in token):
-        raise ValueError(
-            "order parameter token must contain at least 32 non-whitespace characters"
-        )
-    return token
 
 
 def main() -> int:
     args = parse_args()
     store = ExecConfigStore(args.redis_url, args.env_name, args.venue)
-    order_parameter_token = load_order_parameter_token(
-        args.order_parameter_token_file
-    )
     server = ThreadingHTTPServer(
         (args.bind, args.port),
-        make_handler(store, args.dashboard_url, order_parameter_token),
+        make_handler(store, args.dashboard_url),
     )
     print(
         f"[exec-config] listening http://{args.bind}:{args.port} "

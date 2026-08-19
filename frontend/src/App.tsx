@@ -126,7 +126,7 @@ function initialScope() {
 
 export default function App() {
   const path = normalizePath(window.location.pathname)
-  if (path === '/') return <WorkspacePage />
+  if (path === '/' || path === '/manager/workspace') return <WorkspacePage />
   if (path === '/manager/account') return <AccountOverviewPage />
   if (path === '/manager/config') {
     const source = readSourceId()

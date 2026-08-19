@@ -1,13 +1,11 @@
 [database]
-# The URL itself remains in the host credential file and is never stored here.
+# PostgreSQL stores immutable position snapshots and ingestion checkpoints.
 url_env = "CRYPTO_CTA_LOCAL_DATABASE_URL"
 max_connections = 8
 
 [ingestion]
 poll_interval_secs = 60
-# Do not scan the newest few seconds while persist_manager may still be writing them.
 safety_lag_secs = 5
-# Re-read a recent window on every poll; PostgreSQL upserts make this idempotent.
 overlap_secs = 300
 
 [order_config]
@@ -16,7 +14,6 @@ request_timeout_secs = 5
 [twap]
 enabled = true
 # Host-global Manager RocksDB for position-update messages and public BBO TWAP.
-# Do not put this under an Exec account.
 rocksdb_path = "/home/el01/crypto_cta_manager/db"
 venue = "binance-futures"
 interval_ms = 5000
@@ -33,17 +30,13 @@ enabled = true
 gateway_prefix = "/exec_trade01"
 exec_config_url = "http://127.0.0.1:18161/"
 exec_viz_url = "http://127.0.0.1:10041/"
-# Effective fee charged per unit of fill notional (4 bps in this example).
 estimated_fee_rate = 0.0004
-# Iceoryx namespace of this Exec's account_monitor. Defaults to source id.
 ipc_namespace = "binance_exec_trade01"
 account_ipc_service = "account_pubs/binance_pm"
-# One CTA share equals this many USDT of position-strategy reference equity.
 share_unit_usdt = 10000
-# Omit start_ts_us to backfill all available history on the first run.
 
-# Additional accounts are independent workers with independent checkpoints.
-# Keep reserved accounts disabled until that Exec directory and listeners exist.
+# Reserved until the matching Exec account is deployed. Keep disabled so
+# Manager does not open a missing persist_manager RocksDB or IPC.
 [[sources]]
 id = "binance_exec_trade02"
 account = "trade02"

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -83,7 +83,6 @@ struct WebState {
     config: Arc<AppConfig>,
     pool: PgPool,
     exec_config: ExecConfigClient,
-    order_config_write_token: Arc<str>,
     live_equity: LiveEquityHub,
     position_archive: Arc<PositionArchive>,
     viz_snapshot: VizSnapshotClient,
@@ -153,11 +152,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
     postgres::migrate(&pool).await?;
     postgres::register_sources(&pool, &config.sources).await?;
-    let order_config_write_token = config.order_config_write_token()?;
-    let exec_config = ExecConfigClient::new(
-        config.order_config.request_timeout_secs,
-        order_config_write_token.clone(),
-    )?;
+    let exec_config = ExecConfigClient::new(config.order_config.request_timeout_secs)?;
     let live_equity = LiveEquityHub::spawn(&config.sources);
     let viz_snapshot = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
     let manager_db = ManagerDb::open(&config.twap.rocksdb_path)?;
@@ -260,7 +255,6 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             config: Arc::new(config),
             pool,
             exec_config,
-            order_config_write_token: Arc::from(order_config_write_token),
             live_equity,
             position_archive,
             viz_snapshot,
@@ -396,10 +390,7 @@ async fn timeline(
         .into_response())
 }
 
-async fn order_config_auth(State(state): State<WebState>, headers: HeaderMap) -> Response {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return unauthorized();
-    }
+async fn order_config_auth() -> Response {
     (NO_STORE, Json(AuthResponse { ok: true })).into_response()
 }
 
@@ -458,12 +449,8 @@ async fn save_order_parameters(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Json(request): Json<SaveOrderParametersRequest>,
 ) -> Result<Response, ApiError> {
-    if !authorized(&headers, &state.order_config_write_token) {
-        return Ok(unauthorized());
-    }
     if let Err(message) = validate_strategy_name(&request.strategy_name) {
         return Ok(bad_request(message));
     }
@@ -899,40 +886,6 @@ fn resolve_order_config_source<'a>(
     Ok(source)
 }
 
-fn authorized(headers: &HeaderMap, expected: &str) -> bool {
-    let Some(candidate) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-    else {
-        return false;
-    };
-    constant_time_eq(candidate.as_bytes(), expected.as_bytes())
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let mut difference = left.len() ^ right.len();
-    let length = left.len().max(right.len());
-    for index in 0..length {
-        difference |= usize::from(
-            left.get(index).copied().unwrap_or_default()
-                ^ right.get(index).copied().unwrap_or_default(),
-        );
-    }
-    difference == 0
-}
-
-fn unauthorized() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer")],
-        Json(ErrorResponse {
-            error: "write authorization is required".to_string(),
-        }),
-    )
-        .into_response()
-}
-
 fn exec_config_error_response(error: &ExecConfigError) -> Response {
     let status = match error.status() {
         Some(StatusCode::BAD_REQUEST) => StatusCode::BAD_REQUEST,
@@ -1174,29 +1127,6 @@ mod tests {
         assert_eq!(milliseconds_to_microseconds(123, "startMs"), Ok(123_000));
         assert!(milliseconds_to_microseconds(-1, "startMs").is_err());
         assert!(milliseconds_to_microseconds(i64::MAX, "endMs").is_err());
-    }
-
-    #[test]
-    fn write_authorization_requires_an_exact_bearer_token() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            "Bearer correct-token".parse().unwrap(),
-        );
-        assert!(authorized(&headers, "correct-token"));
-        assert!(!authorized(&headers, "correct-token-extra"));
-        headers.insert(
-            header::AUTHORIZATION,
-            "bearer correct-token".parse().unwrap(),
-        );
-        assert!(!authorized(&headers, "correct-token"));
-    }
-
-    #[test]
-    fn constant_time_comparison_handles_different_lengths() {
-        assert!(constant_time_eq(b"same", b"same"));
-        assert!(!constant_time_eq(b"same", b"different"));
-        assert!(!constant_time_eq(b"prefix", b"prefix-extra"));
     }
 
     #[test]

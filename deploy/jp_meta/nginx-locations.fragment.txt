@@ -1,0 +1,16 @@
+# BEGIN managed: crypto cta manager
+# Do not regenerate the whole 4191 site from this file: the live conf
+# also has /ops-api/ and other mappings that are not in nginx_locations.txt.
+# Append these rows to nginx_locations.txt, then install
+# snippets/crypto_cta_manager.conf (SPA try_files + reserved prefixes).
+/manager/api/ http://127.0.0.1:18201/api/
+/cta-api/ http://127.0.0.1:18201/api/
+/exec_trade01/config/ http://127.0.0.1:18161/
+/exec_trade01/ http://127.0.0.1:10041/
+/exec_trade02/config/ http://127.0.0.1:18162/
+/exec_trade02/ http://127.0.0.1:10042/
+/exec_trade03/config/ http://127.0.0.1:18163/
+/exec_trade03/ http://127.0.0.1:10043/
+/exec_trade04/config/ http://127.0.0.1:18164/
+/exec_trade04/ http://127.0.0.1:10044/
+# END managed: crypto cta manager

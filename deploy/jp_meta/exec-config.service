@@ -1,0 +1,18 @@
+[Unit]
+Description=CTA Exec Config Redis publish target (jp-meta reserved trade01)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/crypto_cta_manager
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/ubuntu/crypto_cta_manager/bin/exec_config_server.py --bind 127.0.0.1 --port 18161 --redis-url redis://127.0.0.1:6379/0 --env-name binance_exec_trade01 --venue binance-futures --dashboard-url /manager/
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

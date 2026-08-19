@@ -9,7 +9,7 @@ const links: Array<{
   label: string
   icon: typeof LayoutDashboard
 }> = [
-  { id: 'workspace', href: '/', label: '总览', icon: LayoutDashboard },
+  { id: 'workspace', href: '/manager/workspace/', label: '总览', icon: LayoutDashboard },
   { id: 'manager', href: '/manager/', label: '净值', icon: Activity },
   { id: 'config', href: '/manager/config/position/', label: '策略', icon: Settings },
   { id: 'docs', href: '/manager/docs/', label: '文档', icon: BookOpen },
