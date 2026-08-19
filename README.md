@@ -32,14 +32,20 @@ Set an explicit one-segment `gateway_prefix`, such as `/exec_trade01`, for each
 account whose Exec Viz and Config services are exposed through the unified
 gateway. The dashboard never derives service paths from account names.
 
-When `[twap]` is enabled, `cta_web` records 5-second mid TWAP bars for symbols
-that appear in the position-strategy catalog. This is public BBO, not
-account-private data, so the archive lives in a host-global Manager directory
-such as `/home/el01/crypto_cta_manager/db`, not under
-`binance_exec_trade01`. It subscribes to `spread_pbs/<venue>/ask_bid_spread`
-and writes compact binary rows, one column family per `SYMBOL:venue`. Bars
-older than `retain_days` are deleted and compacted. Never point
-`twap.rocksdb_path` at an Exec `persist_manager` directory.
+`cta_web` keeps a host-global Manager RocksDB at `twap.rocksdb_path`, default
+`/home/el01/crypto_cta_manager/db`. This is not an Exec-account store, so it
+must not live under `binance_exec_trade01` and must never reuse an Exec
+`persist_manager` path. Each accepted `POST /api/catalog/position-strategies`
+is also appended as one JSON message in column family `position_updates`.
+PostgreSQL remains the current catalog; RocksDB is the append-only history of
+those POST bodies. The archived message also records the bound accounts'
+factual positions from each source's Exec Viz `/snapshot`
+`exec_pre_trade_state` row (`current_qty` for that strategy). Set
+`exec_viz_url` to the loopback Viz origin, such as `http://127.0.0.1:10041/`. When `[twap]` is enabled, the same database also records
+5-second mid TWAP bars for catalog symbols from
+`spread_pbs/<venue>/ask_bid_spread`. TWAP uses one compact binary column family
+per `SYMBOL:venue`. Bars older than `retain_days` are deleted and compacted;
+position-update messages are not compacted by that job.
 
 If the account already had positions when its RocksDB history began, store an
 immutable position snapshot in PostgreSQL with `nav_snapshot`. Position

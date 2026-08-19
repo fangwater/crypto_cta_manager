@@ -1,5 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -7,19 +7,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use iceoryx2::prelude::*;
 use iceoryx2::service::ipc;
-use rocksdb::{
-    CompactOptions, DB, DBCompressionType, Direction, IteratorMode, Options, WriteBatch,
-};
+use rocksdb::{CompactOptions, Direction, IteratorMode, WriteBatch};
 use sqlx::postgres::PgPool;
 use tracing::{info, warn};
 
 use crate::config::TwapConfig;
+use crate::manager_db::{self, DEFAULT_CF, ManagerDb, POSITION_UPDATES_CF};
 use crate::strategy_catalog;
 
 pub const ASK_BID_SPREAD_MSG_TYPE: u32 = 1015;
 pub const SPREAD_PAYLOAD_BYTES: usize = 128;
 pub const TWAP_BAR_VALUE_BYTES: usize = 21;
-const DEFAULT_CF: &str = "default";
 const BBO_MAX_AGE_US: i64 = 2_000_000;
 const SAMPLE_INTERVAL_US: i64 = 1_000_000;
 const SPREAD_HISTORY_SIZE: usize = 100;
@@ -58,7 +56,7 @@ impl TwapBar {
 }
 
 pub fn encode_bar_key(end_ts_us: i64) -> [u8; 8] {
-    end_ts_us.to_be_bytes()
+    manager_db::encode_ts_key(end_ts_us)
 }
 
 pub fn column_family_name(symbol: &str, venue: &str) -> Result<String> {
@@ -175,33 +173,21 @@ impl Accumulator {
 }
 
 pub struct TwapStore {
-    db: DB,
-    path: PathBuf,
+    db: ManagerDb,
     retain_us: i64,
 }
 
 impl TwapStore {
     pub fn open(path: &Path, retain_days: u32) -> Result<Self> {
+        Self::from_db(ManagerDb::open(path)?, retain_days)
+    }
+
+    pub fn from_db(db: ManagerDb, retain_days: u32) -> Result<Self> {
         if retain_days == 0 {
             bail!("TWAP retain_days must be greater than zero");
         }
-        std::fs::create_dir_all(path)
-            .with_context(|| format!("failed to create TWAP RocksDB {}", path.display()))?;
-
-        let db_opts = db_options();
-        let existing = match DB::list_cf(&db_opts, path) {
-            Ok(names) if !names.is_empty() => names,
-            _ => vec![DEFAULT_CF.to_string()],
-        };
-        let cf_opts = existing
-            .iter()
-            .map(|name| (name.as_str(), cf_options()))
-            .collect::<Vec<_>>();
-        let db = DB::open_cf_with_opts(&db_opts, path, cf_opts)
-            .with_context(|| format!("failed to open TWAP RocksDB {}", path.display()))?;
         Ok(Self {
             db,
-            path: path.to_path_buf(),
             retain_us: i64::from(retain_days)
                 .saturating_mul(24)
                 .saturating_mul(3_600)
@@ -209,82 +195,70 @@ impl TwapStore {
         })
     }
 
-    pub fn ensure_column_family(&mut self, name: &str) -> Result<()> {
-        if self.db.cf_handle(name).is_some() {
-            return Ok(());
-        }
-        self.db
-            .create_cf(name, &cf_options())
-            .with_context(|| format!("failed to create TWAP column family {name}"))?;
-        Ok(())
+    pub fn ensure_column_family(&self, name: &str) -> Result<()> {
+        self.db.ensure_column_family(name)
     }
 
-    pub fn append_bar(&mut self, cf_name: &str, bar: TwapBar) -> Result<()> {
+    pub fn append_bar(&self, cf_name: &str, bar: TwapBar) -> Result<()> {
         if bar.end_ts_us <= 0 || !bar.twap.is_finite() || bar.sample_count == 0 {
             bail!("invalid TWAP bar for {cf_name}");
         }
         self.ensure_column_family(cf_name)?;
-        let handle = self
-            .db
-            .cf_handle(cf_name)
-            .with_context(|| format!("TWAP column family {cf_name} disappeared after create"))?;
+        let handle =
+            self.db.db().cf_handle(cf_name).with_context(|| {
+                format!("TWAP column family {cf_name} disappeared after create")
+            })?;
         self.db
-            .put_cf(handle, encode_bar_key(bar.end_ts_us), bar.encode_value())
+            .db()
+            .put_cf(&handle, encode_bar_key(bar.end_ts_us), bar.encode_value())
             .with_context(|| format!("failed to append TWAP bar {cf_name}"))?;
         Ok(())
     }
 
-    pub fn compact_older_than(&mut self, now_ts_us: i64) -> Result<usize> {
+    pub fn compact_older_than(&self, now_ts_us: i64) -> Result<usize> {
         if now_ts_us <= self.retain_us {
             return Ok(0);
         }
         let cutoff = now_ts_us - self.retain_us;
         let cutoff_key = encode_bar_key(cutoff);
-        let names = self.column_families()?;
+        let names = self.db.column_families()?;
         let mut deleted = 0usize;
         for name in names {
-            if name == DEFAULT_CF {
+            if name == DEFAULT_CF || name == POSITION_UPDATES_CF {
                 continue;
             }
-            let Some(handle) = self.db.cf_handle(&name) else {
+            let Some(handle) = self.db.db().cf_handle(&name) else {
                 continue;
             };
             let mut batch = WriteBatch::default();
             let iter = self
                 .db
-                .iterator_cf(handle, IteratorMode::From(&cutoff_key, Direction::Reverse));
+                .db()
+                .iterator_cf(&handle, IteratorMode::From(&cutoff_key, Direction::Reverse));
             for item in iter {
                 let (key, _) = item.with_context(|| format!("failed to iterate TWAP {name}"))?;
                 if key.as_ref() >= cutoff_key.as_slice() {
                     continue;
                 }
-                batch.delete_cf(handle, &key);
+                batch.delete_cf(&handle, &key);
                 deleted += 1;
             }
             if !batch.is_empty() {
                 self.db
+                    .db()
                     .write(batch)
                     .with_context(|| format!("failed to delete expired TWAP bars {name}"))?;
             }
             let mut compact = CompactOptions::default();
             compact.set_exclusive_manual_compaction(false);
-            self.db.compact_range_cf_opt(
-                handle,
+            self.db.db().compact_range_cf_opt(
+                &handle,
                 None::<&[u8]>,
                 Some(cutoff_key.as_slice()),
                 &compact,
             );
         }
         Ok(deleted)
-    }
-
-    fn column_families(&self) -> Result<Vec<String>> {
-        DB::list_cf(&db_options(), &self.path).with_context(|| {
-            format!(
-                "failed to list TWAP column families {}",
-                self.path.display()
-            )
-        })
     }
 }
 
@@ -314,7 +288,7 @@ impl SharedSymbols {
     }
 }
 
-pub fn spawn(pool: PgPool, config: TwapConfig) {
+pub fn spawn_with_db(pool: PgPool, config: TwapConfig, db: ManagerDb) {
     if !config.enabled {
         info!("CTA Manager TWAP recorder disabled");
         return;
@@ -343,15 +317,15 @@ pub fn spawn(pool: PgPool, config: TwapConfig) {
     thread::Builder::new()
         .name("cta-twap-recorder".into())
         .spawn(move || {
-            if let Err(error) = run_recorder(config, symbols) {
+            if let Err(error) = run_recorder(config, db, symbols) {
                 warn!(error = %error, "CTA Manager TWAP recorder stopped");
             }
         })
         .expect("failed to spawn TWAP recorder");
 }
 
-fn run_recorder(config: TwapConfig, symbols: SharedSymbols) -> Result<()> {
-    let mut store = TwapStore::open(&config.rocksdb_path, config.retain_days)?;
+fn run_recorder(config: TwapConfig, db: ManagerDb, symbols: SharedSymbols) -> Result<()> {
+    let store = TwapStore::from_db(db, config.retain_days)?;
     info!(
         path = %config.rocksdb_path.display(),
         venue = %config.venue,
@@ -418,7 +392,7 @@ fn run_recorder(config: TwapConfig, symbols: SharedSymbols) -> Result<()> {
 
         let now_us = unix_now_us();
         if now_us >= current_bar_end {
-            flush_bar(&mut store, &mut open, &config.venue, current_bar_end)?;
+            flush_bar(&store, &mut open, &config.venue, current_bar_end)?;
             current_bar_end = aligned_bar_end(now_us, interval_us);
             if current_bar_end <= now_us {
                 current_bar_end = now_us.saturating_add(interval_us);
@@ -455,7 +429,7 @@ fn sample_current_bar(
 }
 
 fn flush_bar(
-    store: &mut TwapStore,
+    store: &TwapStore,
     open: &mut HashMap<String, Accumulator>,
     venue: &str,
     bar_end: i64,
@@ -508,20 +482,6 @@ fn normalize_symbol(raw: &str) -> String {
         .collect()
 }
 
-fn db_options() -> Options {
-    let mut opts = Options::default();
-    opts.create_if_missing(true);
-    opts.create_missing_column_families(true);
-    opts.set_compression_type(DBCompressionType::Lz4);
-    opts
-}
-
-fn cf_options() -> Options {
-    let mut opts = Options::default();
-    opts.set_compression_type(DBCompressionType::Lz4);
-    opts
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,7 +513,7 @@ mod tests {
     #[test]
     fn appends_bars_and_deletes_expired_history() {
         let dir = TempDir::new().unwrap();
-        let mut store = TwapStore::open(dir.path(), 1).unwrap();
+        let store = TwapStore::open(dir.path(), 1).unwrap();
         let cf = column_family_name("BTCUSDT", "binance-futures").unwrap();
         store
             .append_bar(
@@ -583,16 +543,64 @@ mod tests {
             .unwrap();
         assert_eq!(deleted, 1);
 
-        let handle = store.db.cf_handle(&cf).unwrap();
+        let handle = store.db.db().cf_handle(&cf).unwrap();
         let remaining: Vec<_> = store
             .db
-            .iterator_cf(handle, IteratorMode::Start)
+            .db()
+            .iterator_cf(&handle, IteratorMode::Start)
             .map(|item| item.unwrap())
             .collect();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].0.as_ref(), encode_bar_key(90_000_000_000_000));
         let kept = TwapBar::decode(90_000_000_000_000, &remaining[0].1).unwrap();
         assert!((kept.twap - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn compaction_skips_position_update_messages() {
+        use crate::order_config::TargetPosition;
+        use crate::position_archive::PositionArchive;
+        use crate::strategy_catalog::PositionStrategy;
+
+        let dir = TempDir::new().unwrap();
+        let db = ManagerDb::open(dir.path()).unwrap();
+        let archive = PositionArchive::open(db.clone()).unwrap();
+        archive
+            .append(
+                1_000_000,
+                &PositionStrategy {
+                    strategy_name: "cta_a".into(),
+                    equity_usdt: 10_000.0,
+                    targets: std::collections::BTreeMap::from([(
+                        "BTCUSDT".into(),
+                        TargetPosition {
+                            qty: 0.1,
+                            signal: 0,
+                        },
+                    )]),
+                    updated_at_us: 1_000_000,
+                },
+                Vec::new(),
+            )
+            .unwrap();
+        let store = TwapStore::from_db(db, 1).unwrap();
+        let cf = column_family_name("BTCUSDT", "binance-futures").unwrap();
+        store
+            .append_bar(
+                &cf,
+                TwapBar {
+                    end_ts_us: 1_000_000,
+                    twap: 90.0,
+                    sample_count: 1,
+                    first_ts_us: 900_000,
+                },
+            )
+            .unwrap();
+        let deleted = store
+            .compact_older_than(86_400_000_000_000 + 2_000_000)
+            .unwrap();
+        assert_eq!(deleted, 1);
+        assert!(archive.latest().unwrap().is_some());
     }
 
     #[test]

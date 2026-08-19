@@ -220,6 +220,28 @@ fn allocation_ratio(part: f64, total: f64) -> f64 {
     if total > 0.0 { part / total } else { 0.0 }
 }
 
+pub async fn list_binding_source_ids_for_position(
+    pool: &PgPool,
+    strategy_name: &str,
+) -> Result<Vec<String>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT source_id
+        FROM cta_account_strategy_bindings
+        WHERE position_strategy_name = $1
+        ORDER BY source_id
+        "#,
+    )
+    .bind(strategy_name)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to list bindings for position strategy {strategy_name}"))?;
+    rows.into_iter()
+        .map(|row| row.try_get("source_id"))
+        .collect::<Result<Vec<_>, _>>()
+        .context("failed to decode binding source ids")
+}
+
 pub async fn list_position_strategies(pool: &PgPool) -> Result<Vec<PositionStrategy>> {
     let rows = sqlx::query(
         r#"

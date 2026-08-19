@@ -1781,6 +1781,7 @@ mod tests {
             estimated_fee_rate: fee_rate,
             gateway_prefix: None,
             exec_config_url: None,
+            exec_viz_url: None,
             ipc_namespace: None,
             account_ipc_service: None,
             share_unit_usdt: None,

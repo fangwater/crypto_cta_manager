@@ -74,6 +74,8 @@ pub struct SourceConfig {
     pub gateway_prefix: Option<String>,
     /// Loopback-only Exec Config service used by the Manager backend.
     pub exec_config_url: Option<String>,
+    /// Loopback-only Exec Viz origin used to read `/snapshot` factual positions.
+    pub exec_viz_url: Option<String>,
     /// Iceoryx namespace used by this Exec's account_monitor. Defaults to source id.
     #[serde(default)]
     pub ipc_namespace: Option<String>,
@@ -144,13 +146,21 @@ impl AppConfig {
         if self.order_config.request_timeout_secs == 0 {
             bail!("order_config.request_timeout_secs must be greater than zero");
         }
-        if self.twap.enabled {
-            if !self.twap.rocksdb_path.is_absolute() {
+        if !self.twap.rocksdb_path.is_absolute() {
+            bail!(
+                "twap.rocksdb_path must be absolute: {}",
+                self.twap.rocksdb_path.display()
+            );
+        }
+        for source in &self.sources {
+            if source.enabled && source.rocksdb_path == self.twap.rocksdb_path {
                 bail!(
-                    "twap.rocksdb_path must be absolute: {}",
+                    "twap.rocksdb_path must not reuse an Exec persist_manager path: {}",
                     self.twap.rocksdb_path.display()
                 );
             }
+        }
+        if self.twap.enabled {
             if self.twap.venue.trim().is_empty() {
                 bail!("twap.venue must not be empty");
             }
@@ -165,14 +175,6 @@ impl AppConfig {
             }
             if self.twap.compact_interval_secs == 0 {
                 bail!("twap.compact_interval_secs must be greater than zero");
-            }
-            for source in &self.sources {
-                if source.enabled && source.rocksdb_path == self.twap.rocksdb_path {
-                    bail!(
-                        "twap.rocksdb_path must not reuse an Exec persist_manager path: {}",
-                        self.twap.rocksdb_path.display()
-                    );
-                }
             }
         }
         if self.sources.is_empty() {
@@ -223,7 +225,10 @@ impl AppConfig {
                 }
             }
             if let Some(exec_config_url) = &source.exec_config_url {
-                validate_exec_config_url(&source.id, exec_config_url)?;
+                validate_loopback_http_origin(&source.id, "exec_config_url", exec_config_url)?;
+            }
+            if let Some(exec_viz_url) = &source.exec_viz_url {
+                validate_loopback_http_origin(&source.id, "exec_viz_url", exec_viz_url)?;
             }
             if source
                 .share_unit_usdt
@@ -309,6 +314,13 @@ impl SourceConfig {
             .unwrap_or("account_pubs/binance_pm");
         Some(format!("{namespace}/{service}"))
     }
+
+    pub fn exec_viz_origin(&self) -> Option<&str> {
+        self.exec_viz_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
 }
 
 fn validate_source_id(value: &str) -> Result<()> {
@@ -336,9 +348,9 @@ fn validate_gateway_prefix(source_id: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_exec_config_url(source_id: &str, value: &str) -> Result<()> {
+fn validate_loopback_http_origin(source_id: &str, field: &str, value: &str) -> Result<()> {
     let url = reqwest::Url::parse(value)
-        .with_context(|| format!("source {source_id} has invalid exec_config_url"))?;
+        .with_context(|| format!("source {source_id} has invalid {field}"))?;
     if url.scheme() != "http"
         || !url.username().is_empty()
         || url.password().is_some()
@@ -347,19 +359,19 @@ fn validate_exec_config_url(source_id: &str, value: &str) -> Result<()> {
         || !matches!(url.path(), "" | "/")
     {
         bail!(
-            "source {source_id} exec_config_url must be a loopback HTTP origin without credentials, path, query, or fragment"
+            "source {source_id} {field} must be a loopback HTTP origin without credentials, path, query, or fragment"
         );
     }
     let host = url
         .host_str()
-        .with_context(|| format!("source {source_id} exec_config_url has no host"))?;
+        .with_context(|| format!("source {source_id} {field} has no host"))?;
     let normalized_host = host.trim_matches(['[', ']']);
     let loopback = normalized_host.eq_ignore_ascii_case("localhost")
         || normalized_host
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback());
     if !loopback {
-        bail!("source {source_id} exec_config_url host must be loopback");
+        bail!("source {source_id} {field} host must be loopback");
     }
     Ok(())
 }
@@ -405,6 +417,7 @@ mod tests {
             estimated_fee_rate: Some(0.0004),
             gateway_prefix: Some(format!("/{id}")),
             exec_config_url: None,
+            exec_viz_url: None,
             ipc_namespace: None,
             account_ipc_service: None,
             share_unit_usdt: None,
@@ -493,9 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn exec_config_url_must_be_a_loopback_http_origin() {
+    fn exec_loopback_origins_must_be_http_loopback() {
         let mut valid = source("binance_exec_trade01", "/srv/trade01/persist_manager");
         valid.exec_config_url = Some("http://127.0.0.1:18161/".to_string());
+        valid.exec_viz_url = Some("http://127.0.0.1:10041/".to_string());
         config_with_sources(vec![valid]).validate().unwrap();
 
         for url in [
@@ -506,6 +520,9 @@ mod tests {
             let mut invalid = source("binance_exec_trade01", "/srv/trade01/persist_manager");
             invalid.exec_config_url = Some(url.to_string());
             assert!(config_with_sources(vec![invalid]).validate().is_err());
+            let mut invalid_viz = source("binance_exec_trade01", "/srv/trade01/persist_manager");
+            invalid_viz.exec_viz_url = Some(url.replace("18161", "10041"));
+            assert!(config_with_sources(vec![invalid_viz]).validate().is_err());
         }
     }
 
@@ -526,7 +543,7 @@ mod tests {
             "binance_exec_trade01",
             "/srv/trade01/persist_manager",
         )]);
-        config.twap.enabled = true;
+        config.twap.enabled = false;
         config.twap.rocksdb_path = PathBuf::from("/srv/trade01/persist_manager");
         assert!(
             config

@@ -17,13 +17,16 @@ use tracing::{error, info, warn};
 use crate::account_ipc::LiveEquityHub;
 use crate::capacity::{self, AccountCapacityView};
 use crate::config::{AppConfig, SourceConfig};
+use crate::manager_db::ManagerDb;
 use crate::order_config::{
     ExecConfigClient, ExecConfigError, SaveOrderParametersRequest, validate_strategy_name,
 };
+use crate::position_archive::PositionArchive;
 use crate::strategy_catalog::{
     self, SaveAccountSettingsRequest, SaveAllocationsRequest, SaveBindingRequest,
     SaveBindingSharesRequest, SaveOrderStrategyRequest, SavePositionStrategyRequest,
 };
+use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
 use crate::{nav, postgres};
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
@@ -82,6 +85,8 @@ struct WebState {
     exec_config: ExecConfigClient,
     order_config_write_token: Arc<str>,
     live_equity: LiveEquityHub,
+    position_archive: Arc<PositionArchive>,
+    viz_snapshot: VizSnapshotClient,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -154,7 +159,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         order_config_write_token.clone(),
     )?;
     let live_equity = LiveEquityHub::spawn(&config.sources);
-    crate::twap::spawn(pool.clone(), config.twap.clone());
+    let viz_snapshot = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
+    let manager_db = ManagerDb::open(&config.twap.rocksdb_path)?;
+    let position_archive = Arc::new(PositionArchive::open(manager_db.clone())?);
+    crate::twap::spawn_with_db(pool.clone(), config.twap.clone(), manager_db);
     let first_dashboard =
         build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await?;
     let cache = Arc::new(RwLock::new(CacheState {
@@ -180,7 +188,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
 
     let app = Router::new()
         .route("/api/health", get(health))
-        .route("/api/manager_publish_client.py", get(manager_publish_client))
+        .route(
+            "/api/manager_publish_client.py",
+            get(manager_publish_client),
+        )
         .route("/api/dashboard", get(dashboard))
         .route("/api/timeline", get(timeline))
         .route("/api/order-config/auth", post(order_config_auth))
@@ -251,6 +262,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             exec_config,
             order_config_write_token: Arc::from(order_config_write_token),
             live_equity,
+            position_archive,
+            viz_snapshot,
         })
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind)
@@ -559,7 +572,23 @@ async fn save_position_strategy(
     Json(request): Json<SavePositionStrategyRequest>,
 ) -> Result<Response, ApiError> {
     match strategy_catalog::upsert_position_strategy(&state.pool, &request, unix_now_us()).await {
-        Ok(saved) => Ok((NO_STORE, Json(saved)).into_response()),
+        Ok(saved) => {
+            let factual_positions = load_factual_positions(&state, &saved.strategy_name).await;
+            if let Err(error) =
+                state
+                    .position_archive
+                    .append(saved.updated_at_us, &saved, factual_positions)
+            {
+                error!(
+                    strategy_name = %saved.strategy_name,
+                    updated_at_us = saved.updated_at_us,
+                    error = %error,
+                    "position strategy saved but RocksDB archive write failed"
+                );
+                return Err(error.into());
+            }
+            Ok((NO_STORE, Json(saved)).into_response())
+        }
         Err(error) => Ok(catalog_error(error)),
     }
 }
@@ -769,6 +798,54 @@ async fn publish_account_binding(
         Ok(published) => Ok((NO_STORE, Json(published)).into_response()),
         Err(error) => Ok(exec_config_error_response(&error)),
     }
+}
+
+async fn load_factual_positions(
+    state: &WebState,
+    strategy_name: &str,
+) -> Vec<SourceFactualPositions> {
+    let source_ids =
+        match strategy_catalog::list_binding_source_ids_for_position(&state.pool, strategy_name)
+            .await
+        {
+            Ok(source_ids) => source_ids,
+            Err(error) => {
+                warn!(
+                    strategy_name,
+                    error = %error,
+                    "failed to list bound sources for position update archive"
+                );
+                return Vec::new();
+            }
+        };
+    let mut out = Vec::new();
+    for source_id in source_ids {
+        let Some(source) = state
+            .config
+            .sources
+            .iter()
+            .find(|source| source.id == source_id && source.enabled)
+        else {
+            continue;
+        };
+        let Some(viz_url) = source.exec_viz_origin() else {
+            continue;
+        };
+        match state
+            .viz_snapshot
+            .load_strategy_positions(&source_id, viz_url, strategy_name)
+            .await
+        {
+            Ok(positions) => out.push(positions),
+            Err(error) => warn!(
+                source_id,
+                strategy_name,
+                error = %error,
+                "Exec Viz snapshot factual positions unavailable"
+            ),
+        }
+    }
+    out
 }
 
 fn catalog_error(error: anyhow::Error) -> Response {

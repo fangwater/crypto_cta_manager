@@ -105,13 +105,18 @@ The CTA dashboard is a React/Vite application under `frontend/`, backed by the
 `cta_web` API. The API refreshes its in-memory report every 60 seconds
 from local PostgreSQL snapshots plus later RocksDB fills. It keeps the last good
 report when a refresh fails and must never expose database credentials or write
-to the live Exec RocksDB. When `[twap]` is enabled, `cta_web` also records
-5-second mid TWAP bars from `spread_pbs/<venue>/ask_bid_spread` into a
-host-global Manager RocksDB, default `/home/el01/crypto_cta_manager/db`.
-This is public BBO, not an Exec-account store, so it must not live under
-`binance_exec_trade01`. Each configured catalog symbol uses column family
-`SYMBOL:binance-futures`, values are 21-byte binary bars, and rows older than
-30 days are deleted then compacted. This path must not join the Exec order
+to the live Exec RocksDB. `cta_web` also owns a host-global Manager RocksDB,
+default `/home/el01/crypto_cta_manager/db`. This is not an Exec-account store,
+so it must not live under `binance_exec_trade01`. Each accepted
+`POST /api/catalog/position-strategies` is appended as one JSON message in
+column family `position_updates`. The message includes the POST body plus
+bound-account factual positions read from each source's Exec Viz `/snapshot`
+`exec_pre_trade_state.current_qty`. PostgreSQL remains the current catalog.
+When `[twap]` is enabled, the same database records 5-second mid TWAP bars
+from `spread_pbs/<venue>/ask_bid_spread`. Each configured catalog symbol uses
+column family `SYMBOL:binance-futures`, values are 21-byte binary bars, and
+rows older than 30 days are deleted then compacted. Position-update messages
+are not part of that compaction. This path must not join the Exec order
 hot path.
 
 The main NAV display is a time series, not a per-symbol contribution bar chart.

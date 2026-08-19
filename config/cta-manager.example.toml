@@ -16,7 +16,8 @@ request_timeout_secs = 5
 
 [twap]
 enabled = true
-# Host-global public BBO TWAP archive. Do not put this under an Exec account.
+# Host-global Manager RocksDB for position-update messages and public BBO TWAP.
+# Do not put this under an Exec account.
 rocksdb_path = "/home/el01/crypto_cta_manager/db"
 venue = "binance-futures"
 interval_ms = 5000
@@ -32,6 +33,7 @@ rocksdb_path = "/home/el01/binance_exec_trade01/data/persist_manager"
 enabled = true
 gateway_prefix = "/exec_trade01"
 exec_config_url = "http://127.0.0.1:18161/"
+exec_viz_url = "http://127.0.0.1:10041/"
 # Effective fee charged per unit of fill notional (4 bps in this example).
 estimated_fee_rate = 0.0004
 # Iceoryx namespace of this Exec's account_monitor. Defaults to source id.
@@ -50,4 +52,5 @@ share_unit_usdt = 10000
 #enabled = true
 #gateway_prefix = "/exec_trade02"
 #exec_config_url = "http://127.0.0.1:18162/"
+#exec_viz_url = "http://127.0.0.1:10042/"
 #estimated_fee_rate = 0.0004
