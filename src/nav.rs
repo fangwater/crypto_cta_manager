@@ -1963,6 +1963,7 @@ mod tests {
             },
             ingestion: IngestionConfig::default(),
             order_config: OrderConfigSettings::default(),
+            redis: crate::config::RedisSettings::default(),
             twap: crate::config::TwapConfig::default(),
             sources,
         }
@@ -2697,6 +2698,7 @@ mod tests {
             },
             ingestion: IngestionConfig::default(),
             order_config: OrderConfigSettings::default(),
+            redis: crate::config::RedisSettings::default(),
             twap: crate::config::TwapConfig::default(),
             sources: vec![source],
         };

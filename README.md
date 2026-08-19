@@ -234,7 +234,10 @@ read-only. Runtime Redis JSON is written only by Manager through the loopback
 Exec Config `POST /api/strategy`. There is no write token. Each target is
 `{qty, signal}`; `signal=±1` means that symbol uses taker-only for the current
 execution. A successful `POST /api/catalog/position-strategies` republishes
-every bound account automatically. External push scripts only POST the catalog
+every bound account automatically. Manager keeps a reconnecting Redis long
+connection, writes and rereads the runtime JSON there, then notifies
+`exec-pre-trade` over iceoryx. The 30s Redis poll remains the fallback.
+External push scripts only POST the catalog
 through the same Nginx:
 
 ```text

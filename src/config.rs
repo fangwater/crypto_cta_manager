@@ -15,6 +15,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub order_config: OrderConfigSettings,
     #[serde(default)]
+    pub redis: RedisSettings,
+    #[serde(default)]
     pub twap: TwapConfig,
     pub sources: Vec<SourceConfig>,
 }
@@ -40,6 +42,15 @@ pub struct IngestionConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct OrderConfigSettings {
     pub request_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RedisSettings {
+    /// Loopback Redis used as the Exec runtime store. Defaults to 127.0.0.1:6379/0.
+    pub url: String,
+    pub request_timeout_secs: u64,
+    pub reconnect_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +115,16 @@ impl Default for OrderConfigSettings {
     }
 }
 
+impl Default for RedisSettings {
+    fn default() -> Self {
+        Self {
+            url: "redis://127.0.0.1:6379/0".to_string(),
+            request_timeout_secs: 2,
+            reconnect_interval_ms: 500,
+        }
+    }
+}
+
 impl Default for TwapConfig {
     fn default() -> Self {
         Self {
@@ -141,6 +162,13 @@ impl AppConfig {
         if self.order_config.request_timeout_secs == 0 {
             bail!("order_config.request_timeout_secs must be greater than zero");
         }
+        if self.redis.request_timeout_secs == 0 {
+            bail!("redis.request_timeout_secs must be greater than zero");
+        }
+        if self.redis.reconnect_interval_ms == 0 {
+            bail!("redis.reconnect_interval_ms must be greater than zero");
+        }
+        validate_loopback_redis_url(&self.redis.url)?;
         if !self.twap.rocksdb_path.is_absolute() {
             bail!(
                 "twap.rocksdb_path must be absolute: {}",
@@ -299,6 +327,19 @@ impl SourceConfig {
         Some(format!("{namespace}/{service}"))
     }
 
+    pub fn reload_notify_service_name(&self) -> Option<String> {
+        let namespace = self
+            .ipc_namespace
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(self.id.as_str());
+        if namespace.is_empty() {
+            return None;
+        }
+        Some(format!("{namespace}/batch_exec_pubs/reload_notify"))
+    }
+
     pub fn exec_viz_origin(&self) -> Option<&str> {
         self.exec_viz_url
             .as_deref()
@@ -328,6 +369,50 @@ fn validate_gateway_prefix(source_id: &str, value: &str) -> Result<()> {
         bail!(
             "source {source_id} gateway_prefix must be one absolute path segment containing only ASCII letters, digits, '_' or '-': {value:?}"
         );
+    }
+    Ok(())
+}
+
+fn is_supported_redis_db_path(path: &str) -> bool {
+    matches!(
+        path,
+        "" | "/"
+            | "/0"
+            | "/1"
+            | "/2"
+            | "/3"
+            | "/4"
+            | "/5"
+            | "/6"
+            | "/7"
+            | "/8"
+            | "/9"
+            | "/10"
+            | "/11"
+            | "/12"
+            | "/13"
+            | "/14"
+            | "/15"
+    )
+}
+
+fn validate_loopback_redis_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value).context("redis.url is invalid")?;
+    if url.scheme() != "redis"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !is_supported_redis_db_path(url.path())
+    {
+        bail!("redis.url must be a loopback redis:// origin with an optional database index 0-15");
+    }
+    let host = url.host_str().context("redis.url has no host")?;
+    let normalized_host = host.trim_matches(['[', ']']);
+    let loopback = normalized_host.eq_ignore_ascii_case("localhost")
+        || normalized_host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if !loopback {
+        bail!("redis.url host must be loopback");
     }
     Ok(())
 }
@@ -384,6 +469,7 @@ mod tests {
             },
             ingestion: IngestionConfig::default(),
             order_config: OrderConfigSettings::default(),
+            redis: RedisSettings::default(),
             twap: TwapConfig::default(),
             sources,
         }
@@ -511,6 +597,25 @@ mod tests {
     }
 
     #[test]
+    fn redis_url_must_be_loopback() {
+        let mut config = config_with_sources(vec![source(
+            "binance_exec_trade01",
+            "/srv/trade01/persist_manager",
+        )]);
+        config.validate().unwrap();
+        config.redis.url = "redis://172.16.30.42:6379/0".to_string();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("loopback")
+        );
+        config.redis.url = "http://127.0.0.1:6379/0".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn example_config_stays_valid() {
         let config: AppConfig =
             toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
@@ -519,6 +624,17 @@ mod tests {
         assert!(config.twap.enabled);
         assert_eq!(config.twap.interval_ms, 5_000);
         assert_eq!(config.twap.retain_days, 30);
+        assert_eq!(config.redis.url, "redis://127.0.0.1:6379/0");
+        assert_eq!(
+            config.sources[0].reload_notify_service_name().as_deref(),
+            Some("binance_exec_trade01/batch_exec_pubs/reload_notify")
+        );
+        let mut without_namespace = source("binance_exec_trade01", "/srv/trade01/persist_manager");
+        without_namespace.ipc_namespace = None;
+        assert_eq!(
+            without_namespace.reload_notify_service_name().as_deref(),
+            Some("binance_exec_trade01/batch_exec_pubs/reload_notify")
+        );
     }
 
     #[test]

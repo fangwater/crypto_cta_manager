@@ -301,6 +301,7 @@ class ExecConfigStore:
     def save(self, strategy_name: str, config: Any) -> Dict[str, Any]:
         name = validate_strategy_name(strategy_name)
         normalized = normalize_exec_config(config)
+        config_key = self.key(name)
         with self._save_lock:
             if name in self.list_removed_strategy_names():
                 raise ValueError(f"strategy removal already requested: {name}")
@@ -311,17 +312,28 @@ class ExecConfigStore:
             if current is not None and current.get("updated_at_us") is not None:
                 next_version = max(next_version, current["updated_at_us"] + 1)
             normalized["updated_at_us"] = next_version
-            self.client.set(
-                self.key(name),
-                json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+            encoded = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+            next_names = (
+                sorted(set(strategy_names) | {name})
+                if name not in strategy_names
+                else None
             )
-            if name not in strategy_names:
-                strategy_names.append(name)
-                self.client.set(
-                    self.index_key,
-                    json.dumps(sorted(strategy_names), ensure_ascii=False, separators=(",", ":")),
-                )
-        return normalized
+            with self.client.pipeline() as pipeline:
+                pipeline.multi()
+                pipeline.set(config_key, encoded)
+                if next_names is not None:
+                    pipeline.set(
+                        self.index_key,
+                        json.dumps(next_names, ensure_ascii=False, separators=(",", ":")),
+                    )
+                pipeline.execute()
+            stored = confirm_written_config(
+                name,
+                expected=normalized,
+                stored=self.load(name),
+                strategy_names=self.list_strategy_names(),
+            )
+        return stored
 
     def save_order_parameters(
         self,
@@ -333,6 +345,7 @@ class ExecConfigStore:
         normalized_parameters = normalize_order_parameters(order_parameters)
         expected_version = normalize_expected_updated_at_us(expected_updated_at_us)
         config_key = self.key(name)
+        stored: Optional[Dict[str, Any]] = None
         with self._save_lock:
             try:
                 with self.client.pipeline() as pipeline:
@@ -378,11 +391,19 @@ class ExecConfigStore:
                         ),
                     )
                     pipeline.execute()
+                    stored = confirm_written_config(
+                        name,
+                        expected=updated,
+                        stored=self.load(name),
+                        strategy_names=self.list_strategy_names(),
+                    )
             except self._watch_error as exc:
                 raise ConfigVersionConflict(
                     "strategy config changed while it was being saved; reload before saving"
                 ) from exc
-        return updated
+        if stored is None:
+            raise RuntimeError(f"Redis write confirmation missing: {name}")
+        return stored
 
     def remove(self, strategy_name: str) -> bool:
         name = validate_strategy_name(strategy_name)
@@ -412,6 +433,31 @@ class ExecConfigStore:
                     json.dumps(strategy_names, ensure_ascii=False, separators=(",", ":")),
                 )
         return True
+
+
+def confirm_written_config(
+    strategy_name: str,
+    *,
+    expected: Dict[str, Any],
+    stored: Optional[Dict[str, Any]],
+    strategy_names: List[str],
+) -> Dict[str, Any]:
+    """Reject an HTTP 200 unless the committed Redis value is readable and exact."""
+    if stored is None:
+        raise RuntimeError(f"Redis write was not readable after save: {strategy_name}")
+    if stored.get("updated_at_us") != expected.get("updated_at_us"):
+        raise RuntimeError(
+            f"Redis write confirmation mismatched updated_at_us: {strategy_name}"
+        )
+    if stored != expected:
+        raise RuntimeError(
+            f"Redis write confirmation mismatched payload: {strategy_name}"
+        )
+    if strategy_name not in strategy_names:
+        raise RuntimeError(
+            f"Redis write confirmation missing strategy index: {strategy_name}"
+        )
+    return stored
 
 
 INDEX_HTML = r"""<!doctype html>

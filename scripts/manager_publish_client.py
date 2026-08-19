@@ -185,6 +185,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 put-position writes the catalog and automatically republishes every bound
 account. qty is scaled by that account's shares; signal is copied unchanged.
+Manager writes Redis on a reconnecting long connection, confirms the value is
+readable, then notifies exec-pre-trade; the 30s Redis poll remains the fallback
+if notify is lost.
 The optional publish command only republishes one existing binding.
 """,
     )

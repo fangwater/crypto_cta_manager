@@ -9,6 +9,8 @@ pub mod order_config;
 pub mod position_archive;
 pub mod postgres;
 pub mod reconcile;
+pub mod redis_runtime;
+pub mod reload_notify;
 pub mod rocks_source;
 pub mod snapshot;
 pub mod strategy_catalog;

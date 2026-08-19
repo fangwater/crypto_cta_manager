@@ -12,6 +12,11 @@ overlap_secs = 300
 [order_config]
 request_timeout_secs = 5
 
+[redis]
+url = "redis://127.0.0.1:6379/0"
+request_timeout_secs = 2
+reconnect_interval_ms = 500
+
 [twap]
 enabled = true
 # Host-global Manager RocksDB. This is not an Exec persist_manager path.

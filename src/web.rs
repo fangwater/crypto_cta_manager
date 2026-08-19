@@ -23,6 +23,8 @@ use crate::order_config::{
     validate_strategy_name,
 };
 use crate::position_archive::PositionArchive;
+use crate::redis_runtime::RedisRuntime;
+use crate::reload_notify::ReloadNotifyHub;
 use crate::strategy_catalog::{
     self, SaveAccountSettingsRequest, SaveAllocationsRequest, SaveBindingRequest,
     SaveBindingSharesRequest, SaveOrderStrategyRequest, SavePositionStrategyRequest,
@@ -84,6 +86,8 @@ struct WebState {
     config: Arc<AppConfig>,
     pool: PgPool,
     exec_config: ExecConfigClient,
+    redis_runtime: RedisRuntime,
+    reload_notify: ReloadNotifyHub,
     live_equity: LiveEquityHub,
     position_archive: Arc<PositionArchive>,
     viz_snapshot: VizSnapshotClient,
@@ -170,6 +174,9 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     postgres::migrate(&pool).await?;
     postgres::register_sources(&pool, &config.sources).await?;
     let exec_config = ExecConfigClient::new(config.order_config.request_timeout_secs)?;
+    let redis_runtime = RedisRuntime::connect(config.redis.clone())?;
+    redis_runtime.spawn_keepalive();
+    let reload_notify = ReloadNotifyHub::spawn();
     let live_equity = LiveEquityHub::spawn(&config.sources);
     let viz_snapshot = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
     let manager_db = ManagerDb::open(&config.twap.rocksdb_path)?;
@@ -272,6 +279,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             config: Arc::new(config),
             pool,
             exec_config,
+            redis_runtime,
+            reload_notify,
             live_equity,
             position_archive,
             viz_snapshot,
@@ -554,6 +563,17 @@ async fn save_order_parameters(
     .await
     {
         error!(audit_id, error = ?audit_error, "order config changed but audit completion failed");
+    }
+    if let Some(updated_at_us) = saved.updated_at_us {
+        state
+            .reload_notify
+            .notify(source, &saved.strategy_name, updated_at_us);
+    } else {
+        warn!(
+            source_id,
+            strategy_name = %saved.strategy_name,
+            "order-parameter Redis write confirmed without updated_at_us; skip notify"
+        );
     }
     info!(
         audit_id,
@@ -900,19 +920,36 @@ async fn publish_binding(
             message: "binding was not found".to_string(),
         });
     };
-    let exec_config_url = source.exec_config_url.as_deref().unwrap_or_default();
     let targets = strategy_catalog::scale_targets(&position.targets, shares);
-    state
-        .exec_config
-        .publish_strategy(
-            source_id,
-            exec_config_url,
-            binding_name,
-            &order.order_parameters,
-            &targets,
-        )
+    let published = state
+        .redis_runtime
+        .publish_strategy(source, binding_name, &order.order_parameters, &targets)
         .await
-        .map_err(publish_failure_from_exec)
+        .map_err(|error| {
+            let message = error.to_string();
+            let status = if message.contains("reserved")
+                || message.contains("removal already requested")
+                || message.contains("must be")
+                || message.contains("invalid")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            PublishFailure { status, message }
+        })?;
+    if let Some(updated_at_us) = published.updated_at_us {
+        state
+            .reload_notify
+            .notify(source, &published.strategy_name, updated_at_us);
+    } else {
+        warn!(
+            source_id,
+            strategy_name = %published.strategy_name,
+            "Redis write confirmed without updated_at_us; skip notify and keep 30s poll fallback"
+        );
+    }
+    Ok(published)
 }
 
 fn resolve_publish_source<'a>(
@@ -938,23 +975,6 @@ fn resolve_publish_source<'a>(
         });
     }
     Ok(source)
-}
-
-fn publish_failure_from_exec(error: ExecConfigError) -> PublishFailure {
-    let status = match error.status() {
-        Some(StatusCode::BAD_REQUEST) => StatusCode::BAD_REQUEST,
-        Some(StatusCode::UNAUTHORIZED) => StatusCode::BAD_GATEWAY,
-        Some(StatusCode::NOT_FOUND) => StatusCode::NOT_FOUND,
-        Some(StatusCode::CONFLICT) => StatusCode::CONFLICT,
-        Some(StatusCode::SERVICE_UNAVAILABLE) => StatusCode::BAD_GATEWAY,
-        _ => StatusCode::BAD_GATEWAY,
-    };
-    let message = if status == StatusCode::BAD_GATEWAY {
-        "Exec Config service is unavailable".to_string()
-    } else {
-        error.public_message().to_string()
-    };
-    PublishFailure { status, message }
 }
 
 fn publish_failure_response(error: PublishFailure) -> Response {
@@ -1318,6 +1338,7 @@ mod tests {
             },
             ingestion: crate::config::IngestionConfig::default(),
             order_config: crate::config::OrderConfigSettings::default(),
+            redis: crate::config::RedisSettings::default(),
             twap: crate::config::TwapConfig::default(),
             sources: vec![crate::config::SourceConfig {
                 id: "binance_exec_trade01".into(),
@@ -1353,6 +1374,7 @@ mod tests {
         let script = std::str::from_utf8(MANAGER_PUBLISH_CLIENT).unwrap();
         assert!(script.contains("put-position"));
         assert!(script.contains("automatically republishes every bound"));
+        assert!(script.contains("Manager writes Redis on a reconnecting long connection"));
         assert!(script.contains(r#"{"strategy_name":"CTA_A","targets":{"BTCUSDT":-0.006}}"#));
         assert!(script.contains("catalog/accounts/"));
         assert!(script.contains("/bindings/"));

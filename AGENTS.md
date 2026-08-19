@@ -254,7 +254,15 @@ Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Runtime
 Redis JSON is written when Manager scales each target `qty` by shares, copies
 `signal` unchanged, assembles the Exec payload, and `POST`s `/api/strategy`.
 A successful `POST /api/catalog/position-strategies` does that automatically
-for every account bound to the strategy. The per-binding publish endpoint
+for every account bound to the strategy. Manager keeps one loopback Redis long
+connection (`[redis]` in the host toml, default `redis://127.0.0.1:6379/0`)
+with keepalive ping and reconnect. Position publish writes the strategy JSON
+and `batch_exec:strategy_names` on that connection, rereads both, and only then
+publishes a small iceoryx notify on
+`<ipc_namespace>/batch_exec_pubs/reload_notify` so `exec-pre-trade` reloads
+immediately. The existing 30s Redis poll remains the fallback if notify is
+lost. Notify never carries qty/signal. Parameter-only updates still go through
+loopback Exec Config. The per-binding publish endpoint
 remains only as a manual republish. There is no write token. Each target is
 `{"qty": <f64>, "signal": <int>}` with `signal` in `-2,-1,0,1,2`; omitted or
 legacy bare-number targets become `signal=0`. `signal=±1` means that symbol's

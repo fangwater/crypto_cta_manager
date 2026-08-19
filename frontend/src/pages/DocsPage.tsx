@@ -100,7 +100,7 @@ function buildChapters(gateway: string): Chapter[] {
             [
               'Exec 运行时',
               '该账户 Redis',
-              '只读查询；写入只能由 Manager publish 完成',
+              '只读查询；仓位由 Manager 长连接直接写 Redis 并回读确认，再 iceoryx notify，30s 轮询兜底',
             ],
           ]}
         />
@@ -477,7 +477,10 @@ function buildChapters(gateway: string): Chapter[] {
         <p>
           每次 <code>POST /catalog/position-strategies</code> 成功后，Manager
           找出所有绑定了该策略的账户，用各自 <code>qty × shares</code> 和下单参数拼成 Exec
-          标准 JSON，<code>signal</code> 不随份数放大，再写入该账户 Redis。
+          标准 JSON，<code>signal</code> 不随份数放大，再由 Manager 自己的 Redis
+          长连接写入该账户 key。连接断了会自动重连；写入后回读确认，再发 iceoryx
+          notify。notify 只带策略名和 <code>updated_at_us</code>，不带仓位。
+          <code>exec-pre-trade</code> 收到后立刻再读 Redis；notify 断了仍有 30s 轮询兜底。
           手工 publish 做的是同一件事，只作用于一个绑定。
         </p>
         <Note tone="warn">还没有绑定账户时，仓位 POST 只写目录，不会写 Redis。</Note>
@@ -488,7 +491,7 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'exec-read',
     group: 'Exec 运行时',
     title: '只读查询',
-    lead: 'Exec Config 页面和脚本只能读 Redis。仓位与完整策略写入走 Manager publish。',
+    lead: 'Exec Config 页面和脚本只能读 Redis。仓位与完整策略写入走 Manager publish；pre-trade 以 Redis 为真源，iceoryx 只负责立刻唤醒 reload。',
     content: (
       <ApiTable
         rows={[

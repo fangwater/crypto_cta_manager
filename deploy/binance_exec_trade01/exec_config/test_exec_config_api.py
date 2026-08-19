@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 
 from exec_config_server import (
+    confirm_written_config,
     normalize_targets,
     require_exact_fields,
     validate_strategy_name,
@@ -77,6 +78,48 @@ class StrategyNameTests(unittest.TestCase):
     def test_rejects_reserved_names(self) -> None:
         with self.assertRaisesRegex(ValueError, "reserved"):
             validate_strategy_name("SYSTEM_POSITION_CLOSE")
+
+
+class ConfirmWrittenConfigTests(unittest.TestCase):
+    def test_returns_readable_exact_payload(self) -> None:
+        payload = {
+            "single_order_usdt": 100.0,
+            "updated_at_us": 12,
+            "targets": {"BTCUSDT": {"qty": 0.004, "signal": 0}},
+        }
+        self.assertEqual(
+            confirm_written_config(
+                "CTA_A",
+                expected=payload,
+                stored=dict(payload),
+                strategy_names=["CTA_A"],
+            ),
+            payload,
+        )
+
+    def test_rejects_unreadable_or_partial_write(self) -> None:
+        payload = {"updated_at_us": 12, "targets": {}}
+        with self.assertRaisesRegex(RuntimeError, "not readable"):
+            confirm_written_config(
+                "CTA_A",
+                expected=payload,
+                stored=None,
+                strategy_names=["CTA_A"],
+            )
+        with self.assertRaisesRegex(RuntimeError, "updated_at_us"):
+            confirm_written_config(
+                "CTA_A",
+                expected=payload,
+                stored={"updated_at_us": 11, "targets": {}},
+                strategy_names=["CTA_A"],
+            )
+        with self.assertRaisesRegex(RuntimeError, "strategy index"):
+            confirm_written_config(
+                "CTA_A",
+                expected=payload,
+                stored=dict(payload),
+                strategy_names=[],
+            )
 
 
 if __name__ == "__main__":
