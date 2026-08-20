@@ -10,7 +10,7 @@ use crate::strategy_catalog::PositionStrategy;
 use crate::viz_snapshot::SourceFactualPositions;
 
 const MSG_TYPE: &str = "position_update";
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArchivedFactualPosition {
@@ -29,6 +29,14 @@ pub struct ArchivedSourcePositions {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArchivedPublishedAccount {
+    pub source_id: String,
+    pub binding_name: String,
+    pub shares: f64,
+    pub leverage: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PositionUpdateMsg {
     pub msg_type: String,
     pub schema_version: u32,
@@ -37,6 +45,8 @@ pub struct PositionUpdateMsg {
     pub strategy: PositionStrategy,
     #[serde(default)]
     pub factual_positions: Vec<ArchivedSourcePositions>,
+    #[serde(default)]
+    pub published_accounts: Vec<ArchivedPublishedAccount>,
 }
 
 impl PositionUpdateMsg {
@@ -45,6 +55,7 @@ impl PositionUpdateMsg {
         seq: u32,
         strategy: PositionStrategy,
         factual_positions: Vec<SourceFactualPositions>,
+        published_accounts: Vec<ArchivedPublishedAccount>,
     ) -> Self {
         Self {
             msg_type: MSG_TYPE.to_string(),
@@ -53,7 +64,22 @@ impl PositionUpdateMsg {
             seq,
             strategy,
             factual_positions: factual_positions.into_iter().map(archive_source).collect(),
+            published_accounts,
         }
+    }
+}
+
+pub fn published_account(
+    source_id: impl Into<String>,
+    binding_name: impl Into<String>,
+    shares: f64,
+    leverage: f64,
+) -> ArchivedPublishedAccount {
+    ArchivedPublishedAccount {
+        source_id: source_id.into(),
+        binding_name: binding_name.into(),
+        shares,
+        leverage,
     }
 }
 
@@ -101,6 +127,7 @@ impl PositionArchive {
         received_at_us: i64,
         strategy: &PositionStrategy,
         factual_positions: Vec<SourceFactualPositions>,
+        published_accounts: Vec<ArchivedPublishedAccount>,
     ) -> Result<PositionUpdateMsg> {
         if received_at_us <= 0 {
             bail!("position update received_at_us must be positive");
@@ -126,6 +153,7 @@ impl PositionArchive {
             seq,
             strategy.clone(),
             factual_positions,
+            published_accounts,
         );
         let key = manager_db::encode_seq_key(received_at_us, seq)?;
         let value = serde_json::to_vec(&msg).context("failed to encode position update message")?;
@@ -229,6 +257,7 @@ mod tests {
                 1_700_000_000_000_001,
                 &strategy("cta_a", 0.1, 1, 11),
                 Vec::new(),
+                Vec::new(),
             )
             .unwrap();
         let second = archive
@@ -248,14 +277,23 @@ mod tests {
                         },
                     )]),
                 }],
+                vec![published_account("binance_exec_trade01", "cta_a", 2.0, 3.0)],
             )
             .unwrap();
 
         assert_eq!(first.msg_type, "position_update");
-        assert_eq!(first.schema_version, 2);
+        assert_eq!(first.schema_version, 3);
         assert_eq!(first.seq, 0);
         assert!(first.factual_positions.is_empty());
+        assert!(first.published_accounts.is_empty());
         assert_eq!(second.factual_positions.len(), 1);
+        assert_eq!(second.published_accounts.len(), 1);
+        assert_eq!(
+            second.published_accounts[0].source_id,
+            "binance_exec_trade01"
+        );
+        assert!((second.published_accounts[0].shares - 2.0).abs() < 1e-12);
+        assert!((second.published_accounts[0].leverage - 3.0).abs() < 1e-12);
         assert_eq!(
             second.factual_positions[0].source_id,
             "binance_exec_trade01"
@@ -281,6 +319,7 @@ mod tests {
                     1_700_000_000_000_001,
                     &strategy("cta_a", 0.1, 0, 11),
                     Vec::new(),
+                    Vec::new(),
                 )
                 .unwrap();
         }
@@ -290,6 +329,7 @@ mod tests {
                 1_700_000_000_000_001,
                 &strategy("cta_a", 0.2, 1, 12),
                 Vec::new(),
+                Vec::new(),
             )
             .unwrap();
         let later = archive
@@ -297,9 +337,30 @@ mod tests {
                 1_700_000_000_000_002,
                 &strategy("cta_a", 0.3, 2, 13),
                 Vec::new(),
+                Vec::new(),
             )
             .unwrap();
         assert_eq!(same_tick.seq, 1);
         assert_eq!(later.seq, 0);
+    }
+
+    #[test]
+    fn reads_legacy_messages_without_published_accounts() {
+        let raw = serde_json::json!({
+            "msg_type": "position_update",
+            "schema_version": 2,
+            "received_at_us": 1,
+            "seq": 0,
+            "strategy": {
+                "strategy_name": "cta_a",
+                "equity_usdt": 10000.0,
+                "targets": {"BTCUSDT": {"qty": 0.1, "signal": 0}},
+                "updated_at_us": 1
+            },
+            "factual_positions": []
+        });
+        let msg: PositionUpdateMsg = serde_json::from_value(raw).unwrap();
+        assert!(msg.published_accounts.is_empty());
+        assert_eq!(msg.schema_version, 2);
     }
 }

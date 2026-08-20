@@ -21,6 +21,7 @@ import { PositionStrategyPage } from './pages/config/PositionStrategyPage'
 import { OrderStrategyPage } from './pages/config/OrderStrategyPage'
 import { AccountBindingsPage } from './pages/config/AccountBindingsPage'
 import { DocsPage } from './pages/DocsPage'
+import { ExecutionCostPage } from './pages/ExecutionCostPage'
 import { normalizePath, readSourceId, routes } from './lib/routes'
 import {
   NavTimelineChart,
@@ -137,6 +138,7 @@ export default function App() {
   if (path === '/manager/config/order') return <OrderStrategyPage />
   if (path === '/manager/config/bindings') return <AccountBindingsPage />
   if (path === '/manager/docs') return <DocsPage />
+  if (path === '/manager/execution-cost') return <ExecutionCostPage />
   return <NavPage />
 }
 

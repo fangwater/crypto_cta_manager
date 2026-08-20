@@ -109,15 +109,33 @@ to the live Exec RocksDB. `cta_web` also owns a host-global Manager RocksDB,
 default `/home/el01/crypto_cta_manager/db`. This is not an Exec-account store,
 so it must not live under `binance_exec_trade01`. Each accepted
 `POST /api/catalog/position-strategies` is appended as one JSON message in
-column family `position_updates`. The message includes the POST body plus
-bound-account factual positions read from each source's Exec Viz `/snapshot`
-`exec_pre_trade_state.current_qty`. PostgreSQL remains the current catalog.
+column family `position_updates`. The message includes the POST body, each
+bound account's then-current `shares` and `leverage`, and factual positions
+read from each source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty`.
+Published qty is reconstructed later as template qty × shares × leverage.
+Later changes to shares or leverage must not rewrite older messages.
+PostgreSQL remains the current catalog.
 When `[twap]` is enabled, the same database records 5-second mid TWAP bars
 from `spread_pbs/<venue>/ask_bid_spread`. Each configured catalog symbol uses
 column family `SYMBOL:binance-futures`, values are 21-byte binary bars, and
 rows older than 30 days are deleted then compacted. Position-update messages
 are not part of that compaction. This path must not join the Exec order
 hot path.
+
+`GET /api/catalog/execution-cost` is on-demand, not a live job. It rebuilds
+from archived position updates, 5-second mid bars, and later Exec
+`uniform_orders` fills. Query parameters are camel-case `startMs`, `endMs`,
+`windowSec` (default 300, max 86400), comma-separated `sourceIds`, and
+`strategyName`. Intended qty is template qty × archived shares × archived
+leverage minus the snapshot `current_qty`. Each update's window starts at
+`received_at_us` and ends at the earlier of `received_at_us + windowSec`, the
+next same-strategy update, or now. 1-minute mid TWAP is the average of 5-second
+mid bars whose `end_ts` falls in that minute. TWAP cost before fee is
+`intended × (twap_mid − arrival_mid)`. Actual cost before fee is
+`filled_qty × (fill VWAP − arrival_mid)` using signed fills attributed by
+`batch_exec:<strategy_name>`. Messages without `published_accounts` are skipped
+and must not be reconstructed from the current catalog. The browser page is
+`/manager/execution-cost/`.
 
 The main NAV display is a time series, not a per-symbol contribution bar chart.
 `GET /api/timeline` rebuilds it on demand and accepts camel-case `startMs`,

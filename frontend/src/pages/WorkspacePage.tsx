@@ -6,6 +6,7 @@ import {
   ExternalLink,
   LayoutDashboard,
   RefreshCw,
+  Scale,
   Settings,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -306,11 +307,17 @@ function AccountCard({
                 icon={<Activity size={15} />}
                 label="净值"
               />
+              <ActionLink
+                href={routes.executionCost(account.source_id)}
+                icon={<Scale size={15} />}
+                label="成本"
+              />
             </>
           ) : (
             <>
               <ActionDisabled icon={<Settings size={15} />} label="查看配置" />
               <ActionDisabled icon={<Activity size={15} />} label="净值" />
+              <ActionDisabled icon={<Scale size={15} />} label="成本" />
             </>
           )}
           {gatewayReady ? (

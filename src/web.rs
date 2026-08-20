@@ -30,6 +30,7 @@ use crate::strategy_catalog::{
     SaveBindingSharesRequest, SaveOrderStrategyRequest, SavePositionStrategyRequest,
     SaveSymbolContractLeverageRequest,
 };
+use crate::twap::TwapStore;
 use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
 use crate::{nav, postgres};
 
@@ -91,6 +92,7 @@ struct WebState {
     reload_notify: ReloadNotifyHub,
     live_equity: LiveEquityHub,
     position_archive: Arc<PositionArchive>,
+    twap: Arc<TwapStore>,
     viz_snapshot: VizSnapshotClient,
 }
 
@@ -102,6 +104,24 @@ struct TimelineQuery {
     source_ids: Option<String>,
     symbols: Option<String>,
     max_points: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionCostQuery {
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    #[serde(alias = "windowSecs")]
+    window_sec: Option<u64>,
+    source_ids: Option<String>,
+    strategy_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ExecutionCostSnapshot {
+    generated_at_us: i64,
+    generation_duration_ms: u64,
+    report: crate::execution_cost::ExecutionCostReport,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,6 +209,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let viz_snapshot = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
     let manager_db = ManagerDb::open(&config.twap.rocksdb_path)?;
     let position_archive = Arc::new(PositionArchive::open(manager_db.clone())?);
+    let twap = Arc::new(TwapStore::from_db(
+        manager_db.clone(),
+        config.twap.retain_days.max(1),
+    )?);
     crate::twap::spawn_with_db(pool.clone(), config.twap.clone(), manager_db);
     let first_dashboard =
         build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await?;
@@ -221,6 +245,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .route("/api/dashboard", get(dashboard))
         .route("/api/timeline", get(timeline))
+        .route("/api/catalog/execution-cost", get(execution_cost))
         .route("/api/order-config/auth", post(order_config_auth))
         .route(
             "/api/order-config/{source_id}/strategies",
@@ -295,6 +320,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             reload_notify,
             live_equity,
             position_archive,
+            twap,
             viz_snapshot,
         })
         .layer(TraceLayer::new_for_http());
@@ -421,6 +447,89 @@ async fn timeline(
         NO_STORE,
         Json(TimelineSnapshot {
             generated_at_us: unix_now_us(),
+            generation_duration_ms,
+            report,
+        }),
+    )
+        .into_response())
+}
+
+async fn execution_cost(
+    State(state): State<WebState>,
+    Query(query): Query<ExecutionCostQuery>,
+) -> Result<Response, ApiError> {
+    let selected_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
+        return Ok(bad_request(message));
+    }
+    let start_received_at_us = match query.start_ms {
+        Some(value) => match milliseconds_to_microseconds(value, "startMs") {
+            Ok(value) => value,
+            Err(message) => return Ok(bad_request(message)),
+        },
+        None => 1,
+    };
+    let end_received_at_us = match query.end_ms {
+        Some(value) => match milliseconds_to_microseconds(value, "endMs") {
+            Ok(value) => Some(value),
+            Err(message) => return Ok(bad_request(message)),
+        },
+        None => None,
+    };
+    if end_received_at_us.is_some_and(|end| end < start_received_at_us) {
+        return Ok(bad_request(
+            "endMs must be greater than or equal to startMs".to_string(),
+        ));
+    }
+    let window_secs = query
+        .window_sec
+        .unwrap_or(crate::execution_cost::DEFAULT_WINDOW_SECS);
+    let strategy_name = query
+        .strategy_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(name) = strategy_name
+        && let Err(message) = validate_strategy_name(name)
+    {
+        return Ok(bad_request(message));
+    }
+
+    let started = Instant::now();
+    let config = Arc::clone(&state.config);
+    let archive = Arc::clone(&state.position_archive);
+    let twap = Arc::clone(&state.twap);
+    let generated_at_us = unix_now_us();
+    let source_ids = selected_source_ids.clone();
+    let strategy_name = strategy_name.map(str::to_string);
+    let report = tokio::task::spawn_blocking(move || {
+        crate::execution_cost::report_execution_cost(
+            &config,
+            &archive,
+            &twap,
+            start_received_at_us,
+            end_received_at_us,
+            window_secs,
+            generated_at_us,
+            &source_ids,
+            strategy_name.as_deref(),
+        )
+    })
+    .await
+    .context("CTA execution-cost rebuild task failed")?;
+    let report = match report {
+        Ok(report) => report,
+        Err(error) if is_execution_cost_request_error(&error) => {
+            return Ok(bad_request(error.to_string()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+
+    Ok((
+        NO_STORE,
+        Json(ExecutionCostSnapshot {
+            generated_at_us,
             generation_duration_ms,
             report,
         }),
@@ -610,11 +719,13 @@ async fn save_position_strategy(
     match strategy_catalog::upsert_position_strategy(&state.pool, &request, unix_now_us()).await {
         Ok(saved) => {
             let factual_positions = load_factual_positions(&state, &saved.strategy_name).await;
-            if let Err(error) =
-                state
-                    .position_archive
-                    .append(saved.updated_at_us, &saved, factual_positions)
-            {
+            let published_accounts = load_published_accounts(&state, &saved.strategy_name).await;
+            if let Err(error) = state.position_archive.append(
+                saved.updated_at_us,
+                &saved,
+                factual_positions,
+                published_accounts,
+            ) {
                 error!(
                     strategy_name = %saved.strategy_name,
                     updated_at_us = saved.updated_at_us,
@@ -1203,6 +1314,37 @@ fn publish_failure_response(error: PublishFailure) -> Response {
         .into_response()
 }
 
+async fn load_published_accounts(
+    state: &WebState,
+    strategy_name: &str,
+) -> Vec<crate::position_archive::ArchivedPublishedAccount> {
+    let snapshots =
+        match strategy_catalog::list_publish_snapshots_for_position(&state.pool, strategy_name)
+            .await
+        {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                warn!(
+                    strategy_name,
+                    error = %error,
+                    "failed to list bound-account shares and leverage for position update archive"
+                );
+                return Vec::new();
+            }
+        };
+    snapshots
+        .into_iter()
+        .map(|snapshot| {
+            crate::position_archive::published_account(
+                snapshot.source_id,
+                snapshot.binding_name,
+                snapshot.shares,
+                snapshot.leverage,
+            )
+        })
+        .collect()
+}
+
 async fn load_factual_positions(
     state: &WebState,
     strategy_name: &str,
@@ -1381,6 +1523,14 @@ fn is_timeline_request_error(error: &anyhow::Error) -> bool {
     message.starts_with("start timestamp")
         || message.starts_with("end timestamp")
         || message.starts_with("none of the requested symbols")
+}
+
+fn is_execution_cost_request_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.starts_with("start timestamp")
+        || message.starts_with("end timestamp")
+        || message.starts_with("windowSecs")
+        || message.starts_with("sourceIds")
 }
 
 fn bad_request(message: String) -> Response {

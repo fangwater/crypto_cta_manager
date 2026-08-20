@@ -1,7 +1,7 @@
-import { Activity, BookOpen, LayoutDashboard, Settings } from 'lucide-react'
+import { Activity, BookOpen, LayoutDashboard, Settings, Scale } from 'lucide-react'
 import { cn } from '../lib/cn'
 
-export type AppNavId = 'workspace' | 'manager' | 'config' | 'docs'
+export type AppNavId = 'workspace' | 'manager' | 'execution-cost' | 'config' | 'docs'
 
 const links: Array<{
   id: AppNavId
@@ -11,6 +11,7 @@ const links: Array<{
 }> = [
   { id: 'workspace', href: '/manager/workspace/', label: '总览', icon: LayoutDashboard },
   { id: 'manager', href: '/manager/', label: '净值', icon: Activity },
+  { id: 'execution-cost', href: '/manager/execution-cost/', label: '成本', icon: Scale },
   { id: 'config', href: '/manager/config/position/', label: '策略', icon: Settings },
   { id: 'docs', href: '/manager/docs/', label: '文档', icon: BookOpen },
 ]

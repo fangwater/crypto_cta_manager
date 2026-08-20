@@ -260,6 +260,52 @@ impl TwapStore {
         }
         Ok(deleted)
     }
+
+    pub fn scan_bars(
+        &self,
+        symbol: &str,
+        venue: &str,
+        start_end_ts_us: i64,
+        end_end_ts_us: i64,
+    ) -> Result<Vec<TwapBar>> {
+        if start_end_ts_us < 0 || end_end_ts_us < 0 {
+            bail!("TWAP scan timestamps must not be negative");
+        }
+        if start_end_ts_us >= end_end_ts_us {
+            return Ok(Vec::new());
+        }
+        let cf_name = column_family_name(symbol, venue)?;
+        let Some(handle) = self.db.db().cf_handle(&cf_name) else {
+            return Ok(Vec::new());
+        };
+        let start_key = encode_bar_key(start_end_ts_us.max(1));
+        let end_key = encode_bar_key(end_end_ts_us);
+        let mut out = Vec::new();
+        let iter = self
+            .db
+            .db()
+            .iterator_cf(&handle, IteratorMode::From(&start_key, Direction::Forward));
+        for item in iter {
+            let (key, value) = item.with_context(|| format!("failed to iterate TWAP {cf_name}"))?;
+            if key.as_ref() >= end_key.as_slice() {
+                break;
+            }
+            let Some(end_ts_us) = decode_bar_key(&key) else {
+                continue;
+            };
+            if let Some(bar) = TwapBar::decode(end_ts_us, &value) {
+                out.push(bar);
+            }
+        }
+        Ok(out)
+    }
+}
+
+pub fn decode_bar_key(bytes: &[u8]) -> Option<i64> {
+    if bytes.len() != 8 {
+        return None;
+    }
+    Some(i64::from_be_bytes(bytes.try_into().ok()?))
 }
 
 #[derive(Clone)]
@@ -511,6 +557,32 @@ mod tests {
     }
 
     #[test]
+    fn scans_bars_in_half_open_end_ts_range() {
+        let dir = TempDir::new().unwrap();
+        let store = TwapStore::open(dir.path(), 1).unwrap();
+        let cf = column_family_name("BTCUSDT", "binance-futures").unwrap();
+        for (end_ts_us, twap) in [(5_000_000, 100.0), (10_000_000, 101.0), (15_000_000, 102.0)] {
+            store
+                .append_bar(
+                    &cf,
+                    TwapBar {
+                        end_ts_us,
+                        twap,
+                        sample_count: 1,
+                        first_ts_us: end_ts_us - 5_000_000,
+                    },
+                )
+                .unwrap();
+        }
+        let scanned = store
+            .scan_bars("BTCUSDT", "binance-futures", 5_000_000, 15_000_000)
+            .unwrap();
+        assert_eq!(scanned.len(), 2);
+        assert_eq!(scanned[0].end_ts_us, 5_000_000);
+        assert_eq!(scanned[1].end_ts_us, 10_000_000);
+    }
+
+    #[test]
     fn appends_bars_and_deletes_expired_history() {
         let dir = TempDir::new().unwrap();
         let store = TwapStore::open(dir.path(), 1).unwrap();
@@ -580,6 +652,7 @@ mod tests {
                     )]),
                     updated_at_us: 1_000_000,
                 },
+                Vec::new(),
                 Vec::new(),
             )
             .unwrap();

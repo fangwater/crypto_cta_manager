@@ -35,6 +35,7 @@ type ChapterId =
   | 'model'
   | 'bases'
   | 'catalog-position'
+  | 'execution-cost'
   | 'target-signal'
   | 'catalog-order'
   | 'account-studio'
@@ -125,6 +126,11 @@ function buildChapters(gateway: string): Chapter[] {
               method: 'GET',
               path: `${EXEC_PATH}/strategy?name=...`,
               summary: '只读查看该账户运行时；不能 POST 改 Redis',
+            },
+            {
+              method: 'GET',
+              path: `${CATALOG_PATH}/execution-cost`,
+              summary: '按需对比每次仓位更新的实际费前成本与 1 分钟 mid TWAP 预估',
             },
           ]}
         />
@@ -299,6 +305,52 @@ function buildChapters(gateway: string): Chapter[] {
         />
         <Note>
           日常推仓位用精简版即可：只传策略名和裸数字 qty。省略的 signal 按 0，省略的 equity_usdt 按 10000。
+        </Note>
+      </>
+    ),
+  },
+  {
+    id: 'execution-cost',
+    group: '策略目录',
+    title: '执行成本',
+    lead: '按需查询，不是实时任务。对比每次仓位更新窗口内的实际成交 VWAP 与 1 分钟 mid TWAP，都是费前。',
+    content: (
+      <>
+        <Endpoint
+          method="GET"
+          path={`${CATALOG_PATH}/execution-cost`}
+          summary="从归档仓位更新、5s mid 条和 Exec 成交即时生成报告"
+        />
+        <CodeBlock label="curl">{`curl --noproxy '*' -sS \\
+  '${manager}/catalog/execution-cost?startMs=1755648000000&endMs=1755734400000&windowSec=300'`}</CodeBlock>
+        <FieldRows
+          rows={[
+            { field: 'startMs / endMs', detail: '按仓位更新 received_at 过滤；省略 start 从最早开始，省略 end 到现在' },
+            { field: 'windowSec', detail: '每次更新的最长执行窗口，默认 300（5 分钟），上限 86400' },
+            { field: 'sourceIds', detail: '逗号分隔账户；省略则全部' },
+            { field: 'strategyName', detail: '只看一个仓位策略；省略则全部' },
+            {
+              field: 'intended_qty',
+              detail: '模板 qty × 当时归档的 shares × leverage − 快照 current_qty',
+            },
+            {
+              field: 'twap_cost_before_fee_usdt',
+              detail: 'intended × (1 分钟 mid TWAP − 到达分钟 mid)',
+            },
+            {
+              field: 'actual_cost_before_fee_usdt',
+              detail: '窗口内归属该策略的成交 filled × (VWAP − 到达分钟 mid)',
+            },
+          ]}
+        />
+        <Note>
+          价格用 Manager 自己的 5 秒 mid 条先合成 1 分钟 TWAP。成交只认
+          from_key_text 为 batch_exec:&lt;strategy_name&gt; 的 uniform_orders。
+          窗口从这次 POST 开始，遇到同策略下一次更新提前结束。旧消息没有
+          published_accounts 的 shares/leverage 会被跳过，不拿当前配置回填。
+        </Note>
+        <Note tone="warn">
+          这是查询生成，不写 Exec RocksDB，也不进交易热路径。浏览器在 /manager/execution-cost/。
         </Note>
       </>
     ),
@@ -594,7 +646,8 @@ export MANAGER_API_URL=${manager}/
 
 python3 manager_publish_client.py put-position @cta.json
 python3 manager_publish_client.py get-contract-leverage binance_exec_trade01 BTCUSDT
-python3 manager_publish_client.py set-contract-leverage binance_exec_trade01 BTCUSDT 5`}</CodeBlock>
+python3 manager_publish_client.py set-contract-leverage binance_exec_trade01 BTCUSDT 5
+python3 manager_publish_client.py get-execution-cost --window-sec 300`}</CodeBlock>
         <CodeBlock label="cta.json 精简版">{`{
   "strategy_name": "CTA_SK_C4V6PosT1_LXY_filter_Position",
   "targets": {
@@ -654,6 +707,7 @@ const CHAPTER_IDS: ChapterId[] = [
   'model',
   'bases',
   'catalog-position',
+  'execution-cost',
   'target-signal',
   'catalog-order',
   'account-studio',

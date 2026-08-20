@@ -1540,7 +1540,7 @@ fn timeline_strategy_point(
     }
 }
 
-fn strategy_from_from_key(from_key: &str) -> String {
+pub fn strategy_from_from_key(from_key: &str) -> String {
     let Some(strategy) = from_key.strip_prefix(BATCH_EXEC_FROM_KEY_PREFIX) else {
         return UNATTRIBUTED_STRATEGY.to_string();
     };

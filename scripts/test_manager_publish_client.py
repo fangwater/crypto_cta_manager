@@ -53,6 +53,10 @@ class ManagerPublishClientTests(unittest.TestCase):
             CLIENT.api_url(CLIENT.DEFAULT_BASE_URL, CLIENT.position_path()),
         )
         self.assertNotIn("/exec_trade01/config/", CLIENT.DEFAULT_BASE_URL)
+        self.assertIn(
+            "/manager/api/catalog/execution-cost",
+            CLIENT.api_url(CLIENT.DEFAULT_BASE_URL, "catalog/execution-cost"),
+        )
 
     def test_put_position_hits_catalog_only(self) -> None:
         seen: list[dict[str, Any]] = []

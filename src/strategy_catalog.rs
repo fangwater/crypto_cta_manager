@@ -265,6 +265,50 @@ pub async fn list_binding_source_ids_for_position(
     Ok(source_ids)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct BindingPublishSnapshot {
+    pub source_id: String,
+    pub binding_name: String,
+    pub shares: f64,
+    pub leverage: f64,
+}
+
+pub async fn list_publish_snapshots_for_position(
+    pool: &PgPool,
+    strategy_name: &str,
+) -> Result<Vec<BindingPublishSnapshot>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            b.source_id,
+            b.binding_name,
+            b.shares,
+            COALESCE(s.leverage, $2) AS leverage
+        FROM cta_account_strategy_bindings b
+        LEFT JOIN cta_account_settings s ON s.source_id = b.source_id
+        WHERE b.position_strategy_name = $1
+        ORDER BY b.source_id, b.binding_name
+        "#,
+    )
+    .bind(strategy_name)
+    .bind(DEFAULT_ACCOUNT_LEVERAGE)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!("failed to list publish snapshots for position strategy {strategy_name}")
+    })?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(BindingPublishSnapshot {
+                source_id: row.try_get("source_id")?,
+                binding_name: row.try_get("binding_name")?,
+                shares: row.try_get("shares")?,
+                leverage: row.try_get("leverage")?,
+            })
+        })
+        .collect()
+}
+
 pub async fn list_bindings_for_position(
     pool: &PgPool,
     strategy_name: &str,

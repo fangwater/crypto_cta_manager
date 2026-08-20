@@ -38,14 +38,29 @@ must not live under `binance_exec_trade01` and must never reuse an Exec
 `persist_manager` path. Each accepted `POST /api/catalog/position-strategies`
 is also appended as one JSON message in column family `position_updates`.
 PostgreSQL remains the current catalog; RocksDB is the append-only history of
-those POST bodies. The archived message also records the bound accounts'
-factual positions from each source's Exec Viz `/snapshot`
-`exec_pre_trade_state` row (`current_qty` for that strategy). Set
+those POST bodies. The archived message also records each bound account's
+then-current `shares` and `leverage`, and factual positions from each
+source's Exec Viz `/snapshot` `exec_pre_trade_state` row (`current_qty` for
+that strategy). Published qty is reconstructed later as template qty ×
+shares × leverage. Later catalog edits must not be used to reconstruct an
+older fill. Set
 `exec_viz_url` to the loopback Viz origin, such as `http://127.0.0.1:10041/`. When `[twap]` is enabled, the same database also records
 5-second mid TWAP bars for catalog symbols from
 `spread_pbs/<venue>/ask_bid_spread`. TWAP uses one compact binary column family
 per `SYMBOL:venue`. Bars older than `retain_days` are deleted and compacted;
 position-update messages are not compacted by that job.
+
+`GET /api/catalog/execution-cost` generates an on-demand report. It is not a
+real-time job. Each archived position update's intended qty is template qty ×
+the shares and leverage stored in that message minus the snapshot qty. The
+default execution window is 5 minutes (`windowSec`, later adjustable) and ends
+early at the next same-strategy update. Price is 1-minute mid TWAP built from
+the 5-second mid bars. The response compares TWAP estimated cost before fee
+(`intended × (twap_mid − arrival_mid)`) with actual cost before fee
+(`filled × (VWAP − arrival_mid)`). Fills come from that account's Exec
+`uniform_orders` and are attributed with `batch_exec:<strategy_name>`. Legacy
+messages without archived shares/leverage are skipped. The browser page is
+`/manager/execution-cost/`.
 
 If the account already had positions when its RocksDB history began, store an
 immutable position snapshot in PostgreSQL with `nav_snapshot`. Position
@@ -260,6 +275,7 @@ curl --noproxy '*' -sS -X PUT \
 # jp-meta uses the same paths on http://13.115.227.29:4191/manager/api/
 python3 manager_publish_client.py get-contract-leverage binance_exec_trade01 BTCUSDT
 python3 manager_publish_client.py set-contract-leverage binance_exec_trade01 BTCUSDT 5
+python3 manager_publish_client.py get-execution-cost --window-sec 300
 ```
 
 External push scripts only POST the catalog

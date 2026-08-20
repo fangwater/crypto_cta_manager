@@ -244,6 +244,81 @@ export interface TimelineSnapshot {
   report: NavTimelineReport
 }
 
+export interface ExecutionCostTotals {
+  intended_qty: number
+  filled_qty: number
+  arrival_notional_usdt: number
+  twap_notional_usdt: number
+  actual_notional_usdt: number
+  twap_cost_before_fee_usdt: number
+  actual_cost_before_fee_usdt: number
+}
+
+export interface SymbolExecutionCost {
+  symbol: string
+  template_qty: number
+  published_qty: number
+  snapshot_qty: number
+  intended_qty: number
+  filled_qty: number
+  fill_count: number
+  minute_bar_count: number
+  missing_minute_bar_count: number
+  arrival_mid: number | null
+  twap_mid: number | null
+  actual_vwap: number | null
+  arrival_notional_usdt: number | null
+  twap_notional_usdt: number | null
+  actual_notional_usdt: number | null
+  twap_cost_before_fee_usdt: number | null
+  actual_cost_before_fee_usdt: number | null
+}
+
+export interface AccountExecutionCost {
+  source_id: string
+  binding_name: string
+  shares: number
+  leverage: number
+  snapshot_ts_ms: number | null
+  position_ready: boolean | null
+  totals: ExecutionCostTotals
+  symbols: SymbolExecutionCost[]
+}
+
+export interface PositionUpdateExecutionCost {
+  received_at_us: number
+  seq: number
+  schema_version: number
+  strategy_name: string
+  window_start_us: number
+  window_end_us: number
+  skipped_legacy: boolean
+  totals: ExecutionCostTotals
+  accounts: AccountExecutionCost[]
+}
+
+export interface ExecutionCostReport {
+  generated_at_us: number
+  window_secs: number
+  twap_secs: number
+  price_basis: string
+  fee_basis: string
+  start_received_at_us: number
+  end_received_at_us: number | null
+  source_ids: string[]
+  strategy_name: string | null
+  update_count: number
+  skipped_legacy_update_count: number
+  totals: ExecutionCostTotals
+  updates: PositionUpdateExecutionCost[]
+}
+
+export interface ExecutionCostSnapshot {
+  generated_at_us: number
+  generation_duration_ms: number
+  report: ExecutionCostReport
+}
+
 export interface HealthResponse {
   status: 'ok' | 'degraded'
   source_count: number

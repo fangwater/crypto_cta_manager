@@ -12,6 +12,7 @@ import type {
   SavedAccountStudio,
   SavedPositionStrategy,
   SavedSymbolContractLeverage,
+  ExecutionCostSnapshot,
   TimelineSnapshot,
 } from './types'
 
@@ -77,6 +78,27 @@ export function getTimeline(query: TimelineQuery) {
   if (query.symbols?.length) params.set('symbols', query.symbols.join(','))
   params.set('maxPoints', String(query.maxPoints ?? 3_000))
   return requestJson<TimelineSnapshot>(`/timeline?${params}`, {
+    signal: query.signal,
+  })
+}
+
+export interface ExecutionCostQuery {
+  startMs?: number
+  endMs?: number
+  windowSec?: number
+  sourceIds?: string[]
+  strategyName?: string
+  signal?: AbortSignal
+}
+
+export function getExecutionCost(query: ExecutionCostQuery) {
+  const params = new URLSearchParams()
+  if (query.startMs !== undefined) params.set('startMs', String(query.startMs))
+  if (query.endMs !== undefined) params.set('endMs', String(query.endMs))
+  params.set('windowSec', String(query.windowSec ?? 300))
+  if (query.sourceIds?.length) params.set('sourceIds', query.sourceIds.join(','))
+  if (query.strategyName?.trim()) params.set('strategyName', query.strategyName.trim())
+  return requestJson<ExecutionCostSnapshot>(`/catalog/execution-cost?${params}`, {
     signal: query.signal,
   })
 }

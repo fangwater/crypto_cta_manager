@@ -190,6 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
   %(prog)s get-bindings binance_exec_trade01
   %(prog)s get-contract-leverage binance_exec_trade01 BTCUSDT
   %(prog)s set-contract-leverage binance_exec_trade01 BTCUSDT 5
+  %(prog)s get-execution-cost --start-ms 1755648000000 --end-ms 1755734400000
   %(prog)s publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position
 
 put-position writes the catalog and automatically republishes every bound
@@ -237,6 +238,16 @@ The optional publish command only republishes one existing binding.
     contract_parser.add_argument("source_id")
     contract_parser.add_argument("symbol")
     contract_parser.add_argument("contract_leverage", type=int)
+
+    cost_parser = commands.add_parser(
+        "get-execution-cost",
+        help="GET on-demand actual vs 1m mid TWAP execution cost",
+    )
+    cost_parser.add_argument("--start-ms", type=int)
+    cost_parser.add_argument("--end-ms", type=int)
+    cost_parser.add_argument("--window-sec", type=int, default=300)
+    cost_parser.add_argument("--source-id")
+    cost_parser.add_argument("--strategy-name")
 
     publish_parser = commands.add_parser(
         "publish",
@@ -296,6 +307,24 @@ def run(args: argparse.Namespace) -> int:
                 "contract_leverage": args.contract_leverage,
             },
             timeout=args.timeout,
+        )
+    elif args.command == "get-execution-cost":
+        params = []
+        if args.start_ms is not None:
+            params.append(f"startMs={int(args.start_ms)}")
+        if args.end_ms is not None:
+            params.append(f"endMs={int(args.end_ms)}")
+        if args.window_sec is not None:
+            params.append(f"windowSec={int(args.window_sec)}")
+        if args.source_id:
+            params.append(f"sourceIds={quote(args.source_id)}")
+        if args.strategy_name:
+            params.append(f"strategyName={quote(args.strategy_name)}")
+        query = f"?{'&'.join(params)}" if params else ""
+        response = request_json(
+            args.url,
+            f"catalog/execution-cost{query}",
+            timeout=max(args.timeout, 30.0),
         )
     else:
         response = request_json(
