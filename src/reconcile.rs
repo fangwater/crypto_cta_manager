@@ -349,7 +349,7 @@ fn reconcile_source(source: &SourceConfig) -> Result<SourceFillReconciliation> {
 
     Ok(SourceFillReconciliation {
         source_id: source.id.clone(),
-        account: source.account.clone(),
+        account: source.display_name().to_string(),
         configured_venue: source.venue.clone(),
         rocksdb_path: source.rocksdb_path.display().to_string(),
         column_family_record_counts,

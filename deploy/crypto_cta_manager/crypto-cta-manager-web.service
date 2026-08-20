@@ -15,6 +15,7 @@ RestartSec=2
 TimeoutStopSec=15
 NoNewPrivileges=true
 UMask=0077
+LimitNOFILE=65536
 
 [Install]
 WantedBy=default.target

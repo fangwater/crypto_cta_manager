@@ -95,7 +95,7 @@ function buildChapters(gateway: string): Chapter[] {
             [
               '账户绑定',
               'trade01 / 预留 trade02-04',
-              '启用哪些策略、杠杆、占比；仓位更新后按份数自动写入该账户 Exec',
+              '启用哪些策略、杠杆、占比；仓位更新后按份数 × 杠杆自动写入该账户 Exec',
             ],
             [
               'Exec 运行时',
@@ -154,8 +154,8 @@ function buildChapters(gateway: string): Chapter[] {
             ],
             [
               '账户',
-              <code>leverage</code>,
-              '只存杠杆。可用名义 = 实时权益 × 杠杆。',
+              <code>leverage / alias</code>,
+              '杠杆是账户级 CTA 倍数。alias 只改 Manager 展示名，不改 source_id。',
             ],
             [
               '绑定',
@@ -168,13 +168,13 @@ function buildChapters(gateway: string): Chapter[] {
           headers={['量', '公式']}
           rows={[
             ['可用名义', '实时权益 × 杠杆率'],
-            ['已配置名义', 'Σ(份数 × 该策略 equity_usdt)'],
-            ['占比', '该策略已配置名义 / 已配置名义合计'],
-            ['发布到 Exec 的 target', '仓位策略 qty × 份数；signal 原样带上'],
+            ['已配置名义', 'Σ(份数 × 该策略 equity_usdt) × 杠杆'],
+            ['占比', '该策略未加杠杆名义 / 未加杠杆名义合计'],
+            ['发布到 Exec 的 target', '仓位策略 qty × 份数 × 杠杆；signal 原样带上'],
           ]}
         />
         <Note>
-          容量按名义聚合。1×10000 + 1×20000 = 30000 USDT，不会按统一 10000 折成「3 份」。
+          容量按名义聚合后再乘杠杆。杠杆 1x 时，1×10000 + 1×20000 = 30000 USDT，不会按统一 10000 折成「3 份」。
         </Note>
       </>
     ),
@@ -393,7 +393,7 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'PUT',
               path: `${ACCOUNT_PATH}/leverage`,
-              summary: '改 CTA 配置倍数',
+              summary: '改 CTA 配置倍数，并按新倍数重推本账户全部绑定',
             },
           ]}
         />
@@ -404,7 +404,7 @@ function buildChapters(gateway: string): Chapter[] {
         <FieldRows
           rows={[
             { field: 'buying_power_usdt', detail: '实时权益 × 杠杆' },
-            { field: 'bound_notional_usdt', detail: 'Σ(份数 × 策略 equity)' },
+            { field: 'bound_notional_usdt', detail: 'Σ(份数 × 策略 equity) × 杠杆' },
             { field: 'remaining_notional_usdt', detail: '可用名义 − 已配置名义' },
           ]}
         />
@@ -462,7 +462,7 @@ function buildChapters(gateway: string): Chapter[] {
           path={`${ACCOUNT_PATH}/bindings/{name}/shares`}
           summary="脚本按份数精确调整；浏览器主交互走 allocations"
         />
-        <Note>改份数或占比只改 Manager 本地。下一次仓位 POST 会按新份数自动推 Redis；也可以点重推。</Note>
+        <Note>改份数或占比只改 Manager 本地。下一次仓位 POST 或保存杠杆会按新份数 × 杠杆自动推 Redis；也可以点重推。</Note>
       </>
     ),
   },
@@ -476,7 +476,7 @@ function buildChapters(gateway: string): Chapter[] {
         <Endpoint method="POST" path={`${ACCOUNT_PATH}/bindings/{name}/publish`} />
         <p>
           每次 <code>POST /catalog/position-strategies</code> 成功后，Manager
-          找出所有绑定了该策略的账户，用各自 <code>qty × shares</code> 和下单参数拼成 Exec
+          找出所有绑定了该策略的账户，用各自 <code>qty × shares × leverage</code> 和下单参数拼成 Exec
           标准 JSON，<code>signal</code> 不随份数放大，再由 Manager 自己的 Redis
           长连接写入该账户 key。连接断了会自动重连；写入后回读确认，再发 iceoryx
           notify。notify 只带策略名和 <code>updated_at_us</code>，不带仓位。

@@ -33,6 +33,8 @@ compact_interval_secs = 3600
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"
+# Optional Manager display name. source_id remains the identity.
+# alias = "bahll202210"
 venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade01/data/persist_manager"
 enabled = true

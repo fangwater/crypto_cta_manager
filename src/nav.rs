@@ -868,7 +868,7 @@ pub fn estimate_source_events_with_snapshot(
 
     Ok(SourceNavReport {
         source_id: source.id.clone(),
-        account: source.account.clone(),
+        account: source.display_name().to_string(),
         configured_venue: source.venue.clone(),
         estimated_fee_rate: fee_rate,
         initial_position_snapshot_ts_us: snapshot_ts_us,
@@ -1784,6 +1784,7 @@ mod tests {
         SourceConfig {
             id: id.to_string(),
             account: id.to_string(),
+            alias: None,
             venue: "multi-venue".to_string(),
             rocksdb_path: PathBuf::from(format!("/tmp/{id}/persist_manager")),
             enabled: true,

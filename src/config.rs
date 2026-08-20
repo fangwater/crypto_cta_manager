@@ -71,6 +71,9 @@ pub struct SourceConfig {
     /// Stable, globally unique deployment identity, such as binance_exec_trade01.
     pub id: String,
     pub account: String,
+    /// Optional Manager display name. source_id remains the identity.
+    #[serde(default)]
+    pub alias: Option<String>,
     pub venue: String,
     pub rocksdb_path: PathBuf,
     #[serde(default = "default_true")]
@@ -213,6 +216,13 @@ impl AppConfig {
             if source.account.trim().is_empty() {
                 bail!("source {} has an empty account", source.id);
             }
+            if source
+                .alias
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                bail!("source {} alias must not be empty when set", source.id);
+            }
             if source.venue.trim().is_empty() {
                 bail!("source {} has an empty venue", source.id);
             }
@@ -306,6 +316,14 @@ impl SourceConfig {
         self.share_unit_usdt
             .filter(|value| value.is_finite() && *value > 0.0)
             .unwrap_or(10_000.0)
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.alias
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(self.account.as_str())
     }
 
     pub fn account_ipc_service_name(&self) -> Option<String> {
@@ -479,6 +497,7 @@ mod tests {
         SourceConfig {
             id: id.to_string(),
             account: id.to_string(),
+            alias: None,
             venue: "binance-futures".to_string(),
             rocksdb_path: PathBuf::from(path),
             enabled: true,
@@ -616,11 +635,21 @@ mod tests {
     }
 
     #[test]
+    fn display_name_prefers_alias() {
+        let mut source = source("binance_exec_trade01", "/srv/trade01/persist_manager");
+        source.account = "trade01".into();
+        assert_eq!(source.display_name(), "trade01");
+        source.alias = Some("bahll202210".into());
+        assert_eq!(source.display_name(), "bahll202210");
+    }
+
+    #[test]
     fn example_config_stays_valid() {
         let config: AppConfig =
             toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
         config.validate().unwrap();
         assert_eq!(config.sources[0].id, "binance_exec_trade01");
+        assert_eq!(config.sources[0].display_name(), "trade01");
         assert!(config.twap.enabled);
         assert_eq!(config.twap.interval_ms, 5_000);
         assert_eq!(config.twap.retain_days, 30);
@@ -644,6 +673,7 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.sources.len(), 4);
         assert_eq!(config.sources[0].id, "binance_exec_trade01");
+        assert_eq!(config.sources[0].display_name(), "trade01");
         assert!(config.sources[0].enabled);
         assert!(config.sources[1..].iter().all(|source| !source.enabled));
         assert_eq!(

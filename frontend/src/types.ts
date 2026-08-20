@@ -1,3 +1,7 @@
+import type { TargetPosition } from './lib/targetPositions'
+
+export type { TargetPosition }
+
 export interface NavTotals {
   fill_count: number
   volume_quote: number
@@ -77,6 +81,7 @@ export interface NavReport {
 
 export interface DashboardAccount {
   source_id: string
+  /** Manager display name. Uses alias when configured. */
   account: string
   venue: string
   enabled: boolean
@@ -109,11 +114,6 @@ export interface OrderStrategyView {
 export interface OrderStrategyList {
   source_id: string
   strategies: string[]
-}
-
-export interface TargetPosition {
-  qty: number
-  signal: number
 }
 
 export interface PositionStrategy {
@@ -161,6 +161,10 @@ export interface AccountStudio {
   capacity?: AccountCapacity
 }
 
+export interface SavedAccountStudio extends AccountStudio {
+  publishes?: BindingPublishResult[]
+}
+
 export interface LiveEquity {
   status: 'ok' | 'stale' | string
   source: string
@@ -176,7 +180,7 @@ export interface AccountCapacity {
   live: LiveEquity | null
   leverage: number
   buying_power_usdt: number | null
-  /** Σ(份数 × 该策略单份参考权益) */
+  /** Σ(份数 × 该策略单份参考权益) × 杠杆 */
   bound_notional_usdt: number
   remaining_notional_usdt: number | null
 }

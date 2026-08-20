@@ -140,6 +140,13 @@ struct SavedPositionStrategyResponse {
     publishes: Vec<BindingPublishResult>,
 }
 
+#[derive(Debug, Serialize)]
+struct SavedAccountStudioResponse {
+    #[serde(flatten)]
+    studio: AccountStudioResponse,
+    publishes: Vec<BindingPublishResult>,
+}
+
 struct ApiError(anyhow::Error);
 
 impl<E> From<E> for ApiError
@@ -748,7 +755,35 @@ async fn save_account_leverage(
         .await
     {
         Ok(studio) => {
-            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
+            let publishes = publish_source_bindings(&state, &source_id, &studio).await;
+            if let Some(failed) = publishes.iter().find(|item| item.error.is_some()) {
+                let binding_name = failed.binding_name.as_str();
+                let error = failed.error.as_deref().unwrap_or("publish failed");
+                error!(
+                    source_id,
+                    binding_name,
+                    leverage = request.leverage,
+                    error,
+                    "account leverage saved but bound-strategy publish failed"
+                );
+                return Ok((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "account leverage saved, but publish failed for {source_id}/{binding_name}: {error}"
+                        ),
+                    }),
+                )
+                    .into_response());
+            }
+            Ok((
+                NO_STORE,
+                Json(SavedAccountStudioResponse {
+                    studio: studio_response(&state, &source_id, studio),
+                    publishes,
+                }),
+            )
+                .into_response())
         }
         Err(error) => Ok(catalog_error(error)),
     }
@@ -894,6 +929,51 @@ async fn publish_bound_accounts(
     publishes
 }
 
+async fn publish_source_bindings(
+    state: &WebState,
+    source_id: &str,
+    studio: &strategy_catalog::AccountStudio,
+) -> Vec<BindingPublishResult> {
+    let mut publishes = Vec::with_capacity(studio.bindings.len());
+    for binding in &studio.bindings {
+        match publish_binding(state, source_id, &binding.binding_name).await {
+            Ok(published) => {
+                info!(
+                    source_id,
+                    binding_name = %binding.binding_name,
+                    shares = binding.shares,
+                    leverage = studio.leverage,
+                    "published bound strategy after leverage update"
+                );
+                publishes.push(BindingPublishResult {
+                    source_id: source_id.to_string(),
+                    binding_name: binding.binding_name.clone(),
+                    shares: binding.shares,
+                    published: Some(published),
+                    error: None,
+                });
+            }
+            Err(error) => {
+                warn!(
+                    source_id,
+                    binding_name = %binding.binding_name,
+                    leverage = studio.leverage,
+                    error = %error.message,
+                    "bound-strategy publish failed after leverage update"
+                );
+                publishes.push(BindingPublishResult {
+                    source_id: source_id.to_string(),
+                    binding_name: binding.binding_name.clone(),
+                    shares: binding.shares,
+                    published: None,
+                    error: Some(error.message),
+                });
+            }
+        }
+    }
+    publishes
+}
+
 struct PublishFailure {
     status: StatusCode,
     message: String,
@@ -914,13 +994,13 @@ async fn publish_binding(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
         })?;
-    let Some((position, order, shares)) = loaded else {
+    let Some((position, order, shares, leverage)) = loaded else {
         return Err(PublishFailure {
             status: StatusCode::NOT_FOUND,
             message: "binding was not found".to_string(),
         });
     };
-    let targets = strategy_catalog::scale_targets(&position.targets, shares);
+    let targets = strategy_catalog::scale_targets(&position.targets, shares, leverage);
     let published = state
         .redis_runtime
         .publish_strategy(source, binding_name, &order.order_parameters, &targets)
@@ -1229,7 +1309,7 @@ async fn build_dashboard(
                 .map(|snapshot| capacity::live_equity_view(&snapshot, now_ms));
             DashboardAccount {
                 source_id: source.id.clone(),
-                account: source.account.clone(),
+                account: source.display_name().to_string(),
                 venue: source.venue.clone(),
                 enabled: source.enabled,
                 gateway_prefix: source.gateway_prefix.clone(),
@@ -1343,6 +1423,7 @@ mod tests {
             sources: vec![crate::config::SourceConfig {
                 id: "binance_exec_trade01".into(),
                 account: "trade01".into(),
+                alias: None,
                 venue: "binance-futures".into(),
                 rocksdb_path: std::path::PathBuf::from("/tmp/missing"),
                 enabled: true,

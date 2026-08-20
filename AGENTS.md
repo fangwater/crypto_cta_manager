@@ -251,10 +251,12 @@ configured sources, while `/manager/` remains the detailed NAV timeline.
 and publish. The Exec `/exec_trade01/config/` page stays read-only. The browser
 talks only to Manager endpoints below `/manager/api/`; it never connects to
 Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Runtime
-Redis JSON is written when Manager scales each target `qty` by shares, copies
+Redis JSON is written when Manager scales each target `qty` by shares × leverage, copies
 `signal` unchanged, assembles the Exec payload, and `POST`s `/api/strategy`.
 A successful `POST /api/catalog/position-strategies` does that automatically
-for every account bound to the strategy. Manager keeps one loopback Redis long
+for every account bound to the strategy. Changing an account's `leverage`
+recomputes every bound strategy on that account the same way and republishes
+them. Manager keeps one loopback Redis long
 connection (`[redis]` in the host toml, default `redis://127.0.0.1:6379/0`)
 with keepalive ping and reconnect. Position publish writes the strategy JSON
 and `batch_exec:strategy_names` on that connection, rereads both, and only then

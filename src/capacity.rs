@@ -8,7 +8,7 @@ pub struct AccountCapacityView {
     pub live: Option<LiveEquityView>,
     pub leverage: f64,
     pub buying_power_usdt: Option<f64>,
-    /// Σ(份数 × 该策略单份参考权益)。各策略 equity 可以不同。
+    /// Σ(份数 × 该策略单份参考权益) × 杠杆。各策略 equity 可以不同。
     pub bound_notional_usdt: f64,
     pub remaining_notional_usdt: Option<f64>,
 }
@@ -62,7 +62,7 @@ pub fn capacity_view(
     let buying_power_usdt = live_view
         .as_ref()
         .and_then(|view| buying_power_usdt(view.equity_usdt, studio.leverage));
-    let bound_notional_usdt = studio.bound_equity_usdt;
+    let bound_notional_usdt = studio.bound_equity_usdt * studio.leverage;
     let remaining_notional_usdt = buying_power_usdt.map(|value| value - bound_notional_usdt);
     AccountCapacityView {
         live: live_view,
@@ -119,9 +119,9 @@ mod tests {
         let view = capacity_view(&studio, Some(&live), 1_000);
         assert_eq!(view.live.as_ref().unwrap().status, "ok");
         assert!((view.buying_power_usdt.unwrap() - 50_000.0).abs() < 1e-9);
-        // 1×10k + 1×20k，不能按统一 1 万份折算成 3 份
-        assert!((view.bound_notional_usdt - 30_000.0).abs() < 1e-9);
-        assert!((view.remaining_notional_usdt.unwrap() - 20_000.0).abs() < 1e-9);
+        // (1×10k + 1×20k) × 2x leverage，不能按统一 1 万份折算成 3 份
+        assert!((view.bound_notional_usdt - 60_000.0).abs() < 1e-9);
+        assert!((view.remaining_notional_usdt.unwrap() + 10_000.0).abs() < 1e-9);
         assert!((studio.bindings[0].allocation_ratio - 1.0 / 3.0).abs() < 1e-12);
         assert!((studio.bindings[1].allocation_ratio - 2.0 / 3.0).abs() < 1e-12);
     }

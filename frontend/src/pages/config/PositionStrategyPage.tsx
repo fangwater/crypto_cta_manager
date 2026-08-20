@@ -21,7 +21,7 @@ export function PositionStrategyPage() {
     <ConfigShell
       section="position"
       title="仓位策略"
-      description="维护各 CTA 仓位策略的目标持仓与参考权益。保存后会按已绑定账户的份数自动写入各账户 Redis。"
+      description="维护各 CTA 仓位策略的目标持仓与参考权益。保存后会按已绑定账户的份数 × 杠杆自动写入各账户 Redis。"
       saving={saving}
       error={error ?? writeError}
       notice={notice}
@@ -108,7 +108,7 @@ export function PositionStrategyPage() {
                   </Label>
                 </div>
                 <FieldHint>
-                  一份仓位策略的名义，默认 10,000 USDT，可按策略改。已绑定账户按各自份数放大 qty 后自动写入 Redis；signal 不随份数变化。
+                  一份仓位策略的名义，默认 10,000 USDT，可按策略改。已绑定账户按各自份数 × 杠杆放大 qty 后自动写入 Redis；signal 不随份数变化。
                 </FieldHint>
                 <TargetPositionsEditor
                   targets={selectedPosition.targets}

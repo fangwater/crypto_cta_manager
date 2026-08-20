@@ -42,7 +42,7 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
             "#,
         )
         .bind(&source.id)
-        .bind(&source.account)
+        .bind(source.display_name())
         .bind(&source.venue)
         .bind(path_text(&source.rocksdb_path))
         .bind(source.enabled)

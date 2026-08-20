@@ -102,7 +102,7 @@ async fn source_loop(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let interval = Duration::from_secs(source.poll_interval_secs(&defaults));
-    info!(source_id = %source.id, account = %source.account, venue = %source.venue, ?interval, "source worker started");
+    info!(source_id = %source.id, account = %source.display_name(), venue = %source.venue, ?interval, "source worker started");
     loop {
         match sync_source_once(&pool, &defaults, &source).await {
             Ok(summary) => log_summary(&summary),

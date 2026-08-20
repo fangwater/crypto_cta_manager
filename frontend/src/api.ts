@@ -9,6 +9,7 @@ import type {
   OrderStrategyList,
   OrderStrategyView,
   PositionStrategy,
+  SavedAccountStudio,
   SavedPositionStrategy,
   TimelineSnapshot,
 } from './types'
@@ -190,7 +191,7 @@ export function getAccountLive(sourceId: string, signal?: AbortSignal) {
 }
 
 export function saveAccountLeverage(sourceId: string, leverage: number) {
-  return requestJson<AccountStudio>(
+  return requestJson<SavedAccountStudio>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/leverage`,
     {
       method: 'PUT',

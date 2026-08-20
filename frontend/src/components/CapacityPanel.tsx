@@ -28,7 +28,7 @@ export function CapacityPanel({
         <div>
           <CardTitle>权益与可配置名义</CardTitle>
           <CardDescription>
-            已配置名义 = Σ(份数 × 该策略单份参考权益)。各策略参考权益可以不同，按名义金额聚合，不按统一份数折算。
+            已配置名义 = Σ(份数 × 该策略单份参考权益) × 杠杆。各策略参考权益可以不同，按名义金额聚合，不按统一份数折算。
           </CardDescription>
         </div>
         <Badge tone={status === 'ok' ? 'success' : status === 'stale' ? 'warning' : 'neutral'}>
@@ -50,7 +50,7 @@ export function CapacityPanel({
           <Metric
             label="杠杆率"
             value={capacity ? `${capacity.leverage}x` : '--'}
-            hint="CTA 配置倍数，不是交易所保证金杠杆"
+            hint="CTA 配置倍数；发布仓位 = 模板 qty × 份数 × 杠杆"
           />
           <Metric
             label="可用名义"
@@ -85,12 +85,13 @@ export function CapacityPanel({
           <p className="mt-1">
             这里的杠杆不是交易所保证金杠杆。它是账户级的
             <strong className="font-medium text-ink"> CTA 配置倍数</strong>
-            ：可用名义 = 实时权益 × 杠杆率。已配置名义按各策略自己的参考权益加权求和，例如 1 份 ×
-            10,000 + 1 份 × 20,000 = 30,000 USDT，不是统一按 10,000 折成 3 份。
+            ：可用名义 = 实时权益 × 杠杆率；发布到 Exec 的仓位 = 仓位模板 qty × 份数 ×
+            杠杆。已配置名义先按各策略自己的参考权益加权求和，再乘杠杆，例如（1 份 × 10,000 + 1 份 ×
+            20,000）× 2x = 60,000 USDT，不是统一按 10,000 折成 3 份。
           </p>
           <p className="mt-2">
-            例如权益 25,000 USDT、杠杆 2x，可用名义 50,000 USDT；若已配置名义 30,000，则剩余
-            20,000。页面和脚本都通过{' '}
+            例如权益 25,000 USDT、杠杆 2x，可用名义 50,000 USDT；若未加杠杆的绑定名义是 30,000，则已配置名义
+            60,000，剩余 -10,000。保存杠杆后会按新倍数重算并推送本账户全部绑定策略。页面和脚本都通过{' '}
             <code className="text-[12px] text-ink">PUT /api/catalog/accounts/&lt;source_id&gt;/leverage</code>{' '}
             修改杠杆。
           </p>

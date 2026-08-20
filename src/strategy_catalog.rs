@@ -100,14 +100,16 @@ pub fn allocated_equity(binding: &AccountBinding) -> f64 {
 pub fn scale_targets(
     targets: &BTreeMap<String, TargetPosition>,
     shares: f64,
+    leverage: f64,
 ) -> BTreeMap<String, TargetPosition> {
+    let scale = shares * leverage;
     targets
         .iter()
         .map(|(symbol, target)| {
             (
                 symbol.clone(),
                 TargetPosition {
-                    qty: target.qty * shares,
+                    qty: target.qty * scale,
                     signal: target.signal,
                 },
             )
@@ -613,7 +615,7 @@ pub async fn load_binding_parts(
     pool: &PgPool,
     source_id: &str,
     binding_name: &str,
-) -> Result<Option<(PositionStrategy, OrderStrategy, f64)>> {
+) -> Result<Option<(PositionStrategy, OrderStrategy, f64, f64)>> {
     let row = sqlx::query(
         r#"
         SELECT
@@ -631,15 +633,18 @@ pub async fn load_binding_parts(
             o.max_maker_requotes,
             o.target_tolerance_usdt,
             o.updated_at_us AS order_updated_at_us,
-            b.shares
+            b.shares,
+            COALESCE(s.leverage, $3) AS leverage
         FROM cta_account_strategy_bindings b
         JOIN cta_position_strategies p ON p.strategy_name = b.position_strategy_name
         JOIN cta_order_strategies o ON o.strategy_name = b.order_strategy_name
+        LEFT JOIN cta_account_settings s ON s.source_id = b.source_id
         WHERE b.source_id = $1 AND b.binding_name = $2
         "#,
     )
     .bind(source_id)
     .bind(binding_name)
+    .bind(DEFAULT_ACCOUNT_LEVERAGE)
     .fetch_optional(pool)
     .await
     .with_context(|| format!("failed to load binding {binding_name} on {source_id}"))?;
@@ -668,6 +673,7 @@ pub async fn load_binding_parts(
             updated_at_us: row.try_get("order_updated_at_us")?,
         },
         row.try_get("shares")?,
+        row.try_get("leverage")?,
     )))
 }
 
@@ -815,9 +821,22 @@ mod tests {
                 },
             )]),
             3.0,
+            2.0,
         );
-        assert!((scaled["BTCUSDT"].qty + 0.018).abs() < 1e-12);
+        assert!((scaled["BTCUSDT"].qty + 0.036).abs() < 1e-12);
         assert_eq!(scaled["BTCUSDT"].signal, -1);
+        let unlevered = scale_targets(
+            &BTreeMap::from([(
+                "BTCUSDT".into(),
+                TargetPosition {
+                    qty: -0.006,
+                    signal: -1,
+                },
+            )]),
+            3.0,
+            1.0,
+        );
+        assert!((unlevered["BTCUSDT"].qty + 0.018).abs() < 1e-12);
         let next = apply_allocation_ratios(
             &studio.bindings,
             &BTreeMap::from([("cta_a".into(), 0.5), ("cta_b".into(), 0.5)]),

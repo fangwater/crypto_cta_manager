@@ -175,6 +175,10 @@ export function AccountOverviewPage() {
                       const next = await saveAccountLeverage(sourceId, Number(leverage))
                       setStudio(next)
                       setCapacity(next.capacity ?? null)
+                      const published = next.publishes?.length ?? 0
+                      return published > 0
+                        ? `已保存杠杆 ${next.leverage}x，并重推 ${published} 条绑定策略`
+                        : `已保存杠杆 ${next.leverage}x；当前没有绑定策略，未写入 Redis`
                     })
                   }
                 />

@@ -147,7 +147,7 @@ export function AccountBindingsPage() {
       <Alert tone="warning" className="mb-2">
         <strong className="font-medium">逻辑说明：</strong>
         先在「仓位策略」里定义目标仓位 → 在「下单策略」里维护执行算法模板（如 default_order）→
-        在这里把二者关联并发布。不需要单独填发布名，系统会用仓位策略名写入 Exec。
+        在这里把二者关联并发布。保存杠杆会按新倍数重算本账户全部绑定并推送到 Exec。
       </Alert>
 
       {loading || catalogLoading ? (
@@ -192,6 +192,10 @@ export function AccountBindingsPage() {
                     const next = await saveAccountLeverage(sourceId, Number(leverage))
                     setStudio(next)
                     setCapacity(next.capacity ?? null)
+                    const published = next.publishes?.length ?? 0
+                    return published > 0
+                      ? `已保存杠杆 ${next.leverage}x，并重推 ${published} 条绑定策略`
+                      : `已保存杠杆 ${next.leverage}x；当前没有绑定策略，未写入 Redis`
                   })
                 }
               />
