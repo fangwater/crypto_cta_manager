@@ -9,6 +9,9 @@ use crate::order_config::{OrderParameters, TargetPosition, validate_strategy_nam
 
 pub const DEFAULT_POSITION_EQUITY_USDT: f64 = 10_000.0;
 pub const DEFAULT_ACCOUNT_LEVERAGE: f64 = 1.0;
+pub const DEFAULT_CONTRACT_LEVERAGE: i32 = 5;
+pub const MIN_CONTRACT_LEVERAGE: i32 = 1;
+pub const MAX_CONTRACT_LEVERAGE: i32 = 125;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PositionStrategy {
@@ -64,6 +67,12 @@ pub struct SaveOrderStrategyRequest {
 #[derive(Debug, Deserialize)]
 pub struct SaveAccountSettingsRequest {
     pub leverage: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveSymbolContractLeverageRequest {
+    pub symbol: String,
+    pub contract_leverage: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +187,26 @@ pub fn validate_targets(targets: &BTreeMap<String, TargetPosition>) -> Result<()
 pub fn validate_equity(value: f64, field: &str) -> Result<(), String> {
     if !value.is_finite() || value <= 0.0 {
         return Err(format!("{field} must be finite and greater than zero"));
+    }
+    Ok(())
+}
+
+pub fn validate_contract_leverage(value: i32) -> Result<(), String> {
+    if !(MIN_CONTRACT_LEVERAGE..=MAX_CONTRACT_LEVERAGE).contains(&value) {
+        return Err(format!(
+            "contract_leverage must be an integer from {MIN_CONTRACT_LEVERAGE} to {MAX_CONTRACT_LEVERAGE}"
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_contract_symbol(symbol: &str) -> Result<(), String> {
+    if symbol.is_empty()
+        || !symbol
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return Err(format!("invalid symbol: {symbol}"));
     }
     Ok(())
 }
@@ -472,6 +501,63 @@ pub async fn save_account_settings(
     .await
     .with_context(|| format!("failed to save account settings {source_id}"))?;
     load_account_studio(pool, source_id, updated_at_us).await
+}
+
+pub async fn save_symbol_contract_leverage(
+    pool: &PgPool,
+    source_id: &str,
+    request: &SaveSymbolContractLeverageRequest,
+    updated_at_us: i64,
+) -> Result<()> {
+    validate_contract_symbol(&request.symbol).map_err(|error| anyhow::anyhow!(error))?;
+    validate_contract_leverage(request.contract_leverage)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    sqlx::query(
+        r#"
+        INSERT INTO cta_account_symbol_leverages (
+            source_id, symbol, contract_leverage, updated_at_us
+        )
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (source_id, symbol) DO UPDATE SET
+            contract_leverage = EXCLUDED.contract_leverage,
+            updated_at_us = EXCLUDED.updated_at_us
+        "#,
+    )
+    .bind(source_id)
+    .bind(&request.symbol)
+    .bind(request.contract_leverage)
+    .bind(updated_at_us)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to save contract leverage for {} on {source_id}",
+            request.symbol
+        )
+    })?;
+    Ok(())
+}
+
+pub async fn load_symbol_contract_leverage(
+    pool: &PgPool,
+    source_id: &str,
+    symbol: &str,
+) -> Result<Option<i32>> {
+    let row = sqlx::query(
+        r#"
+        SELECT contract_leverage
+        FROM cta_account_symbol_leverages
+        WHERE source_id = $1 AND symbol = $2
+        "#,
+    )
+    .bind(source_id)
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to load contract leverage for {symbol} on {source_id}"))?;
+    row.map(|row| row.try_get("contract_leverage"))
+        .transpose()
+        .context("failed to decode contract leverage")
 }
 
 pub async fn save_binding(
@@ -857,5 +943,17 @@ mod tests {
         assert!(validate_equity(0.0, "leverage").is_err());
         assert!(validate_equity(-1.0, "leverage").is_err());
         assert!(validate_equity(f64::NAN, "leverage").is_err());
+    }
+
+    #[test]
+    fn contract_leverage_must_be_a_supported_integer() {
+        assert!(validate_contract_leverage(5).is_ok());
+        assert!(validate_contract_leverage(1).is_ok());
+        assert!(validate_contract_leverage(125).is_ok());
+        assert!(validate_contract_leverage(0).is_err());
+        assert!(validate_contract_leverage(126).is_err());
+        assert!(validate_contract_leverage(-1).is_err());
+        assert!(validate_contract_symbol("BTCUSDT").is_ok());
+        assert!(validate_contract_symbol("btc").is_err());
     }
 }

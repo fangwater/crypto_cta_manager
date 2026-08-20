@@ -155,7 +155,7 @@ function buildChapters(gateway: string): Chapter[] {
             [
               '账户',
               <code>leverage / alias</code>,
-              '杠杆是账户级 CTA 倍数。alias 只改 Manager 展示名，不改 source_id。',
+              'leverage 是 CTA 仓位倍数。合约杠杆按单个 symbol 调用交易所 setLeverage，不进账户 studio。alias 只改 Manager 展示名。',
             ],
             [
               '绑定',
@@ -375,7 +375,7 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'account-studio',
     group: '账户绑定',
     title: '账户视图与杠杆',
-    lead: '账户层只有杠杆、实时权益和绑定列表。策略模板不在这里。',
+    lead: 'CTA 杠杆改仓位倍数并重推绑定；合约杠杆按单个 symbol 查/设交易所保证金杠杆。',
     content: (
       <>
         <ApiTable
@@ -395,19 +395,48 @@ function buildChapters(gateway: string): Chapter[] {
               path: `${ACCOUNT_PATH}/leverage`,
               summary: '改 CTA 配置倍数，并按新倍数重推本账户全部绑定',
             },
+            {
+              method: 'GET',
+              path: `${ACCOUNT_PATH}/contract-leverage?symbol=BTCUSDT`,
+              summary: '查询该账户单个 symbol 的交易所当前合约杠杆；真相是交易所实时值',
+            },
+            {
+              method: 'PUT',
+              path: `${ACCOUNT_PATH}/contract-leverage`,
+              summary: '按单个 symbol 调用交易所 setLeverage，不改 CTA 仓位，也不通知 pre-trade',
+            },
           ]}
         />
         <CodeBlock label="curl">{`curl --noproxy '*' -sS -X PUT \\
   '${account}/leverage' \\
   -H 'Content-Type: application/json' \\
-  -d '{"leverage": 2}'`}</CodeBlock>
+  -d '{"leverage": 2}'
+
+curl --noproxy '*' -sS \\
+  '${account}/contract-leverage?symbol=BTCUSDT'
+
+curl --noproxy '*' -sS -X PUT \\
+  '${account}/contract-leverage' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"symbol":"BTCUSDT","contract_leverage":5}'`}</CodeBlock>
         <FieldRows
           rows={[
-            { field: 'buying_power_usdt', detail: '实时权益 × 杠杆' },
-            { field: 'bound_notional_usdt', detail: 'Σ(份数 × 策略 equity) × 杠杆' },
+            { field: 'buying_power_usdt', detail: '实时权益 × CTA 杠杆' },
+            { field: 'bound_notional_usdt', detail: 'Σ(份数 × 策略 equity) × CTA 杠杆' },
             { field: 'remaining_notional_usdt', detail: '可用名义 − 已配置名义' },
+            {
+              field: 'contract_leverage',
+              detail: '交易所当前保证金杠杆。GET 读实时值；PUT 设置 1–125',
+            },
+            {
+              field: 'recorded_contract_leverage',
+              detail: '本地上次 PUT 的对照，可能为空；不以它为准',
+            },
           ]}
         />
+        <Note>
+          合约杠杆读该账户 Exec env.sh。Binance STANDARD 走 fapi，UNIFIED 走 papi；OKX 走 leverage-info / set-leverage。jp-meta 若没有 env.sh，查询会 502。
+        </Note>
       </>
     ),
   },
@@ -541,9 +570,10 @@ function buildChapters(gateway: string): Chapter[] {
         rows={[
           ['200', '成功'],
           ['202', '删除已受理'],
-          ['400', '字段缺失、策略不存在、占比合计不为 1'],
+          ['400', '字段缺失、策略不存在、占比合计不为 1、合约杠杆缺 symbol'],
           ['404', '路径不存在、缺少账户前缀，或 /api/targets 已移除'],
           ['409', '参数乐观锁冲突'],
+          ['502', '交易所/env.sh 不可用，或 Exec Config 不可达'],
         ]}
       />
     ),
@@ -562,7 +592,9 @@ curl --noproxy '*' -fsS -o manager_publish_client.py ${joinGateway(JP_GATEWAY, `
         <CodeBlock label="update">{`# 当前页所在环境的 Nginx 入口；jp-meta 必须是 ${JP_GATEWAY}/manager/api/
 export MANAGER_API_URL=${manager}/
 
-python3 manager_publish_client.py put-position @cta.json`}</CodeBlock>
+python3 manager_publish_client.py put-position @cta.json
+python3 manager_publish_client.py get-contract-leverage binance_exec_trade01 BTCUSDT
+python3 manager_publish_client.py set-contract-leverage binance_exec_trade01 BTCUSDT 5`}</CodeBlock>
         <CodeBlock label="cta.json 精简版">{`{
   "strategy_name": "CTA_SK_C4V6PosT1_LXY_filter_Position",
   "targets": {

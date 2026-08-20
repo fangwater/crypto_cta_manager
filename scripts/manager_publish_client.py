@@ -160,6 +160,13 @@ def bindings_path(source_id: str) -> str:
     return f"catalog/accounts/{quote(source, safe='')}"
 
 
+def contract_leverage_path(source_id: str) -> str:
+    source = source_id.strip()
+    if not source:
+        raise ValueError("source_id must not be empty")
+    return f"catalog/accounts/{quote(source, safe='')}/contract-leverage"
+
+
 def publish_path(source_id: str, binding_name: str) -> str:
     source = source_id.strip()
     binding = binding_name.strip()
@@ -181,6 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
   %(prog)s put-position @cta.json
   %(prog)s put-position '{"strategy_name":"CTA_A","targets":{"BTCUSDT":-0.006}}'
   %(prog)s get-bindings binance_exec_trade01
+  %(prog)s get-contract-leverage binance_exec_trade01 BTCUSDT
+  %(prog)s set-contract-leverage binance_exec_trade01 BTCUSDT 5
   %(prog)s publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position
 
 put-position writes the catalog and automatically republishes every bound
@@ -213,6 +222,21 @@ The optional publish command only republishes one existing binding.
 
     bind_parser = commands.add_parser("get-bindings", help="GET account studio / bindings")
     bind_parser.add_argument("source_id")
+
+    get_contract_parser = commands.add_parser(
+        "get-contract-leverage",
+        help="GET one symbol's live exchange contract leverage",
+    )
+    get_contract_parser.add_argument("source_id")
+    get_contract_parser.add_argument("symbol")
+
+    contract_parser = commands.add_parser(
+        "set-contract-leverage",
+        help="PUT one symbol's exchange contract leverage",
+    )
+    contract_parser.add_argument("source_id")
+    contract_parser.add_argument("symbol")
+    contract_parser.add_argument("contract_leverage", type=int)
 
     publish_parser = commands.add_parser(
         "publish",
@@ -254,6 +278,23 @@ def run(args: argparse.Namespace) -> int:
         response = request_json(
             args.url,
             bindings_path(args.source_id),
+            timeout=args.timeout,
+        )
+    elif args.command == "get-contract-leverage":
+        response = request_json(
+            args.url,
+            f"{contract_leverage_path(args.source_id)}?symbol={quote(args.symbol)}",
+            timeout=args.timeout,
+        )
+    elif args.command == "set-contract-leverage":
+        response = request_json(
+            args.url,
+            contract_leverage_path(args.source_id),
+            method="PUT",
+            payload={
+                "symbol": args.symbol,
+                "contract_leverage": args.contract_leverage,
+            },
             timeout=args.timeout,
         )
     else:

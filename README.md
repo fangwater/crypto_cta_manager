@@ -234,9 +234,34 @@ read-only. Runtime Redis JSON is written only by Manager through the loopback
 Exec Config `POST /api/strategy`. There is no write token. Each target is
 `{qty, signal}`; `signal=±1` means that symbol uses taker-only for the current
 execution. A successful `POST /api/catalog/position-strategies` republishes
-every bound account automatically. Manager keeps a reconnecting Redis long
+every bound account automatically. Changing an account's CTA `leverage`
+recomputes every bound strategy on that account the same way and republishes
+them. Manager keeps a reconnecting Redis long
 connection, writes and rereads the runtime JSON there, then notifies
 `exec-pre-trade` over iceoryx. The 30s Redis poll remains the fallback.
+
+Exchange contract leverage is separate from CTA `leverage`. Query and set it
+per account and per symbol through Manager. Both calls read that account's
+Exec `env.sh` (default `<rocksdb_path>/../../env.sh`). GET is the live venue
+value; PUT records the last requested value in PostgreSQL as
+`recorded_contract_leverage`. Neither call scales published qty, writes Exec
+Redis, or notifies `exec-pre-trade`. Range is 1–125.
+
+```bash
+# el01
+curl --noproxy '*' -sS \
+  'http://172.16.30.42:10041/manager/api/catalog/accounts/binance_exec_trade01/contract-leverage?symbol=BTCUSDT'
+
+curl --noproxy '*' -sS -X PUT \
+  'http://172.16.30.42:10041/manager/api/catalog/accounts/binance_exec_trade01/contract-leverage' \
+  -H 'Content-Type: application/json' \
+  -d '{"symbol":"BTCUSDT","contract_leverage":5}'
+
+# jp-meta uses the same paths on http://13.115.227.29:4191/manager/api/
+python3 manager_publish_client.py get-contract-leverage binance_exec_trade01 BTCUSDT
+python3 manager_publish_client.py set-contract-leverage binance_exec_trade01 BTCUSDT 5
+```
+
 External push scripts only POST the catalog
 through the same Nginx:
 

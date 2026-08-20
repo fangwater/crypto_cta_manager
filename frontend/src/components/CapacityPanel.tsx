@@ -141,6 +141,94 @@ export function LeverageToolbar({
   )
 }
 
+export function ContractLeverageToolbar({
+  symbol,
+  contractLeverage,
+  queriedLeverage,
+  saving,
+  onSymbolChange,
+  onContractLeverageChange,
+  onQuery,
+  onSave,
+}: {
+  symbol: string
+  contractLeverage: string
+  queriedLeverage?: string | null
+  saving?: boolean
+  onSymbolChange: (value: string) => void
+  onContractLeverageChange: (value: string) => void
+  onQuery: () => void
+  onSave: () => void
+}) {
+  return (
+    <form
+      className="grid max-w-2xl items-end gap-3 sm:grid-cols-[9rem_7.5rem_auto_auto]"
+      onSubmit={(event) => {
+        event.preventDefault()
+        onSave()
+      }}
+    >
+      <label className="grid gap-1.5 text-xs font-medium text-muted">
+        合约
+        <Input
+          value={symbol}
+          placeholder="BTCUSDT"
+          onChange={(event) => onSymbolChange(event.target.value.toUpperCase())}
+        />
+      </label>
+      <label className="grid gap-1.5 text-xs font-medium text-muted">
+        合约杠杆
+        <Input
+          value={contractLeverage}
+          inputMode="numeric"
+          onChange={(event) => onContractLeverageChange(event.target.value)}
+        />
+      </label>
+      <Button type="button" variant="secondary" disabled={saving} onClick={onQuery}>
+        查询
+      </Button>
+      <Button type="submit" variant="primary" disabled={saving}>
+        设置
+      </Button>
+      {queriedLeverage ? (
+        <p className="sm:col-span-4 text-xs text-muted">
+          交易所当前杠杆 <span className="font-medium text-ink">{queriedLeverage}x</span>
+        </p>
+      ) : null}
+    </form>
+  )
+}
+
+export function ContractLeveragePanel({ toolbar }: { toolbar?: ReactNode }) {
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader>
+        <CardTitle>交易所合约杠杆</CardTitle>
+        <CardDescription>
+          按单个合约调用交易所 setLeverage。这不会改 CTA 仓位倍数，也不会让 pre-trade 检查或强制重设。
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4 pt-0">
+        {toolbar}
+        <div className="rounded-xl border border-border-soft bg-canvas/60 px-4 py-3 text-sm leading-relaxed text-muted">
+          <p>
+            页面和脚本通过{' '}
+            <code className="text-[12px] text-ink">
+              GET /api/catalog/accounts/&lt;source_id&gt;/contract-leverage?symbol=BTCUSDT
+            </code>{' '}
+            查询交易所当前杠杆，通过{' '}
+            <code className="text-[12px] text-ink">
+              PUT /api/catalog/accounts/&lt;source_id&gt;/contract-leverage
+            </code>{' '}
+            设置，例如 <code className="text-[12px] text-ink">{`{"symbol":"BTCUSDT","contract_leverage":5}`}</code>
+            。范围 1–125。查询读交易所实时值，不把本地上次设置当真相。
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 function Metric({
   label,
   value,

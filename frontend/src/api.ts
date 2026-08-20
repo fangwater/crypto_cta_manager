@@ -11,6 +11,7 @@ import type {
   PositionStrategy,
   SavedAccountStudio,
   SavedPositionStrategy,
+  SavedSymbolContractLeverage,
   TimelineSnapshot,
 } from './types'
 
@@ -196,6 +197,27 @@ export function saveAccountLeverage(sourceId: string, leverage: number) {
     {
       method: 'PUT',
       body: { leverage },
+    },
+  )
+}
+
+export function getAccountContractLeverage(sourceId: string, symbol: string) {
+  const params = new URLSearchParams({ symbol })
+  return requestJson<SavedSymbolContractLeverage>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/contract-leverage?${params}`,
+  )
+}
+
+export function saveAccountContractLeverage(
+  sourceId: string,
+  symbol: string,
+  contractLeverage: number,
+) {
+  return requestJson<SavedSymbolContractLeverage>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/contract-leverage`,
+    {
+      method: 'PUT',
+      body: { symbol, contract_leverage: contractLeverage },
     },
   )
 }

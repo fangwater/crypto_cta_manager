@@ -28,6 +28,7 @@ use crate::reload_notify::ReloadNotifyHub;
 use crate::strategy_catalog::{
     self, SaveAccountSettingsRequest, SaveAllocationsRequest, SaveBindingRequest,
     SaveBindingSharesRequest, SaveOrderStrategyRequest, SavePositionStrategyRequest,
+    SaveSymbolContractLeverageRequest,
 };
 use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
 use crate::{nav, postgres};
@@ -256,6 +257,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route(
             "/api/catalog/accounts/{source_id}/leverage",
             put(save_account_leverage),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/contract-leverage",
+            get(get_account_symbol_contract_leverage).put(save_account_symbol_contract_leverage),
         )
         .route(
             "/api/catalog/accounts/{source_id}/live",
@@ -786,6 +791,137 @@ async fn save_account_leverage(
                 .into_response())
         }
         Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ContractLeverageQuery {
+    symbol: Option<String>,
+}
+
+async fn get_account_symbol_contract_leverage(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Query(query): Query<ContractLeverageQuery>,
+) -> Result<Response, ApiError> {
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
+    let symbol = query
+        .symbol
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
+    if symbol.is_empty() {
+        return Ok(bad_request("symbol is required".to_string()));
+    }
+    if let Err(error) = strategy_catalog::validate_contract_symbol(&symbol) {
+        return Ok(bad_request(error));
+    }
+    match crate::exchange_leverage::get_symbol_contract_leverage(source, &symbol).await {
+        Ok(mut result) => {
+            match strategy_catalog::load_symbol_contract_leverage(&state.pool, &source_id, &symbol)
+                .await
+            {
+                Ok(recorded) => result.recorded_contract_leverage = recorded,
+                Err(error) => {
+                    warn!(
+                        source_id,
+                        symbol = %symbol,
+                        error = %error,
+                        "exchange contract leverage queried, but local catalog read failed"
+                    );
+                }
+            }
+            info!(
+                source_id,
+                symbol = %result.symbol,
+                contract_leverage = result.contract_leverage,
+                recorded_contract_leverage = result.recorded_contract_leverage,
+                endpoint = %result.endpoint,
+                "account symbol contract leverage queried from exchange"
+            );
+            Ok((NO_STORE, Json(result)).into_response())
+        }
+        Err(error) => {
+            error!(
+                source_id,
+                symbol = %symbol,
+                error = %format!("{error:#}"),
+                "account symbol contract leverage query failed"
+            );
+            Ok((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("{error:#}"),
+                }),
+            )
+                .into_response())
+        }
+    }
+}
+
+async fn save_account_symbol_contract_leverage(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Json(mut request): Json<SaveSymbolContractLeverageRequest>,
+) -> Result<Response, ApiError> {
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
+    request.symbol = request.symbol.trim().to_ascii_uppercase();
+    if let Err(error) = strategy_catalog::validate_contract_symbol(&request.symbol) {
+        return Ok(bad_request(error));
+    }
+    if let Err(error) = strategy_catalog::validate_contract_leverage(request.contract_leverage) {
+        return Ok(bad_request(error));
+    }
+    match crate::exchange_leverage::set_symbol_contract_leverage(source, &request).await {
+        Ok(result) => {
+            if let Err(error) = strategy_catalog::save_symbol_contract_leverage(
+                &state.pool,
+                &source_id,
+                &request,
+                unix_now_us(),
+            )
+            .await
+            {
+                warn!(
+                    source_id,
+                    symbol = %request.symbol,
+                    contract_leverage = request.contract_leverage,
+                    error = %error,
+                    "exchange contract leverage set, but local catalog write failed"
+                );
+            }
+            info!(
+                source_id,
+                symbol = %result.symbol,
+                contract_leverage = result.contract_leverage,
+                endpoint = %result.endpoint,
+                "account symbol contract leverage set on exchange"
+            );
+            Ok((NO_STORE, Json(result)).into_response())
+        }
+        Err(error) => {
+            error!(
+                source_id,
+                symbol = %request.symbol,
+                contract_leverage = request.contract_leverage,
+                error = %format!("{error:#}"),
+                "account symbol contract leverage set failed"
+            );
+            Ok((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("{error:#}"),
+                }),
+            )
+                .into_response())
+        }
     }
 }
 
@@ -1436,6 +1572,7 @@ mod tests {
                 ipc_namespace: None,
                 account_ipc_service: None,
                 share_unit_usdt: None,
+                env_path: None,
             }],
         };
         assert!(resolve_publish_source(&config, "binance_exec_trade01").is_ok());

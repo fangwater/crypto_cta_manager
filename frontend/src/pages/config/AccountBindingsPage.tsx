@@ -2,16 +2,23 @@ import { CheckCircle2, Layers3, LoaderCircle, Plus, SlidersHorizontal, Trash2 } 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   deleteAccountBinding,
+  getAccountContractLeverage,
   getAccountLive,
   getAccountStudio,
   getDashboard,
   publishAccountBinding,
   saveAccountAllocations,
   saveAccountBinding,
+  saveAccountContractLeverage,
   saveAccountLeverage,
 } from '../../api'
 import { AllocationEditor } from '../../components/AllocationEditor'
-import { CapacityPanel, LeverageToolbar } from '../../components/CapacityPanel'
+import {
+  CapacityPanel,
+  ContractLeveragePanel,
+  ContractLeverageToolbar,
+  LeverageToolbar,
+} from '../../components/CapacityPanel'
 import { ConfigShell } from '../../components/ConfigShell'
 import { Alert } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
@@ -33,6 +40,9 @@ export function AccountBindingsPage() {
   const [capacity, setCapacity] = useState<AccountCapacity | null>(null)
   const [sourceId, setSourceId] = useState(initialSource)
   const [leverage, setLeverage] = useState('1')
+  const [contractSymbol, setContractSymbol] = useState('')
+  const [contractLeverage, setContractLeverage] = useState('5')
+  const [queriedContractLeverage, setQueriedContractLeverage] = useState<string | null>(null)
   const [newPosition, setNewPosition] = useState('')
   const [newOrder, setNewOrder] = useState('')
   const [newShares, setNewShares] = useState('1')
@@ -97,8 +107,10 @@ export function AccountBindingsPage() {
   useEffect(() => {
     if (!sourceId) {
       setStudio(null)
+      setQueriedContractLeverage(null)
       return
     }
+    setQueriedContractLeverage(null)
     const controller = new AbortController()
     loadStudio(sourceId, controller.signal).catch((reason: unknown) => {
       if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -196,6 +208,47 @@ export function AccountBindingsPage() {
                     return published > 0
                       ? `已保存杠杆 ${next.leverage}x，并重推 ${published} 条绑定策略`
                       : `已保存杠杆 ${next.leverage}x；当前没有绑定策略，未写入 Redis`
+                  })
+                }
+              />
+            }
+          />
+          <ContractLeveragePanel
+            toolbar={
+              <ContractLeverageToolbar
+                symbol={contractSymbol}
+                contractLeverage={contractLeverage}
+                queriedLeverage={queriedContractLeverage}
+                saving={saving}
+                onSymbolChange={(value) => {
+                  setContractSymbol(value)
+                  setQueriedContractLeverage(null)
+                }}
+                onContractLeverageChange={setContractLeverage}
+                onQuery={() =>
+                  void withWrite(async () => {
+                    const next = await getAccountContractLeverage(sourceId, contractSymbol)
+                    setContractSymbol(next.symbol)
+                    setContractLeverage(String(next.contract_leverage))
+                    setQueriedContractLeverage(String(next.contract_leverage))
+                    const recorded =
+                      next.recorded_contract_leverage == null
+                        ? '本地无上次设置'
+                        : `本地上次设置 ${next.recorded_contract_leverage}x`
+                    return `交易所 ${next.symbol} 当前合约杠杆 ${next.contract_leverage}x（${recorded}）`
+                  })
+                }
+                onSave={() =>
+                  void withWrite(async () => {
+                    const next = await saveAccountContractLeverage(
+                      sourceId,
+                      contractSymbol,
+                      Number(contractLeverage),
+                    )
+                    setContractSymbol(next.symbol)
+                    setContractLeverage(String(next.contract_leverage))
+                    setQueriedContractLeverage(String(next.contract_leverage))
+                    return `已将 ${next.symbol} 合约杠杆设为 ${next.contract_leverage}x`
                   })
                 }
               />

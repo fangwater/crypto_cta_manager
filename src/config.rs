@@ -98,6 +98,9 @@ pub struct SourceConfig {
     /// One CTA share equals this many USDT of reference equity.
     #[serde(default)]
     pub share_unit_usdt: Option<f64>,
+    /// Optional Exec env.sh used only to read exchange API credentials.
+    #[serde(default)]
+    pub env_path: Option<PathBuf>,
 }
 
 impl Default for IngestionConfig {
@@ -272,6 +275,15 @@ impl AppConfig {
                     source.id
                 );
             }
+            if let Some(env_path) = &source.env_path {
+                if !env_path.is_absolute() {
+                    bail!(
+                        "source {} env_path must be absolute: {}",
+                        source.id,
+                        env_path.display()
+                    );
+                }
+            }
             if !ids.insert(source.id.clone()) {
                 bail!("duplicate source id: {}", source.id);
             }
@@ -316,6 +328,16 @@ impl SourceConfig {
         self.share_unit_usdt
             .filter(|value| value.is_finite() && *value > 0.0)
             .unwrap_or(10_000.0)
+    }
+
+    pub fn env_path(&self) -> PathBuf {
+        self.env_path.clone().unwrap_or_else(|| {
+            self.rocksdb_path
+                .parent()
+                .and_then(Path::parent)
+                .map(|root| root.join("env.sh"))
+                .unwrap_or_else(|| PathBuf::from("env.sh"))
+        })
     }
 
     pub fn display_name(&self) -> &str {
@@ -510,6 +532,7 @@ mod tests {
             ipc_namespace: None,
             account_ipc_service: None,
             share_unit_usdt: None,
+            env_path: None,
         }
     }
 

@@ -256,7 +256,23 @@ Redis JSON is written when Manager scales each target `qty` by shares × leverag
 A successful `POST /api/catalog/position-strategies` does that automatically
 for every account bound to the strategy. Changing an account's `leverage`
 recomputes every bound strategy on that account the same way and republishes
-them. Manager keeps one loopback Redis long
+them. Exchange contract leverage is a separate per-symbol venue setting, not
+the CTA qty multiple. `GET /api/catalog/accounts/{source_id}/contract-leverage?symbol=BTCUSDT`
+reads that account's live exchange contract leverage from the venue.
+`PUT /api/catalog/accounts/{source_id}/contract-leverage` with
+`{"symbol":"BTCUSDT","contract_leverage":5}` sets one symbol. Both read the
+account `env.sh` (optional `env_path`, default `<rocksdb_path>/../../env.sh`).
+Binance STANDARD uses `/fapi/v2/positionRisk` and `/fapi/v1/leverage`; UNIFIED
+uses `/papi/v1/um/positionRisk` and `/papi/v1/um/leverage`. OKX uses
+`/api/v5/account/leverage-info` and `/api/v5/account/set-leverage`. PUT records
+the last requested value in PostgreSQL table `cta_account_symbol_leverages`.
+GET may also return that recorded value as `recorded_contract_leverage`, but
+the live exchange `contract_leverage` is the source of truth. Range is 1–125.
+Missing `symbol` is HTTP 400. Venue or `env.sh` failures are HTTP 502. Neither
+call scales published qty, writes Exec Redis, nor notifies `exec-pre-trade`.
+The browser account and bindings pages expose Query and Set. The served
+publish client has `get-contract-leverage` and `set-contract-leverage`.
+Manager keeps one loopback Redis long
 connection (`[redis]` in the host toml, default `redis://127.0.0.1:6379/0`)
 with keepalive ping and reconnect. Position publish writes the strategy JSON
 and `batch_exec:strategy_names` on that connection, rereads both, and only then

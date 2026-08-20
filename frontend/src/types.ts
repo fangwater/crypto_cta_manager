@@ -165,6 +165,16 @@ export interface SavedAccountStudio extends AccountStudio {
   publishes?: BindingPublishResult[]
 }
 
+export interface SavedSymbolContractLeverage {
+  source_id: string
+  symbol: string
+  contract_leverage: number
+  exchange: string
+  endpoint: string
+  http_status: number
+  recorded_contract_leverage?: number | null
+}
+
 export interface LiveEquity {
   status: 'ok' | 'stale' | string
   source: string

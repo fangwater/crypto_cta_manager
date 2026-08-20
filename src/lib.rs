@@ -1,6 +1,7 @@
 pub mod account_ipc;
 pub mod capacity;
 pub mod config;
+pub mod exchange_leverage;
 pub mod ingest;
 pub mod manager_db;
 pub mod model;

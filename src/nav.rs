@@ -1797,6 +1797,7 @@ mod tests {
             ipc_namespace: None,
             account_ipc_service: None,
             share_unit_usdt: None,
+            env_path: None,
         }
     }
 

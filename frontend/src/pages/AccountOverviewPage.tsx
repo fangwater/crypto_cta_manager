@@ -10,9 +10,21 @@ import {
   WalletCards,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getAccountLive, getAccountStudio, getDashboard, saveAccountLeverage } from '../api'
+import {
+  getAccountContractLeverage,
+  getAccountLive,
+  getAccountStudio,
+  getDashboard,
+  saveAccountContractLeverage,
+  saveAccountLeverage,
+} from '../api'
 import { AppShell, PageIntro } from '../components/AppShell'
-import { CapacityPanel, LeverageToolbar } from '../components/CapacityPanel'
+import {
+  CapacityPanel,
+  ContractLeveragePanel,
+  ContractLeverageToolbar,
+  LeverageToolbar,
+} from '../components/CapacityPanel'
 import { OrderParametersView } from '../components/OrderParametersView'
 import { TargetPositionsView } from '../components/TargetPositionsView'
 import { Alert, Badge } from '../components/ui/Badge'
@@ -46,6 +58,9 @@ export function AccountOverviewPage() {
   const [studio, setStudio] = useState<AccountStudio | null>(null)
   const [capacity, setCapacity] = useState<AccountCapacity | null>(null)
   const [leverage, setLeverage] = useState('1')
+  const [contractSymbol, setContractSymbol] = useState('')
+  const [contractLeverage, setContractLeverage] = useState('5')
+  const [queriedContractLeverage, setQueriedContractLeverage] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -162,7 +177,7 @@ export function AccountOverviewPage() {
             }
           />
 
-          <div className="mb-8">
+          <div className="mb-8 space-y-4">
             <CapacityPanel
               capacity={capacity ?? studio?.capacity}
               toolbar={
@@ -179,6 +194,47 @@ export function AccountOverviewPage() {
                       return published > 0
                         ? `已保存杠杆 ${next.leverage}x，并重推 ${published} 条绑定策略`
                         : `已保存杠杆 ${next.leverage}x；当前没有绑定策略，未写入 Redis`
+                    })
+                  }
+                />
+              }
+            />
+            <ContractLeveragePanel
+              toolbar={
+                <ContractLeverageToolbar
+                  symbol={contractSymbol}
+                  contractLeverage={contractLeverage}
+                  queriedLeverage={queriedContractLeverage}
+                  saving={saving}
+                  onSymbolChange={(value) => {
+                    setContractSymbol(value)
+                    setQueriedContractLeverage(null)
+                  }}
+                  onContractLeverageChange={setContractLeverage}
+                  onQuery={() =>
+                    void withWrite(async () => {
+                      const next = await getAccountContractLeverage(sourceId, contractSymbol)
+                      setContractSymbol(next.symbol)
+                      setContractLeverage(String(next.contract_leverage))
+                      setQueriedContractLeverage(String(next.contract_leverage))
+                      const recorded =
+                        next.recorded_contract_leverage == null
+                          ? '本地无上次设置'
+                          : `本地上次设置 ${next.recorded_contract_leverage}x`
+                      return `交易所 ${next.symbol} 当前合约杠杆 ${next.contract_leverage}x（${recorded}）`
+                    })
+                  }
+                  onSave={() =>
+                    void withWrite(async () => {
+                      const next = await saveAccountContractLeverage(
+                        sourceId,
+                        contractSymbol,
+                        Number(contractLeverage),
+                      )
+                      setContractSymbol(next.symbol)
+                      setContractLeverage(String(next.contract_leverage))
+                      setQueriedContractLeverage(String(next.contract_leverage))
+                      return `已将 ${next.symbol} 合约杠杆设为 ${next.contract_leverage}x`
                     })
                   }
                 />

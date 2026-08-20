@@ -48,6 +48,10 @@ ipc_namespace = "binance_exec_trade01"
 account_ipc_service = "account_pubs/binance_pm"
 # One CTA share equals this many USDT of position-strategy reference equity.
 share_unit_usdt = 10000
+# Optional Exec env.sh used only to read exchange API credentials for
+# GET/PUT /api/catalog/accounts/{source_id}/contract-leverage.
+# Defaults to <rocksdb_path>/../../env.sh, for example /home/el01/binance_exec_trade01/env.sh.
+# env_path = "/home/el01/binance_exec_trade01/env.sh"
 # Omit start_ts_us to backfill all available history on the first run.
 
 # Additional accounts are independent workers with independent checkpoints.
