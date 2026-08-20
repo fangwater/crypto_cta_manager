@@ -129,8 +129,12 @@ from archived position updates, 5-second mid bars, and later Exec
 `strategyName`. Intended qty is template qty × archived shares × archived
 leverage minus the snapshot `current_qty`. Each update's window starts at
 `received_at_us` and ends at the earlier of `received_at_us + windowSec`, the
-next same-strategy update, or now. 1-minute mid TWAP is the average of 5-second
-mid bars whose `end_ts` falls in that minute. TWAP cost before fee is
+next same-strategy update, or now. Assume uniform execution over that window.
+Split the window into consecutive 1-minute buckets from `received_at_us`, not
+wall-clock minutes. Each 1-minute mid is the equal average of the 5-second mid
+bars in that bucket (12 bars in a full minute). The window TWAP is the equal
+average of those 1-minute mids when the window is an exact multiple of 60s, or
+duration-weighted if a later update truncates the last bucket. TWAP cost before fee is
 `intended × (twap_mid − arrival_mid)`. Actual cost before fee is
 `filled_qty × (fill VWAP − arrival_mid)` using signed fills attributed by
 `batch_exec:<strategy_name>`. Messages without `published_accounts` are skipped

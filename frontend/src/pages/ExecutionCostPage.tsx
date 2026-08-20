@@ -161,7 +161,7 @@ export function ExecutionCostPage() {
       <PageIntro
         eyebrow="On demand"
         title="实际成交 vs TWAP 预估"
-        description="每次仓位 POST 的目标仓位按当时归档的份数 × 杠杆减去快照仓位，得到要执行的数量。默认 5 分钟窗口（可改），窗口内用 1 分钟 midprice TWAP 估算费前成本，再和同一窗口实际成交 VWAP 的费前成本对比。不是实时任务，点查询才生成。"
+        description="每次仓位 POST 的目标仓位按当时归档的份数 × 杠杆减去快照仓位，得到要执行的数量。默认假设 5 分钟均匀执行：从这次更新起切 5 个 1 分钟，每分钟对其中 5 秒 mid 等权平均，再对这 5 个 1 分钟 mid 平均，得到 TWAP 预估费前，并和同一窗口实际成交 VWAP 的费前成本对比。不是实时任务，点查询才生成。"
       />
 
       {dashError && <Alert className="mb-4">账户列表失败：{dashError}</Alert>}
@@ -171,7 +171,7 @@ export function ExecutionCostPage() {
         <CardHeader>
           <CardTitle>查询条件</CardTitle>
           <CardDescription>
-            价格基准固定为 1 分钟 mid TWAP；成交来自 Exec RocksDB 的
+            价格基准是从这次更新起的连续 1 分钟 mid（每分钟用 5 秒 mid 平均）；成交来自 Exec RocksDB 的
             <code className="mx-1">batch_exec:&lt;strategy&gt;</code>
             归属。归档里没有 shares/leverage 的旧消息会跳过。
           </CardDescription>
@@ -237,7 +237,7 @@ export function ExecutionCostPage() {
         <StatTile
           label="TWAP 预估费前"
           value={report ? money(report.totals.twap_cost_before_fee_usdt) : '--'}
-          hint="intended × (1m mid TWAP − arrival mid)"
+          hint="intended × (5×1m mid 平均 − arrival mid)"
         />
         <StatTile
           label="仓位更新"

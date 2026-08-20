@@ -335,7 +335,7 @@ function buildChapters(gateway: string): Chapter[] {
             },
             {
               field: 'twap_cost_before_fee_usdt',
-              detail: 'intended × (1 分钟 mid TWAP − 到达分钟 mid)',
+              detail: 'intended × (窗口 TWAP − 到达 mid)。窗口从这次更新起按连续 1 分钟切桶；每桶对其中 5 秒 mid 等权平均，5 分钟就是 5 个 1 分钟 mid 再等权平均',
             },
             {
               field: 'actual_cost_before_fee_usdt',
@@ -344,7 +344,9 @@ function buildChapters(gateway: string): Chapter[] {
           ]}
         />
         <Note>
-          价格用 Manager 自己的 5 秒 mid 条先合成 1 分钟 TWAP。成交只认
+          价格用 Manager 自己的 5 秒 mid 条。假设窗口内均匀执行：从这次 POST
+          时刻起切连续 1 分钟，每分钟对其中 5 秒 mid 等权平均（满分钟 12 根），
+          再对这几个 1 分钟 mid 平均。5 分钟窗口就是 5 个 1 分钟 mid。成交只认
           from_key_text 为 batch_exec:&lt;strategy_name&gt; 的 uniform_orders。
           窗口从这次 POST 开始，遇到同策略下一次更新提前结束。旧消息没有
           published_accounts 的 shares/leverage 会被跳过，不拿当前配置回填。

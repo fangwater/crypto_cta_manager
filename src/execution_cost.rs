@@ -283,11 +283,16 @@ fn cost_for_account(
         let published = template * account.shares * account.leverage;
         let snap = snapshot_qty.get(&symbol).copied().unwrap_or(0.0);
         let intended = published - snap;
-        let bars = twap.scan_bars(&symbol, venue, msg.received_at_us, window_end_us)?;
-        let (minute_mids, missing_minute_bar_count) =
-            minute_twap_mids(&bars, msg.received_at_us, window_end_us);
-        let arrival_mid = minute_mids.first().copied();
-        let twap_mid = average(&minute_mids);
+        let bars = twap.scan_bars(
+            &symbol,
+            venue,
+            msg.received_at_us,
+            window_end_us.saturating_add(1),
+        )?;
+        let (minute_buckets, missing_minute_bar_count) =
+            minute_twap_buckets(&bars, msg.received_at_us, window_end_us);
+        let arrival_mid = minute_buckets.first().map(|bucket| bucket.mid);
+        let twap_mid = duration_weighted_mid(&minute_buckets);
         let key = (
             account.source_id.clone(),
             msg.strategy.strategy_name.clone(),
@@ -325,7 +330,7 @@ fn cost_for_account(
             intended_qty: intended,
             filled_qty,
             fill_count: signed_fills.len() as u64,
-            minute_bar_count: minute_mids.len() as u32,
+            minute_bar_count: minute_buckets.len() as u32,
             missing_minute_bar_count,
             arrival_mid,
             twap_mid,
@@ -500,57 +505,63 @@ fn append_source_fills(
     Ok(())
 }
 
-fn minute_twap_mids(bars: &[TwapBar], start_us: i64, end_us: i64) -> (Vec<f64>, u32) {
+#[derive(Debug, Clone, Copy)]
+struct MinuteTwapBucket {
+    mid: f64,
+    duration_us: i64,
+}
+
+fn minute_twap_buckets(
+    bars: &[TwapBar],
+    start_us: i64,
+    end_us: i64,
+) -> (Vec<MinuteTwapBucket>, u32) {
     if end_us <= start_us {
         return (Vec::new(), 0);
     }
-    let mut by_minute: BTreeMap<i64, (f64, u32)> = BTreeMap::new();
-    for bar in bars {
-        if bar.end_ts_us < start_us || bar.end_ts_us >= end_us {
-            continue;
-        }
-        let minute_end = aligned_up(bar.end_ts_us, MINUTE_US);
-        let entry = by_minute.entry(minute_end).or_insert((0.0, 0));
-        entry.0 += bar.twap;
-        entry.1 += 1;
-    }
-    let first_minute_end = aligned_up(start_us.saturating_add(1).max(1), MINUTE_US);
-    let last_included_end = end_us.saturating_sub(1).max(start_us);
-    let last_minute_end = aligned_up(last_included_end.max(1), MINUTE_US);
-    let mut mids = Vec::new();
+    let mut buckets = Vec::new();
     let mut missing = 0u32;
-    let mut minute_end = first_minute_end;
-    while minute_end <= last_minute_end {
-        if let Some((sum, count)) = by_minute.get(&minute_end) {
-            if *count > 0 {
-                mids.push(*sum / f64::from(*count));
-            } else {
-                missing += 1;
+    let mut bucket_start = start_us;
+    while bucket_start < end_us {
+        let bucket_end = bucket_start.saturating_add(MINUTE_US).min(end_us);
+        let duration_us = bucket_end - bucket_start;
+        let mut sum = 0.0;
+        let mut count = 0u32;
+        for bar in bars {
+            if bar.end_ts_us > bucket_start && bar.end_ts_us <= bucket_end {
+                sum += bar.twap;
+                count += 1;
             }
-        } else if minute_end > start_us {
+        }
+        if count > 0 && duration_us > 0 {
+            buckets.push(MinuteTwapBucket {
+                mid: sum / f64::from(count),
+                duration_us,
+            });
+        } else {
             missing += 1;
         }
-        minute_end = minute_end.saturating_add(MINUTE_US);
-        if minute_end <= 0 {
+        if bucket_end <= bucket_start {
             break;
         }
+        bucket_start = bucket_end;
     }
-    (mids, missing)
+    (buckets, missing)
 }
 
-fn aligned_up(ts_us: i64, interval_us: i64) -> i64 {
-    if ts_us <= 0 || interval_us <= 0 {
-        return 0;
+fn duration_weighted_mid(buckets: &[MinuteTwapBucket]) -> Option<f64> {
+    let mut weighted = 0.0;
+    let mut duration = 0.0;
+    for bucket in buckets {
+        let seconds = bucket.duration_us as f64;
+        weighted += bucket.mid * seconds;
+        duration += seconds;
     }
-    let completed = (ts_us - 1) / interval_us;
-    completed.saturating_add(1).saturating_mul(interval_us)
-}
-
-fn average(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
+    if duration > 0.0 {
+        Some(weighted / duration)
+    } else {
+        None
     }
-    Some(values.iter().sum::<f64>() / values.len() as f64)
 }
 
 pub fn intended_qty(template_qty: f64, shares: f64, leverage: f64, snapshot_qty: f64) -> f64 {
@@ -583,27 +594,40 @@ mod tests {
         assert!((intended_qty(0.1, 2.0, 3.0, 0.15) - 0.45).abs() < 1e-12);
     }
 
+    fn five_second_bars_for_minutes(
+        start: i64,
+        minutes: i64,
+        mid_for_minute: impl Fn(i64) -> f64,
+    ) -> Vec<TwapBar> {
+        let mut bars = Vec::new();
+        for minute in 0..minutes {
+            for sample in 1..=12 {
+                let end_ts_us = start + minute * MINUTE_US + sample * 5_000_000;
+                bars.push(TwapBar {
+                    end_ts_us,
+                    twap: mid_for_minute(minute),
+                    sample_count: 1,
+                    first_ts_us: end_ts_us - 5_000_000,
+                });
+            }
+        }
+        bars
+    }
+
     #[test]
-    fn minute_twap_averages_five_second_mids() {
-        let start = 60_000_000;
-        let bars = vec![
-            TwapBar {
-                end_ts_us: 65_000_000,
-                twap: 100.0,
-                sample_count: 1,
-                first_ts_us: 60_000_000,
-            },
-            TwapBar {
-                end_ts_us: 70_000_000,
-                twap: 102.0,
-                sample_count: 1,
-                first_ts_us: 65_000_000,
-            },
-        ];
-        let (mids, missing) = minute_twap_mids(&bars, start, 120_000_000);
+    fn five_minute_window_uses_five_equal_one_minute_mids() {
+        let start = 1_000_000;
+        let end = start + 5 * MINUTE_US;
+        let bars = five_second_bars_for_minutes(start, 5, |minute| 100.0 + minute as f64);
+        let (buckets, missing) = minute_twap_buckets(&bars, start, end);
         assert_eq!(missing, 0);
-        assert_eq!(mids.len(), 1);
-        assert!((mids[0] - 101.0).abs() < 1e-12);
+        assert_eq!(buckets.len(), 5);
+        for (minute, bucket) in buckets.iter().enumerate() {
+            assert_eq!(bucket.duration_us, MINUTE_US);
+            assert!((bucket.mid - (100.0 + minute as f64)).abs() < 1e-12);
+        }
+        let twap = duration_weighted_mid(&buckets).unwrap();
+        assert!((twap - 102.0).abs() < 1e-12);
     }
 
     #[test]
@@ -613,17 +637,8 @@ mod tests {
         let archive = PositionArchive::open(db.clone()).unwrap();
         let twap = TwapStore::from_db(db, 1).unwrap();
         let cf = twap::column_family_name("BTCUSDT", "binance-futures").unwrap();
-        for offset in 1..=12 {
-            twap.append_bar(
-                &cf,
-                TwapBar {
-                    end_ts_us: 1_000_000 + offset * 5_000_000,
-                    twap: 100.0 + offset as f64,
-                    sample_count: 1,
-                    first_ts_us: 1_000_000 + (offset - 1) * 5_000_000,
-                },
-            )
-            .unwrap();
+        for bar in five_second_bars_for_minutes(1_000_000, 5, |minute| 100.0 + minute as f64) {
+            twap.append_bar(&cf, bar).unwrap();
         }
         let msg = archive
             .append(
@@ -670,15 +685,21 @@ mod tests {
             sources: vec![],
         };
         let fills = BTreeMap::new();
-        let update =
-            cost_for_update(&config, &twap, &msg, 61_000_000, &fills, &BTreeSet::new()).unwrap();
+        let update = cost_for_update(
+            &config,
+            &twap,
+            &msg,
+            1_000_000 + 5 * MINUTE_US,
+            &fills,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         let row = &update.accounts[0].symbols[0];
         assert!((row.intended_qty - 1.0).abs() < 1e-12);
-        assert!(row.arrival_mid.is_some());
-        assert!(row.twap_mid.is_some());
-        let arrival = row.arrival_mid.unwrap();
-        let exec = row.twap_mid.unwrap();
-        assert!((row.twap_cost_before_fee_usdt.unwrap() - (exec - arrival)).abs() < 1e-9);
+        assert_eq!(row.minute_bar_count, 5);
+        assert!((row.arrival_mid.unwrap() - 100.0).abs() < 1e-12);
+        assert!((row.twap_mid.unwrap() - 102.0).abs() < 1e-12);
+        assert!((row.twap_cost_before_fee_usdt.unwrap() - 2.0).abs() < 1e-9);
         assert!(row.actual_cost_before_fee_usdt.is_none());
     }
 
@@ -689,17 +710,8 @@ mod tests {
         let archive = PositionArchive::open(db.clone()).unwrap();
         let twap = TwapStore::from_db(db, 1).unwrap();
         let cf = twap::column_family_name("BTCUSDT", "binance-futures").unwrap();
-        for offset in 1..=12 {
-            twap.append_bar(
-                &cf,
-                TwapBar {
-                    end_ts_us: 1_000_000 + offset * 5_000_000,
-                    twap: 100.0,
-                    sample_count: 1,
-                    first_ts_us: 1_000_000 + (offset - 1) * 5_000_000,
-                },
-            )
-            .unwrap();
+        for bar in five_second_bars_for_minutes(1_000_000, 5, |_| 100.0) {
+            twap.append_bar(&cf, bar).unwrap();
         }
         let msg = archive
             .append(
@@ -769,8 +781,15 @@ mod tests {
                 ),
             ],
         );
-        let update =
-            cost_for_update(&config, &twap, &msg, 61_000_000, &fills, &BTreeSet::new()).unwrap();
+        let update = cost_for_update(
+            &config,
+            &twap,
+            &msg,
+            1_000_000 + 5 * MINUTE_US,
+            &fills,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         let row = &update.accounts[0].symbols[0];
         assert!((row.filled_qty - 1.0).abs() < 1e-12);
         assert!((row.actual_vwap.unwrap() - 102.8).abs() < 1e-12);

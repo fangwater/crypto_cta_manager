@@ -54,8 +54,11 @@ position-update messages are not compacted by that job.
 real-time job. Each archived position update's intended qty is template qty ×
 the shares and leverage stored in that message minus the snapshot qty. The
 default execution window is 5 minutes (`windowSec`, later adjustable) and ends
-early at the next same-strategy update. Price is 1-minute mid TWAP built from
-the 5-second mid bars. The response compares TWAP estimated cost before fee
+early at the next same-strategy update. Assume the intended qty is executed
+uniformly over that window. Split from the update timestamp into consecutive
+1-minute buckets; each 1-minute mid is the equal average of the 5-second mid
+bars in that bucket, then those 1-minute mids are averaged. A 5-minute window
+therefore uses five 1-minute mids. The response compares TWAP estimated cost before fee
 (`intended × (twap_mid − arrival_mid)`) with actual cost before fee
 (`filled × (VWAP − arrival_mid)`). Fills come from that account's Exec
 `uniform_orders` and are attributed with `batch_exec:<strategy_name>`. Legacy
