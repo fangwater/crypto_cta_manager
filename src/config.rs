@@ -95,9 +95,9 @@ pub struct SourceConfig {
     /// Iceoryx service path after the namespace, for example account_pubs/binance_pm.
     #[serde(default)]
     pub account_ipc_service: Option<String>,
-    /// One CTA share equals this many USDT of reference equity.
-    #[serde(default)]
-    pub share_unit_usdt: Option<f64>,
+    /// Accepted during rollout for old host TOML files. Direct shares never use it.
+    #[serde(default, rename = "share_unit_usdt")]
+    pub legacy_share_unit_usdt: Option<f64>,
     /// Optional Exec env.sh used only to read exchange API credentials.
     #[serde(default)]
     pub env_path: Option<PathBuf>,
@@ -266,15 +266,6 @@ impl AppConfig {
             if let Some(exec_viz_url) = &source.exec_viz_url {
                 validate_loopback_http_origin(&source.id, "exec_viz_url", exec_viz_url)?;
             }
-            if source
-                .share_unit_usdt
-                .is_some_and(|value| !value.is_finite() || value <= 0.0)
-            {
-                bail!(
-                    "source {} share_unit_usdt must be finite and greater than zero",
-                    source.id
-                );
-            }
             if let Some(env_path) = &source.env_path {
                 if !env_path.is_absolute() {
                     bail!(
@@ -322,12 +313,6 @@ impl SourceConfig {
                 self.id
             )
         })
-    }
-
-    pub fn share_unit_usdt(&self) -> f64 {
-        self.share_unit_usdt
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .unwrap_or(10_000.0)
     }
 
     pub fn env_path(&self) -> PathBuf {
@@ -531,7 +516,7 @@ mod tests {
             exec_viz_url: None,
             ipc_namespace: None,
             account_ipc_service: None,
-            share_unit_usdt: None,
+            legacy_share_unit_usdt: None,
             env_path: None,
         }
     }
@@ -687,6 +672,18 @@ mod tests {
             without_namespace.reload_notify_service_name().as_deref(),
             Some("binance_exec_trade01/batch_exec_pubs/reload_notify")
         );
+    }
+
+    #[test]
+    fn accepts_but_does_not_use_legacy_share_unit_config() {
+        let raw = include_str!("../config/cta-manager.example.toml").replacen(
+            "account_ipc_service = \"account_pubs/binance_pm\"",
+            "account_ipc_service = \"account_pubs/binance_pm\"\nshare_unit_usdt = 10000",
+            1,
+        );
+        let config: AppConfig = toml::from_str(&raw).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.sources[0].legacy_share_unit_usdt, Some(10_000.0));
     }
 
     #[test]

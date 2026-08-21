@@ -1,24 +1,19 @@
-import { CheckCircle2, Layers3, LoaderCircle, Plus, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { CheckCircle2, Layers3, LoaderCircle, Plus, Save, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   deleteAccountBinding,
   getAccountContractLeverage,
-  getAccountLive,
   getAccountStudio,
   getDashboard,
   publishAccountBinding,
-  saveAccountAllocations,
   saveAccountBinding,
   saveAccountContractLeverage,
-  saveAccountLeverage,
+  saveBindingShares,
 } from '../../api'
-import { AllocationEditor } from '../../components/AllocationEditor'
 import {
-  CapacityPanel,
   ContractLeveragePanel,
   ContractLeverageToolbar,
-  LeverageToolbar,
-} from '../../components/CapacityPanel'
+} from '../../components/ContractLeveragePanel'
 import { ConfigShell } from '../../components/ConfigShell'
 import { Alert } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
@@ -26,9 +21,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import { FieldHint, Input, Label, Select } from '../../components/ui/Field'
 import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
-import { percent } from '../../lib/strategyDefaults'
 import { readSourceId, routes } from '../../lib/routes'
-import type { AccountCapacity, AccountStudio, DashboardSnapshot } from '../../types'
+import type { AccountStudio, DashboardSnapshot } from '../../types'
 
 export function AccountBindingsPage() {
   const initialSource = readSourceId()
@@ -37,9 +31,8 @@ export function AccountBindingsPage() {
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
   const [studio, setStudio] = useState<AccountStudio | null>(null)
-  const [capacity, setCapacity] = useState<AccountCapacity | null>(null)
+  const [shareDrafts, setShareDrafts] = useState<Record<string, string>>({})
   const [sourceId, setSourceId] = useState(initialSource)
-  const [leverage, setLeverage] = useState('1')
   const [contractSymbol, setContractSymbol] = useState('')
   const [contractLeverage, setContractLeverage] = useState('5')
   const [queriedContractLeverage, setQueriedContractLeverage] = useState<string | null>(null)
@@ -96,13 +89,18 @@ export function AccountBindingsPage() {
     if (orders[0]) setNewOrder(orders[0].strategy_name)
   }, [newOrder, orders])
 
+  const applyStudio = useCallback((next: AccountStudio) => {
+    setStudio(next)
+    setShareDrafts(
+      Object.fromEntries(next.bindings.map((binding) => [binding.binding_name, String(binding.shares)])),
+    )
+  }, [])
+
   const loadStudio = useCallback(async (nextSourceId: string, signal?: AbortSignal) => {
     const next = await getAccountStudio(nextSourceId, signal)
-    setStudio(next)
-    setLeverage(String(next.leverage))
-    setCapacity(next.capacity ?? null)
+    applyStudio(next)
     return next
-  }, [])
+  }, [applyStudio])
 
   useEffect(() => {
     if (!sourceId) {
@@ -119,31 +117,19 @@ export function AccountBindingsPage() {
     return () => controller.abort()
   }, [loadStudio, sourceId])
 
-  useEffect(() => {
-    if (!sourceId) return
-    const timer = window.setInterval(() => {
-      void getAccountLive(sourceId)
-        .then(setCapacity)
-        .catch(() => undefined)
-    }, 2_000)
-    return () => window.clearInterval(timer)
-  }, [sourceId])
-
   async function bindExecution(
     positionStrategyName: string,
     orderStrategyName: string,
     shares: number,
   ) {
-    await saveAccountBinding(
+    const next = await saveAccountBinding(
       sourceId,
       positionStrategyName,
       positionStrategyName,
       orderStrategyName,
       shares,
     )
-    const next = await getAccountStudio(sourceId)
-    setStudio(next)
-    setCapacity(next.capacity ?? null)
+    applyStudio(next)
     await reloadCatalog()
   }
 
@@ -159,7 +145,7 @@ export function AccountBindingsPage() {
       <Alert tone="warning" className="mb-2">
         <strong className="font-medium">逻辑说明：</strong>
         先在「仓位策略」里定义目标仓位 → 在「下单策略」里维护执行算法模板（如 default_order）→
-        在这里把二者关联并发布。保存杠杆会按新倍数重算本账户全部绑定并推送到 Exec。
+        在这里为每条策略直接配置份数。发布数量始终是原始 qty × 份数。
       </Alert>
 
       {loading || catalogLoading ? (
@@ -173,46 +159,27 @@ export function AccountBindingsPage() {
         <Alert tone="warning">当前没有可配置的 Exec 账户。</Alert>
       ) : (
         <div className="space-y-6">
-          <CapacityPanel
-            capacity={capacity ?? studio?.capacity}
-            toolbar={
-              <LeverageToolbar
-                account={
-                  <Label>
-                    账户
-                    <Select
-                      value={sourceId}
-                      onChange={(event) => {
-                        const next = event.target.value
-                        setSourceId(next)
-                        window.history.replaceState({}, '', routes.configBindings(next))
-                      }}
-                    >
-                      {accounts.map((entry) => (
-                        <option key={entry.source_id} value={entry.source_id}>
-                          {entry.account} / {entry.source_id}
-                        </option>
-                      ))}
-                    </Select>
-                  </Label>
-                }
-                leverage={leverage}
-                saving={saving}
-                onLeverageChange={setLeverage}
-                onSave={() =>
-                  void withWrite(async () => {
-                    const next = await saveAccountLeverage(sourceId, Number(leverage))
-                    setStudio(next)
-                    setCapacity(next.capacity ?? null)
-                    const published = next.publishes?.length ?? 0
-                    return published > 0
-                      ? `已保存杠杆 ${next.leverage}x，并重推 ${published} 条绑定策略`
-                      : `已保存杠杆 ${next.leverage}x；当前没有绑定策略，未写入 Redis`
-                  })
-                }
-              />
-            }
-          />
+          <Card>
+            <CardContent className="pt-5">
+              <Label className="max-w-xl">
+                账户
+                <Select
+                  value={sourceId}
+                  onChange={(event) => {
+                    const next = event.target.value
+                    setSourceId(next)
+                    window.history.replaceState({}, '', routes.configBindings(next))
+                  }}
+                >
+                  {accounts.map((entry) => (
+                    <option key={entry.source_id} value={entry.source_id}>
+                      {entry.account} / {entry.source_id}
+                    </option>
+                  ))}
+                </Select>
+              </Label>
+            </CardContent>
+          </Card>
           <ContractLeveragePanel
             toolbar={
               <ContractLeverageToolbar
@@ -322,21 +289,6 @@ export function AccountBindingsPage() {
             </CardContent>
           </Card>
 
-          {(studio?.bindings ?? []).length > 0 ? (
-            <AllocationEditor
-              bindings={studio?.bindings ?? []}
-              boundEquity={studio?.bound_equity_usdt ?? 0}
-              saving={saving}
-              onSave={(allocations) =>
-                void withWrite(async () => {
-                  const next = await saveAccountAllocations(sourceId, allocations)
-                  setStudio(next)
-                  setCapacity(next.capacity ?? null)
-                })
-              }
-            />
-          ) : null}
-
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm font-medium text-ink">
               <Layers3 size={16} className="text-brand" />
@@ -349,8 +301,12 @@ export function AccountBindingsPage() {
                 </CardContent>
               </Card>
             ) : (
-              (studio?.bindings ?? []).map((binding) => (
-                <Card key={binding.binding_name}>
+              (studio?.bindings ?? []).map((binding) => {
+                const shareDraft = shareDrafts[binding.binding_name] ?? String(binding.shares)
+                const parsedShares = Number(shareDraft)
+                const validShares = Number.isFinite(parsedShares) && parsedShares > 0
+                const sharesChanged = validShares && parsedShares !== binding.shares
+                return <Card key={binding.binding_name}>
                   <CardContent className="space-y-4 pt-5">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
@@ -361,7 +317,7 @@ export function AccountBindingsPage() {
                         </p>
                       </div>
                       <span className="rounded-full bg-brand-soft px-3 py-1 text-sm font-semibold text-brand">
-                        {percent(binding.allocation_ratio)}
+                        {binding.shares} 份
                       </span>
                     </div>
                     <div className="flex flex-wrap items-end gap-3">
@@ -386,7 +342,38 @@ export function AccountBindingsPage() {
                           ))}
                         </Select>
                       </Label>
+                      <Label className="w-32">
+                        份数
+                        <Input
+                          inputMode="decimal"
+                          value={shareDraft}
+                          onChange={(event) =>
+                            setShareDrafts((current) => ({
+                              ...current,
+                              [binding.binding_name]: event.target.value,
+                            }))
+                          }
+                        />
+                      </Label>
                       <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          disabled={saving || !sharesChanged}
+                          onClick={() =>
+                            void withWrite(async () => {
+                              const next = await saveBindingShares(
+                                sourceId,
+                                binding.binding_name,
+                                parsedShares,
+                              )
+                              applyStudio(next)
+                              return `已将 ${binding.binding_name} 设为 ${parsedShares} 份；下次仓位更新生效`
+                            })
+                          }
+                        >
+                          <Save size={15} /> 保存份数
+                        </Button>
                         <Button
                           type="button"
                           variant="primary"
@@ -407,7 +394,7 @@ export function AccountBindingsPage() {
                             void withWrite(async () => {
                               await deleteAccountBinding(sourceId, binding.binding_name)
                               const next = await getAccountStudio(sourceId)
-                              setStudio(next)
+                              applyStudio(next)
                             })
                           }
                         >
@@ -417,7 +404,7 @@ export function AccountBindingsPage() {
                     </div>
                   </CardContent>
                 </Card>
-              ))
+              })
             )}
           </div>
         </div>

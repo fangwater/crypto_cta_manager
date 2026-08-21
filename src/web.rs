@@ -15,7 +15,6 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use crate::account_ipc::LiveEquityHub;
-use crate::capacity::{self, AccountCapacityView};
 use crate::config::{AppConfig, SourceConfig};
 use crate::manager_db::ManagerDb;
 use crate::order_config::{
@@ -26,9 +25,8 @@ use crate::position_archive::PositionArchive;
 use crate::redis_runtime::RedisRuntime;
 use crate::reload_notify::ReloadNotifyHub;
 use crate::strategy_catalog::{
-    self, SaveAccountSettingsRequest, SaveAllocationsRequest, SaveBindingRequest,
-    SaveBindingSharesRequest, SaveOrderStrategyRequest, SavePositionStrategyRequest,
-    SaveSymbolContractLeverageRequest,
+    self, SaveBindingRequest, SaveBindingSharesRequest, SaveOrderStrategyRequest,
+    SavePositionStrategyRequest, SaveSymbolContractLeverageRequest,
 };
 use crate::twap::TwapStore;
 use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
@@ -161,13 +159,6 @@ struct SavedPositionStrategyResponse {
     publishes: Vec<BindingPublishResult>,
 }
 
-#[derive(Debug, Serialize)]
-struct SavedAccountStudioResponse {
-    #[serde(flatten)]
-    studio: AccountStudioResponse,
-    publishes: Vec<BindingPublishResult>,
-}
-
 struct ApiError(anyhow::Error);
 
 impl<E> From<E> for ApiError
@@ -275,25 +266,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             "/api/catalog/order-strategies/{name}",
             delete(delete_order_strategy),
         )
-        .route(
-            "/api/catalog/accounts/{source_id}",
-            get(get_account_studio).put(save_account_leverage),
-        )
-        .route(
-            "/api/catalog/accounts/{source_id}/leverage",
-            put(save_account_leverage),
-        )
+        .route("/api/catalog/accounts/{source_id}", get(get_account_studio))
         .route(
             "/api/catalog/accounts/{source_id}/contract-leverage",
             get(get_account_symbol_contract_leverage).put(save_account_symbol_contract_leverage),
-        )
-        .route(
-            "/api/catalog/accounts/{source_id}/live",
-            get(get_account_live),
-        )
-        .route(
-            "/api/catalog/accounts/{source_id}/allocations",
-            put(save_account_allocations),
         )
         .route(
             "/api/catalog/accounts/{source_id}/bindings",
@@ -343,9 +319,8 @@ async fn dashboard(State(state): State<WebState>) -> impl IntoResponse {
     let now_ms = unix_now_ms();
     for account in &mut dashboard.accounts {
         if let Some(snapshot) = state.live_equity.get(&account.source_id) {
-            let live = capacity::live_equity_view(&snapshot, now_ms);
-            account.live_equity_usdt = Some(live.equity_usdt);
-            account.live_equity_status = Some(live.status);
+            account.live_equity_usdt = Some(snapshot.equity_usdt);
+            account.live_equity_status = Some(live_equity_status(snapshot.ts_ms, now_ms));
         }
     }
     (NO_STORE, Json(dashboard))
@@ -806,25 +781,16 @@ async fn delete_order_strategy(
     }
 }
 
-#[derive(Debug, Serialize)]
-struct AccountStudioResponse {
-    #[serde(flatten)]
-    studio: strategy_catalog::AccountStudio,
-    capacity: AccountCapacityView,
-}
-
 fn unix_now_ms() -> i64 {
     unix_now_us() / 1_000
 }
 
-fn studio_response(
-    state: &WebState,
-    source_id: &str,
-    studio: strategy_catalog::AccountStudio,
-) -> AccountStudioResponse {
-    let live = state.live_equity.get(source_id);
-    let capacity = capacity::capacity_view(&studio, live.as_ref(), unix_now_ms());
-    AccountStudioResponse { studio, capacity }
+fn live_equity_status(snapshot_ts_ms: i64, now_ms: i64) -> &'static str {
+    if now_ms.saturating_sub(snapshot_ts_ms).max(0) > 45_000 {
+        "stale"
+    } else {
+        "ok"
+    }
 }
 
 async fn get_account_studio(
@@ -834,73 +800,8 @@ async fn get_account_studio(
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
-    match strategy_catalog::load_account_studio(&state.pool, &source_id, unix_now_us()).await {
-        Ok(studio) => {
-            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
-        }
-        Err(error) => Ok(catalog_error(error)),
-    }
-}
-
-async fn get_account_live(
-    State(state): State<WebState>,
-    Path(source_id): Path<String>,
-) -> Result<Response, ApiError> {
-    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
-        return Ok(response);
-    }
-    match strategy_catalog::load_account_studio(&state.pool, &source_id, unix_now_us()).await {
-        Ok(studio) => Ok((
-            NO_STORE,
-            Json(studio_response(&state, &source_id, studio).capacity),
-        )
-            .into_response()),
-        Err(error) => Ok(catalog_error(error)),
-    }
-}
-
-async fn save_account_leverage(
-    State(state): State<WebState>,
-    Path(source_id): Path<String>,
-    Json(request): Json<SaveAccountSettingsRequest>,
-) -> Result<Response, ApiError> {
-    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
-        return Ok(response);
-    }
-    match strategy_catalog::save_account_settings(&state.pool, &source_id, &request, unix_now_us())
-        .await
-    {
-        Ok(studio) => {
-            let publishes = publish_source_bindings(&state, &source_id, &studio).await;
-            if let Some(failed) = publishes.iter().find(|item| item.error.is_some()) {
-                let binding_name = failed.binding_name.as_str();
-                let error = failed.error.as_deref().unwrap_or("publish failed");
-                error!(
-                    source_id,
-                    binding_name,
-                    leverage = request.leverage,
-                    error,
-                    "account leverage saved but bound-strategy publish failed"
-                );
-                return Ok((
-                    StatusCode::BAD_GATEWAY,
-                    Json(ErrorResponse {
-                        error: format!(
-                            "account leverage saved, but publish failed for {source_id}/{binding_name}: {error}"
-                        ),
-                    }),
-                )
-                    .into_response());
-            }
-            Ok((
-                NO_STORE,
-                Json(SavedAccountStudioResponse {
-                    studio: studio_response(&state, &source_id, studio),
-                    publishes,
-                }),
-            )
-                .into_response())
-        }
+    match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
+        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
         Err(error) => Ok(catalog_error(error)),
     }
 }
@@ -1045,9 +946,7 @@ async fn save_account_binding(
         return Ok(response);
     }
     match strategy_catalog::save_binding(&state.pool, &source_id, &request, unix_now_us()).await {
-        Ok(studio) => {
-            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
-        }
+        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
         Err(error) => Ok(catalog_error(error)),
     }
 }
@@ -1069,26 +968,7 @@ async fn save_account_binding_shares(
     )
     .await
     {
-        Ok(studio) => {
-            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
-        }
-        Err(error) => Ok(catalog_error(error)),
-    }
-}
-
-async fn save_account_allocations(
-    State(state): State<WebState>,
-    Path(source_id): Path<String>,
-    Json(request): Json<SaveAllocationsRequest>,
-) -> Result<Response, ApiError> {
-    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
-        return Ok(response);
-    }
-    match strategy_catalog::save_allocations(&state.pool, &source_id, &request, unix_now_us()).await
-    {
-        Ok(studio) => {
-            Ok((NO_STORE, Json(studio_response(&state, &source_id, studio))).into_response())
-        }
+        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
         Err(error) => Ok(catalog_error(error)),
     }
 }
@@ -1176,51 +1056,6 @@ async fn publish_bound_accounts(
     publishes
 }
 
-async fn publish_source_bindings(
-    state: &WebState,
-    source_id: &str,
-    studio: &strategy_catalog::AccountStudio,
-) -> Vec<BindingPublishResult> {
-    let mut publishes = Vec::with_capacity(studio.bindings.len());
-    for binding in &studio.bindings {
-        match publish_binding(state, source_id, &binding.binding_name).await {
-            Ok(published) => {
-                info!(
-                    source_id,
-                    binding_name = %binding.binding_name,
-                    shares = binding.shares,
-                    leverage = studio.leverage,
-                    "published bound strategy after leverage update"
-                );
-                publishes.push(BindingPublishResult {
-                    source_id: source_id.to_string(),
-                    binding_name: binding.binding_name.clone(),
-                    shares: binding.shares,
-                    published: Some(published),
-                    error: None,
-                });
-            }
-            Err(error) => {
-                warn!(
-                    source_id,
-                    binding_name = %binding.binding_name,
-                    leverage = studio.leverage,
-                    error = %error.message,
-                    "bound-strategy publish failed after leverage update"
-                );
-                publishes.push(BindingPublishResult {
-                    source_id: source_id.to_string(),
-                    binding_name: binding.binding_name.clone(),
-                    shares: binding.shares,
-                    published: None,
-                    error: Some(error.message),
-                });
-            }
-        }
-    }
-    publishes
-}
-
 struct PublishFailure {
     status: StatusCode,
     message: String,
@@ -1241,13 +1076,13 @@ async fn publish_binding(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
         })?;
-    let Some((position, order, shares, leverage)) = loaded else {
+    let Some((position, order, shares)) = loaded else {
         return Err(PublishFailure {
             status: StatusCode::NOT_FOUND,
             message: "binding was not found".to_string(),
         });
     };
-    let targets = strategy_catalog::scale_targets(&position.targets, shares, leverage);
+    let targets = strategy_catalog::scale_targets(&position.targets, shares);
     let published = state
         .redis_runtime
         .publish_strategy(source, binding_name, &order.order_parameters, &targets)
@@ -1327,7 +1162,7 @@ async fn load_published_accounts(
                 warn!(
                     strategy_name,
                     error = %error,
-                    "failed to list bound-account shares and leverage for position update archive"
+                    "failed to list bound-account shares for position update archive"
                 );
                 return Vec::new();
             }
@@ -1339,7 +1174,6 @@ async fn load_published_accounts(
                 snapshot.source_id,
                 snapshot.binding_name,
                 snapshot.shares,
-                snapshot.leverage,
             )
         })
         .collect()
@@ -1399,10 +1233,6 @@ fn catalog_error(error: anyhow::Error) -> Response {
         || message.contains("unknown")
         || message.contains("invalid")
         || message.contains("must be")
-        || message.contains("must sum")
-        || message.contains("must include")
-        || message.contains("missing allocation")
-        || message.contains("no bindings")
         || message.contains("violates")
     {
         StatusCode::BAD_REQUEST
@@ -1590,9 +1420,7 @@ async fn build_dashboard(
         .sources
         .iter()
         .map(|source| {
-            let live = live_equity
-                .get(&source.id)
-                .map(|snapshot| capacity::live_equity_view(&snapshot, now_ms));
+            let live = live_equity.get(&source.id);
             DashboardAccount {
                 source_id: source.id.clone(),
                 account: source.display_name().to_string(),
@@ -1600,8 +1428,10 @@ async fn build_dashboard(
                 enabled: source.enabled,
                 gateway_prefix: source.gateway_prefix.clone(),
                 configurable: source.exec_config_url.is_some(),
-                live_equity_usdt: live.as_ref().map(|view| view.equity_usdt),
-                live_equity_status: live.as_ref().map(|view| view.status),
+                live_equity_usdt: live.as_ref().map(|snapshot| snapshot.equity_usdt),
+                live_equity_status: live
+                    .as_ref()
+                    .map(|snapshot| live_equity_status(snapshot.ts_ms, now_ms)),
             }
         })
         .collect();
@@ -1721,7 +1551,7 @@ mod tests {
                 exec_viz_url: None,
                 ipc_namespace: None,
                 account_ipc_service: None,
-                share_unit_usdt: None,
+                legacy_share_unit_usdt: None,
                 env_path: None,
             }],
         };

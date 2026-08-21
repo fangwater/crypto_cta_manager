@@ -1796,7 +1796,7 @@ mod tests {
             exec_viz_url: None,
             ipc_namespace: None,
             account_ipc_service: None,
-            share_unit_usdt: None,
+            legacy_share_unit_usdt: None,
             env_path: None,
         }
     }

@@ -642,7 +642,6 @@ mod tests {
                 1_000_000,
                 &PositionStrategy {
                     strategy_name: "cta_a".into(),
-                    equity_usdt: 10_000.0,
                     targets: std::collections::BTreeMap::from([(
                         "BTCUSDT".into(),
                         TargetPosition {

@@ -13,7 +13,7 @@ export const DEFAULT_ORDER: OrderParameters = {
 }
 
 export function emptyPosition(): PositionStrategy {
-  return { strategy_name: '', equity_usdt: 10_000, targets: {}, updated_at_us: 0 }
+  return { strategy_name: '', targets: {}, updated_at_us: 0 }
 }
 
 export function emptyOrder(): CatalogOrderStrategy {
@@ -22,19 +22,4 @@ export function emptyOrder(): CatalogOrderStrategy {
     order_parameters: { ...DEFAULT_ORDER },
     updated_at_us: 0,
   }
-}
-
-export function percent(ratio: number) {
-  return `${(ratio * 100).toFixed(1)}%`
-}
-
-export function nextAllocationRatio(
-  studio: { bindings: Array<{ binding_name: string; position_equity_usdt: number }>; bound_equity_usdt: number },
-  bindingName: string,
-  nextEquity: number,
-) {
-  const replaced =
-    studio.bindings.find((binding) => binding.binding_name === bindingName)?.position_equity_usdt ?? 0
-  const total = studio.bound_equity_usdt - replaced + nextEquity
-  return total > 0 ? nextEquity / total : 0
 }

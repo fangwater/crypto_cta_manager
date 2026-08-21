@@ -39,7 +39,6 @@ exec_viz_url = "http://127.0.0.1:10041/"
 estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade01"
 account_ipc_service = "account_pubs/binance_pm"
-share_unit_usdt = 10000
 
 # Reserved until the matching Exec account is deployed. Keep disabled so
 # Manager does not open a missing persist_manager RocksDB or IPC.
@@ -55,7 +54,6 @@ exec_viz_url = "http://127.0.0.1:10042/"
 estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade02"
 account_ipc_service = "account_pubs/binance_pm"
-share_unit_usdt = 10000
 
 [[sources]]
 id = "binance_exec_trade03"
@@ -69,7 +67,6 @@ exec_viz_url = "http://127.0.0.1:10043/"
 estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade03"
 account_ipc_service = "account_pubs/binance_pm"
-share_unit_usdt = 10000
 
 [[sources]]
 id = "binance_exec_trade04"
@@ -83,4 +80,3 @@ exec_viz_url = "http://127.0.0.1:10044/"
 estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade04"
 account_ipc_service = "account_pubs/binance_pm"
-share_unit_usdt = 10000

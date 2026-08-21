@@ -9,7 +9,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import { FieldHint, Input, Label } from '../../components/ui/Field'
 import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
-import { money } from '../../format'
 import { emptyPosition } from '../../lib/strategyDefaults'
 
 export function PositionStrategyPage() {
@@ -21,7 +20,7 @@ export function PositionStrategyPage() {
     <ConfigShell
       section="position"
       title="仓位策略"
-      description="维护各 CTA 仓位策略的目标持仓与参考权益。保存后会按已绑定账户的份数 × 杠杆自动写入各账户 Redis。"
+      description="维护各 CTA 仓位策略的原始目标持仓。保存后会按每个绑定账户直接配置的份数自动写入 Redis。"
       saving={saving}
       error={error ?? writeError}
       notice={notice}
@@ -49,14 +48,14 @@ export function PositionStrategyPage() {
               const item = positions.find((entry) => entry.strategy_name === name)
               if (!item) return ''
               const active = Object.values(item.targets).filter((value) => value.qty !== 0).length
-              return `参考权益 ${money(item.equity_usdt)} USDT · ${active} 非零`
+              return `${active} 个非零目标`
             }}
           />
 
           <Card>
             <CardHeader>
               <CardTitle>编辑模板</CardTitle>
-              <CardDescription>CTA 仓位策略名通常来自上游系统；参考权益仅用于账户内的比例分配。</CardDescription>
+              <CardDescription>CTA 仓位策略名通常来自上游系统；这里保存每份策略的原始目标数量。</CardDescription>
             </CardHeader>
             <CardContent>
               <form
@@ -66,7 +65,6 @@ export function PositionStrategyPage() {
                   void withWrite(async () => {
                     const saved = await savePositionStrategy({
                       ...selectedPosition,
-                      equity_usdt: Number(selectedPosition.equity_usdt),
                       targets: selectedPosition.targets,
                     })
                     setSelectedPosition(saved)
@@ -78,37 +76,20 @@ export function PositionStrategyPage() {
                   })
                 }}
               >
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Label>
-                    策略名
-                    <Input
-                      value={selectedPosition.strategy_name}
-                      onChange={(event) =>
-                        setSelectedPosition({
-                          ...selectedPosition,
-                          strategy_name: event.target.value,
-                        })
-                      }
-                    />
-                  </Label>
-                  <Label>
-                    参考权益 USDT
-                    <Input
-                      type="number"
-                      min="1"
-                      step="1"
-                      value={selectedPosition.equity_usdt}
-                      onChange={(event) =>
-                        setSelectedPosition({
-                          ...selectedPosition,
-                          equity_usdt: Number(event.target.value),
-                        })
-                      }
-                    />
-                  </Label>
-                </div>
+                <Label>
+                  策略名
+                  <Input
+                    value={selectedPosition.strategy_name}
+                    onChange={(event) =>
+                      setSelectedPosition({
+                        ...selectedPosition,
+                        strategy_name: event.target.value,
+                      })
+                    }
+                  />
+                </Label>
                 <FieldHint>
-                  一份仓位策略的名义，默认 10,000 USDT，可按策略改。已绑定账户按各自份数 × 杠杆放大 qty 后自动写入 Redis；signal 不随份数变化。
+                  账户发布数量 = 此处的原始 qty × 该账户为策略配置的份数；signal 原样发布。
                 </FieldHint>
                 <TargetPositionsEditor
                   targets={selectedPosition.targets}

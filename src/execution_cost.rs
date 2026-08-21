@@ -75,7 +75,6 @@ pub struct AccountUpdateCost {
     pub source_id: String,
     pub binding_name: String,
     pub shares: f64,
-    pub leverage: f64,
     pub snapshot_ts_ms: Option<i64>,
     pub position_ready: Option<bool>,
     pub totals: CostTotals,
@@ -280,7 +279,7 @@ fn cost_for_account(
             .get(&symbol)
             .map(|target| target.qty)
             .unwrap_or(0.0);
-        let published = template * account.shares * account.leverage;
+        let published = template * account.effective_shares();
         let snap = snapshot_qty.get(&symbol).copied().unwrap_or(0.0);
         let intended = published - snap;
         let bars = twap.scan_bars(
@@ -357,8 +356,7 @@ fn cost_for_account(
     Ok(AccountUpdateCost {
         source_id: account.source_id.clone(),
         binding_name: account.binding_name.clone(),
-        shares: account.shares,
-        leverage: account.leverage,
+        shares: account.effective_shares(),
         snapshot_ts_ms: snapshot.map(|item| item.snapshot_ts_ms),
         position_ready: snapshot.map(|item| item.position_ready),
         totals,
@@ -564,8 +562,8 @@ fn duration_weighted_mid(buckets: &[MinuteTwapBucket]) -> Option<f64> {
     }
 }
 
-pub fn intended_qty(template_qty: f64, shares: f64, leverage: f64, snapshot_qty: f64) -> f64 {
-    template_qty * shares * leverage - snapshot_qty
+pub fn intended_qty(template_qty: f64, shares: f64, snapshot_qty: f64) -> f64 {
+    template_qty * shares - snapshot_qty
 }
 
 #[cfg(test)]
@@ -583,15 +581,14 @@ mod tests {
     fn strategy(qty: f64) -> PositionStrategy {
         PositionStrategy {
             strategy_name: "cta_a".into(),
-            equity_usdt: 10_000.0,
             targets: BTreeMap::from([("BTCUSDT".into(), TargetPosition { qty, signal: 0 })]),
             updated_at_us: 1,
         }
     }
 
     #[test]
-    fn intended_qty_uses_archived_shares_and_leverage() {
-        assert!((intended_qty(0.1, 2.0, 3.0, 0.15) - 0.45).abs() < 1e-12);
+    fn intended_qty_uses_direct_archived_shares() {
+        assert!((intended_qty(0.1, 2.0, 0.15) - 0.05).abs() < 1e-12);
     }
 
     fn five_second_bars_for_minutes(
@@ -660,7 +657,6 @@ mod tests {
                 vec![position_archive::published_account(
                     "binance_exec_trade01",
                     "cta_a",
-                    1.0,
                     1.0,
                 )],
             )
@@ -733,7 +729,6 @@ mod tests {
                 vec![position_archive::published_account(
                     "binance_exec_trade01",
                     "cta_a",
-                    1.0,
                     1.0,
                 )],
             )
@@ -809,9 +804,8 @@ mod tests {
                 },
             )]),
             2.0,
-            5.0,
         );
-        assert!((scaled["BTCUSDT"].qty - 2.0).abs() < 1e-12);
+        assert!((scaled["BTCUSDT"].qty - 0.4).abs() < 1e-12);
     }
 
     #[test]

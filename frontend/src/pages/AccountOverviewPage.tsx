@@ -12,19 +12,15 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   getAccountContractLeverage,
-  getAccountLive,
   getAccountStudio,
   getDashboard,
   saveAccountContractLeverage,
-  saveAccountLeverage,
 } from '../api'
 import { AppShell, PageIntro } from '../components/AppShell'
 import {
-  CapacityPanel,
   ContractLeveragePanel,
   ContractLeverageToolbar,
-  LeverageToolbar,
-} from '../components/CapacityPanel'
+} from '../components/ContractLeveragePanel'
 import { OrderParametersView } from '../components/OrderParametersView'
 import { TargetPositionsView } from '../components/TargetPositionsView'
 import { Alert, Badge } from '../components/ui/Badge'
@@ -33,11 +29,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
 import { money, signedClass, timestampUs } from '../format'
-import { percent } from '../lib/strategyDefaults'
 import { readSourceId, routes } from '../lib/routes'
 import { cn } from '../lib/cn'
 import type {
-  AccountCapacity,
   AccountStudio,
   DashboardAccount,
   DashboardSnapshot,
@@ -56,8 +50,6 @@ export function AccountOverviewPage() {
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
   const [studio, setStudio] = useState<AccountStudio | null>(null)
-  const [capacity, setCapacity] = useState<AccountCapacity | null>(null)
-  const [leverage, setLeverage] = useState('1')
   const [contractSymbol, setContractSymbol] = useState('')
   const [contractLeverage, setContractLeverage] = useState('5')
   const [queriedContractLeverage, setQueriedContractLeverage] = useState<string | null>(null)
@@ -70,18 +62,6 @@ export function AccountOverviewPage() {
     const nextStudio = await getAccountStudio(sourceId, signal)
     setDashboard(snapshot)
     setStudio(nextStudio)
-    setCapacity(nextStudio.capacity ?? null)
-    setLeverage(String(nextStudio.leverage))
-  }, [sourceId])
-
-  useEffect(() => {
-    if (!sourceId) return
-    const timer = window.setInterval(() => {
-      void getAccountLive(sourceId)
-        .then(setCapacity)
-        .catch(() => undefined)
-    }, 2_000)
-    return () => window.clearInterval(timer)
   }, [sourceId])
 
   useEffect(() => {
@@ -178,27 +158,6 @@ export function AccountOverviewPage() {
           />
 
           <div className="mb-8 space-y-4">
-            <CapacityPanel
-              capacity={capacity ?? studio?.capacity}
-              toolbar={
-                <LeverageToolbar
-                  leverage={leverage}
-                  saving={saving}
-                  onLeverageChange={setLeverage}
-                  onSave={() =>
-                    void withWrite(async () => {
-                      const next = await saveAccountLeverage(sourceId, Number(leverage))
-                      setStudio(next)
-                      setCapacity(next.capacity ?? null)
-                      const published = next.publishes?.length ?? 0
-                      return published > 0
-                        ? `已保存杠杆 ${next.leverage}x，并重推 ${published} 条绑定策略`
-                        : `已保存杠杆 ${next.leverage}x；当前没有绑定策略，未写入 Redis`
-                    })
-                  }
-                />
-              }
-            />
             <ContractLeveragePanel
               toolbar={
                 <ContractLeverageToolbar
@@ -275,7 +234,7 @@ export function AccountOverviewPage() {
                               Exec 策略名
                             </CardDescription>
                           </div>
-                          <Badge tone="brand">{percent(binding.allocation_ratio)}</Badge>
+                          <Badge tone="brand">{binding.shares} 份</Badge>
                         </div>
                       </CardHeader>
                       <CardContent className="space-y-5 pt-5">
@@ -283,10 +242,6 @@ export function AccountOverviewPage() {
                           <MiniStat label="仓位策略" value={binding.position_strategy_name} mono />
                           <MiniStat label="执行算法" value={binding.order_strategy_name} mono />
                           <MiniStat label="份数" value={String(binding.shares)} />
-                          <MiniStat
-                            label="比例"
-                            value={percent(binding.allocation_ratio)}
-                          />
                         </div>
                         {position && (
                           <div>
@@ -322,7 +277,7 @@ export function AccountOverviewPage() {
               <ConfigEntry
                 href={routes.configPosition}
                 title="仓位策略"
-                description="编辑目标仓位与参考权益"
+                description="编辑每份策略的原始目标仓位"
               />
               <ConfigEntry
                 href={routes.configOrder}

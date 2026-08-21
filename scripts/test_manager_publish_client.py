@@ -22,7 +22,6 @@ class ManagerPublishClientTests(unittest.TestCase):
         payload = CLIENT.normalize_position_payload(
             {
                 "strategy_name": "CTA_A",
-                "equity_usdt": 10000,
                 "targets": {
                     "btcusdt": -0.006,
                     "ETHUSDT": {"qty": -0.54, "signal": -1},

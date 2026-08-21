@@ -118,7 +118,6 @@ export interface OrderStrategyList {
 
 export interface PositionStrategy {
   strategy_name: string
-  equity_usdt: number
   targets: Record<string, TargetPosition>
   updated_at_us: number
 }
@@ -147,22 +146,12 @@ export interface AccountBinding {
   position_strategy_name: string
   order_strategy_name: string
   shares: number
-  position_equity_usdt: number
-  allocation_ratio: number
   updated_at_us: number
 }
 
 export interface AccountStudio {
   source_id: string
-  leverage: number
-  bound_equity_usdt: number
   bindings: AccountBinding[]
-  updated_at_us: number
-  capacity?: AccountCapacity
-}
-
-export interface SavedAccountStudio extends AccountStudio {
-  publishes?: BindingPublishResult[]
 }
 
 export interface SavedSymbolContractLeverage {
@@ -173,26 +162,6 @@ export interface SavedSymbolContractLeverage {
   endpoint: string
   http_status: number
   recorded_contract_leverage?: number | null
-}
-
-export interface LiveEquity {
-  status: 'ok' | 'stale' | string
-  source: string
-  equity_usdt: number
-  wallet_balance_usdt: number
-  unrealized_pnl_usdt: number
-  available_balance_usdt: number
-  ts_ms: number
-  age_ms: number
-}
-
-export interface AccountCapacity {
-  live: LiveEquity | null
-  leverage: number
-  buying_power_usdt: number | null
-  /** Σ(份数 × 该策略单份参考权益) × 杠杆 */
-  bound_notional_usdt: number
-  remaining_notional_usdt: number | null
 }
 
 export interface DashboardSnapshot {
@@ -278,7 +247,6 @@ export interface AccountExecutionCost {
   source_id: string
   binding_name: string
   shares: number
-  leverage: number
   snapshot_ts_ms: number | null
   position_ready: boolean | null
   totals: ExecutionCostTotals

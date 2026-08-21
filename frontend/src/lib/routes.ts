@@ -37,7 +37,7 @@ export const configNav: Array<{
     id: 'position',
     href: routes.configPosition,
     label: '仓位策略',
-    hint: '目标仓位与参考权益',
+    hint: '每份策略的原始目标仓位',
   },
   {
     id: 'order',

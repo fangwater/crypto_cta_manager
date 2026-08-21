@@ -329,16 +329,9 @@
   gap: 16px;
 }
 
-.studio-capacity,
 .studio-bindings {
   display: grid;
   gap: 10px;
-}
-
-.studio-capacity {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  color: var(--ink);
-  font-weight: 650;
 }
 
 .studio-bindings {
@@ -349,8 +342,7 @@
 @media (max-width: 860px) {
   .studio-split,
   .studio-account,
-  .studio-bindings,
-  .studio-capacity {
+  .studio-bindings {
     grid-template-columns: minmax(0, 1fr);
   }
 }

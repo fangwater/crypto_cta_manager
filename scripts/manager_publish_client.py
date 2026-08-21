@@ -130,13 +130,10 @@ def normalize_position_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         str(symbol).strip().upper(): normalize_target(target)
         for symbol, target in targets_in.items()
     }
-    normalized: Dict[str, Any] = {
+    return {
         "strategy_name": name,
         "targets": targets,
     }
-    if "equity_usdt" in payload:
-        normalized["equity_usdt"] = float(payload["equity_usdt"])
-    return normalized
 
 
 def print_json(payload: Any, *, stream: Any = sys.stdout) -> None:
@@ -194,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
   %(prog)s publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position
 
 put-position writes the catalog and automatically republishes every bound
-account. qty is scaled by that account's shares × leverage; signal is copied unchanged.
+account. qty is scaled by that account's directly configured shares; signal is copied unchanged.
 Manager writes Redis on a reconnecting long connection, confirms the value is
 readable, then notifies exec-pre-trade; the 30s Redis poll remains the fallback
 if notify is lost.

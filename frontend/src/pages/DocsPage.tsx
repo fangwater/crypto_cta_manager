@@ -81,7 +81,7 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'overview',
     group: '概念',
     title: '概述',
-    lead: '策略是全局目录；账户只负责启用、占比和发布。Exec 前缀只表示落到哪台交易机。',
+    lead: '策略是全局目录；账户只负责启用、份数和发布。Exec 前缀只表示落到哪台交易机。',
     content: (
       <>
         <p>配置与发送分三层，不要混：</p>
@@ -91,12 +91,12 @@ function buildChapters(gateway: string): Chapter[] {
             [
               '策略目录',
               '全局，不挂账户',
-              '维护仓位策略（targets + 参考权益）和下单策略（执行参数）',
+              '维护仓位策略（原始 targets）和下单策略（执行参数）',
             ],
             [
               '账户绑定',
               'trade01 / 预留 trade02-04',
-              '启用哪些策略、杠杆、占比；仓位更新后按份数 × 杠杆自动写入该账户 Exec',
+              '启用哪些策略并直接配置份数；仓位更新后按份数自动写入该账户 Exec',
             ],
             [
               'Exec 运行时',
@@ -150,8 +150,8 @@ function buildChapters(gateway: string): Chapter[] {
           rows={[
             [
               '仓位策略',
-              <code>strategy_name / equity_usdt / targets</code>,
-              '全局模板。equity 是单份参考名义，默认 10000，可按策略改。',
+              <code>strategy_name / targets</code>,
+              '全局模板。targets 是一份策略的原始目标数量。',
             ],
             [
               '下单策略',
@@ -160,8 +160,8 @@ function buildChapters(gateway: string): Chapter[] {
             ],
             [
               '账户',
-              <code>leverage / alias</code>,
-              'leverage 是 CTA 仓位倍数。合约杠杆按单个 symbol 调用交易所 setLeverage，不进账户 studio。alias 只改 Manager 展示名。',
+              <code>source_id / alias</code>,
+              'source_id 是稳定身份；alias 只改 Manager 展示名。交易所合约杠杆是独立保证金设置。',
             ],
             [
               '绑定',
@@ -173,14 +173,12 @@ function buildChapters(gateway: string): Chapter[] {
         <SpecTable
           headers={['量', '公式']}
           rows={[
-            ['可用名义', '实时权益 × 杠杆率'],
-            ['已配置名义', 'Σ(份数 × 该策略 equity_usdt) × 杠杆'],
-            ['占比', '该策略未加杠杆名义 / 未加杠杆名义合计'],
-            ['发布到 Exec 的 target', '仓位策略 qty × 份数 × 杠杆；signal 原样带上'],
+            ['发布到 Exec 的 target', '仓位策略 qty × 该账户配置的份数'],
+            ['signal', '原样发布，不随份数放大'],
           ]}
         />
         <Note>
-          容量按名义聚合后再乘杠杆。杠杆 1x 时，1×10000 + 1×20000 = 30000 USDT，不会按统一 10000 折成「3 份」。
+          没有权益换算、账户级 CTA 杠杆或比例反推。每个账户为每条策略直接指定份数。
         </Note>
       </>
     ),
@@ -279,7 +277,6 @@ function buildChapters(gateway: string): Chapter[] {
 }`}</CodeBlock>
         <CodeBlock label="完整 POST body">{`{
   "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
-  "equity_usdt": 10000,
   "targets": {
     "BTCUSDT": { "qty": -0.006, "signal": -1 },
     "ETHUSDT": { "qty": -0.54, "signal": 0 }
@@ -288,10 +285,6 @@ function buildChapters(gateway: string): Chapter[] {
         <FieldRows
           rows={[
             { field: 'strategy_name', detail: '必填，全局唯一；写入 Redis 时原样使用' },
-            {
-              field: 'equity_usdt',
-              detail: '可省略，默认 10000。单份参考名义，必须 > 0；只影响账户配比，不进 Redis',
-            },
             {
               field: 'targets',
               detail: '品种 → 数量。精简写法是裸数字；完整写法是 { qty, signal }',
@@ -304,7 +297,7 @@ function buildChapters(gateway: string): Chapter[] {
           ]}
         />
         <Note>
-          日常推仓位用精简版即可：只传策略名和裸数字 qty。省略的 signal 按 0，省略的 equity_usdt 按 10000。
+          日常推仓位用精简版即可：只传策略名和裸数字 qty。省略的 signal 按 0。
         </Note>
       </>
     ),
@@ -331,7 +324,7 @@ function buildChapters(gateway: string): Chapter[] {
             { field: 'strategyName', detail: '只看一个仓位策略；省略则全部' },
             {
               field: 'intended_qty',
-              detail: '模板 qty × 当时归档的 shares × leverage − 快照 current_qty',
+              detail: '模板 qty × 当时归档的 shares − 快照 current_qty',
             },
             {
               field: 'twap_cost_before_fee_usdt',
@@ -349,7 +342,7 @@ function buildChapters(gateway: string): Chapter[] {
           再对这几个 1 分钟 mid 平均。5 分钟窗口就是 5 个 1 分钟 mid。成交只认
           from_key_text 为 batch_exec:&lt;strategy_name&gt; 的 uniform_orders。
           窗口从这次 POST 开始，遇到同策略下一次更新提前结束。旧消息没有
-          published_accounts 的 shares/leverage 会被跳过，不拿当前配置回填。
+          published_accounts 会被跳过，不拿当前配置回填。旧格式中的历史杠杆只用于还原旧时的有效份数。
         </Note>
         <Note tone="warn">
           这是查询生成，不写 Exec RocksDB，也不进交易热路径。浏览器在 /manager/execution-cost/。
@@ -428,8 +421,8 @@ function buildChapters(gateway: string): Chapter[] {
   {
     id: 'account-studio',
     group: '账户绑定',
-    title: '账户视图与杠杆',
-    lead: 'CTA 杠杆改仓位倍数并重推绑定；合约杠杆按单个 symbol 查/设交易所保证金杠杆。',
+    title: '账户与合约杠杆',
+    lead: '账户 studio 只保存策略绑定和直接份数；合约杠杆按单个 symbol 查/设交易所保证金杠杆。',
     content: (
       <>
         <ApiTable
@@ -437,17 +430,7 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'GET',
               path: `${ACCOUNT_PATH}`,
-              summary: 'studio + capacity',
-            },
-            {
-              method: 'GET',
-              path: `${ACCOUNT_PATH}/live`,
-              summary: '只取 capacity（含实时权益）',
-            },
-            {
-              method: 'PUT',
-              path: `${ACCOUNT_PATH}/leverage`,
-              summary: '改 CTA 配置倍数，并按新倍数重推本账户全部绑定',
+              summary: '读取本账户的策略绑定和直接份数',
             },
             {
               method: 'GET',
@@ -461,12 +444,7 @@ function buildChapters(gateway: string): Chapter[] {
             },
           ]}
         />
-        <CodeBlock label="curl">{`curl --noproxy '*' -sS -X PUT \\
-  '${account}/leverage' \\
-  -H 'Content-Type: application/json' \\
-  -d '{"leverage": 2}'
-
-curl --noproxy '*' -sS \\
+        <CodeBlock label="curl">{`curl --noproxy '*' -sS \\
   '${account}/contract-leverage?symbol=BTCUSDT'
 
 curl --noproxy '*' -sS -X PUT \\
@@ -475,9 +453,6 @@ curl --noproxy '*' -sS -X PUT \\
   -d '{"symbol":"BTCUSDT","contract_leverage":5}'`}</CodeBlock>
         <FieldRows
           rows={[
-            { field: 'buying_power_usdt', detail: '实时权益 × CTA 杠杆' },
-            { field: 'bound_notional_usdt', detail: 'Σ(份数 × 策略 equity) × CTA 杠杆' },
-            { field: 'remaining_notional_usdt', detail: '可用名义 − 已配置名义' },
             {
               field: 'contract_leverage',
               detail: '交易所当前保证金杠杆。GET 读实时值；PUT 设置 1–125',
@@ -527,25 +502,17 @@ curl --noproxy '*' -sS -X PUT \\
   {
     id: 'account-alloc',
     group: '账户绑定',
-    title: '占比与份数',
-    lead: '占比按已配置名义加权。各策略独立填写，合计必须等于 100%。',
+    title: '直接份数',
+    lead: '每个账户为每条策略直接填写一个正数份数，不做权益、杠杆或比例换算。',
     content: (
       <>
         <Endpoint
           method="PUT"
-          path={`${ACCOUNT_PATH}/allocations`}
-          summary="一次提交全部绑定的占比；保存后按总名义反推份数"
-        />
-        <CodeBlock label="curl">{`curl --noproxy '*' -sS -X PUT \\
-  '${account}/allocations' \\
-  -H 'Content-Type: application/json' \\
-  -d '{"allocations":{"CTA_A":0.25,"CTA_B":0.75}}'`}</CodeBlock>
-        <Endpoint
-          method="PUT"
           path={`${ACCOUNT_PATH}/bindings/{name}/shares`}
-          summary="脚本按份数精确调整；浏览器主交互走 allocations"
+          summary="直接设置该绑定的份数"
         />
-        <Note>改份数或占比只改 Manager 本地。下一次仓位 POST 或保存杠杆会按新份数 × 杠杆自动推 Redis；也可以点重推。</Note>
+        <CodeBlock label="body">{`{"shares": 2.5}`}</CodeBlock>
+        <Note>保存份数只改 Manager 本地。下一次仓位 POST 会按新份数自动推 Redis；也可以点重推立即应用。</Note>
       </>
     ),
   },
@@ -559,7 +526,7 @@ curl --noproxy '*' -sS -X PUT \\
         <Endpoint method="POST" path={`${ACCOUNT_PATH}/bindings/{name}/publish`} />
         <p>
           每次 <code>POST /catalog/position-strategies</code> 成功后，Manager
-          找出所有绑定了该策略的账户，用各自 <code>qty × shares × leverage</code> 和下单参数拼成 Exec
+          找出所有绑定了该策略的账户，用各自 <code>qty × shares</code> 和下单参数拼成 Exec
           标准 JSON，<code>signal</code> 不随份数放大，再由 Manager 自己的 Redis
           长连接写入该账户 key。连接断了会自动重连；写入后回读确认，再发 iceoryx
           notify。notify 只带策略名和 <code>updated_at_us</code>，不带仓位。
@@ -624,7 +591,7 @@ curl --noproxy '*' -sS -X PUT \\
         rows={[
           ['200', '成功'],
           ['202', '删除已受理'],
-          ['400', '字段缺失、策略不存在、占比合计不为 1、合约杠杆缺 symbol'],
+          ['400', '字段缺失、策略不存在、份数不是正数、合约杠杆缺 symbol'],
           ['404', '路径不存在、缺少账户前缀，或 /api/targets 已移除'],
           ['409', '参数乐观锁冲突'],
           ['502', '交易所/env.sh 不可用，或 Exec Config 不可达'],
@@ -659,7 +626,6 @@ python3 manager_publish_client.py get-execution-cost --window-sec 300`}</CodeBlo
 }`}</CodeBlock>
         <CodeBlock label="cta.json 完整版">{`{
   "strategy_name": "CTA_SK_C40V6PosT1_LXY_filter_Position",
-  "equity_usdt": 10000,
   "targets": {
     "BTCUSDT": { "qty": -0.006, "signal": -1 },
     "ETHUSDT": { "qty": -0.54, "signal": 0 }

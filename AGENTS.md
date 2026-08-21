@@ -110,10 +110,12 @@ default `/home/el01/crypto_cta_manager/db`. This is not an Exec-account store,
 so it must not live under `binance_exec_trade01`. Each accepted
 `POST /api/catalog/position-strategies` is appended as one JSON message in
 column family `position_updates`. The message includes the POST body, each
-bound account's then-current `shares` and `leverage`, and factual positions
+bound account's then-current direct `shares`, and factual positions
 read from each source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty`.
-Published qty is reconstructed later as template qty × shares × leverage.
-Later changes to shares or leverage must not rewrite older messages.
+Published qty is reconstructed later as template qty × shares.
+Later changes to shares must not rewrite older messages. Historical messages
+that contained the removed account CTA leverage remain readable and fold that
+value into their historical effective shares.
 PostgreSQL remains the current catalog.
 When `[twap]` is enabled, the same database records 5-second mid TWAP bars
 from `spread_pbs/<venue>/ask_bid_spread`. Each configured catalog symbol uses
@@ -126,8 +128,8 @@ hot path.
 from archived position updates, 5-second mid bars, and later Exec
 `uniform_orders` fills. Query parameters are camel-case `startMs`, `endMs`,
 `windowSec` (default 300, max 86400), comma-separated `sourceIds`, and
-`strategyName`. Intended qty is template qty × archived shares × archived
-leverage minus the snapshot `current_qty`. Each update's window starts at
+`strategyName`. Intended qty is template qty × archived shares minus the
+snapshot `current_qty`. Each update's window starts at
 `received_at_us` and ends at the earlier of `received_at_us + windowSec`, the
 next same-strategy update, or now. Assume uniform execution over that window.
 Split the window into consecutive 1-minute buckets from `received_at_us`, not
@@ -272,14 +274,16 @@ configured sources, while `/manager/` remains the detailed NAV timeline.
 `/manager/config/` is the browser editor for strategy catalog, account bindings,
 and publish. The Exec `/exec_trade01/config/` page stays read-only. The browser
 talks only to Manager endpoints below `/manager/api/`; it never connects to
-Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Runtime
-Redis JSON is written when Manager scales each target `qty` by shares × leverage, copies
+Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Each
+account binding directly stores a positive `shares` multiplier; there is no
+equity conversion, allocation ratio, or account-level CTA leverage. Runtime
+Redis JSON is written when Manager scales each target `qty` by shares, copies
 `signal` unchanged, assembles the Exec payload, and `POST`s `/api/strategy`.
 A successful `POST /api/catalog/position-strategies` does that automatically
-for every account bound to the strategy. Changing an account's `leverage`
-recomputes every bound strategy on that account the same way and republishes
-them. Exchange contract leverage is a separate per-symbol venue setting, not
-the CTA qty multiple. `GET /api/catalog/accounts/{source_id}/contract-leverage?symbol=BTCUSDT`
+for every account bound to the strategy. Changing binding shares affects later
+automatic publishes; the per-binding publish endpoint applies it immediately
+when needed. Exchange contract leverage is a separate per-symbol venue setting
+and never scales CTA qty. `GET /api/catalog/accounts/{source_id}/contract-leverage?symbol=BTCUSDT`
 reads that account's live exchange contract leverage from the venue.
 `PUT /api/catalog/accounts/{source_id}/contract-leverage` with
 `{"symbol":"BTCUSDT","contract_leverage":5}` sets one symbol. Both read the

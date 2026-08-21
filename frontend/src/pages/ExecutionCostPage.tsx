@@ -113,7 +113,6 @@ export function ExecutionCostPage() {
       update: PositionUpdateExecutionCost
       sourceId: string
       shares: number
-      leverage: number
       symbol: SymbolExecutionCost
     }> = []
     for (const update of updates) {
@@ -126,7 +125,6 @@ export function ExecutionCostPage() {
             update,
             sourceId: account.source_id,
             shares: account.shares,
-            leverage: account.leverage,
             symbol,
           })
         }
@@ -161,7 +159,7 @@ export function ExecutionCostPage() {
       <PageIntro
         eyebrow="On demand"
         title="实际成交 vs TWAP 预估"
-        description="每次仓位 POST 的目标仓位按当时归档的份数 × 杠杆减去快照仓位，得到要执行的数量。默认假设 5 分钟均匀执行：从这次更新起切 5 个 1 分钟，每分钟对其中 5 秒 mid 等权平均，再对这 5 个 1 分钟 mid 平均，得到 TWAP 预估费前，并和同一窗口实际成交 VWAP 的费前成本对比。不是实时任务，点查询才生成。"
+        description="每次仓位 POST 的目标仓位按当时归档的份数减去快照仓位，得到要执行的数量。默认假设 5 分钟均匀执行：从这次更新起切 5 个 1 分钟，每分钟对其中 5 秒 mid 等权平均，再对这 5 个 1 分钟 mid 平均，得到 TWAP 预估费前，并和同一窗口实际成交 VWAP 的费前成本对比。不是实时任务，点查询才生成。"
       />
 
       {dashError && <Alert className="mb-4">账户列表失败：{dashError}</Alert>}
@@ -173,7 +171,7 @@ export function ExecutionCostPage() {
           <CardDescription>
             价格基准是从这次更新起的连续 1 分钟 mid（每分钟用 5 秒 mid 平均）；成交来自 Exec RocksDB 的
             <code className="mx-1">batch_exec:&lt;strategy&gt;</code>
-            归属。归档里没有 shares/leverage 的旧消息会跳过。
+            归属。归档里没有账户份数的旧消息会跳过。
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
@@ -290,7 +288,7 @@ export function ExecutionCostPage() {
           <CardContent className="overflow-x-auto p-0">
             {symbolRows.length === 0 ? (
               <p className="px-5 py-10 text-center text-sm text-muted">
-                这段时间没有可估算的仓位更新。旧消息缺少 shares/leverage 会被跳过。
+                这段时间没有可估算的仓位更新。旧消息缺少账户份数会被跳过。
               </p>
             ) : (
               <table className="min-w-full text-left text-[13px]">
@@ -324,7 +322,7 @@ export function ExecutionCostPage() {
                         <td className="px-4 py-2 font-mono text-[12px]">
                           {row.sourceId}
                           <div className="text-[11px] text-subtle">
-                            ×{quantity(row.shares)} · {quantity(row.leverage)}x
+                            ×{quantity(row.shares)} 份
                           </div>
                         </td>
                         <td className="px-4 py-2 font-medium">{row.symbol.symbol}</td>

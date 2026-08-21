@@ -39,10 +39,10 @@ must not live under `binance_exec_trade01` and must never reuse an Exec
 is also appended as one JSON message in column family `position_updates`.
 PostgreSQL remains the current catalog; RocksDB is the append-only history of
 those POST bodies. The archived message also records each bound account's
-then-current `shares` and `leverage`, and factual positions from each
+then-current direct `shares`, and factual positions from each
 source's Exec Viz `/snapshot` `exec_pre_trade_state` row (`current_qty` for
 that strategy). Published qty is reconstructed later as template qty ×
-shares × leverage. Later catalog edits must not be used to reconstruct an
+shares. Later share edits must not be used to reconstruct an
 older fill. Set
 `exec_viz_url` to the loopback Viz origin, such as `http://127.0.0.1:10041/`. When `[twap]` is enabled, the same database also records
 5-second mid TWAP bars for catalog symbols from
@@ -52,7 +52,7 @@ position-update messages are not compacted by that job.
 
 `GET /api/catalog/execution-cost` generates an on-demand report. It is not a
 real-time job. Each archived position update's intended qty is template qty ×
-the shares and leverage stored in that message minus the snapshot qty. The
+the shares stored in that message minus the snapshot qty. The
 default execution window is 5 minutes (`windowSec`, later adjustable) and ends
 early at the next same-strategy update. Assume the intended qty is executed
 uniformly over that window. Split from the update timestamp into consecutive
@@ -62,7 +62,8 @@ therefore uses five 1-minute mids. The response compares TWAP estimated cost bef
 (`intended × (twap_mid − arrival_mid)`) with actual cost before fee
 (`filled × (VWAP − arrival_mid)`). Fills come from that account's Exec
 `uniform_orders` and are attributed with `batch_exec:<strategy_name>`. Legacy
-messages without archived shares/leverage are skipped. The browser page is
+messages without archived account shares are skipped; old messages that stored
+an account CTA leverage fold it into their historical effective shares. The browser page is
 `/manager/execution-cost/`.
 
 If the account already had positions when its RocksDB history began, store an
@@ -252,14 +253,14 @@ read-only. Runtime Redis JSON is written only by Manager through the loopback
 Exec Config `POST /api/strategy`. There is no write token. Each target is
 `{qty, signal}`; `signal=±1` means that symbol uses taker-only for the current
 execution. A successful `POST /api/catalog/position-strategies` republishes
-every bound account automatically. Changing an account's CTA `leverage`
-recomputes every bound strategy on that account the same way and republishes
-them. Manager keeps a reconnecting Redis long
+every bound account automatically using `qty × shares`. Each binding stores its
+direct positive shares multiplier; there is no equity conversion, allocation
+ratio, or account-level CTA leverage. Manager keeps a reconnecting Redis long
 connection, writes and rereads the runtime JSON there, then notifies
 `exec-pre-trade` over iceoryx. The 30s Redis poll remains the fallback.
 
-Exchange contract leverage is separate from CTA `leverage`. Query and set it
-per account and per symbol through Manager. Both calls read that account's
+Exchange contract leverage is an independent venue margin setting. Query and
+set it per account and per symbol through Manager. Both calls read that account's
 Exec `env.sh` (default `<rocksdb_path>/../../env.sh`). GET is the live venue
 value; PUT records the last requested value in PostgreSQL as
 `recorded_contract_leverage`. Neither call scales published qty, writes Exec

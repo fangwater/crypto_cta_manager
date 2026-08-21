@@ -10,7 +10,7 @@ use crate::strategy_catalog::PositionStrategy;
 use crate::viz_snapshot::SourceFactualPositions;
 
 const MSG_TYPE: &str = "position_update";
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArchivedFactualPosition {
@@ -33,7 +33,14 @@ pub struct ArchivedPublishedAccount {
     pub source_id: String,
     pub binding_name: String,
     pub shares: f64,
-    pub leverage: f64,
+    #[serde(default, rename = "leverage", skip_serializing_if = "Option::is_none")]
+    legacy_leverage: Option<f64>,
+}
+
+impl ArchivedPublishedAccount {
+    pub fn effective_shares(&self) -> f64 {
+        self.shares * self.legacy_leverage.unwrap_or(1.0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,13 +80,12 @@ pub fn published_account(
     source_id: impl Into<String>,
     binding_name: impl Into<String>,
     shares: f64,
-    leverage: f64,
 ) -> ArchivedPublishedAccount {
     ArchivedPublishedAccount {
         source_id: source_id.into(),
         binding_name: binding_name.into(),
         shares,
-        leverage,
+        legacy_leverage: None,
     }
 }
 
@@ -242,7 +248,6 @@ mod tests {
     fn strategy(name: &str, qty: f64, signal: i32, updated_at_us: i64) -> PositionStrategy {
         PositionStrategy {
             strategy_name: name.to_string(),
-            equity_usdt: 10_000.0,
             targets: BTreeMap::from([("BTCUSDT".to_string(), TargetPosition { qty, signal })]),
             updated_at_us,
         }
@@ -277,12 +282,12 @@ mod tests {
                         },
                     )]),
                 }],
-                vec![published_account("binance_exec_trade01", "cta_a", 2.0, 3.0)],
+                vec![published_account("binance_exec_trade01", "cta_a", 2.0)],
             )
             .unwrap();
 
         assert_eq!(first.msg_type, "position_update");
-        assert_eq!(first.schema_version, 3);
+        assert_eq!(first.schema_version, 4);
         assert_eq!(first.seq, 0);
         assert!(first.factual_positions.is_empty());
         assert!(first.published_accounts.is_empty());
@@ -293,7 +298,7 @@ mod tests {
             "binance_exec_trade01"
         );
         assert!((second.published_accounts[0].shares - 2.0).abs() < 1e-12);
-        assert!((second.published_accounts[0].leverage - 3.0).abs() < 1e-12);
+        assert!((second.published_accounts[0].effective_shares() - 2.0).abs() < 1e-12);
         assert_eq!(
             second.factual_positions[0].source_id,
             "binance_exec_trade01"
@@ -302,6 +307,9 @@ mod tests {
         assert_eq!(second.seq, 1);
         assert!((second.strategy.targets["BTCUSDT"].qty - 0.2).abs() < 1e-12);
         assert_eq!(second.strategy.targets["BTCUSDT"].signal, -1);
+        let encoded = serde_json::to_value(&second).unwrap();
+        assert!(encoded["strategy"].get("equity_usdt").is_none());
+        assert!(encoded["published_accounts"][0].get("leverage").is_none());
 
         let latest = archive.latest().unwrap().expect("latest");
         assert_eq!(latest, second);
@@ -362,5 +370,17 @@ mod tests {
         let msg: PositionUpdateMsg = serde_json::from_value(raw).unwrap();
         assert!(msg.published_accounts.is_empty());
         assert_eq!(msg.schema_version, 2);
+    }
+
+    #[test]
+    fn folds_legacy_leverage_into_effective_historical_shares() {
+        let raw = serde_json::json!({
+            "source_id": "binance_exec_trade01",
+            "binding_name": "cta_a",
+            "shares": 2.0,
+            "leverage": 3.0
+        });
+        let account: ArchivedPublishedAccount = serde_json::from_value(raw).unwrap();
+        assert!((account.effective_shares() - 6.0).abs() < 1e-12);
     }
 }

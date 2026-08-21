@@ -1,6 +1,5 @@
 import { normalizeTargetMap } from './lib/targetPositions'
 import type {
-  AccountCapacity,
   AccountStudio,
   CatalogOrderStrategy,
   DashboardSnapshot,
@@ -9,7 +8,6 @@ import type {
   OrderStrategyList,
   OrderStrategyView,
   PositionStrategy,
-  SavedAccountStudio,
   SavedPositionStrategy,
   SavedSymbolContractLeverage,
   ExecutionCostSnapshot,
@@ -164,7 +162,6 @@ export async function savePositionStrategy(body: PositionStrategy) {
     method: 'POST',
     body: {
       strategy_name: body.strategy_name,
-      equity_usdt: body.equity_usdt,
       targets: body.targets,
     },
   })
@@ -204,23 +201,6 @@ export function getAccountStudio(sourceId: string, signal?: AbortSignal) {
   return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}`, {
     signal,
   })
-}
-
-export function getAccountLive(sourceId: string, signal?: AbortSignal) {
-  return requestJson<AccountCapacity>(
-    `/catalog/accounts/${encodeURIComponent(sourceId)}/live`,
-    { signal },
-  )
-}
-
-export function saveAccountLeverage(sourceId: string, leverage: number) {
-  return requestJson<SavedAccountStudio>(
-    `/catalog/accounts/${encodeURIComponent(sourceId)}/leverage`,
-    {
-      method: 'PUT',
-      body: { leverage },
-    },
-  )
 }
 
 export function getAccountContractLeverage(sourceId: string, symbol: string) {
@@ -271,19 +251,6 @@ export function saveBindingShares(sourceId: string, bindingName: string, shares:
     {
       method: 'PUT',
       body: { shares },
-    },
-  )
-}
-
-export function saveAccountAllocations(
-  sourceId: string,
-  allocations: Record<string, number>,
-) {
-  return requestJson<AccountStudio>(
-    `/catalog/accounts/${encodeURIComponent(sourceId)}/allocations`,
-    {
-      method: 'PUT',
-      body: { allocations },
     },
   )
 }
