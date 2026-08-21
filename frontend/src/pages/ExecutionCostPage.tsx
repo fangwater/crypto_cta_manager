@@ -171,7 +171,7 @@ export function ExecutionCostPage() {
           <CardDescription>
             价格基准是从这次更新起的连续 1 分钟 mid（每分钟用 5 秒 mid 平均）；成交来自 Exec RocksDB 的
             <code className="mx-1">batch_exec:&lt;strategy&gt;</code>
-            归属。归档里没有账户份数的旧消息会跳过。
+            归属。只统计归档时带有 published_accounts 与 shares 的仓位更新。
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
@@ -242,7 +242,7 @@ export function ExecutionCostPage() {
           value={report ? String(report.update_count) : '--'}
           hint={
             report
-              ? `跳过旧消息 ${report.skipped_legacy_update_count} · ${snapshot?.generation_duration_ms ?? 0} ms`
+              ? `跳过无归档账户 ${report.skipped_legacy_update_count} · ${snapshot?.generation_duration_ms ?? 0} ms`
               : undefined
           }
         />
@@ -288,7 +288,7 @@ export function ExecutionCostPage() {
           <CardContent className="overflow-x-auto p-0">
             {symbolRows.length === 0 ? (
               <p className="px-5 py-10 text-center text-sm text-muted">
-                这段时间没有可估算的仓位更新。旧消息缺少账户份数会被跳过。
+                这段时间没有可估算的仓位更新。需要归档中带有 published_accounts。
               </p>
             ) : (
               <table className="min-w-full text-left text-[13px]">
@@ -315,7 +315,7 @@ export function ExecutionCostPage() {
                         <td className="whitespace-nowrap px-4 py-2 tabular-nums text-muted">
                           {timestampUs(row.update.received_at_us)}
                           {row.update.skipped_legacy && (
-                            <span className="ml-2 text-[11px] text-warning">旧消息</span>
+                            <span className="ml-2 text-[11px] text-warning">无归档账户</span>
                           )}
                         </td>
                         <td className="px-4 py-2 font-mono text-[12px]">{row.update.strategy_name}</td>

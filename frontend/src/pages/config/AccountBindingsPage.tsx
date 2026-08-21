@@ -145,7 +145,7 @@ export function AccountBindingsPage() {
       <Alert tone="warning" className="mb-2">
         <strong className="font-medium">逻辑说明：</strong>
         先在「仓位策略」里定义目标仓位 → 在「下单策略」里维护执行算法模板（如 default_order）→
-        在这里为每条策略直接配置份数。发布数量始终是原始 qty × 份数。
+        在这里为每条策略配置份数。发布数量 = 原始 qty × 份数。
       </Alert>
 
       {loading || catalogLoading ? (

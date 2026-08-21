@@ -110,13 +110,10 @@ default `/home/el01/crypto_cta_manager/db`. This is not an Exec-account store,
 so it must not live under `binance_exec_trade01`. Each accepted
 `POST /api/catalog/position-strategies` is appended as one JSON message in
 column family `position_updates`. The message includes the POST body, each
-bound account's then-current direct `shares`, and factual positions
-read from each source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty`.
-Published qty is reconstructed later as template qty × shares.
-Later changes to shares must not rewrite older messages. Historical messages
-that contained the removed account CTA leverage remain readable and fold that
-value into their historical effective shares.
-PostgreSQL remains the current catalog.
+bound account's then-current `shares`, and factual positions read from each
+source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty`. Published qty
+is reconstructed later as template qty × shares. Later changes to shares must
+not rewrite older messages. PostgreSQL remains the current catalog.
 When `[twap]` is enabled, the same database records 5-second mid TWAP bars
 from `spread_pbs/<venue>/ask_bid_spread`. Each configured catalog symbol uses
 column family `SYMBOL:binance-futures`, values are 21-byte binary bars, and
@@ -275,12 +272,11 @@ configured sources, while `/manager/` remains the detailed NAV timeline.
 and publish. The Exec `/exec_trade01/config/` page stays read-only. The browser
 talks only to Manager endpoints below `/manager/api/`; it never connects to
 Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Each
-account binding directly stores a positive `shares` multiplier; there is no
-equity conversion, allocation ratio, or account-level CTA leverage. Runtime
-Redis JSON is written when Manager scales each target `qty` by shares, copies
-`signal` unchanged, assembles the Exec payload, and `POST`s `/api/strategy`.
-A successful `POST /api/catalog/position-strategies` does that automatically
-for every account bound to the strategy. Changing binding shares affects later
+account binding stores a positive `shares` multiplier. Runtime Redis JSON is
+written when Manager scales each target `qty` by shares, copies `signal`
+unchanged, assembles the Exec payload, and `POST`s `/api/strategy`. A
+successful `POST /api/catalog/position-strategies` does that automatically for
+every account bound to the strategy. Changing binding shares affects later
 automatic publishes; the per-binding publish endpoint applies it immediately
 when needed. Exchange contract leverage is a separate per-symbol venue setting
 and never scales CTA qty. `GET /api/catalog/accounts/{source_id}/contract-leverage?symbol=BTCUSDT`

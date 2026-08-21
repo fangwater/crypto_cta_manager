@@ -20,7 +20,7 @@ export function PositionStrategyPage() {
     <ConfigShell
       section="position"
       title="仓位策略"
-      description="维护各 CTA 仓位策略的原始目标持仓。保存后会按每个绑定账户直接配置的份数自动写入 Redis。"
+      description="维护各 CTA 仓位策略的原始目标持仓。保存后会按每个绑定账户的份数自动写入 Redis。"
       saving={saving}
       error={error ?? writeError}
       notice={notice}
@@ -89,7 +89,7 @@ export function PositionStrategyPage() {
                   />
                 </Label>
                 <FieldHint>
-                  账户发布数量 = 此处的原始 qty × 该账户为策略配置的份数；signal 原样发布。
+                  账户发布数量 = 原始 qty × 该账户份数；signal 原样发布。
                 </FieldHint>
                 <TargetPositionsEditor
                   targets={selectedPosition.targets}

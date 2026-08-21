@@ -39,11 +39,10 @@ must not live under `binance_exec_trade01` and must never reuse an Exec
 is also appended as one JSON message in column family `position_updates`.
 PostgreSQL remains the current catalog; RocksDB is the append-only history of
 those POST bodies. The archived message also records each bound account's
-then-current direct `shares`, and factual positions from each
-source's Exec Viz `/snapshot` `exec_pre_trade_state` row (`current_qty` for
-that strategy). Published qty is reconstructed later as template qty ×
-shares. Later share edits must not be used to reconstruct an
-older fill. Set
+then-current `shares`, and factual positions from each source's Exec Viz
+`/snapshot` `exec_pre_trade_state` row (`current_qty` for that strategy).
+Published qty is reconstructed later as template qty × shares. Later share
+edits must not be used to reconstruct an older fill. Set
 `exec_viz_url` to the loopback Viz origin, such as `http://127.0.0.1:10041/`. When `[twap]` is enabled, the same database also records
 5-second mid TWAP bars for catalog symbols from
 `spread_pbs/<venue>/ask_bid_spread`. TWAP uses one compact binary column family
@@ -61,10 +60,9 @@ bars in that bucket, then those 1-minute mids are averaged. A 5-minute window
 therefore uses five 1-minute mids. The response compares TWAP estimated cost before fee
 (`intended × (twap_mid − arrival_mid)`) with actual cost before fee
 (`filled × (VWAP − arrival_mid)`). Fills come from that account's Exec
-`uniform_orders` and are attributed with `batch_exec:<strategy_name>`. Legacy
-messages without archived account shares are skipped; old messages that stored
-an account CTA leverage fold it into their historical effective shares. The browser page is
-`/manager/execution-cost/`.
+`uniform_orders` and are attributed with `batch_exec:<strategy_name>`. Only
+messages that archived `published_accounts` (with each account's `shares`) are
+included. The browser page is `/manager/execution-cost/`.
 
 If the account already had positions when its RocksDB history began, store an
 immutable position snapshot in PostgreSQL with `nav_snapshot`. Position
@@ -253,9 +251,8 @@ read-only. Runtime Redis JSON is written only by Manager through the loopback
 Exec Config `POST /api/strategy`. There is no write token. Each target is
 `{qty, signal}`; `signal=±1` means that symbol uses taker-only for the current
 execution. A successful `POST /api/catalog/position-strategies` republishes
-every bound account automatically using `qty × shares`. Each binding stores its
-direct positive shares multiplier; there is no equity conversion, allocation
-ratio, or account-level CTA leverage. Manager keeps a reconnecting Redis long
+every bound account automatically using `qty × shares`. Each binding stores a
+positive `shares` multiplier. Manager keeps a reconnecting Redis long
 connection, writes and rereads the runtime JSON there, then notifies
 `exec-pre-trade` over iceoryx. The 30s Redis poll remains the fallback.
 

@@ -96,7 +96,7 @@ function buildChapters(gateway: string): Chapter[] {
             [
               '账户绑定',
               'trade01 / 预留 trade02-04',
-              '启用哪些策略并直接配置份数；仓位更新后按份数自动写入该账户 Exec',
+              '启用哪些策略并配置份数；仓位更新后按份数自动写入该账户 Exec',
             ],
             [
               'Exec 运行时',
@@ -178,7 +178,7 @@ function buildChapters(gateway: string): Chapter[] {
           ]}
         />
         <Note>
-          没有权益换算、账户级 CTA 杠杆或比例反推。每个账户为每条策略直接指定份数。
+          每个账户为每条绑定策略配置正数份数；发布数量 = 模板 qty × 份数。
         </Note>
       </>
     ),
@@ -341,8 +341,8 @@ function buildChapters(gateway: string): Chapter[] {
           时刻起切连续 1 分钟，每分钟对其中 5 秒 mid 等权平均（满分钟 12 根），
           再对这几个 1 分钟 mid 平均。5 分钟窗口就是 5 个 1 分钟 mid。成交只认
           from_key_text 为 batch_exec:&lt;strategy_name&gt; 的 uniform_orders。
-          窗口从这次 POST 开始，遇到同策略下一次更新提前结束。旧消息没有
-          published_accounts 会被跳过，不拿当前配置回填。旧格式中的历史杠杆只用于还原旧时的有效份数。
+          窗口从这次 POST 开始，遇到同策略下一次更新提前结束。只统计归档里带有
+          published_accounts（含当时 shares）的消息；份数以该条消息为准，不用当前目录回填。
         </Note>
         <Note tone="warn">
           这是查询生成，不写 Exec RocksDB，也不进交易热路径。浏览器在 /manager/execution-cost/。
@@ -422,7 +422,7 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'account-studio',
     group: '账户绑定',
     title: '账户与合约杠杆',
-    lead: '账户 studio 只保存策略绑定和直接份数；合约杠杆按单个 symbol 查/设交易所保证金杠杆。',
+    lead: '账户 studio 保存策略绑定和份数；合约杠杆按单个 symbol 查/设交易所保证金杠杆。',
     content: (
       <>
         <ApiTable
@@ -430,7 +430,7 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'GET',
               path: `${ACCOUNT_PATH}`,
-              summary: '读取本账户的策略绑定和直接份数',
+              summary: '读取本账户的策略绑定和份数',
             },
             {
               method: 'GET',
@@ -502,14 +502,14 @@ curl --noproxy '*' -sS -X PUT \\
   {
     id: 'account-alloc',
     group: '账户绑定',
-    title: '直接份数',
-    lead: '每个账户为每条策略直接填写一个正数份数，不做权益、杠杆或比例换算。',
+    title: '份数',
+    lead: '每个账户为每条绑定策略填写一个正数 shares；发布 qty = 模板 qty × shares。',
     content: (
       <>
         <Endpoint
           method="PUT"
           path={`${ACCOUNT_PATH}/bindings/{name}/shares`}
-          summary="直接设置该绑定的份数"
+          summary="设置该绑定的份数"
         />
         <CodeBlock label="body">{`{"shares": 2.5}`}</CodeBlock>
         <Note>保存份数只改 Manager 本地。下一次仓位 POST 会按新份数自动推 Redis；也可以点重推立即应用。</Note>
@@ -574,8 +574,9 @@ curl --noproxy '*' -sS -X PUT \\
           path={`${EXEC_PATH}/strategy?name=...`}
           summary="请求移除策略"
         />
-        <Note tone="warn">
-          <code>POST /api/targets</code> 已删除。不再使用写 token。
+        <Note>
+          浏览器和外部脚本只写 Manager 的 catalog 接口；由 Manager 写 Redis 并通知
+          exec-pre-trade。参数更新走 loopback Exec Config 的 order-parameters。
         </Note>
       </>
     ),
@@ -592,7 +593,7 @@ curl --noproxy '*' -sS -X PUT \\
           ['200', '成功'],
           ['202', '删除已受理'],
           ['400', '字段缺失、策略不存在、份数不是正数、合约杠杆缺 symbol'],
-          ['404', '路径不存在、缺少账户前缀，或 /api/targets 已移除'],
+          ['404', '路径不存在或缺少账户前缀'],
           ['409', '参数乐观锁冲突'],
           ['502', '交易所/env.sh 不可用，或 Exec Config 不可达'],
         ]}
@@ -603,7 +604,7 @@ curl --noproxy '*' -sS -X PUT \\
     id: 'client',
     group: '附录',
     title: '客户端',
-    lead: '仓位推送脚本挂在 Manager。旧的 exec_config_client.py 已删除。',
+    lead: '仓位推送脚本从 Manager 下载，经 Nginx 写 catalog。',
     content: (
       <>
         <CodeBlock label="download">{`# el01
@@ -659,10 +660,10 @@ def request(method, path, body=None):
 print(json.dumps(request("POST", "catalog/position-strategies", payload), ensure_ascii=False, indent=2))
 `}</CodeBlock>
         <Note>
-          标准库即可，不必先下载脚本。日常用精简 payload：只传策略名和裸数字 qty。一次 POST 后 Manager 按各绑定账户份数放大 qty，省略的 signal 按 0 写入 Redis。
+          标准库即可，不必先下载脚本。日常用精简 payload：只传策略名和裸数字 qty。一次 POST 后 Manager 按各绑定账户份数放大 qty，省略的 signal 按 0 写入 Redis。需要 taker-only 时用完整对象写 signal=±1。
         </Note>
-        <Note tone="warn">
-          不要再 POST Exec Config。旧的 exec_config_client.py 已删除。需要 taker-only 时再用完整对象写 signal=±1。
+        <Note>
+          脚本只 POST Manager catalog；Redis 与 iceoryx 通知由 Manager 完成。
         </Note>
       </>
     ),
