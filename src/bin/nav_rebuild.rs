@@ -32,10 +32,13 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config = AppConfig::load(&args.config)?;
     let report = if args.no_position_snapshot {
+        // Pure RocksDB mode still uses toml fee rates (no DB required).
         nav::rebuild_nav_from_rocksdb(&config, &args.source_ids)?
     } else {
         let database_url = config.database_url()?;
         let pool = postgres::connect(&database_url, config.database.max_connections).await?;
+        let fee_rates = postgres::load_estimated_fee_rates(&pool).await?;
+        let config = config.with_estimated_fee_rates(&fee_rates);
         let requested = args
             .source_ids
             .iter()

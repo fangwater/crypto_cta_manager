@@ -38,7 +38,14 @@ pub struct AccountBinding {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountStudio {
     pub source_id: String,
+    /// NAV estimated trading fee rate as a fraction (e.g. 0.0004 = 4 bps).
+    pub estimated_fee_rate: f64,
     pub bindings: Vec<AccountBinding>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveEstimatedFeeRateRequest {
+    pub estimated_fee_rate: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +137,20 @@ pub fn validate_contract_leverage(value: i32) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_estimated_fee_rate(value: f64) -> Result<(), String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err("estimated_fee_rate must be finite and nonnegative".to_string());
+    }
+    // Guard against accidental bps input like 4 instead of 0.0004.
+    if value > 0.05 {
+        return Err(
+            "estimated_fee_rate looks too large (>5%); use a fraction such as 0.0004 for 4 bps"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub fn validate_contract_symbol(symbol: &str) -> Result<(), String> {
     if symbol.is_empty()
         || !symbol
@@ -150,9 +171,14 @@ impl PositionStrategy {
 }
 
 impl AccountStudio {
-    pub fn from_parts(source_id: String, bindings: Vec<AccountBinding>) -> Self {
+    pub fn from_parts(
+        source_id: String,
+        estimated_fee_rate: f64,
+        bindings: Vec<AccountBinding>,
+    ) -> Self {
         Self {
             source_id,
+            estimated_fee_rate,
             bindings,
         }
     }
@@ -305,7 +331,7 @@ pub async fn delete_position_strategy(pool: &PgPool, strategy_name: &str) -> Res
 pub async fn list_order_strategies(pool: &PgPool) -> Result<Vec<OrderStrategy>> {
     let rows = sqlx::query(
         r#"
-        SELECT strategy_name, single_order_usdt, orders_per_batch, maker_price_anchor,
+        SELECT strategy_name, single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
                tick_spacing, batch_interval_ms, maker_timeout_ms, max_maker_requotes,
                target_tolerance_usdt, updated_at_us
         FROM cta_order_strategies
@@ -331,14 +357,15 @@ pub async fn upsert_order_strategy(
     sqlx::query(
         r#"
         INSERT INTO cta_order_strategies (
-            strategy_name, single_order_usdt, orders_per_batch, maker_price_anchor,
+            strategy_name, single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
             tick_spacing, batch_interval_ms, maker_timeout_ms, max_maker_requotes,
             target_tolerance_usdt, updated_at_us
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (strategy_name) DO UPDATE SET
             single_order_usdt = EXCLUDED.single_order_usdt,
             orders_per_batch = EXCLUDED.orders_per_batch,
+            max_batch = EXCLUDED.max_batch,
             maker_price_anchor = EXCLUDED.maker_price_anchor,
             tick_spacing = EXCLUDED.tick_spacing,
             batch_interval_ms = EXCLUDED.batch_interval_ms,
@@ -351,6 +378,7 @@ pub async fn upsert_order_strategy(
     .bind(&request.strategy_name)
     .bind(request.order_parameters.single_order_usdt)
     .bind(i32::try_from(request.order_parameters.orders_per_batch)?)
+    .bind(i32::try_from(request.order_parameters.max_batch)?)
     .bind(&request.order_parameters.maker_price_anchor)
     .bind(i32::try_from(request.order_parameters.tick_spacing)?)
     .bind(i32::try_from(request.order_parameters.batch_interval_ms)?)
@@ -379,7 +407,16 @@ pub async fn delete_order_strategy(pool: &PgPool, strategy_name: &str) -> Result
 
 pub async fn load_account_studio(pool: &PgPool, source_id: &str) -> Result<AccountStudio> {
     let bindings = list_bindings(pool, source_id).await?;
-    Ok(AccountStudio::from_parts(source_id.to_string(), bindings))
+    let estimated_fee_rate = crate::postgres::load_estimated_fee_rate(pool, source_id)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!("source {source_id} is not registered in cta_order_sources")
+        })?;
+    Ok(AccountStudio::from_parts(
+        source_id.to_string(),
+        estimated_fee_rate,
+        bindings,
+    ))
 }
 
 pub async fn save_symbol_contract_leverage(
@@ -557,6 +594,7 @@ pub async fn load_binding_parts(
             o.strategy_name AS order_name,
             o.single_order_usdt,
             o.orders_per_batch,
+            o.max_batch,
             o.maker_price_anchor,
             o.tick_spacing,
             o.batch_interval_ms,
@@ -590,6 +628,7 @@ pub async fn load_binding_parts(
             order_parameters: OrderParameters {
                 single_order_usdt: row.try_get("single_order_usdt")?,
                 orders_per_batch: u32::try_from(row.try_get::<i32, _>("orders_per_batch")?)?,
+                max_batch: u32::try_from(row.try_get::<i32, _>("max_batch")?)?,
                 maker_price_anchor: row.try_get("maker_price_anchor")?,
                 tick_spacing: u32::try_from(row.try_get::<i32, _>("tick_spacing")?)?,
                 batch_interval_ms: u32::try_from(row.try_get::<i32, _>("batch_interval_ms")?)?,
@@ -649,6 +688,7 @@ fn decode_order_row(row: sqlx::postgres::PgRow) -> Result<OrderStrategy> {
         order_parameters: OrderParameters {
             single_order_usdt: row.try_get("single_order_usdt")?,
             orders_per_batch: u32::try_from(row.try_get::<i32, _>("orders_per_batch")?)?,
+            max_batch: u32::try_from(row.try_get::<i32, _>("max_batch")?)?,
             maker_price_anchor: row.try_get("maker_price_anchor")?,
             tick_spacing: u32::try_from(row.try_get::<i32, _>("tick_spacing")?)?,
             batch_interval_ms: u32::try_from(row.try_get::<i32, _>("batch_interval_ms")?)?,
@@ -686,6 +726,17 @@ mod tests {
         assert!(validate_positive_multiplier(0.0, "shares").is_err());
         assert!(validate_positive_multiplier(-1.0, "shares").is_err());
         assert!(validate_positive_multiplier(f64::NAN, "shares").is_err());
+    }
+
+    #[test]
+    fn estimated_fee_rate_must_be_a_nonnegative_fraction() {
+        assert!(validate_estimated_fee_rate(0.0).is_ok());
+        assert!(validate_estimated_fee_rate(0.0004).is_ok());
+        assert!(validate_estimated_fee_rate(0.05).is_ok());
+        assert!(validate_estimated_fee_rate(-0.0001).is_err());
+        assert!(validate_estimated_fee_rate(f64::NAN).is_err());
+        assert!(validate_estimated_fee_rate(0.0500001).is_err());
+        assert!(validate_estimated_fee_rate(4.0).is_err());
     }
 
     #[test]

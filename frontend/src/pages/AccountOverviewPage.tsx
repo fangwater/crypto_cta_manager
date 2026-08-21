@@ -15,6 +15,7 @@ import {
   getAccountStudio,
   getDashboard,
   saveAccountContractLeverage,
+  saveAccountEstimatedFeeRate,
 } from '../api'
 import { AppShell, PageIntro } from '../components/AppShell'
 import {
@@ -28,7 +29,8 @@ import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
-import { money, signedClass, timestampUs } from '../format'
+import { feeBps, money, signedClass, timestampUs } from '../format'
+import { FieldHint, Input, Label } from '../components/ui/Field'
 import { readSourceId, routes } from '../lib/routes'
 import { cn } from '../lib/cn'
 import type {
@@ -53,6 +55,7 @@ export function AccountOverviewPage() {
   const [contractSymbol, setContractSymbol] = useState('')
   const [contractLeverage, setContractLeverage] = useState('5')
   const [queriedContractLeverage, setQueriedContractLeverage] = useState<string | null>(null)
+  const [feeRateInput, setFeeRateInput] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -62,6 +65,7 @@ export function AccountOverviewPage() {
     const nextStudio = await getAccountStudio(sourceId, signal)
     setDashboard(snapshot)
     setStudio(nextStudio)
+    setFeeRateInput(String(nextStudio.estimated_fee_rate))
   }, [sourceId])
 
   useEffect(() => {
@@ -158,6 +162,62 @@ export function AccountOverviewPage() {
           />
 
           <div className="mb-8 space-y-4">
+            <Card>
+              <CardHeader className="border-b border-border-soft/80">
+                <div>
+                  <CardTitle className="text-base">估算费率</CardTitle>
+                  <CardDescription className="mt-1">
+                    仅用于 Manager NAV / timeline 手续费估算，不改交易所与 Exec 下单。保存后立即写入
+                    PostgreSQL，无需重启。
+                  </CardDescription>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3 pt-5">
+                <div className="flex flex-wrap items-end gap-3">
+                  <Label className="min-w-[12rem] flex-1">
+                    estimated_fee_rate（小数）
+                    <Input
+                      inputMode="decimal"
+                      value={feeRateInput}
+                      onChange={(event) => setFeeRateInput(event.target.value)}
+                      placeholder="0.0004"
+                      disabled={saving}
+                    />
+                  </Label>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={saving}
+                    onClick={() =>
+                      void withWrite(async () => {
+                        const parsed = Number(feeRateInput.trim())
+                        if (!Number.isFinite(parsed) || parsed < 0) {
+                          throw new Error('请输入非负小数，例如 0.0004')
+                        }
+                        if (parsed > 0.05) {
+                          throw new Error('费率过大（>5%）。请用小数，例如 4 bps 写 0.0004')
+                        }
+                        const next = await saveAccountEstimatedFeeRate(sourceId, parsed)
+                        setStudio(next)
+                        setFeeRateInput(String(next.estimated_fee_rate))
+                        return `已保存估算费率 ${feeBps(next.estimated_fee_rate)}（${next.estimated_fee_rate}）`
+                      })
+                    }
+                  >
+                    保存
+                  </Button>
+                </div>
+                <FieldHint>
+                  当前{' '}
+                  <span className="font-medium text-ink">
+                    {studio ? feeBps(studio.estimated_fee_rate) : '--'}
+                  </span>
+                  {studio ? ` · 原始值 ${studio.estimated_fee_rate}` : ''}
+                  。例：4 bps = 0.0004；每笔估算费 = price × qty × rate。
+                </FieldHint>
+              </CardContent>
+            </Card>
+
             <ContractLeveragePanel
               toolbar={
                 <ContractLeverageToolbar

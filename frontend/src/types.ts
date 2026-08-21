@@ -94,6 +94,7 @@ export interface DashboardAccount {
 export interface OrderParameters {
   single_order_usdt: number
   orders_per_batch: number
+  max_batch: number
   maker_price_anchor: 'own_best' | 'opposite_best_plus_one_tick'
   tick_spacing: number
   batch_interval_ms: number
@@ -151,6 +152,8 @@ export interface AccountBinding {
 
 export interface AccountStudio {
   source_id: string
+  /** NAV estimated trading fee rate as a fraction (e.g. 0.0004 = 4 bps). */
+  estimated_fee_rate: number
   bindings: AccountBinding[]
 }
 

@@ -25,8 +25,8 @@ use crate::position_archive::PositionArchive;
 use crate::redis_runtime::RedisRuntime;
 use crate::reload_notify::ReloadNotifyHub;
 use crate::strategy_catalog::{
-    self, SaveBindingRequest, SaveBindingSharesRequest, SaveOrderStrategyRequest,
-    SavePositionStrategyRequest, SaveSymbolContractLeverageRequest,
+    self, SaveBindingRequest, SaveBindingSharesRequest, SaveEstimatedFeeRateRequest,
+    SaveOrderStrategyRequest, SavePositionStrategyRequest, SaveSymbolContractLeverageRequest,
 };
 use crate::twap::TwapStore;
 use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
@@ -268,6 +268,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .route("/api/catalog/accounts/{source_id}", get(get_account_studio))
         .route(
+            "/api/catalog/accounts/{source_id}/estimated-fee-rate",
+            put(save_account_estimated_fee_rate),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/contract-leverage",
             get(get_account_symbol_contract_leverage).put(save_account_symbol_contract_leverage),
         )
@@ -396,6 +400,7 @@ async fn timeline(
             snapshots.insert(source.id.clone(), snapshot);
         }
     }
+    let fee_rates = postgres::load_estimated_fee_rates(&state.pool).await?;
     let request = nav::NavTimelineRequest {
         start_ts_us,
         end_ts_us,
@@ -403,7 +408,10 @@ async fn timeline(
         selected_symbols,
         max_points: query.max_points.unwrap_or(3_000).clamp(200, 10_000),
     };
-    let config = Arc::clone(&state.config);
+    let config = Arc::clone(&state.config)
+        .as_ref()
+        .clone()
+        .with_estimated_fee_rates(&fee_rates);
     let report = tokio::task::spawn_blocking(move || {
         nav::rebuild_nav_timeline_from_rocksdb_with_snapshots(&config, request, &snapshots)
     })
@@ -803,6 +811,43 @@ async fn get_account_studio(
     match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
         Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
         Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn save_account_estimated_fee_rate(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Json(request): Json<SaveEstimatedFeeRateRequest>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+        return Ok(response);
+    }
+    if let Err(error) = strategy_catalog::validate_estimated_fee_rate(request.estimated_fee_rate) {
+        return Ok(bad_request(error));
+    }
+    match postgres::save_estimated_fee_rate(&state.pool, &source_id, request.estimated_fee_rate)
+        .await
+    {
+        Ok(()) => {
+            info!(
+                source_id,
+                estimated_fee_rate = request.estimated_fee_rate,
+                "account estimated fee rate updated"
+            );
+            match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
+                Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+                Err(error) => Ok(catalog_error(error)),
+            }
+        }
+        Err(error) => {
+            error!(
+                source_id,
+                estimated_fee_rate = request.estimated_fee_rate,
+                error = %error,
+                "account estimated fee rate update failed"
+            );
+            Ok(catalog_error(error))
+        }
     }
 }
 
@@ -1416,6 +1461,8 @@ async fn build_dashboard(
 ) -> Result<DashboardSnapshot> {
     let started = Instant::now();
     let now_ms = unix_now_ms();
+    let fee_rates = postgres::load_estimated_fee_rates(pool).await?;
+    let nav_config = config.clone().with_estimated_fee_rates(&fee_rates);
     let accounts = config
         .sources
         .iter()
@@ -1442,9 +1489,8 @@ async fn build_dashboard(
         }
     }
 
-    let config = config.clone();
     let report = tokio::task::spawn_blocking(move || {
-        nav::rebuild_nav_from_rocksdb_with_snapshots(&config, &[], &snapshots)
+        nav::rebuild_nav_from_rocksdb_with_snapshots(&nav_config, &[], &snapshots)
     })
     .await
     .context("CTA dashboard rebuild task failed")??;

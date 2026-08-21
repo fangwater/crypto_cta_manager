@@ -203,6 +203,16 @@ export function getAccountStudio(sourceId: string, signal?: AbortSignal) {
   })
 }
 
+export function saveAccountEstimatedFeeRate(sourceId: string, estimatedFeeRate: number) {
+  return requestJson<AccountStudio>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/estimated-fee-rate`,
+    {
+      method: 'PUT',
+      body: { estimated_fee_rate: estimatedFeeRate },
+    },
+  )
+}
+
 export function getAccountContractLeverage(sourceId: string, symbol: string) {
   const params = new URLSearchParams({ symbol })
   return requestJson<SavedSymbolContractLeverage>(

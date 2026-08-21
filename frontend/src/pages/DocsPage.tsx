@@ -155,7 +155,7 @@ function buildChapters(gateway: string): Chapter[] {
             ],
             [
               '下单策略',
-              <code>strategy_name + 8 个参数</code>,
+              <code>strategy_name + 9 个参数</code>,
               '全局模板，多账户可共用同一个 default_order。',
             ],
             [
@@ -406,6 +406,7 @@ function buildChapters(gateway: string): Chapter[] {
   "order_parameters": {
     "single_order_usdt": 100.0,
     "orders_per_batch": 3,
+    "max_batch": 20,
     "maker_price_anchor": "own_best",
     "tick_spacing": 1,
     "batch_interval_ms": 500,
@@ -414,7 +415,10 @@ function buildChapters(gateway: string): Chapter[] {
     "target_tolerance_usdt": 10.0
   }
 }`}</CodeBlock>
-        <Note>只接受上述 8 个参数字段。改完后要对该账户已启用绑定再点「发布到 Exec」才会进交易进程。</Note>
+        <Note>
+          只接受上述 9 个参数字段。max_batch 限制一次目标更新的预估批次数；Exec
+          按目标激活时的 mark price 计算动态单笔金额，并取该值与 single_order_usdt 的较大者。
+        </Note>
       </>
     ),
   },
@@ -430,7 +434,12 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'GET',
               path: `${ACCOUNT_PATH}`,
-              summary: '读取本账户的策略绑定和份数',
+              summary: '读取本账户的策略绑定、份数与估算费率',
+            },
+            {
+              method: 'PUT',
+              path: `${ACCOUNT_PATH}/estimated-fee-rate`,
+              summary: '更新 NAV 估算手续费率（小数，如 0.0004=4bps），写入 PostgreSQL，无需重启',
             },
             {
               method: 'GET',
@@ -445,6 +454,14 @@ function buildChapters(gateway: string): Chapter[] {
           ]}
         />
         <CodeBlock label="curl">{`curl --noproxy '*' -sS \\
+  '${account}'
+
+curl --noproxy '*' -sS -X PUT \\
+  '${account}/estimated-fee-rate' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"estimated_fee_rate":0.0004}'
+
+curl --noproxy '*' -sS \\
   '${account}/contract-leverage?symbol=BTCUSDT'
 
 curl --noproxy '*' -sS -X PUT \\
@@ -453,6 +470,10 @@ curl --noproxy '*' -sS -X PUT \\
   -d '{"symbol":"BTCUSDT","contract_leverage":5}'`}</CodeBlock>
         <FieldRows
           rows={[
+            {
+              field: 'estimated_fee_rate',
+              detail: 'NAV 估算费率，小数（0.0004=4bps）。仅影响 Manager 报表，不改交易',
+            },
             {
               field: 'contract_leverage',
               detail: '交易所当前保证金杠杆。GET 读实时值；PUT 设置 1–125',
@@ -567,7 +588,7 @@ curl --noproxy '*' -sS -X PUT \\
         <Endpoint
           method="POST"
           path={`${EXEC_PATH}/order-parameters`}
-          summary="只改已存在策略的 8 个参数；带 targets 会被拒绝"
+          summary="只改已存在策略的 9 个参数；带 targets 会被拒绝"
         />
         <Endpoint
           method="DELETE"

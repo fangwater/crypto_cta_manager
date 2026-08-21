@@ -298,6 +298,20 @@ impl AppConfig {
         std::env::var(env_name)
             .with_context(|| format!("database URL environment variable {env_name} is not set"))
     }
+
+    /// Overlay operator-managed fee rates (typically loaded from PostgreSQL).
+    /// Missing map entries keep the current value (usually toml bootstrap).
+    pub fn with_estimated_fee_rates(
+        mut self,
+        rates: &std::collections::BTreeMap<String, f64>,
+    ) -> Self {
+        for source in &mut self.sources {
+            if let Some(rate) = rates.get(&source.id) {
+                source.estimated_fee_rate = Some(*rate);
+            }
+        }
+        self
+    }
 }
 
 impl SourceConfig {
@@ -600,6 +614,20 @@ mod tests {
             .validate()
             .unwrap();
         assert!(without_rate.nav_fee_rate().is_err());
+    }
+
+    #[test]
+    fn estimated_fee_rates_overlay_replaces_matching_sources_only() {
+        let config = config_with_sources(vec![
+            source("binance_exec_trade01", "/srv/trade01/persist_manager"),
+            source("binance_exec_trade02", "/srv/trade02/persist_manager"),
+        ])
+        .with_estimated_fee_rates(&std::collections::BTreeMap::from([(
+            "binance_exec_trade02".to_string(),
+            0.0008,
+        )]));
+        assert_eq!(config.sources[0].estimated_fee_rate, Some(0.0004));
+        assert_eq!(config.sources[1].estimated_fee_rate, Some(0.0008));
     }
 
     #[test]

@@ -45,6 +45,7 @@ account_ipc_service = "account_pubs/binance_pm"
 [[sources]]
 id = "binance_exec_trade02"
 account = "trade02"
+alias = "shaokai"
 venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade02/data/persist_manager"
 enabled = false

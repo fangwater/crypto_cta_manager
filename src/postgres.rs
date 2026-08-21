@@ -27,12 +27,16 @@ pub async fn migrate(pool: &PgPool) -> Result<()> {
 
 pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result<()> {
     for source in sources {
+        // Seed estimated_fee_rate only on first insert. Later operator edits in
+        // PostgreSQL must not be overwritten by toml on every cta_web restart.
+        let seed_fee_rate = source.estimated_fee_rate.unwrap_or(0.0004);
         sqlx::query(
             r#"
             INSERT INTO cta_order_sources (
-                source_id, account_label, venue_label, rocksdb_path, enabled
+                source_id, account_label, venue_label, rocksdb_path, enabled,
+                estimated_fee_rate
             )
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (source_id) DO UPDATE SET
                 account_label = EXCLUDED.account_label,
                 venue_label = EXCLUDED.venue_label,
@@ -46,9 +50,78 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
         .bind(&source.venue)
         .bind(path_text(&source.rocksdb_path))
         .bind(source.enabled)
+        .bind(seed_fee_rate)
         .execute(pool)
         .await
         .with_context(|| format!("failed to register source {}", source.id))?;
+    }
+    Ok(())
+}
+
+/// Load per-source estimated fee rates from PostgreSQL.
+/// Missing rows are omitted; callers should fall back to toml defaults.
+pub async fn load_estimated_fee_rates(
+    pool: &PgPool,
+) -> Result<std::collections::BTreeMap<String, f64>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT source_id, estimated_fee_rate
+        FROM cta_order_sources
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load estimated fee rates")?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let source_id: String = row
+            .try_get("source_id")
+            .context("failed to decode source_id for estimated fee rate")?;
+        let rate: f64 = row
+            .try_get("estimated_fee_rate")
+            .with_context(|| format!("failed to decode estimated_fee_rate for {source_id}"))?;
+        out.insert(source_id, rate);
+    }
+    Ok(out)
+}
+
+pub async fn load_estimated_fee_rate(pool: &PgPool, source_id: &str) -> Result<Option<f64>> {
+    sqlx::query_scalar::<_, f64>(
+        r#"
+        SELECT estimated_fee_rate
+        FROM cta_order_sources
+        WHERE source_id = $1
+        "#,
+    )
+    .bind(source_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to load estimated fee rate for {source_id}"))
+}
+
+pub async fn save_estimated_fee_rate(
+    pool: &PgPool,
+    source_id: &str,
+    estimated_fee_rate: f64,
+) -> Result<()> {
+    if !estimated_fee_rate.is_finite() || estimated_fee_rate < 0.0 {
+        anyhow::bail!("estimated_fee_rate must be finite and nonnegative");
+    }
+    let result = sqlx::query(
+        r#"
+        UPDATE cta_order_sources
+        SET estimated_fee_rate = $2,
+            updated_at = now()
+        WHERE source_id = $1
+        "#,
+    )
+    .bind(source_id)
+    .bind(estimated_fee_rate)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to save estimated fee rate for {source_id}"))?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("source {source_id} is not registered in cta_order_sources");
     }
     Ok(())
 }
