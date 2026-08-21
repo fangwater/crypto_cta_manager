@@ -12,6 +12,7 @@ export function OrderParametersView({ value }: { value: OrderParameters }) {
   const rows = [
     { label: orderParameterMeta.single_order_usdt.label, value: `${value.single_order_usdt} USDT` },
     { label: orderParameterMeta.orders_per_batch.label, value: String(value.orders_per_batch) },
+    { label: orderParameterMeta.max_batch.label, value: String(value.max_batch) },
     { label: orderParameterMeta.maker_price_anchor.label, value: anchorLabel },
     { label: orderParameterMeta.tick_spacing.label, value: String(value.tick_spacing) },
     { label: orderParameterMeta.batch_interval_ms.label, value: `${value.batch_interval_ms} ms` },

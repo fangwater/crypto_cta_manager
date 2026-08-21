@@ -5,6 +5,7 @@ export const DEFAULT_ORDER_STRATEGY_NAME = 'default_order'
 export const ORDER_PARAMETER_FIELDS = [
   'single_order_usdt',
   'orders_per_batch',
+  'max_batch',
   'tick_spacing',
   'batch_interval_ms',
   'maker_timeout_ms',
@@ -27,6 +28,12 @@ export const orderParameterMeta: Record<
   orders_per_batch: {
     label: '每批订单数',
     hint: '同一时刻并行挂出的 maker 数量。数值越大，单次推进越快，但挂单更分散。',
+    step: '1',
+    min: '1',
+  },
+  max_batch: {
+    label: '最大批次数',
+    hint: '单次调仓的目标批次数上限。Exec 按激活目标时的 mark price 放大单笔名义金额，力争在该批数内完成。',
     step: '1',
     min: '1',
   },

@@ -169,6 +169,15 @@ the strategy suffix in `batch_exec:<strategy_name>`. Account-level initial
 snapshot positions are shown as unallocated initial positions because they do
 not contain historical strategy ownership.
 
+Order strategies include `max_batch`, the estimated maximum batch count for a
+single target update. When a target is activated, Exec values the outstanding
+base quantity with the current mark price and calculates
+`dynamic_single_usdt = delta_usdt / max_batch / orders_per_batch`. The effective
+single-order amount is `max(single_order_usdt, dynamic_single_usdt)` and remains
+fixed for that target generation. The Manager form shows the corresponding
+maximum maker-path estimate:
+`(max_batch - 1) * batch_interval_ms + (max_maker_requotes + 1) * maker_timeout_ms`.
+
 Build the API and frontend locally:
 
 ```bash

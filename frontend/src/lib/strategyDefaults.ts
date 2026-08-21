@@ -4,6 +4,7 @@ import { DEFAULT_ORDER_STRATEGY_NAME } from './orderParametersMeta'
 export const DEFAULT_ORDER: OrderParameters = {
   single_order_usdt: 100,
   orders_per_batch: 3,
+  max_batch: 20,
   maker_price_anchor: 'own_best',
   tick_spacing: 1,
   batch_interval_ms: 500,

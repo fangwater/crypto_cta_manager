@@ -4,11 +4,26 @@ from __future__ import annotations
 import unittest
 
 from exec_config_server import (
+    DEFAULT_CONFIG,
     confirm_written_config,
+    normalize_exec_config,
     normalize_targets,
     require_exact_fields,
     validate_strategy_name,
 )
+
+
+class MaxBatchTests(unittest.TestCase):
+    def test_legacy_config_defaults_max_batch(self) -> None:
+        config = dict(DEFAULT_CONFIG)
+        config.pop("max_batch")
+        self.assertEqual(normalize_exec_config(config)["max_batch"], 20)
+
+    def test_rejects_zero_max_batch(self) -> None:
+        config = dict(DEFAULT_CONFIG)
+        config["max_batch"] = 0
+        with self.assertRaisesRegex(ValueError, "max_batch"):
+            normalize_exec_config(config)
 
 
 class RequireExactFieldsTests(unittest.TestCase):

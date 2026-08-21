@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub struct OrderParameters {
     pub single_order_usdt: f64,
     pub orders_per_batch: u32,
+    #[serde(default = "default_max_batch")]
+    pub max_batch: u32,
     pub maker_price_anchor: String,
     pub tick_spacing: u32,
     pub batch_interval_ms: u32,
@@ -26,6 +28,9 @@ impl OrderParameters {
         }
         if self.orders_per_batch == 0 {
             return Err("orders_per_batch must be greater than zero".to_string());
+        }
+        if self.max_batch == 0 {
+            return Err("max_batch must be greater than zero".to_string());
         }
         if !matches!(
             self.maker_price_anchor.as_str(),
@@ -142,6 +147,8 @@ pub fn validate_target_signal(signal: i32) -> std::result::Result<(), String> {
 struct ExecConfigPayload {
     single_order_usdt: f64,
     orders_per_batch: u32,
+    #[serde(default = "default_max_batch")]
+    max_batch: u32,
     maker_price_anchor: String,
     tick_spacing: u32,
     batch_interval_ms: u32,
@@ -158,6 +165,7 @@ impl ExecConfigPayload {
         OrderParameters {
             single_order_usdt: self.single_order_usdt,
             orders_per_batch: self.orders_per_batch,
+            max_batch: self.max_batch,
             maker_price_anchor: self.maker_price_anchor.clone(),
             tick_spacing: self.tick_spacing,
             batch_interval_ms: self.batch_interval_ms,
@@ -166,6 +174,10 @@ impl ExecConfigPayload {
             target_tolerance_usdt: self.target_tolerance_usdt,
         }
     }
+}
+
+const fn default_max_batch() -> u32 {
+    20
 }
 
 #[derive(Debug, Deserialize)]
@@ -387,6 +399,7 @@ impl ExecConfigClient {
                 "config": {
                     "single_order_usdt": order_parameters.single_order_usdt,
                     "orders_per_batch": order_parameters.orders_per_batch,
+                    "max_batch": order_parameters.max_batch,
                     "maker_price_anchor": order_parameters.maker_price_anchor,
                     "tick_spacing": order_parameters.tick_spacing,
                     "batch_interval_ms": order_parameters.batch_interval_ms,
@@ -485,6 +498,7 @@ mod tests {
         OrderParameters {
             single_order_usdt: 100.0,
             orders_per_batch: 3,
+            max_batch: 20,
             maker_price_anchor: "own_best".to_string(),
             tick_spacing: 1,
             batch_interval_ms: 500,
@@ -501,8 +515,19 @@ mod tests {
         invalid.orders_per_batch = 0;
         assert!(invalid.validate().is_err());
         let mut invalid = valid_parameters();
+        invalid.max_batch = 0;
+        assert!(invalid.validate().is_err());
+        let mut invalid = valid_parameters();
         invalid.maker_price_anchor = "mid".to_string();
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_order_parameters_default_max_batch() {
+        let mut payload = serde_json::to_value(valid_parameters()).unwrap();
+        payload.as_object_mut().unwrap().remove("max_batch");
+        let decoded: OrderParameters = serde_json::from_value(payload).unwrap();
+        assert_eq!(decoded.max_batch, 20);
     }
 
     #[test]
@@ -513,6 +538,7 @@ mod tests {
             "order_parameters": {
                 "single_order_usdt": 100.0,
                 "orders_per_batch": 3,
+                "max_batch": 20,
                 "maker_price_anchor": "own_best",
                 "tick_spacing": 1,
                 "batch_interval_ms": 500,

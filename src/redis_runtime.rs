@@ -20,6 +20,7 @@ const POSITION_CLOSE_STRATEGY_NAME: &str = "SYSTEM_POSITION_CLOSE";
 struct StoredExecConfig<'a> {
     single_order_usdt: f64,
     orders_per_batch: u32,
+    max_batch: u32,
     maker_price_anchor: &'a str,
     tick_spacing: u32,
     batch_interval_ms: u32,
@@ -127,6 +128,7 @@ impl RedisRuntime {
                 let payload = StoredExecConfig {
                     single_order_usdt: order_parameters.single_order_usdt,
                     orders_per_batch: order_parameters.orders_per_batch,
+                    max_batch: order_parameters.max_batch,
                     maker_price_anchor: &order_parameters.maker_price_anchor,
                     tick_spacing: order_parameters.tick_spacing,
                     batch_interval_ms: order_parameters.batch_interval_ms,
