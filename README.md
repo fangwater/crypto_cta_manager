@@ -60,9 +60,14 @@ early at the next same-strategy update. Assume the intended qty is executed
 uniformly over that window. Split from the update timestamp into consecutive
 1-minute buckets; each 1-minute mid is the equal average of the 5-second mid
 bars in that bucket, then those 1-minute mids are averaged. A 5-minute window
-therefore uses five 1-minute mids. The response compares TWAP estimated cost before fee
-(`intended × (twap_mid − arrival_mid)`) with actual cost before fee
-(`filled × (VWAP − arrival_mid)`). Fills come from that account's Exec
+therefore uses five 1-minute mids. The latest non-stale completed 5-second mid
+at the update is `arrival_mid`. For windows with actual fills, price execution
+uses the same signed filled quantity for both paths: actual slippage is
+`filled × (VWAP − arrival_mid)`, TWAP slippage is
+`filled × (twap_mid − arrival_mid)`, and shortfall versus TWAP is
+`filled × (VWAP − twap_mid)`. Positive values mean worse execution for both
+buys and sells. Estimated maker/taker fees are reported separately and never
+included in these price metrics. Fills come from that account's Exec
 `uniform_orders` and are attributed with `batch_exec:<strategy_name>`. Only
 messages that archived `published_accounts` (with each account's `shares`) are
 included. The browser page is `/manager/execution-cost/`.

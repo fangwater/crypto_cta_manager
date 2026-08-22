@@ -26,26 +26,20 @@ interface Props {
 
 const series = [
   {
-    key: 'twap_cost_before_fee_usdt' as const,
-    label: 'TWAP 费前',
+    key: 'twap_price_slippage_on_filled_usdt' as const,
+    label: 'TWAP 价格滑点',
     color: '#2563a7',
     dashed: true,
   },
   {
-    key: 'actual_cost_before_fee_usdt' as const,
-    label: '实际费前',
+    key: 'actual_price_slippage_usdt' as const,
+    label: '实际价格滑点',
     color: '#b7791f',
   },
   {
-    key: 'actual_cost_after_fee_usdt' as const,
-    label: '实际费后',
+    key: 'shortfall_vs_twap_usdt' as const,
+    label: '实际相对 TWAP',
     color: '#176b5b',
-  },
-  {
-    key: 'estimated_trading_fee_usdt' as const,
-    label: '估算手续费',
-    color: '#c2413b',
-    dashed: true,
   },
 ]
 
@@ -126,7 +120,7 @@ export function ExecutionCostChart({ points }: Props) {
         showSymbol: false,
         sampling: 'lttb',
         lineStyle: {
-          width: item.key === 'actual_cost_after_fee_usdt' ? 2.4 : 1.6,
+          width: item.key === 'shortfall_vs_twap_usdt' ? 2.4 : 1.6,
           color: item.color,
           type: item.dashed ? 'dashed' : 'solid',
         },
@@ -147,7 +141,7 @@ export function ExecutionCostChart({ points }: Props) {
       ref={elementRef}
       className="h-[360px] w-full sm:h-[420px]"
       role="img"
-      aria-label="累计执行成本时间序列"
+      aria-label="累计价格执行滑点时间序列"
     />
   )
 }

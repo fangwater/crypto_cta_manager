@@ -511,7 +511,11 @@ async fn execution_cost(
     }
 
     let started = Instant::now();
-    let config = Arc::clone(&state.config);
+    let fee_rates = postgres::load_fee_rates(&state.pool).await?;
+    let config = Arc::clone(&state.config)
+        .as_ref()
+        .clone()
+        .with_fee_rates(&fee_rates);
     let archive = Arc::clone(&state.position_archive);
     let twap = Arc::clone(&state.twap);
     let (histories, generated_at_us) = {

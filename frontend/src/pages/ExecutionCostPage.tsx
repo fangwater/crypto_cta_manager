@@ -7,7 +7,7 @@ import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { Input, Label, Select } from '../components/ui/Field'
-import { money, quantity, signedClass, timestampUs } from '../format'
+import { money, quantity, timestampUs } from '../format'
 import { cn } from '../lib/cn'
 import { readSourceId } from '../lib/routes'
 import type {
@@ -42,7 +42,19 @@ function optionalMoney(value: number | null | undefined) {
 
 function costClass(value: number | null | undefined) {
   if (value == null) return ''
-  return signedClass(value)
+  if (value > 0) return 'number-negative'
+  if (value < 0) return 'number-positive'
+  return ''
+}
+
+function optionalBps(value: number | null | undefined) {
+  return value == null ? '--' : `${value.toFixed(2)} bps`
+}
+
+function sideLabel(side: SymbolExecutionCost['side']) {
+  if (side === 'buy') return '买'
+  if (side === 'sell') return '卖'
+  return '--'
 }
 
 export function ExecutionCostPage() {
@@ -124,7 +136,7 @@ export function ExecutionCostPage() {
     for (const update of updates) {
       for (const account of update.accounts) {
         for (const symbol of account.symbols) {
-          if (Math.abs(symbol.intended_qty) < 1e-12 && Math.abs(symbol.filled_qty) < 1e-12) {
+          if (symbol.fill_count === 0) {
             continue
           }
           rows.push({
@@ -164,8 +176,8 @@ export function ExecutionCostPage() {
     >
       <PageIntro
         eyebrow="On demand"
-        title="实际成交 vs TWAP 预估"
-        description="每次仓位 POST 的目标仓位按当时归档的份数减去快照仓位，得到要执行的数量。默认假设 5 分钟均匀执行：从这次更新起切 5 个 1 分钟，每分钟对其中 5 秒 mid 等权平均，再对这 5 个 1 分钟 mid 平均，得到 TWAP 预估费前，并和同一窗口实际成交 VWAP 的费前、费后成本对比。实际手续费按成交 maker/taker 角色估算。"
+        title="实际价格执行 vs TWAP"
+        description="仅比较有实际成交的执行窗口。实际 VWAP 与 TWAP 使用同一实际成交量计算价格滑点；正数表示成本，负数表示价格改善。手续费单独统计，不进入价格执行指标。"
       />
 
       {dashError && <Alert className="mb-4">账户列表失败：{dashError}</Alert>}
@@ -175,7 +187,8 @@ export function ExecutionCostPage() {
         <CardHeader>
           <CardTitle>查询条件</CardTitle>
           <CardDescription>
-            价格基准是从这次更新起的连续 1 分钟 mid（每分钟用 5 秒 mid 平均）；成交来自 Exec RocksDB 的
+            到达价取更新时最近且未过期的已完成 5 秒 mid；TWAP 从该时点切连续 1 分钟 bucket（每分钟用
+            5 秒 mid 平均）。成交来自 Exec RocksDB 的
             <code className="mx-1">batch_exec:&lt;strategy&gt;</code>
             归属。只统计归档时带有 published_accounts 与 shares 的仓位更新。
           </CardDescription>
@@ -234,50 +247,43 @@ export function ExecutionCostPage() {
 
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <StatTile
-          label="实际费后成本"
-          value={report ? money(report.totals.actual_cost_after_fee_usdt) : '--'}
-          hint="实际费前 + maker/taker 估算手续费"
+          label="实际价格滑点"
+          value={report ? money(report.totals.actual_price_slippage_usdt) : '--'}
+          hint={report ? `${report.totals.actual_slippage_bps.toFixed(2)} bps` : undefined}
         />
         <StatTile
-          label="实际费前成本"
-          value={report ? money(report.totals.actual_cost_before_fee_usdt) : '--'}
-          hint="filled × (VWAP − arrival mid)"
+          label="TWAP 价格滑点"
+          value={report ? money(report.totals.twap_price_slippage_on_filled_usdt) : '--'}
+          hint={report ? `${report.totals.twap_slippage_bps.toFixed(2)} bps · 同成交量` : undefined}
         />
         <StatTile
-          label="TWAP 预估费前"
-          value={report ? money(report.totals.twap_cost_before_fee_usdt) : '--'}
-          hint="intended × (5×1m mid 平均 − arrival mid)"
+          label="实际相对 TWAP"
+          value={report ? money(report.totals.shortfall_vs_twap_usdt) : '--'}
+          hint={report ? `${report.totals.shortfall_vs_twap_bps.toFixed(2)} bps · 正数较差` : undefined}
         />
         <StatTile
-          label="估算手续费"
+          label="实际手续费（独立）"
           value={report ? money(report.totals.estimated_trading_fee_usdt) : '--'}
-          hint="maker/taker 费率，负数为返佣"
+          hint="不计入任何价格滑点"
         />
         <StatTile
-          label="仓位更新"
+          label="可比成交"
+          value={report ? String(report.totals.comparable_fill_count) : '--'}
+          hint={report ? `${report.execution_update_count} 个执行窗口` : undefined}
+        />
+        <StatTile
+          label="归档更新"
           value={report ? String(report.update_count) : '--'}
-          hint={
-            report
-              ? `跳过无归档账户 ${report.skipped_legacy_update_count} · ${snapshot?.generation_duration_ms ?? 0} ms`
-              : undefined
-          }
-        />
-        <StatTile
-          label="成交 / 意向"
-          value={
-            report
-              ? `${quantity(report.totals.filled_qty)} / ${quantity(report.totals.intended_qty)}`
-              : '--'
-          }
+          hint={report ? `${snapshot?.generation_duration_ms ?? 0} ms` : undefined}
         />
       </div>
 
       {snapshot && report && report.points.length > 0 && (
         <Card className="mb-6">
           <CardHeader>
-            <CardTitle>累计执行成本</CardTitle>
+            <CardTitle>累计价格滑点</CardTitle>
             <CardDescription>
-              完整查询区间的累计成本变化；TWAP 保持费前，实际费后包含 maker/taker 估算手续费。
+              实际与 TWAP 使用相同的实际成交量；手续费不进入曲线。相对 TWAP 为正表示实际执行更差。
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -307,11 +313,11 @@ export function ExecutionCostPage() {
         <Card>
           <CardHeader className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
             <div>
-              <CardTitle>每次仓位更新</CardTitle>
+              <CardTitle>每次实际执行</CardTitle>
               <CardDescription>
                 窗口从该次 POST 开始，最多 {report?.window_secs} 秒，遇到同策略下一次更新提前结束。
-                共 {report?.update_count ?? 0} 次，本页 {report?.returned_update_count ?? 0} 次。生成于{' '}
-                {timestampUs(snapshot.generated_at_us)}。
+                共 {report?.execution_update_count ?? 0} 个有成交窗口，本页{' '}
+                {report?.returned_update_count ?? 0} 个。生成于 {timestampUs(snapshot.generated_at_us)}。
               </CardDescription>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -347,7 +353,7 @@ export function ExecutionCostPage() {
           <CardContent className="overflow-x-auto p-0">
             {symbolRows.length === 0 ? (
               <p className="px-5 py-10 text-center text-sm text-muted">
-                这段时间没有可估算的仓位更新。需要归档中带有 published_accounts。
+                这一页没有可比较的实际成交。
               </p>
             ) : (
               <table className="min-w-full text-left text-[13px]">
@@ -357,15 +363,16 @@ export function ExecutionCostPage() {
                     <th className="px-4 py-2 font-medium">策略</th>
                     <th className="px-4 py-2 font-medium">账户</th>
                     <th className="px-4 py-2 font-medium">合约</th>
-                    <th className="px-4 py-2 font-medium text-right">意向</th>
+                    <th className="px-4 py-2 font-medium">方向</th>
                     <th className="px-4 py-2 font-medium text-right">成交</th>
                     <th className="px-4 py-2 font-medium text-right">到达 mid</th>
                     <th className="px-4 py-2 font-medium text-right">TWAP mid</th>
                     <th className="px-4 py-2 font-medium text-right">实际 VWAP</th>
-                    <th className="px-4 py-2 font-medium text-right">TWAP 费前</th>
-                    <th className="px-4 py-2 font-medium text-right">实际费前</th>
-                    <th className="px-4 py-2 font-medium text-right">估算手续费</th>
-                    <th className="px-4 py-2 font-medium text-right">实际费后</th>
+                    <th className="px-4 py-2 font-medium text-right">实际滑点</th>
+                    <th className="px-4 py-2 font-medium text-right">TWAP 滑点</th>
+                    <th className="px-4 py-2 font-medium text-right">相对 TWAP</th>
+                    <th className="px-4 py-2 font-medium text-right">相对 TWAP USDT</th>
+                    <th className="px-4 py-2 font-medium text-right">手续费</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -387,11 +394,9 @@ export function ExecutionCostPage() {
                           </div>
                         </td>
                         <td className="px-4 py-2 font-medium">{row.symbol.symbol}</td>
+                        <td className="px-4 py-2 font-medium">{sideLabel(row.symbol.side)}</td>
                         <td className="px-4 py-2 text-right tabular-nums">
-                          {quantity(row.symbol.intended_qty)}
-                        </td>
-                        <td className="px-4 py-2 text-right tabular-nums">
-                          {quantity(row.symbol.filled_qty)}
+                          {quantity(Math.abs(row.symbol.filled_qty))}
                         </td>
                         <td className="px-4 py-2 text-right tabular-nums">
                           {optionalMoney(row.symbol.arrival_mid)}
@@ -405,18 +410,34 @@ export function ExecutionCostPage() {
                         <td
                           className={cn(
                             'px-4 py-2 text-right tabular-nums',
-                            costClass(row.symbol.twap_cost_before_fee_usdt),
+                            costClass(row.symbol.actual_slippage_bps),
                           )}
                         >
-                          {optionalMoney(row.symbol.twap_cost_before_fee_usdt)}
+                          {optionalBps(row.symbol.actual_slippage_bps)}
                         </td>
                         <td
                           className={cn(
                             'px-4 py-2 text-right tabular-nums',
-                            costClass(row.symbol.actual_cost_before_fee_usdt),
+                            costClass(row.symbol.twap_slippage_bps),
                           )}
                         >
-                          {optionalMoney(row.symbol.actual_cost_before_fee_usdt)}
+                          {optionalBps(row.symbol.twap_slippage_bps)}
+                        </td>
+                        <td
+                          className={cn(
+                            'px-4 py-2 text-right tabular-nums',
+                            costClass(row.symbol.shortfall_vs_twap_bps),
+                          )}
+                        >
+                          {optionalBps(row.symbol.shortfall_vs_twap_bps)}
+                        </td>
+                        <td
+                          className={cn(
+                            'px-4 py-2 text-right tabular-nums',
+                            costClass(row.symbol.shortfall_vs_twap_usdt),
+                          )}
+                        >
+                          {optionalMoney(row.symbol.shortfall_vs_twap_usdt)}
                         </td>
                         <td
                           className={cn(
@@ -425,14 +446,6 @@ export function ExecutionCostPage() {
                           )}
                         >
                           {money(row.symbol.estimated_trading_fee_usdt)}
-                        </td>
-                        <td
-                          className={cn(
-                            'px-4 py-2 text-right tabular-nums',
-                            costClass(row.symbol.actual_cost_after_fee_usdt),
-                          )}
-                        >
-                          {optionalMoney(row.symbol.actual_cost_after_fee_usdt)}
                         </td>
                       </tr>
                     )

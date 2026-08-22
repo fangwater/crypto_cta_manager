@@ -229,6 +229,7 @@ export interface TimelineSnapshot {
 export interface ExecutionCostTotals {
   intended_qty: number
   filled_qty: number
+  actual_fill_count: number
   arrival_notional_usdt: number
   twap_notional_usdt: number
   actual_notional_usdt: number
@@ -236,6 +237,15 @@ export interface ExecutionCostTotals {
   actual_cost_before_fee_usdt: number
   estimated_trading_fee_usdt: number
   actual_cost_after_fee_usdt: number
+  comparable_fill_count: number
+  comparable_arrival_notional_usdt: number
+  comparable_twap_notional_usdt: number
+  actual_price_slippage_usdt: number
+  twap_price_slippage_on_filled_usdt: number
+  shortfall_vs_twap_usdt: number
+  actual_slippage_bps: number
+  twap_slippage_bps: number
+  shortfall_vs_twap_bps: number
 }
 
 export interface ExecutionCostPoint {
@@ -244,6 +254,9 @@ export interface ExecutionCostPoint {
   actual_cost_before_fee_usdt: number
   estimated_trading_fee_usdt: number
   actual_cost_after_fee_usdt: number
+  actual_price_slippage_usdt: number
+  twap_price_slippage_on_filled_usdt: number
+  shortfall_vs_twap_usdt: number
 }
 
 export interface SymbolExecutionCost {
@@ -266,6 +279,13 @@ export interface SymbolExecutionCost {
   actual_cost_before_fee_usdt: number | null
   estimated_trading_fee_usdt: number
   actual_cost_after_fee_usdt: number | null
+  side: 'buy' | 'sell' | null
+  actual_price_slippage_usdt: number | null
+  twap_price_slippage_on_filled_usdt: number | null
+  shortfall_vs_twap_usdt: number | null
+  actual_slippage_bps: number | null
+  twap_slippage_bps: number | null
+  shortfall_vs_twap_bps: number | null
 }
 
 export interface AccountExecutionCost {
@@ -302,6 +322,7 @@ export interface ExecutionCostReport {
   source_ids: string[]
   strategy_name: string | null
   update_count: number
+  execution_update_count: number
   page: number
   page_size: number
   page_count: number

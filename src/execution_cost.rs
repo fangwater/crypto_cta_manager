@@ -18,6 +18,8 @@ pub const MAX_PAGE_SIZE: usize = 100;
 pub const MINUTE_TWAP_SECS: u64 = 60;
 const MINUTE_US: i64 = 60_000_000;
 const MAX_COST_POINTS: usize = 2_000;
+const ARRIVAL_LOOKBACK_US: i64 = 10_000_000;
+const ARRIVAL_MAX_AGE_US: i64 = 10_000_000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutionCostReport {
@@ -32,6 +34,7 @@ pub struct ExecutionCostReport {
     pub source_ids: Vec<String>,
     pub strategy_name: Option<String>,
     pub update_count: usize,
+    pub execution_update_count: usize,
     pub page: usize,
     pub page_size: usize,
     pub page_count: usize,
@@ -46,6 +49,7 @@ pub struct ExecutionCostReport {
 pub struct CostTotals {
     pub intended_qty: f64,
     pub filled_qty: f64,
+    pub actual_fill_count: u64,
     pub arrival_notional_usdt: f64,
     pub twap_notional_usdt: f64,
     pub actual_notional_usdt: f64,
@@ -53,12 +57,24 @@ pub struct CostTotals {
     pub actual_cost_before_fee_usdt: f64,
     pub estimated_trading_fee_usdt: f64,
     pub actual_cost_after_fee_usdt: f64,
+    pub comparable_fill_count: u64,
+    pub comparable_arrival_notional_usdt: f64,
+    pub comparable_twap_notional_usdt: f64,
+    pub actual_price_slippage_usdt: f64,
+    pub twap_price_slippage_on_filled_usdt: f64,
+    pub shortfall_vs_twap_usdt: f64,
+    pub actual_slippage_bps: f64,
+    pub twap_slippage_bps: f64,
+    pub shortfall_vs_twap_bps: f64,
 }
 
 impl CostTotals {
     fn add(&mut self, other: CostTotals) {
         self.intended_qty += other.intended_qty;
         self.filled_qty += other.filled_qty;
+        self.actual_fill_count = self
+            .actual_fill_count
+            .saturating_add(other.actual_fill_count);
         self.arrival_notional_usdt += other.arrival_notional_usdt;
         self.twap_notional_usdt += other.twap_notional_usdt;
         self.actual_notional_usdt += other.actual_notional_usdt;
@@ -67,7 +83,45 @@ impl CostTotals {
         self.estimated_trading_fee_usdt += other.estimated_trading_fee_usdt;
         self.actual_cost_after_fee_usdt =
             self.actual_cost_before_fee_usdt + self.estimated_trading_fee_usdt;
+        self.comparable_fill_count = self
+            .comparable_fill_count
+            .saturating_add(other.comparable_fill_count);
+        self.comparable_arrival_notional_usdt += other.comparable_arrival_notional_usdt;
+        self.comparable_twap_notional_usdt += other.comparable_twap_notional_usdt;
+        self.actual_price_slippage_usdt += other.actual_price_slippage_usdt;
+        self.twap_price_slippage_on_filled_usdt += other.twap_price_slippage_on_filled_usdt;
+        self.shortfall_vs_twap_usdt += other.shortfall_vs_twap_usdt;
+        self.refresh_price_bps();
     }
+
+    fn refresh_price_bps(&mut self) {
+        self.actual_slippage_bps = ratio_bps(
+            self.actual_price_slippage_usdt,
+            self.comparable_arrival_notional_usdt,
+        );
+        self.twap_slippage_bps = ratio_bps(
+            self.twap_price_slippage_on_filled_usdt,
+            self.comparable_arrival_notional_usdt,
+        );
+        self.shortfall_vs_twap_bps = ratio_bps(
+            self.shortfall_vs_twap_usdt,
+            self.comparable_twap_notional_usdt,
+        );
+    }
+}
+
+fn ratio_bps(value: f64, notional: f64) -> f64 {
+    if notional > 0.0 {
+        value / notional * 10_000.0
+    } else {
+        0.0
+    }
+}
+
+fn page_bounds(count: usize, page: usize, page_size: usize) -> (usize, usize) {
+    let offset = page.saturating_sub(1).saturating_mul(page_size);
+    let end = count.saturating_sub(offset);
+    (end.saturating_sub(page_size), end)
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -77,6 +131,9 @@ pub struct ExecutionCostPoint {
     pub actual_cost_before_fee_usdt: f64,
     pub estimated_trading_fee_usdt: f64,
     pub actual_cost_after_fee_usdt: f64,
+    pub actual_price_slippage_usdt: f64,
+    pub twap_price_slippage_on_filled_usdt: f64,
+    pub shortfall_vs_twap_usdt: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +181,13 @@ pub struct SymbolUpdateCost {
     pub actual_cost_before_fee_usdt: Option<f64>,
     pub estimated_trading_fee_usdt: f64,
     pub actual_cost_after_fee_usdt: Option<f64>,
+    pub side: Option<&'static str>,
+    pub actual_price_slippage_usdt: Option<f64>,
+    pub twap_price_slippage_on_filled_usdt: Option<f64>,
+    pub shortfall_vs_twap_usdt: Option<f64>,
+    pub actual_slippage_bps: Option<f64>,
+    pub twap_slippage_bps: Option<f64>,
+    pub shortfall_vs_twap_bps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -233,23 +297,18 @@ pub fn report_execution_cost(
     let twap_ms = twap_started.elapsed().as_millis();
 
     let update_count = selected.len();
-    let page_count = update_count.div_ceil(page_size);
-    let page_offset = page.saturating_sub(1).saturating_mul(page_size);
-    let detail_end = update_count.saturating_sub(page_offset);
-    let detail_start = detail_end.saturating_sub(page_size);
-    let mut updates = Vec::with_capacity(detail_end.saturating_sub(detail_start));
     let mut totals = CostTotals::default();
     let mut points = Vec::with_capacity(update_count.min(MAX_COST_POINTS));
+    let mut executions = Vec::<(usize, &PositionUpdateMsg, i64)>::new();
     let mut skipped_legacy_update_count = 0usize;
     let compute_started = Instant::now();
-    for (position, (index, msg)) in selected.into_iter().enumerate() {
+    for (index, msg) in &selected {
         let window_end_us = execution_window_end(
             msg,
-            next_same_strategy.get(index).copied().flatten(),
+            next_same_strategy.get(*index).copied().flatten(),
             window_us,
             generated_at_us,
         );
-        let include_details = position >= detail_start && position < detail_end;
         let update = cost_for_update(
             config,
             &twap_bars,
@@ -257,26 +316,45 @@ pub fn report_execution_cost(
             window_end_us,
             &fills,
             &selected_sources,
-            include_details,
+            false,
         )?;
         if update.skipped_legacy {
             skipped_legacy_update_count += 1;
         }
         totals.add(update.totals);
-        points.push(ExecutionCostPoint {
-            ts_us: msg.received_at_us,
-            twap_cost_before_fee_usdt: totals.twap_cost_before_fee_usdt,
-            actual_cost_before_fee_usdt: totals.actual_cost_before_fee_usdt,
-            estimated_trading_fee_usdt: totals.estimated_trading_fee_usdt,
-            actual_cost_after_fee_usdt: totals.actual_cost_after_fee_usdt,
-        });
-        if include_details {
-            updates.push(update);
+        if update.totals.actual_fill_count > 0 {
+            executions.push((*index, *msg, window_end_us));
+            points.push(ExecutionCostPoint {
+                ts_us: msg.received_at_us,
+                twap_cost_before_fee_usdt: totals.twap_cost_before_fee_usdt,
+                actual_cost_before_fee_usdt: totals.actual_cost_before_fee_usdt,
+                estimated_trading_fee_usdt: totals.estimated_trading_fee_usdt,
+                actual_cost_after_fee_usdt: totals.actual_cost_after_fee_usdt,
+                actual_price_slippage_usdt: totals.actual_price_slippage_usdt,
+                twap_price_slippage_on_filled_usdt: totals.twap_price_slippage_on_filled_usdt,
+                shortfall_vs_twap_usdt: totals.shortfall_vs_twap_usdt,
+            });
         }
+    }
+    let execution_update_count = executions.len();
+    let page_count = execution_update_count.div_ceil(page_size);
+    let (detail_start, detail_end) = page_bounds(execution_update_count, page, page_size);
+    let mut updates = Vec::with_capacity(detail_end.saturating_sub(detail_start));
+    for (_, msg, window_end_us) in &executions[detail_start..detail_end] {
+        updates.push(cost_for_update(
+            config,
+            &twap_bars,
+            msg,
+            *window_end_us,
+            &fills,
+            &selected_sources,
+            true,
+        )?);
     }
     let compute_ms = compute_started.elapsed().as_millis();
     tracing::info!(
         update_count,
+        execution_update_count,
         returned_update_count = updates.len(),
         archive_ms,
         fills_ms,
@@ -290,7 +368,7 @@ pub fn report_execution_cost(
         generated_at_us,
         window_secs,
         twap_secs: MINUTE_TWAP_SECS,
-        price_basis: "1m_mid_twap",
+        price_basis: "arrival_latest_completed_5s_mid+1m_mid_twap",
         fee_basis: "before_fee",
         actual_fee_basis: "maker_taker_estimated",
         start_received_at_us,
@@ -298,6 +376,7 @@ pub fn report_execution_cost(
         source_ids: source_ids.to_vec(),
         strategy_name,
         update_count,
+        execution_update_count,
         page,
         page_size,
         page_count,
@@ -390,10 +469,11 @@ fn cost_for_account(
         let published = template * account.effective_shares();
         let snap = snapshot_qty.get(&symbol).copied().unwrap_or(0.0);
         let intended = published - snap;
-        let bars = bars_for_window(twap_bars, &symbol, venue, msg.received_at_us, window_end_us);
+        let market_bars = market_bars(twap_bars, &symbol, venue);
+        let bars = bars_for_window(market_bars, msg.received_at_us, window_end_us);
         let (minute_buckets, missing_minute_bar_count) =
             minute_twap_buckets(&bars, msg.received_at_us, window_end_us);
-        let arrival_mid = minute_buckets.first().map(|bucket| bucket.mid);
+        let arrival_mid = arrival_mid(market_bars, msg.received_at_us);
         let twap_mid = duration_weighted_mid(&minute_buckets);
         let key = (
             account.source_id.clone(),
@@ -429,6 +509,30 @@ fn cost_for_account(
             _ => None,
         };
         let actual_cost_after_fee = actual_cost.map(|cost| cost + estimated_fee);
+        let side = if filled_qty > 0.0 {
+            Some("buy")
+        } else if filled_qty < 0.0 {
+            Some("sell")
+        } else {
+            None
+        };
+        let comparable = match (arrival_mid, twap_mid, actual_vwap, side) {
+            (Some(arrival), Some(twap), Some(actual), Some(side)) => {
+                let side_multiplier = if side == "buy" { 1.0 } else { -1.0 };
+                let actual_slippage = filled_qty * (actual - arrival);
+                let twap_slippage = filled_qty * (twap - arrival);
+                let shortfall = filled_qty * (actual - twap);
+                Some((
+                    actual_slippage,
+                    twap_slippage,
+                    shortfall,
+                    side_multiplier * (actual / arrival - 1.0) * 10_000.0,
+                    side_multiplier * (twap / arrival - 1.0) * 10_000.0,
+                    side_multiplier * (actual / twap - 1.0) * 10_000.0,
+                ))
+            }
+            _ => None,
+        };
         let row = SymbolUpdateCost {
             symbol,
             template_qty: template,
@@ -453,9 +557,17 @@ fn cost_for_account(
             actual_cost_before_fee_usdt: actual_cost,
             estimated_trading_fee_usdt: estimated_fee,
             actual_cost_after_fee_usdt: actual_cost_after_fee,
+            side,
+            actual_price_slippage_usdt: comparable.map(|value| value.0),
+            twap_price_slippage_on_filled_usdt: comparable.map(|value| value.1),
+            shortfall_vs_twap_usdt: comparable.map(|value| value.2),
+            actual_slippage_bps: comparable.map(|value| value.3),
+            twap_slippage_bps: comparable.map(|value| value.4),
+            shortfall_vs_twap_bps: comparable.map(|value| value.5),
         };
         totals.intended_qty += row.intended_qty;
         totals.filled_qty += row.filled_qty;
+        totals.actual_fill_count = totals.actual_fill_count.saturating_add(row.fill_count);
         totals.arrival_notional_usdt += row.arrival_notional_usdt.unwrap_or(0.0);
         totals.twap_notional_usdt += row.twap_notional_usdt.unwrap_or(0.0);
         totals.actual_notional_usdt += row.actual_notional_usdt.unwrap_or(0.0);
@@ -464,6 +576,22 @@ fn cost_for_account(
         totals.estimated_trading_fee_usdt += row.estimated_trading_fee_usdt;
         totals.actual_cost_after_fee_usdt =
             totals.actual_cost_before_fee_usdt + totals.estimated_trading_fee_usdt;
+        if let (Some(actual), Some(twap), Some(shortfall), Some(arrival), Some(twap_mid)) = (
+            row.actual_price_slippage_usdt,
+            row.twap_price_slippage_on_filled_usdt,
+            row.shortfall_vs_twap_usdt,
+            row.arrival_mid,
+            row.twap_mid,
+        ) {
+            totals.comparable_fill_count =
+                totals.comparable_fill_count.saturating_add(row.fill_count);
+            totals.comparable_arrival_notional_usdt += row.filled_qty.abs() * arrival;
+            totals.comparable_twap_notional_usdt += row.filled_qty.abs() * twap_mid;
+            totals.actual_price_slippage_usdt += actual;
+            totals.twap_price_slippage_on_filled_usdt += twap;
+            totals.shortfall_vs_twap_usdt += shortfall;
+            totals.refresh_price_bps();
+        }
         if include_details {
             rows.push(row);
         }
@@ -613,10 +741,14 @@ fn needed_twap_ranges(
                 );
             }
             for symbol in symbols {
+                let arrival_start = msg
+                    .received_at_us
+                    .saturating_sub(ARRIVAL_LOOKBACK_US)
+                    .max(1);
                 let entry = ranges
                     .entry((symbol, venue.to_string()))
-                    .or_insert((msg.received_at_us, end));
-                entry.0 = entry.0.min(msg.received_at_us);
+                    .or_insert((arrival_start, end));
+                entry.0 = entry.0.min(arrival_start);
                 entry.1 = entry.1.max(end);
             }
         }
@@ -633,16 +765,18 @@ fn load_twap_bars(twap: &TwapStore, ranges: &TwapRangesByMarket) -> Result<TwapB
     Ok(out)
 }
 
-fn bars_for_window<'a>(
+fn market_bars<'a>(
     bars_by_market: &'a TwapBarsByMarket,
     symbol: &str,
     venue: &str,
-    start_us: i64,
-    end_us: i64,
 ) -> &'a [TwapBar] {
-    let Some(bars) = bars_by_market.get(&(symbol.to_string(), venue.to_string())) else {
-        return &[];
-    };
+    bars_by_market
+        .get(&(symbol.to_string(), venue.to_string()))
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+fn bars_for_window(bars: &[TwapBar], start_us: i64, end_us: i64) -> &[TwapBar] {
     let start = bars.partition_point(|bar| bar.end_ts_us <= start_us);
     let end = bars.partition_point(|bar| bar.end_ts_us <= end_us);
     bars.get(start..end).unwrap_or_default()
@@ -763,6 +897,13 @@ fn minute_twap_buckets(
     (buckets, missing)
 }
 
+fn arrival_mid(bars: &[TwapBar], arrival_ts_us: i64) -> Option<f64> {
+    let end = bars.partition_point(|bar| bar.end_ts_us <= arrival_ts_us);
+    let bar = bars.get(..end)?.last()?;
+    let age = arrival_ts_us.saturating_sub(bar.end_ts_us);
+    (age <= ARRIVAL_MAX_AGE_US).then_some(bar.twap)
+}
+
 fn duration_weighted_mid(buckets: &[MinuteTwapBucket]) -> Option<f64> {
     let mut weighted = 0.0;
     let mut duration = 0.0;
@@ -835,6 +976,19 @@ mod tests {
         )])
     }
 
+    fn append_arrival_bar(twap: &TwapStore, cf: &str, end_ts_us: i64, mid: f64) {
+        twap.append_bar(
+            cf,
+            TwapBar {
+                end_ts_us,
+                twap: mid,
+                sample_count: 1,
+                first_ts_us: end_ts_us - 5_000_000,
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn five_minute_window_uses_five_equal_one_minute_mids() {
         let start = 1_000_000;
@@ -852,12 +1006,31 @@ mod tests {
     }
 
     #[test]
+    fn arrival_uses_latest_completed_five_second_mid() {
+        let start = 1_000_000;
+        let end = start + MINUTE_US;
+        let mut bars = vec![TwapBar {
+            end_ts_us: start,
+            twap: 95.0,
+            sample_count: 1,
+            first_ts_us: start - 5_000_000,
+        }];
+        bars.extend(five_second_bars_for_minutes(start, 1, |_| 100.0));
+        let (buckets, missing) = minute_twap_buckets(&bars, start, end);
+
+        assert_eq!(missing, 0);
+        assert!((arrival_mid(&bars, start).unwrap() - 95.0).abs() < 1e-12);
+        assert!((buckets[0].mid - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn twap_cost_is_intended_qty_times_twap_minus_arrival() {
         let dir = TempDir::new().unwrap();
         let db = ManagerDb::open(dir.path()).unwrap();
         let archive = PositionArchive::open(db.clone()).unwrap();
         let twap = TwapStore::from_db(db, 1).unwrap();
         let cf = twap::column_family_name("BTCUSDT", "binance-futures").unwrap();
+        append_arrival_bar(&twap, &cf, 1_000_000, 100.0);
         for bar in five_second_bars_for_minutes(1_000_000, 5, |minute| 100.0 + minute as f64) {
             twap.append_bar(&cf, bar).unwrap();
         }
@@ -932,6 +1105,7 @@ mod tests {
         let archive = PositionArchive::open(db.clone()).unwrap();
         let twap = TwapStore::from_db(db, 1).unwrap();
         let cf = twap::column_family_name("BTCUSDT", "binance-futures").unwrap();
+        append_arrival_bar(&twap, &cf, 1_000_000, 100.0);
         for bar in five_second_bars_for_minutes(1_000_000, 5, |_| 100.0) {
             twap.append_bar(&cf, bar).unwrap();
         }
@@ -1023,6 +1197,17 @@ mod tests {
         assert!((row.estimated_trading_fee_usdt - 0.03).abs() < 1e-12);
         assert!((row.actual_cost_after_fee_usdt.unwrap() - (102.8 - arrival + 0.03)).abs() < 1e-9);
         assert!((row.twap_cost_before_fee_usdt.unwrap()).abs() < 1e-12);
+        assert_eq!(row.side, Some("buy"));
+        assert!((row.actual_price_slippage_usdt.unwrap() - 2.8).abs() < 1e-9);
+        assert!(row.twap_price_slippage_on_filled_usdt.unwrap().abs() < 1e-12);
+        assert!((row.shortfall_vs_twap_usdt.unwrap() - 2.8).abs() < 1e-9);
+        assert!((row.actual_slippage_bps.unwrap() - 280.0).abs() < 1e-9);
+        assert!(row.twap_slippage_bps.unwrap().abs() < 1e-12);
+        assert!((row.shortfall_vs_twap_bps.unwrap() - 280.0).abs() < 1e-9);
+        assert!((update.totals.actual_price_slippage_usdt - 2.8).abs() < 1e-9);
+        assert!(update.totals.twap_price_slippage_on_filled_usdt.abs() < 1e-12);
+        assert!((update.totals.shortfall_vs_twap_usdt - 2.8).abs() < 1e-9);
+        assert!((update.totals.actual_slippage_bps - 280.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1085,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn report_paginates_latest_updates_without_changing_range_totals() {
+    fn report_excludes_updates_without_fills_from_execution_pages() {
         let dir = TempDir::new().unwrap();
         let db = ManagerDb::open(dir.path()).unwrap();
         let archive = PositionArchive::open(db.clone()).unwrap();
@@ -1148,26 +1333,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(page_one.update_count, 3);
-        assert_eq!(page_one.page_count, 2);
-        assert_eq!(page_one.returned_update_count, 2);
-        assert_eq!(
-            page_one
-                .updates
-                .iter()
-                .map(|update| update.received_at_us)
-                .collect::<Vec<_>>(),
-            vec![2_000_000, 3_000_000]
-        );
-        assert_eq!(page_two.returned_update_count, 1);
-        assert_eq!(page_two.updates[0].received_at_us, 1_000_000);
+        assert_eq!(page_one.execution_update_count, 0);
+        assert_eq!(page_one.page_count, 0);
+        assert_eq!(page_one.returned_update_count, 0);
+        assert!(page_one.updates.is_empty());
+        assert_eq!(page_two.returned_update_count, 0);
+        assert!(page_two.updates.is_empty());
         assert_eq!(page_one.totals.intended_qty, page_two.totals.intended_qty);
         assert_eq!(page_one.totals.intended_qty, 3.0);
-        assert_eq!(page_one.points.len(), 3);
-        assert_eq!(page_one.points.last().unwrap().ts_us, 3_000_000);
-        assert_eq!(
-            page_one.points.last().unwrap().actual_cost_after_fee_usdt,
-            page_one.totals.actual_cost_after_fee_usdt
-        );
+        assert!(page_one.points.is_empty());
+    }
+
+    #[test]
+    fn execution_page_bounds_are_latest_first() {
+        assert_eq!(page_bounds(3, 1, 2), (1, 3));
+        assert_eq!(page_bounds(3, 2, 2), (0, 1));
+        assert_eq!(page_bounds(3, 3, 2), (0, 0));
     }
 
     #[test]
@@ -1179,6 +1360,9 @@ mod tests {
                 actual_cost_before_fee_usdt: index as f64,
                 estimated_trading_fee_usdt: index as f64,
                 actual_cost_after_fee_usdt: index as f64,
+                actual_price_slippage_usdt: index as f64,
+                twap_price_slippage_on_filled_usdt: index as f64,
+                shortfall_vs_twap_usdt: index as f64,
             })
             .collect();
         let sampled = downsample_cost_points(points, 2_000);
