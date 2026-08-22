@@ -1,8 +1,10 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+use tracing::info;
 
 use crate::config::{AppConfig, FeeRates, SourceConfig};
 use crate::model::{
@@ -15,6 +17,14 @@ use crate::snapshot::PositionSnapshot;
 pub type VenueMarkOverrides = BTreeMap<(String, i16), f64>;
 pub type SourceMarkOverrides = BTreeMap<String, VenueMarkOverrides>;
 pub type SourcePositionSnapshots = BTreeMap<String, PositionSnapshot>;
+
+#[derive(Debug)]
+pub struct NavSourceHistory {
+    events: Vec<UniformOrderEvent>,
+    liquidity_by_order: LiquidityByOrder,
+}
+
+pub type NavSourceHistories = BTreeMap<String, NavSourceHistory>;
 
 const NAV_TICK_INTERVAL_US: i64 = 15 * 60 * 1_000_000;
 const BATCH_EXEC_FROM_KEY_PREFIX: &str = "batch_exec:";
@@ -913,11 +923,10 @@ fn liquidity_role_for_event(
         })
 }
 
-fn load_liquidity_by_order(source: &SourceConfig) -> Result<LiquidityByOrder> {
-    let records = rocks_source::read_available_column_families(
-        &source.rocksdb_path,
-        &[TRADE_UPDATES_CF, TRADE_UPDATES_UNMATCHED_CF],
-    )?;
+fn decode_liquidity_by_order(
+    source: &SourceConfig,
+    records: BTreeMap<String, Vec<rocks_source::RawRocksRecord>>,
+) -> Result<LiquidityByOrder> {
     let mut roles = LiquidityByOrder::new();
     for (column_family, records) in records {
         for record in records {
@@ -949,6 +958,79 @@ fn load_liquidity_by_order(source: &SourceConfig) -> Result<LiquidityByOrder> {
         }
     }
     Ok(roles)
+}
+
+fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
+    let read_started = Instant::now();
+    let mut records = rocks_source::read_available_column_families(
+        &source.rocksdb_path,
+        &[
+            crate::model::UNIFORM_ORDERS_CF,
+            TRADE_UPDATES_CF,
+            TRADE_UPDATES_UNMATCHED_CF,
+        ],
+    )?;
+    let rocksdb_read_ms = read_started.elapsed().as_millis();
+    let uniform_records = records
+        .remove(crate::model::UNIFORM_ORDERS_CF)
+        .with_context(|| {
+            format!(
+                "RocksDB {} has no {} column family",
+                source.rocksdb_path.display(),
+                crate::model::UNIFORM_ORDERS_CF
+            )
+        })?;
+    let uniform_record_count = uniform_records.len();
+    let trade_record_count = records.values().map(Vec::len).sum::<usize>();
+
+    let decode_started = Instant::now();
+    let mut events = Vec::with_capacity(uniform_record_count);
+    for record in uniform_records {
+        events.push(
+            decode_uniform_order(&record.key, &record.value).with_context(|| {
+                format!(
+                    "source {} contains an undecodable uniform order at key {:?}",
+                    source.id,
+                    String::from_utf8_lossy(&record.key)
+                )
+            })?,
+        );
+    }
+    let liquidity_by_order = decode_liquidity_by_order(source, records)?;
+    let decode_ms = decode_started.elapsed().as_millis();
+    info!(
+        source_id = source.id,
+        uniform_record_count,
+        trade_record_count,
+        rocksdb_read_ms,
+        decode_ms,
+        "loaded NAV source history"
+    );
+    Ok(NavSourceHistory {
+        events,
+        liquidity_by_order,
+    })
+}
+
+pub fn load_nav_source_histories(
+    config: &AppConfig,
+    selected_source_ids: &[String],
+) -> Result<NavSourceHistories> {
+    let selected = select_sources(config, selected_source_ids)?;
+    let mut histories = NavSourceHistories::new();
+    for source in selected {
+        let history = if source.rocksdb_path.is_dir() {
+            load_source_history(source)
+                .with_context(|| format!("failed to read source {} RocksDB", source.id))?
+        } else {
+            NavSourceHistory {
+                events: Vec::new(),
+                liquidity_by_order: LiquidityByOrder::new(),
+            }
+        };
+        histories.insert(source.id.clone(), history);
+    }
+    Ok(histories)
 }
 
 pub fn estimate_source_events(
@@ -1148,6 +1230,16 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
     request: NavTimelineRequest,
     snapshots: &SourcePositionSnapshots,
 ) -> Result<NavTimelineReport> {
+    let histories = load_nav_source_histories(config, &request.selected_source_ids)?;
+    rebuild_nav_timeline_from_histories_with_snapshots(config, request, snapshots, &histories)
+}
+
+pub fn rebuild_nav_timeline_from_histories_with_snapshots(
+    config: &AppConfig,
+    request: NavTimelineRequest,
+    snapshots: &SourcePositionSnapshots,
+    histories: &NavSourceHistories,
+) -> Result<NavTimelineReport> {
     if request.end_ts_us < 0 {
         bail!("end timestamp must not be negative");
     }
@@ -1174,35 +1266,14 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
 
     for source in selected {
         let fee_rates = source.nav_fee_rates()?;
-        let records = if source.rocksdb_path.is_dir() {
-            rocks_source::read_uniform_orders(&source.rocksdb_path, 0, i64::MAX)
-                .with_context(|| format!("failed to read source {} RocksDB", source.id))?
-        } else {
-            Vec::new()
-        };
-        let mut events = Vec::with_capacity(records.len());
-        for record in records {
-            events.push(
-                decode_uniform_order(&record.key, &record.value).with_context(|| {
-                    format!(
-                        "source {} contains an undecodable uniform order at key {:?}",
-                        source.id,
-                        String::from_utf8_lossy(&record.key)
-                    )
-                })?,
-            );
-        }
-        let liquidity_by_order = if source.rocksdb_path.is_dir() {
-            load_liquidity_by_order(source)
-                .with_context(|| format!("failed to load source {} liquidity roles", source.id))?
-        } else {
-            LiquidityByOrder::new()
-        };
+        let history = histories
+            .get(&source.id)
+            .with_context(|| format!("NAV history is missing selected source {}", source.id))?;
         let prepared = prepare_source_events(
             source,
-            events,
+            history.events.clone(),
             snapshots.get(&source.id),
-            &liquidity_by_order,
+            &history.liquidity_by_order,
         )
         .with_context(|| format!("failed to prepare source {} timeline", source.id))?;
         let first_fill_ts_us = prepared
@@ -1504,6 +1575,38 @@ fn rebuild_nav_from_rocksdb_with_inputs(
     mark_overrides: &SourceMarkOverrides,
     snapshots: &SourcePositionSnapshots,
 ) -> Result<NavReport> {
+    let histories = load_nav_source_histories(config, selected_source_ids)?;
+    rebuild_nav_from_histories_with_inputs(
+        config,
+        selected_source_ids,
+        mark_overrides,
+        snapshots,
+        &histories,
+    )
+}
+
+pub fn rebuild_nav_from_histories_with_snapshots(
+    config: &AppConfig,
+    selected_source_ids: &[String],
+    snapshots: &SourcePositionSnapshots,
+    histories: &NavSourceHistories,
+) -> Result<NavReport> {
+    rebuild_nav_from_histories_with_inputs(
+        config,
+        selected_source_ids,
+        &SourceMarkOverrides::new(),
+        snapshots,
+        histories,
+    )
+}
+
+fn rebuild_nav_from_histories_with_inputs(
+    config: &AppConfig,
+    selected_source_ids: &[String],
+    mark_overrides: &SourceMarkOverrides,
+    snapshots: &SourcePositionSnapshots,
+    histories: &NavSourceHistories,
+) -> Result<NavReport> {
     let selected = select_sources(config, selected_source_ids)?;
     let selected_ids = selected
         .iter()
@@ -1523,36 +1626,16 @@ fn rebuild_nav_from_rocksdb_with_inputs(
     let empty_marks = VenueMarkOverrides::new();
     let mut sources = Vec::with_capacity(selected.len());
     for source in selected {
-        let records = if source.rocksdb_path.is_dir() {
-            rocks_source::read_uniform_orders(&source.rocksdb_path, 0, i64::MAX)
-                .with_context(|| format!("failed to read source {} RocksDB", source.id))?
-        } else {
-            Vec::new()
-        };
-        let mut events = Vec::with_capacity(records.len());
-        for record in records {
-            let event = decode_uniform_order(&record.key, &record.value).with_context(|| {
-                format!(
-                    "source {} contains an undecodable uniform order at key {:?}",
-                    source.id,
-                    String::from_utf8_lossy(&record.key)
-                )
-            })?;
-            events.push(event);
-        }
-        let liquidity_by_order = if source.rocksdb_path.is_dir() {
-            load_liquidity_by_order(source)
-                .with_context(|| format!("failed to load source {} liquidity roles", source.id))?
-        } else {
-            LiquidityByOrder::new()
-        };
+        let history = histories
+            .get(&source.id)
+            .with_context(|| format!("NAV history is missing selected source {}", source.id))?;
         let source_marks = mark_overrides.get(&source.id).unwrap_or(&empty_marks);
         sources.push(estimate_source_events_with_snapshot_and_liquidity(
             source,
-            events,
+            history.events.clone(),
             source_marks,
             snapshots.get(&source.id),
-            &liquidity_by_order,
+            &history.liquidity_by_order,
         )?);
     }
     Ok(aggregate_source_reports(sources))
@@ -2870,6 +2953,28 @@ mod tests {
                 1_810 * 1_000_000,
             ]
         );
+    }
+
+    #[test]
+    fn cached_history_rebuild_does_not_reopen_rocksdb() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("trade01");
+        let moved_path = temp.path().join("trade01-moved");
+        write_events(&path, &[event_at(1, 100, "BTCUSDT", 1, 1, 100.0, 1.0)]);
+        let config = app_config(vec![source_at("trade01", &path, 0.0)]);
+        let histories = load_nav_source_histories(&config, &[]).unwrap();
+        std::fs::rename(&path, &moved_path).unwrap();
+
+        let report = rebuild_nav_timeline_from_histories_with_snapshots(
+            &config,
+            timeline_request(100, 200, Vec::new(), Vec::new()),
+            &SourcePositionSnapshots::new(),
+            &histories,
+        )
+        .unwrap();
+
+        assert_eq!(report.summary.fill_count, 1);
+        assert_eq!(report.available_symbols, vec!["BTCUSDT".to_string()]);
     }
 
     #[test]

@@ -77,8 +77,16 @@ pub struct HealthResponse {
 #[derive(Debug)]
 struct CacheState {
     dashboard: DashboardSnapshot,
+    nav_histories: Arc<nav::NavSourceHistories>,
+    position_snapshots: Arc<nav::SourcePositionSnapshots>,
     last_attempt_at_us: i64,
     last_refresh_error: Option<String>,
+}
+
+struct DashboardBuild {
+    dashboard: DashboardSnapshot,
+    nav_histories: Arc<nav::NavSourceHistories>,
+    position_snapshots: Arc<nav::SourcePositionSnapshots>,
 }
 
 #[derive(Clone)]
@@ -207,11 +215,12 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         config.twap.retain_days.max(1),
     )?);
     crate::twap::spawn_with_db(pool.clone(), config.twap.clone(), manager_db);
-    let first_dashboard =
-        build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await?;
+    let first_build = build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await?;
     let cache = Arc::new(RwLock::new(CacheState {
-        last_attempt_at_us: first_dashboard.generated_at_us,
-        dashboard: first_dashboard,
+        last_attempt_at_us: first_build.dashboard.generated_at_us,
+        dashboard: first_build.dashboard,
+        nav_histories: first_build.nav_histories,
+        position_snapshots: first_build.position_snapshots,
         last_refresh_error: None,
     }));
 
@@ -373,10 +382,9 @@ async fn timeline(
     Query(query): Query<TimelineQuery>,
 ) -> Result<Response, ApiError> {
     let selected_source_ids = parse_csv(query.source_ids.as_deref(), false);
-    let selected_sources = match resolve_sources(&state.config, &selected_source_ids) {
-        Ok(sources) => sources,
-        Err(message) => return Ok(bad_request(message)),
-    };
+    if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
+        return Ok(bad_request(message));
+    }
     let selected_symbols = parse_csv(query.symbols.as_deref(), true);
     let start_ts_us = match query.start_ms {
         Some(value) => match milliseconds_to_microseconds(value, "startMs") {
@@ -399,14 +407,14 @@ async fn timeline(
     }
 
     let started = Instant::now();
-    let mut snapshots = nav::SourcePositionSnapshots::new();
-    for source in selected_sources {
-        if let Some(snapshot) =
-            postgres::load_latest_position_snapshot(&state.pool, &source.id).await?
-        {
-            snapshots.insert(source.id.clone(), snapshot);
-        }
-    }
+    let (histories, snapshots, data_generated_at_us) = {
+        let cache = state.cache.read().await;
+        (
+            Arc::clone(&cache.nav_histories),
+            Arc::clone(&cache.position_snapshots),
+            cache.dashboard.generated_at_us,
+        )
+    };
     let fee_rates = postgres::load_fee_rates(&state.pool).await?;
     let request = nav::NavTimelineRequest {
         start_ts_us,
@@ -420,7 +428,9 @@ async fn timeline(
         .clone()
         .with_fee_rates(&fee_rates);
     let report = tokio::task::spawn_blocking(move || {
-        nav::rebuild_nav_timeline_from_rocksdb_with_snapshots(&config, request, &snapshots)
+        nav::rebuild_nav_timeline_from_histories_with_snapshots(
+            &config, request, &snapshots, &histories,
+        )
     })
     .await
     .context("CTA timeline rebuild task failed")?;
@@ -436,7 +446,7 @@ async fn timeline(
     Ok((
         NO_STORE,
         Json(TimelineSnapshot {
-            generated_at_us: unix_now_us(),
+            generated_at_us: data_generated_at_us,
             generation_duration_ms,
             report,
         }),
@@ -911,7 +921,7 @@ async fn save_account_fee_rates(
 
 async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
     let attempted_at_us = unix_now_us();
-    let dashboard = build_dashboard(
+    let build = build_dashboard(
         &state.config,
         &state.pool,
         state.refresh_interval_secs,
@@ -920,7 +930,9 @@ async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
     .await?;
     let mut cache = state.cache.write().await;
     cache.last_attempt_at_us = attempted_at_us;
-    cache.dashboard = dashboard;
+    cache.dashboard = build.dashboard;
+    cache.nav_histories = build.nav_histories;
+    cache.position_snapshots = build.position_snapshots;
     cache.last_refresh_error = None;
     Ok(())
 }
@@ -1505,16 +1517,18 @@ async fn refresh_loop(
         interval.tick().await;
         let attempted_at_us = unix_now_us();
         match build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await {
-            Ok(dashboard) => {
+            Ok(build) => {
                 info!(
-                    source_count = dashboard.report.source_count,
-                    fill_count = dashboard.report.aggregate.totals.fill_count,
-                    duration_ms = dashboard.generation_duration_ms,
+                    source_count = build.dashboard.report.source_count,
+                    fill_count = build.dashboard.report.aggregate.totals.fill_count,
+                    duration_ms = build.dashboard.generation_duration_ms,
                     "refreshed CTA dashboard"
                 );
                 let mut state = cache.write().await;
                 state.last_attempt_at_us = attempted_at_us;
-                state.dashboard = dashboard;
+                state.dashboard = build.dashboard;
+                state.nav_histories = build.nav_histories;
+                state.position_snapshots = build.position_snapshots;
                 state.last_refresh_error = None;
             }
             Err(error) => {
@@ -1532,7 +1546,7 @@ async fn build_dashboard(
     pool: &PgPool,
     refresh_interval_secs: u64,
     live_equity: &LiveEquityHub,
-) -> Result<DashboardSnapshot> {
+) -> Result<DashboardBuild> {
     let started = Instant::now();
     let now_ms = unix_now_ms();
     let fee_rates = postgres::load_fee_rates(pool).await?;
@@ -1563,19 +1577,30 @@ async fn build_dashboard(
         }
     }
 
-    let report = tokio::task::spawn_blocking(move || {
-        nav::rebuild_nav_from_rocksdb_with_snapshots(&nav_config, &[], &snapshots)
+    let (report, histories, snapshots) = tokio::task::spawn_blocking(move || {
+        let histories = nav::load_nav_source_histories(&nav_config, &[])?;
+        let report = nav::rebuild_nav_from_histories_with_snapshots(
+            &nav_config,
+            &[],
+            &snapshots,
+            &histories,
+        )?;
+        anyhow::Ok((report, histories, snapshots))
     })
     .await
     .context("CTA dashboard rebuild task failed")??;
     let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
 
-    Ok(DashboardSnapshot {
-        generated_at_us: unix_now_us(),
-        generation_duration_ms: duration_ms,
-        refresh_interval_secs,
-        accounts,
-        report,
+    Ok(DashboardBuild {
+        dashboard: DashboardSnapshot {
+            generated_at_us: unix_now_us(),
+            generation_duration_ms: duration_ms,
+            refresh_interval_secs,
+            accounts,
+            report,
+        },
+        nav_histories: Arc::new(histories),
+        position_snapshots: Arc::new(snapshots),
     })
 }
 

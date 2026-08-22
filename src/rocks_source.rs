@@ -12,6 +12,13 @@ pub struct RawRocksRecord {
     pub value: Vec<u8>,
 }
 
+fn read_only_options() -> Options {
+    let mut options = Options::default();
+    options.create_if_missing(false);
+    options.create_missing_column_families(false);
+    options
+}
+
 pub fn read_all_column_families(
     path: &Path,
     requested_column_families: &[&str],
@@ -20,9 +27,7 @@ pub fn read_all_column_families(
         bail!("RocksDB path is not a directory: {}", path.display());
     }
 
-    let mut options = Options::default();
-    options.create_if_missing(false);
-    options.create_missing_column_families(false);
+    let options = read_only_options();
     let column_families = DB::list_cf(&options, path)
         .with_context(|| format!("failed to list column families in {}", path.display()))?;
     for requested in requested_column_families {
@@ -64,9 +69,7 @@ pub fn read_available_column_families(
         bail!("RocksDB path is not a directory: {}", path.display());
     }
 
-    let mut options = Options::default();
-    options.create_if_missing(false);
-    options.create_missing_column_families(false);
+    let options = read_only_options();
     let column_families = DB::list_cf(&options, path)
         .with_context(|| format!("failed to list column families in {}", path.display()))?;
     let db = DB::open_cf_for_read_only(&options, path, column_families.clone(), false)
@@ -108,9 +111,7 @@ pub fn read_uniform_orders(
         bail!("RocksDB path is not a directory: {}", path.display());
     }
 
-    let mut options = Options::default();
-    options.create_if_missing(false);
-    options.create_missing_column_families(false);
+    let options = read_only_options();
     let column_families = DB::list_cf(&options, path)
         .with_context(|| format!("failed to list column families in {}", path.display()))?;
     if !column_families.iter().any(|name| name == UNIFORM_ORDERS_CF) {
