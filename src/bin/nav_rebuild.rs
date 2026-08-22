@@ -37,8 +37,8 @@ async fn main() -> Result<()> {
     } else {
         let database_url = config.database_url()?;
         let pool = postgres::connect(&database_url, config.database.max_connections).await?;
-        let fee_rates = postgres::load_estimated_fee_rates(&pool).await?;
-        let config = config.with_estimated_fee_rates(&fee_rates);
+        let fee_rates = postgres::load_fee_rates(&pool).await?;
+        let config = config.with_fee_rates(&fee_rates);
         let requested = args
             .source_ids
             .iter()

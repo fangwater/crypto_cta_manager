@@ -25,9 +25,12 @@ set +a
 
 The default URL variable is `CRYPTO_CTA_LOCAL_DATABASE_URL`.
 
-Set `estimated_fee_rate` on every source used for NAV reconstruction. The value
-is a decimal rate applied to every fill's `price * amount_update`; for example,
-`0.0004` is 4 bps. The order-ingestion process does not require this setting.
+Set `maker_fee_rate` and `taker_fee_rate` on every source used for NAV
+reconstruction. Both accept any finite decimal rate; negative values represent
+rebates. Each fill uses `price * amount_update * role_fee_rate`. Liquidity role
+comes from the exchange trade update `is_maker` flag, with order type used only
+when raw role data is unavailable. The order-ingestion process does not require
+these settings.
 Set an explicit one-segment `gateway_prefix`, such as `/exec_trade01`, for each
 account whose Exec Viz and Config services are exposed through the unified
 gateway. The dashboard never derives service paths from account names.
@@ -178,15 +181,24 @@ fixed for that target generation. The Manager form shows the corresponding
 maximum maker-path estimate:
 `(max_batch - 1) * batch_interval_ms + (max_maker_requotes + 1) * maker_timeout_ms`.
 
-Build the API and frontend locally:
+Build the API and frontend locally, then deploy one independent host:
 
 ```bash
-cargo build --release --bin cta_web
-cd frontend
-npm install
-npm run lint
-npm run build
+# compile here, then upload to one physical host
+scripts/deploy_host.sh --target el01
+scripts/deploy_host.sh --target jp-meta
+
+# or compile first and reuse the artifacts
+cargo build --release --bin cta_web --bin nav_rebuild --bin nav_snapshot
+cd frontend && npm install && npm run lint && npm run build
+../scripts/deploy_host.sh --target el01 --skip-build
 ```
+
+`el01` and `jp-meta` are two physical machines with two independent
+stacks. The same local artifacts can be copied to either host. They do
+not share PostgreSQL, Redis, Nginx, Manager RocksDB, or Exec accounts.
+The live host `cta-manager.toml` is never overwritten; a
+`cta-manager.toml.template` is uploaded beside it.
 
 The known Exec deployment uses these loopback-only endpoints:
 
@@ -282,10 +294,11 @@ curl --noproxy '*' -sS -X PUT \
   -H 'Content-Type: application/json' \
   -d '{"symbol":"BTCUSDT","contract_leverage":5}'
 
-# jp-meta uses the same paths on http://13.115.227.29:4191/manager/api/
-python3 manager_publish_client.py get-contract-leverage binance_exec_trade01 BTCUSDT
-python3 manager_publish_client.py set-contract-leverage binance_exec_trade01 BTCUSDT 5
-python3 manager_publish_client.py get-execution-cost --window-sec 300
+# jp-meta is a different physical host. Choose it explicitly.
+python3 manager_publish_client.py --target jp-meta get-contract-leverage binance_exec_trade01 BTCUSDT
+python3 manager_publish_client.py --target jp-meta set-contract-leverage binance_exec_trade01 BTCUSDT 5
+python3 manager_publish_client.py --target jp-meta get-execution-cost --window-sec 300
+python3 manager_publish_client.py --target el01 get-contract-leverage binance_exec_trade01 BTCUSDT
 ```
 
 External push scripts only POST the catalog

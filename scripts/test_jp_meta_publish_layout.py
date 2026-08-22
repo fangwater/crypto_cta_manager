@@ -69,6 +69,26 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
         self.assertNotIn("/home/ubuntu/", toml)
         self.assertNotIn("/home/ubuntu/", web)
 
+    def test_jp_meta_trade01_alias_is_local_to_that_host(self) -> None:
+        jp = (JP / "cta-manager.toml").read_text(encoding="utf-8")
+        el01 = (EL01 / "cta-manager.toml").read_text(encoding="utf-8")
+        self.assertIn('alias = "rpc_hf_cta"', jp)
+        self.assertNotIn("rpc_hf_cta", el01)
+        self.assertIn('alias = "shaokai"', el01)
+        self.assertNotIn("shaokai", jp)
+
+    def test_deploy_script_keeps_hosts_independent(self) -> None:
+        script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
+        self.assertIn('--target el01|jp-meta', script)
+        self.assertIn('SSH_HOST="cta_exec"', script)
+        self.assertIn('SSH_HOST="jp-meta-elvpn"', script)
+        self.assertIn("/home/el01/crypto_cta_manager", script)
+        self.assertIn("/home/ubuntu/crypto_cta_manager", script)
+        self.assertIn("cta-manager.toml.template", script)
+        self.assertIn("RESTART_NGINX=0", script)
+        self.assertIn("cargo build --release --bin cta_web", script)
+        self.assertIn("frontend/dist/", script)
+
 
 if __name__ == "__main__":
     unittest.main()

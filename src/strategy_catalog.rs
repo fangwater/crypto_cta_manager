@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use sqlx::postgres::PgPool;
 
+use crate::config::{FeeRates, validate_fee_rates};
 use crate::order_config::{OrderParameters, TargetPosition, validate_strategy_name};
 
 pub const DEFAULT_CONTRACT_LEVERAGE: i32 = 5;
@@ -40,12 +41,20 @@ pub struct AccountStudio {
     pub source_id: String,
     /// NAV estimated trading fee rate as a fraction (e.g. 0.0004 = 4 bps).
     pub estimated_fee_rate: f64,
+    pub maker_fee_rate: f64,
+    pub taker_fee_rate: f64,
     pub bindings: Vec<AccountBinding>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SaveEstimatedFeeRateRequest {
     pub estimated_fee_rate: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveFeeRatesRequest {
+    pub maker_fee_rate: f64,
+    pub taker_fee_rate: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,17 +147,14 @@ pub fn validate_contract_leverage(value: i32) -> Result<(), String> {
 }
 
 pub fn validate_estimated_fee_rate(value: f64) -> Result<(), String> {
-    if !value.is_finite() || value < 0.0 {
-        return Err("estimated_fee_rate must be finite and nonnegative".to_string());
-    }
-    // Guard against accidental bps input like 4 instead of 0.0004.
-    if value > 0.05 {
-        return Err(
-            "estimated_fee_rate looks too large (>5%); use a fraction such as 0.0004 for 4 bps"
-                .to_string(),
-        );
+    if !value.is_finite() {
+        return Err("estimated_fee_rate must be finite".to_string());
     }
     Ok(())
+}
+
+pub fn validate_account_fee_rates(maker: f64, taker: f64) -> Result<(), String> {
+    validate_fee_rates(FeeRates { maker, taker }).map_err(|error| error.to_string())
 }
 
 pub fn validate_contract_symbol(symbol: &str) -> Result<(), String> {
@@ -173,12 +179,14 @@ impl PositionStrategy {
 impl AccountStudio {
     pub fn from_parts(
         source_id: String,
-        estimated_fee_rate: f64,
+        fee_rates: FeeRates,
         bindings: Vec<AccountBinding>,
     ) -> Self {
         Self {
             source_id,
-            estimated_fee_rate,
+            estimated_fee_rate: fee_rates.taker,
+            maker_fee_rate: fee_rates.maker,
+            taker_fee_rate: fee_rates.taker,
             bindings,
         }
     }
@@ -407,14 +415,14 @@ pub async fn delete_order_strategy(pool: &PgPool, strategy_name: &str) -> Result
 
 pub async fn load_account_studio(pool: &PgPool, source_id: &str) -> Result<AccountStudio> {
     let bindings = list_bindings(pool, source_id).await?;
-    let estimated_fee_rate = crate::postgres::load_estimated_fee_rate(pool, source_id)
+    let fee_rates = crate::postgres::load_fee_rate(pool, source_id)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!("source {source_id} is not registered in cta_order_sources")
         })?;
     Ok(AccountStudio::from_parts(
         source_id.to_string(),
-        estimated_fee_rate,
+        fee_rates,
         bindings,
     ))
 }
@@ -729,14 +737,15 @@ mod tests {
     }
 
     #[test]
-    fn estimated_fee_rate_must_be_a_nonnegative_fraction() {
+    fn fee_rates_accept_any_finite_fraction() {
         assert!(validate_estimated_fee_rate(0.0).is_ok());
         assert!(validate_estimated_fee_rate(0.0004).is_ok());
-        assert!(validate_estimated_fee_rate(0.05).is_ok());
-        assert!(validate_estimated_fee_rate(-0.0001).is_err());
+        assert!(validate_estimated_fee_rate(-4.0).is_ok());
+        assert!(validate_estimated_fee_rate(4.0).is_ok());
         assert!(validate_estimated_fee_rate(f64::NAN).is_err());
-        assert!(validate_estimated_fee_rate(0.0500001).is_err());
-        assert!(validate_estimated_fee_rate(4.0).is_err());
+        assert!(validate_estimated_fee_rate(f64::INFINITY).is_err());
+        assert!(validate_account_fee_rates(-0.00005, 0.000146).is_ok());
+        assert!(validate_account_fee_rates(-100.0, -200.0).is_ok());
     }
 
     #[test]

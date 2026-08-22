@@ -82,8 +82,12 @@ must not turn `el_dev` into the only durable copy for an Exec account.
 later local `uniform_orders` RocksDB history. PostgreSQL is only the immutable
 recomputation anchor; order events remain sourced directly from RocksDB. A pure
 RocksDB diagnostic mode may bypass snapshots. Positive `amount_update` values
-are base-quantity fills, and each estimated fee is
-`price * amount_update * estimated_fee_rate`.
+are base-quantity fills. Estimated fees use
+`price * amount_update * maker_fee_rate` for maker fills and
+`price * amount_update * taker_fee_rate` for taker fills. Rates may be any
+finite decimal; negative values represent rebates. Resolve liquidity from the
+exchange trade update `is_maker` flag and use order type only as a fallback when
+raw role data is unavailable.
 
 All venue types use quantity FIFO. Keep FIFO state isolated by `source_id`,
 symbol, and event venue; never close a position with a fill from another account
@@ -315,7 +319,11 @@ Redis optimistic concurrency, and a PostgreSQL audit row in
 The replacement push client is `scripts/manager_publish_client.py`, served at
 `GET /api/manager_publish_client.py` (`/manager/api/manager_publish_client.py`
 through Nginx). It writes the catalog; bound accounts are republished by
-Manager. It never talks to Redis.
+Manager. It never talks to Redis. el01 and jp-meta are independent physical
+hosts. The client requires `--target el01` or `--target jp-meta` (or an
+explicit `--url` / `MANAGER_API_URL`). Build locally, then deploy one host
+with `scripts/deploy_host.sh --target el01|jp-meta`. Do not overwrite the
+live host toml; the script uploads `cta-manager.toml.template` beside it.
 
 End-to-end HTTP checks from both `el_dev` and the development host returned
 `200` for Manager, Manager API, Exec Viz, snapshot, and Config. The development

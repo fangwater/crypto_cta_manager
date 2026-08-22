@@ -15,7 +15,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use crate::account_ipc::LiveEquityHub;
-use crate::config::{AppConfig, SourceConfig};
+use crate::config::{AppConfig, FeeRates, SourceConfig};
 use crate::manager_db::ManagerDb;
 use crate::order_config::{
     ExecConfigClient, ExecConfigError, OrderStrategyView, SaveOrderParametersRequest,
@@ -26,7 +26,8 @@ use crate::redis_runtime::RedisRuntime;
 use crate::reload_notify::ReloadNotifyHub;
 use crate::strategy_catalog::{
     self, SaveBindingRequest, SaveBindingSharesRequest, SaveEstimatedFeeRateRequest,
-    SaveOrderStrategyRequest, SavePositionStrategyRequest, SaveSymbolContractLeverageRequest,
+    SaveFeeRatesRequest, SaveOrderStrategyRequest, SavePositionStrategyRequest,
+    SaveSymbolContractLeverageRequest,
 };
 use crate::twap::TwapStore;
 use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
@@ -92,6 +93,7 @@ struct WebState {
     position_archive: Arc<PositionArchive>,
     twap: Arc<TwapStore>,
     viz_snapshot: VizSnapshotClient,
+    refresh_interval_secs: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -272,6 +274,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             put(save_account_estimated_fee_rate),
         )
         .route(
+            "/api/catalog/accounts/{source_id}/fee-rates",
+            put(save_account_fee_rates),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/contract-leverage",
             get(get_account_symbol_contract_leverage).put(save_account_symbol_contract_leverage),
         )
@@ -302,6 +308,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             position_archive,
             twap,
             viz_snapshot,
+            refresh_interval_secs,
         })
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind)
@@ -400,7 +407,7 @@ async fn timeline(
             snapshots.insert(source.id.clone(), snapshot);
         }
     }
-    let fee_rates = postgres::load_estimated_fee_rates(&state.pool).await?;
+    let fee_rates = postgres::load_fee_rates(&state.pool).await?;
     let request = nav::NavTimelineRequest {
         start_ts_us,
         end_ts_us,
@@ -411,7 +418,7 @@ async fn timeline(
     let config = Arc::clone(&state.config)
         .as_ref()
         .clone()
-        .with_estimated_fee_rates(&fee_rates);
+        .with_fee_rates(&fee_rates);
     let report = tokio::task::spawn_blocking(move || {
         nav::rebuild_nav_timeline_from_rocksdb_with_snapshots(&config, request, &snapshots)
     })
@@ -834,6 +841,10 @@ async fn save_account_estimated_fee_rate(
                 estimated_fee_rate = request.estimated_fee_rate,
                 "account estimated fee rate updated"
             );
+            if let Err(error) = refresh_dashboard_cache(&state).await {
+                error!(source_id, error = %error, "dashboard refresh after fee update failed");
+                return Ok(catalog_error(error));
+            }
             match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
                 Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
                 Err(error) => Ok(catalog_error(error)),
@@ -849,6 +860,69 @@ async fn save_account_estimated_fee_rate(
             Ok(catalog_error(error))
         }
     }
+}
+
+async fn save_account_fee_rates(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Json(request): Json<SaveFeeRatesRequest>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+        return Ok(response);
+    }
+    if let Err(error) =
+        strategy_catalog::validate_account_fee_rates(request.maker_fee_rate, request.taker_fee_rate)
+    {
+        return Ok(bad_request(error));
+    }
+    let rates = FeeRates {
+        maker: request.maker_fee_rate,
+        taker: request.taker_fee_rate,
+    };
+    match postgres::save_fee_rates(&state.pool, &source_id, rates).await {
+        Ok(()) => {
+            info!(
+                source_id,
+                maker_fee_rate = rates.maker,
+                taker_fee_rate = rates.taker,
+                "account maker/taker fee rates updated"
+            );
+            if let Err(error) = refresh_dashboard_cache(&state).await {
+                error!(source_id, error = %error, "dashboard refresh after fee update failed");
+                return Ok(catalog_error(error));
+            }
+            match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
+                Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+                Err(error) => Ok(catalog_error(error)),
+            }
+        }
+        Err(error) => {
+            error!(
+                source_id,
+                maker_fee_rate = rates.maker,
+                taker_fee_rate = rates.taker,
+                error = %error,
+                "account maker/taker fee rate update failed"
+            );
+            Ok(catalog_error(error))
+        }
+    }
+}
+
+async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
+    let attempted_at_us = unix_now_us();
+    let dashboard = build_dashboard(
+        &state.config,
+        &state.pool,
+        state.refresh_interval_secs,
+        &state.live_equity,
+    )
+    .await?;
+    let mut cache = state.cache.write().await;
+    cache.last_attempt_at_us = attempted_at_us;
+    cache.dashboard = dashboard;
+    cache.last_refresh_error = None;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1461,8 +1535,8 @@ async fn build_dashboard(
 ) -> Result<DashboardSnapshot> {
     let started = Instant::now();
     let now_ms = unix_now_ms();
-    let fee_rates = postgres::load_estimated_fee_rates(pool).await?;
-    let nav_config = config.clone().with_estimated_fee_rates(&fee_rates);
+    let fee_rates = postgres::load_fee_rates(pool).await?;
+    let nav_config = config.clone().with_fee_rates(&fee_rates);
     let accounts = config
         .sources
         .iter()
@@ -1592,6 +1666,8 @@ mod tests {
                 start_ts_us: None,
                 poll_interval_secs: None,
                 estimated_fee_rate: None,
+                maker_fee_rate: None,
+                taker_fee_rate: None,
                 gateway_prefix: Some("/exec_trade01".into()),
                 exec_config_url: Some("http://127.0.0.1:18161/".into()),
                 exec_viz_url: None,
@@ -1623,6 +1699,9 @@ mod tests {
         assert!(script.contains("catalog/accounts/"));
         assert!(script.contains("/bindings/"));
         assert!(script.contains("/publish"));
+        assert!(script.contains(r#""el01": "http://172.16.30.42:10041/manager/api/""#));
+        assert!(script.contains(r#""jp-meta": "http://13.115.227.29:4191/manager/api/""#));
+        assert!(script.contains("--target"));
         assert!(!script.contains("/exec_trade01/config/api/strategy"));
         assert_eq!(
             MANAGER_PUBLISH_CLIENT,

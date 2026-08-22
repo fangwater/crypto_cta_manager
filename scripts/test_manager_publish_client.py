@@ -47,15 +47,30 @@ class ManagerPublishClientTests(unittest.TestCase):
             CLIENT.publish_path("binance_exec_trade01", "CTA_A"),
             "catalog/accounts/binance_exec_trade01/bindings/CTA_A/publish",
         )
-        self.assertIn(
-            "/manager/api/",
-            CLIENT.api_url(CLIENT.DEFAULT_BASE_URL, CLIENT.position_path()),
-        )
-        self.assertNotIn("/exec_trade01/config/", CLIENT.DEFAULT_BASE_URL)
+        el01 = CLIENT.resolve_base_url(target="el01")
+        jp_meta = CLIENT.resolve_base_url(target="jp-meta")
+        self.assertEqual(el01, "http://172.16.30.42:10041/manager/api/")
+        self.assertEqual(jp_meta, "http://13.115.227.29:4191/manager/api/")
+        self.assertNotEqual(el01, jp_meta)
+        self.assertIn("/manager/api/", CLIENT.api_url(el01, CLIENT.position_path()))
+        self.assertIn("/manager/api/", CLIENT.api_url(jp_meta, CLIENT.position_path()))
+        self.assertNotIn("/exec_trade01/config/", el01)
+        self.assertNotIn("/exec_trade01/config/", jp_meta)
         self.assertIn(
             "/manager/api/catalog/execution-cost",
-            CLIENT.api_url(CLIENT.DEFAULT_BASE_URL, "catalog/execution-cost"),
+            CLIENT.api_url(el01, "catalog/execution-cost"),
         )
+
+    def test_requires_explicit_host_target(self) -> None:
+        with self.assertRaisesRegex(ValueError, "--target"):
+            CLIENT.resolve_base_url()
+        with self.assertRaisesRegex(ValueError, "cannot be used together"):
+            CLIENT.resolve_base_url(url="http://127.0.0.1:18201/api/", target="el01")
+        with self.assertRaisesRegex(ValueError, "one of"):
+            CLIENT.resolve_base_url(target="el_dev")
+
+    def test_cli_rejects_missing_target(self) -> None:
+        self.assertEqual(CLIENT.main(["get-position"]), 1)
 
     def test_put_position_hits_catalog_only(self) -> None:
         seen: list[dict[str, Any]] = []

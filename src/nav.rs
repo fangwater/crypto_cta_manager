@@ -4,8 +4,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::config::{AppConfig, SourceConfig};
-use crate::model::{UniformOrderEvent, decode_uniform_order, venue_name};
+use crate::config::{AppConfig, FeeRates, SourceConfig};
+use crate::model::{
+    TRADE_UPDATES_CF, TRADE_UPDATES_UNMATCHED_CF, UniformOrderEvent, decode_trade_update,
+    decode_uniform_order, venue_name,
+};
 use crate::rocks_source;
 use crate::snapshot::PositionSnapshot;
 
@@ -22,6 +25,12 @@ const UNATTRIBUTED_STRATEGY: &str = "__unattributed__";
 pub struct NavTotals {
     pub fill_count: u64,
     pub volume_quote: f64,
+    pub maker_fill_count: u64,
+    pub maker_volume_quote: f64,
+    pub taker_fill_count: u64,
+    pub taker_volume_quote: f64,
+    pub unknown_liquidity_fill_count: u64,
+    pub unknown_liquidity_volume_quote: f64,
     pub realized_pnl_before_fee_quote: f64,
     pub estimated_trading_fee_quote: f64,
     pub realized_pnl_after_fee_quote: f64,
@@ -88,6 +97,8 @@ pub struct SourceNavReport {
     pub account: String,
     pub configured_venue: String,
     pub estimated_fee_rate: f64,
+    pub maker_fee_rate: f64,
+    pub taker_fee_rate: f64,
     pub initial_position_snapshot_ts_us: Option<i64>,
     pub initial_position_count: usize,
     pub order_event_count: u64,
@@ -187,11 +198,22 @@ enum Side {
     Sell,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiquidityRole {
+    Maker,
+    Taker,
+    Unknown,
+}
+
+type LiquidityOrderKey = (String, i16, i64);
+type LiquidityByOrder = BTreeMap<LiquidityOrderKey, LiquidityRole>;
+
 #[derive(Clone, Debug)]
 struct PreparedFill {
     event: UniformOrderEvent,
     side: Side,
     fill_ts_us: i64,
+    liquidity: LiquidityRole,
 }
 
 #[derive(Clone, Debug)]
@@ -264,7 +286,7 @@ impl TimelineEvent {
 #[derive(Clone, Debug)]
 struct TimelineSourceState {
     source_id: String,
-    fee_rate: f64,
+    fee_rates: FeeRates,
     snapshot_ts_us: Option<i64>,
     pending_initial_states: Option<BTreeMap<(String, i16), VenueState>>,
     pending_initial_strategy_states: Option<BTreeMap<(String, String, i16), VenueState>>,
@@ -304,7 +326,13 @@ impl TimelineSourceState {
             .entry(key.clone())
             .or_insert_with(|| VenueState::new(&fill.event));
         state
-            .apply_fill(&fill.event, fill.side, self.fee_rate, fill.fill_ts_us)
+            .apply_fill(
+                &fill.event,
+                fill.side,
+                self.fee_rates,
+                fill.liquidity,
+                fill.fill_ts_us,
+            )
             .with_context(|| {
                 format!(
                     "failed to apply source {} record {}",
@@ -319,7 +347,13 @@ impl TimelineSourceState {
             .entry(strategy_key)
             .or_insert_with(|| VenueState::new(&fill.event));
         strategy_state
-            .apply_fill(&fill.event, fill.side, self.fee_rate, fill.fill_ts_us)
+            .apply_fill(
+                &fill.event,
+                fill.side,
+                self.fee_rates,
+                fill.liquidity,
+                fill.fill_ts_us,
+            )
             .with_context(|| {
                 format!(
                     "failed to apply strategy attribution for source {} record {}",
@@ -394,6 +428,12 @@ struct VenueState {
     initial_reference_price_source: Option<InitialReferencePriceSource>,
     fill_count: u64,
     volume_quote: f64,
+    maker_fill_count: u64,
+    maker_volume_quote: f64,
+    taker_fill_count: u64,
+    taker_volume_quote: f64,
+    unknown_liquidity_fill_count: u64,
+    unknown_liquidity_volume_quote: f64,
     estimated_fee_quote: f64,
     first_fill_ts_us: Option<i64>,
     last_fill_ts_us: Option<i64>,
@@ -417,6 +457,12 @@ impl VenueState {
             initial_reference_price_source: None,
             fill_count: 0,
             volume_quote: 0.0,
+            maker_fill_count: 0,
+            maker_volume_quote: 0.0,
+            taker_fill_count: 0,
+            taker_volume_quote: 0.0,
+            unknown_liquidity_fill_count: 0,
+            unknown_liquidity_volume_quote: 0.0,
             estimated_fee_quote: 0.0,
             first_fill_ts_us: None,
             last_fill_ts_us: None,
@@ -447,6 +493,12 @@ impl VenueState {
             initial_reference_price_source: Some(reference_price_source),
             fill_count: 0,
             volume_quote: 0.0,
+            maker_fill_count: 0,
+            maker_volume_quote: 0.0,
+            taker_fill_count: 0,
+            taker_volume_quote: 0.0,
+            unknown_liquidity_fill_count: 0,
+            unknown_liquidity_volume_quote: 0.0,
             estimated_fee_quote: 0.0,
             first_fill_ts_us: None,
             last_fill_ts_us: None,
@@ -458,7 +510,8 @@ impl VenueState {
         &mut self,
         event: &UniformOrderEvent,
         side: Side,
-        fee_rate: f64,
+        fee_rates: FeeRates,
+        liquidity: LiquidityRole,
         fill_ts_us: i64,
     ) -> Result<()> {
         if self.venue != event.venue {
@@ -470,6 +523,10 @@ impl VenueState {
             );
         }
         let notional = event.price * event.amount_update;
+        let fee_rate = match liquidity {
+            LiquidityRole::Maker => fee_rates.maker,
+            LiquidityRole::Taker | LiquidityRole::Unknown => fee_rates.taker,
+        };
         let fee = notional * fee_rate;
         if !notional.is_finite() || !fee.is_finite() {
             bail!("fill notional or estimated fee overflowed");
@@ -481,8 +538,28 @@ impl VenueState {
             .checked_add(1)
             .context("fill count overflowed u64")?;
         self.volume_quote += notional;
+        match liquidity {
+            LiquidityRole::Maker => {
+                self.maker_fill_count = self.maker_fill_count.saturating_add(1);
+                self.maker_volume_quote += notional;
+            }
+            LiquidityRole::Taker => {
+                self.taker_fill_count = self.taker_fill_count.saturating_add(1);
+                self.taker_volume_quote += notional;
+            }
+            LiquidityRole::Unknown => {
+                self.unknown_liquidity_fill_count =
+                    self.unknown_liquidity_fill_count.saturating_add(1);
+                self.unknown_liquidity_volume_quote += notional;
+            }
+        }
         self.estimated_fee_quote += fee;
-        if !self.volume_quote.is_finite() || !self.estimated_fee_quote.is_finite() {
+        if !self.volume_quote.is_finite()
+            || !self.maker_volume_quote.is_finite()
+            || !self.taker_volume_quote.is_finite()
+            || !self.unknown_liquidity_volume_quote.is_finite()
+            || !self.estimated_fee_quote.is_finite()
+        {
             bail!("cumulative volume or estimated fee overflowed");
         }
         self.first_fill_ts_us.get_or_insert(fill_ts_us);
@@ -525,6 +602,12 @@ impl VenueState {
             totals: NavTotals {
                 fill_count: self.fill_count,
                 volume_quote: clean_zero(self.volume_quote),
+                maker_fill_count: self.maker_fill_count,
+                maker_volume_quote: clean_zero(self.maker_volume_quote),
+                taker_fill_count: self.taker_fill_count,
+                taker_volume_quote: clean_zero(self.taker_volume_quote),
+                unknown_liquidity_fill_count: self.unknown_liquidity_fill_count,
+                unknown_liquidity_volume_quote: clean_zero(self.unknown_liquidity_volume_quote),
                 realized_pnl_before_fee_quote: clean_zero(realized_before_fee),
                 estimated_trading_fee_quote: clean_zero(self.estimated_fee_quote),
                 realized_pnl_after_fee_quote: clean_zero(realized_after_fee),
@@ -624,6 +707,14 @@ impl NavTotals {
     fn add(&mut self, other: Self) {
         self.fill_count = self.fill_count.saturating_add(other.fill_count);
         self.volume_quote += other.volume_quote;
+        self.maker_fill_count = self.maker_fill_count.saturating_add(other.maker_fill_count);
+        self.maker_volume_quote += other.maker_volume_quote;
+        self.taker_fill_count = self.taker_fill_count.saturating_add(other.taker_fill_count);
+        self.taker_volume_quote += other.taker_volume_quote;
+        self.unknown_liquidity_fill_count = self
+            .unknown_liquidity_fill_count
+            .saturating_add(other.unknown_liquidity_fill_count);
+        self.unknown_liquidity_volume_quote += other.unknown_liquidity_volume_quote;
         self.realized_pnl_before_fee_quote += other.realized_pnl_before_fee_quote;
         self.estimated_trading_fee_quote += other.estimated_trading_fee_quote;
         self.realized_pnl_after_fee_quote += other.realized_pnl_after_fee_quote;
@@ -634,6 +725,9 @@ impl NavTotals {
 
     fn cleaned(mut self) -> Self {
         self.volume_quote = clean_zero(self.volume_quote);
+        self.maker_volume_quote = clean_zero(self.maker_volume_quote);
+        self.taker_volume_quote = clean_zero(self.taker_volume_quote);
+        self.unknown_liquidity_volume_quote = clean_zero(self.unknown_liquidity_volume_quote);
         self.realized_pnl_before_fee_quote = clean_zero(self.realized_pnl_before_fee_quote);
         self.estimated_trading_fee_quote = clean_zero(self.estimated_trading_fee_quote);
         self.realized_pnl_after_fee_quote = clean_zero(self.realized_pnl_after_fee_quote);
@@ -647,6 +741,19 @@ impl NavTotals {
         Self {
             fill_count: self.fill_count.saturating_sub(baseline.fill_count),
             volume_quote: self.volume_quote - baseline.volume_quote,
+            maker_fill_count: self
+                .maker_fill_count
+                .saturating_sub(baseline.maker_fill_count),
+            maker_volume_quote: self.maker_volume_quote - baseline.maker_volume_quote,
+            taker_fill_count: self
+                .taker_fill_count
+                .saturating_sub(baseline.taker_fill_count),
+            taker_volume_quote: self.taker_volume_quote - baseline.taker_volume_quote,
+            unknown_liquidity_fill_count: self
+                .unknown_liquidity_fill_count
+                .saturating_sub(baseline.unknown_liquidity_fill_count),
+            unknown_liquidity_volume_quote: self.unknown_liquidity_volume_quote
+                - baseline.unknown_liquidity_volume_quote,
             realized_pnl_before_fee_quote: self.realized_pnl_before_fee_quote
                 - baseline.realized_pnl_before_fee_quote,
             estimated_trading_fee_quote: self.estimated_trading_fee_quote
@@ -667,6 +774,7 @@ fn prepare_source_events(
     source: &SourceConfig,
     events: impl IntoIterator<Item = UniformOrderEvent>,
     snapshot: Option<&PositionSnapshot>,
+    liquidity_by_order: &LiquidityByOrder,
 ) -> Result<PreparedSourceEvents> {
     if let Some(snapshot) = snapshot {
         snapshot.validate()?;
@@ -707,6 +815,7 @@ fn prepare_source_events(
             continue;
         };
         let fill_ts_us = fifo_ts_us(&event);
+        let liquidity = liquidity_role_for_event(&event, liquidity_by_order);
         first_fill_references
             .entry((event.symbol.clone(), event.venue_code))
             .or_insert_with(|| FirstFillReference {
@@ -717,6 +826,7 @@ fn prepare_source_events(
             event,
             side,
             fill_ts_us,
+            liquidity,
         });
     }
 
@@ -784,6 +894,63 @@ fn prepare_source_events(
     })
 }
 
+fn liquidity_role_for_event(
+    event: &UniformOrderEvent,
+    liquidity_by_order: &LiquidityByOrder,
+) -> LiquidityRole {
+    let key = (
+        event.symbol.clone(),
+        event.venue_code,
+        event.client_order_id,
+    );
+    liquidity_by_order
+        .get(&key)
+        .copied()
+        .unwrap_or_else(|| match event.order_type_code {
+            1 => LiquidityRole::Maker,
+            3 | 4 | 5 | 6 | 7 | 8 | 9 => LiquidityRole::Taker,
+            _ => LiquidityRole::Unknown,
+        })
+}
+
+fn load_liquidity_by_order(source: &SourceConfig) -> Result<LiquidityByOrder> {
+    let records = rocks_source::read_available_column_families(
+        &source.rocksdb_path,
+        &[TRADE_UPDATES_CF, TRADE_UPDATES_UNMATCHED_CF],
+    )?;
+    let mut roles = LiquidityByOrder::new();
+    for (column_family, records) in records {
+        for record in records {
+            let event = decode_trade_update(&record.key, &record.value).with_context(|| {
+                format!(
+                    "source {} contains an undecodable {} record at key {:?}",
+                    source.id,
+                    column_family,
+                    String::from_utf8_lossy(&record.key)
+                )
+            })?;
+            if event.cumulative_filled_quantity <= 0.0 || event.client_order_id == 0 {
+                continue;
+            }
+            let key = (event.symbol, event.venue_code, event.client_order_id);
+            let observed = if event.is_maker {
+                LiquidityRole::Maker
+            } else {
+                LiquidityRole::Taker
+            };
+            roles
+                .entry(key)
+                .and_modify(|role| {
+                    if *role != observed {
+                        *role = LiquidityRole::Unknown;
+                    }
+                })
+                .or_insert(observed);
+        }
+    }
+    Ok(roles)
+}
+
 pub fn estimate_source_events(
     source: &SourceConfig,
     events: impl IntoIterator<Item = UniformOrderEvent>,
@@ -798,8 +965,23 @@ pub fn estimate_source_events_with_snapshot(
     mark_overrides: &VenueMarkOverrides,
     snapshot: Option<&PositionSnapshot>,
 ) -> Result<SourceNavReport> {
-    let fee_rate = source.nav_fee_rate()?;
-    validate_fee_rate(fee_rate, &source.id)?;
+    estimate_source_events_with_snapshot_and_liquidity(
+        source,
+        events,
+        mark_overrides,
+        snapshot,
+        &LiquidityByOrder::new(),
+    )
+}
+
+fn estimate_source_events_with_snapshot_and_liquidity(
+    source: &SourceConfig,
+    events: impl IntoIterator<Item = UniformOrderEvent>,
+    mark_overrides: &VenueMarkOverrides,
+    snapshot: Option<&PositionSnapshot>,
+    liquidity_by_order: &LiquidityByOrder,
+) -> Result<SourceNavReport> {
+    let fee_rates = source.nav_fee_rates()?;
     for ((symbol, venue_code), mark_price) in mark_overrides {
         validate_positive(*mark_price, "mark price").with_context(|| {
             format!(
@@ -816,7 +998,7 @@ pub fn estimate_source_events_with_snapshot(
         order_event_count,
         ignored_at_or_before_snapshot_event_count,
         ignored_non_fill_event_count,
-    } = prepare_source_events(source, events, snapshot)?;
+    } = prepare_source_events(source, events, snapshot, liquidity_by_order)?;
 
     let mut first_fill_ts_us = None;
     let mut last_fill_ts_us = None;
@@ -826,7 +1008,13 @@ pub fn estimate_source_events_with_snapshot(
             .entry(key)
             .or_insert_with(|| VenueState::new(&fill.event));
         state
-            .apply_fill(&fill.event, fill.side, fee_rate, fill.fill_ts_us)
+            .apply_fill(
+                &fill.event,
+                fill.side,
+                fee_rates,
+                fill.liquidity,
+                fill.fill_ts_us,
+            )
             .with_context(|| {
                 format!(
                     "failed to apply source {} record {}",
@@ -870,7 +1058,9 @@ pub fn estimate_source_events_with_snapshot(
         source_id: source.id.clone(),
         account: source.display_name().to_string(),
         configured_venue: source.venue.clone(),
-        estimated_fee_rate: fee_rate,
+        estimated_fee_rate: fee_rates.taker,
+        maker_fee_rate: fee_rates.maker,
+        taker_fee_rate: fee_rates.taker,
         initial_position_snapshot_ts_us: snapshot_ts_us,
         initial_position_count: snapshot.map_or(0, |value| value.positions.len()),
         order_event_count,
@@ -983,8 +1173,7 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
         .collect::<Vec<_>>();
 
     for source in selected {
-        let fee_rate = source.nav_fee_rate()?;
-        validate_fee_rate(fee_rate, &source.id)?;
+        let fee_rates = source.nav_fee_rates()?;
         let records = if source.rocksdb_path.is_dir() {
             rocks_source::read_uniform_orders(&source.rocksdb_path, 0, i64::MAX)
                 .with_context(|| format!("failed to read source {} RocksDB", source.id))?
@@ -1003,8 +1192,19 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
                 })?,
             );
         }
-        let prepared = prepare_source_events(source, events, snapshots.get(&source.id))
-            .with_context(|| format!("failed to prepare source {} timeline", source.id))?;
+        let liquidity_by_order = if source.rocksdb_path.is_dir() {
+            load_liquidity_by_order(source)
+                .with_context(|| format!("failed to load source {} liquidity roles", source.id))?
+        } else {
+            LiquidityByOrder::new()
+        };
+        let prepared = prepare_source_events(
+            source,
+            events,
+            snapshots.get(&source.id),
+            &liquidity_by_order,
+        )
+        .with_context(|| format!("failed to prepare source {} timeline", source.id))?;
         let first_fill_ts_us = prepared
             .fill_events
             .iter()
@@ -1064,7 +1264,7 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
             .collect::<BTreeMap<_, _>>();
         runtimes.push(TimelineSourceState {
             source_id: source.id.clone(),
-            fee_rate,
+            fee_rates,
             snapshot_ts_us: prepared.snapshot_ts_us,
             pending_initial_states: prepared.snapshot_ts_us.map(|_| prepared.initial_states),
             pending_initial_strategy_states: prepared
@@ -1340,12 +1540,19 @@ fn rebuild_nav_from_rocksdb_with_inputs(
             })?;
             events.push(event);
         }
+        let liquidity_by_order = if source.rocksdb_path.is_dir() {
+            load_liquidity_by_order(source)
+                .with_context(|| format!("failed to load source {} liquidity roles", source.id))?
+        } else {
+            LiquidityByOrder::new()
+        };
         let source_marks = mark_overrides.get(&source.id).unwrap_or(&empty_marks);
-        sources.push(estimate_source_events_with_snapshot(
+        sources.push(estimate_source_events_with_snapshot_and_liquidity(
             source,
             events,
             source_marks,
             snapshots.get(&source.id),
+            &liquidity_by_order,
         )?);
     }
     Ok(aggregate_source_reports(sources))
@@ -1741,14 +1948,6 @@ fn close_fifo(
     (realized_pnl, quantity)
 }
 
-fn validate_fee_rate(value: f64, source_id: &str) -> Result<()> {
-    if value.is_finite() && value >= 0.0 {
-        Ok(())
-    } else {
-        bail!("source {source_id} estimated_fee_rate must be finite and nonnegative")
-    }
-}
-
 fn fifo_ts_us(event: &UniformOrderEvent) -> i64 {
     if event.update_ts_us > 0 {
         event.update_ts_us
@@ -1791,6 +1990,8 @@ mod tests {
             start_ts_us: None,
             poll_interval_secs: None,
             estimated_fee_rate: fee_rate,
+            maker_fee_rate: None,
+            taker_fee_rate: None,
             gateway_prefix: None,
             exec_config_url: None,
             exec_viz_url: None,
@@ -2040,6 +2241,35 @@ mod tests {
     }
 
     #[test]
+    fn applies_maker_rebate_and_taker_cost_by_liquidity_role() {
+        let mut source = source("trade01", Some(0.0));
+        source.maker_fee_rate = Some(-0.00005);
+        source.taker_fee_rate = Some(0.000146);
+        let events = vec![
+            event(1, "BTCUSDT", 1, 1, 100.0, 1.0),
+            event(2, "BTCUSDT", 1, 2, 110.0, 1.0),
+        ];
+        let liquidity = LiquidityByOrder::from([
+            (("BTCUSDT".to_string(), 1, 1), LiquidityRole::Maker),
+            (("BTCUSDT".to_string(), 1, 2), LiquidityRole::Taker),
+        ]);
+        let report = estimate_source_events_with_snapshot_and_liquidity(
+            &source,
+            events,
+            &BTreeMap::new(),
+            None,
+            &liquidity,
+        )
+        .unwrap();
+
+        assert_eq!(report.totals.maker_fill_count, 1);
+        assert_eq!(report.totals.taker_fill_count, 1);
+        assert_close(report.totals.maker_volume_quote, 100.0);
+        assert_close(report.totals.taker_volume_quote, 110.0);
+        assert_close(report.totals.estimated_trading_fee_quote, 0.01106);
+    }
+
+    #[test]
     fn initial_position_seeds_fifo_without_volume_or_fee() {
         let source = source("trade01", Some(0.001));
         let snapshot = position_snapshot("trade01", 1, -2.0, Some(100.0));
@@ -2276,7 +2506,7 @@ mod tests {
             estimate_source_events(&source("trade01", None), Vec::new(), &BTreeMap::new())
                 .unwrap_err()
                 .to_string()
-                .contains("estimated_fee_rate")
+                .contains("maker_fee_rate")
         );
         assert!(
             estimate_source_events(
@@ -2284,7 +2514,7 @@ mod tests {
                 Vec::new(),
                 &BTreeMap::new()
             )
-            .is_err()
+            .is_ok()
         );
     }
 

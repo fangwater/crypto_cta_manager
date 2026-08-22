@@ -70,6 +70,12 @@ const seriesOptions: NavSeriesKey[] = [
 const ZERO_TOTALS: NavTotals = {
   fill_count: 0,
   volume_quote: 0,
+  maker_fill_count: 0,
+  maker_volume_quote: 0,
+  taker_fill_count: 0,
+  taker_volume_quote: 0,
+  unknown_liquidity_fill_count: 0,
+  unknown_liquidity_volume_quote: 0,
   realized_pnl_before_fee_quote: 0,
   estimated_trading_fee_quote: 0,
   realized_pnl_after_fee_quote: 0,
@@ -929,7 +935,10 @@ function NavPage() {
                   value={timestampUs(source.initial_position_snapshot_ts_us)}
                 />
                 <SourceDatum label="累计成交" value={integer(source.fill_count)} />
-                <SourceDatum label="估算费率" value={feeBps(source.estimated_fee_rate)} />
+                <SourceDatum
+                  label="Maker / Taker 费率"
+                  value={`${feeBps(source.maker_fee_rate)} / ${feeBps(source.taker_fee_rate)}`}
+                />
                 <SourceDatum
                   label="累计费后净值"
                   value={`${money(source.nav_change_after_fee_quote)} USDT`}

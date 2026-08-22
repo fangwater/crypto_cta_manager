@@ -213,6 +213,20 @@ export function saveAccountEstimatedFeeRate(sourceId: string, estimatedFeeRate: 
   )
 }
 
+export function saveAccountFeeRates(
+  sourceId: string,
+  makerFeeRate: number,
+  takerFeeRate: number,
+) {
+  return requestJson<AccountStudio>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/fee-rates`,
+    {
+      method: 'PUT',
+      body: { maker_fee_rate: makerFeeRate, taker_fee_rate: takerFeeRate },
+    },
+  )
+}
+
 export function getAccountContractLeverage(sourceId: string, symbol: string) {
   const params = new URLSearchParams({ symbol })
   return requestJson<SavedSymbolContractLeverage>(

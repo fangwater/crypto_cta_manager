@@ -187,7 +187,7 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'bases',
     group: '概念',
     title: '基址',
-    lead: 'el01 和 jp-meta 的 IP、端口不同。浏览器与脚本的 GET/POST 都走该环境 Nginx，不要打 loopback 18201 / 18161。',
+    lead: 'el01 和 jp-meta 是两台独立物理机、两套独立栈。浏览器与脚本的 GET/POST 都走该环境 Nginx，不要打 loopback 18201 / 18161。',
     content: (
       <>
         <SpecTable
@@ -434,12 +434,12 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'GET',
               path: `${ACCOUNT_PATH}`,
-              summary: '读取本账户的策略绑定、份数与估算费率',
+              summary: '读取本账户的策略绑定、份数与 Maker/Taker 估算费率',
             },
             {
               method: 'PUT',
-              path: `${ACCOUNT_PATH}/estimated-fee-rate`,
-              summary: '更新 NAV 估算手续费率（小数，如 0.0004=4bps），写入 PostgreSQL，无需重启',
+              path: `${ACCOUNT_PATH}/fee-rates`,
+              summary: '更新 Maker/Taker 费率，接受任意有限小数，写入 PostgreSQL 并立即重算 NAV',
             },
             {
               method: 'GET',
@@ -457,9 +457,9 @@ function buildChapters(gateway: string): Chapter[] {
   '${account}'
 
 curl --noproxy '*' -sS -X PUT \\
-  '${account}/estimated-fee-rate' \\
+  '${account}/fee-rates' \\
   -H 'Content-Type: application/json' \\
-  -d '{"estimated_fee_rate":0.0004}'
+  -d '{"maker_fee_rate":-0.00005,"taker_fee_rate":0.000146}'
 
 curl --noproxy '*' -sS \\
   '${account}/contract-leverage?symbol=BTCUSDT'
@@ -471,8 +471,8 @@ curl --noproxy '*' -sS -X PUT \\
         <FieldRows
           rows={[
             {
-              field: 'estimated_fee_rate',
-              detail: 'NAV 估算费率，小数（0.0004=4bps）。仅影响 Manager 报表，不改交易',
+              field: 'maker_fee_rate / taker_fee_rate',
+              detail: '任意有限小数；负数表示返佣。保存后立即重算 Manager NAV，不改交易',
             },
             {
               field: 'contract_leverage',
@@ -632,13 +632,13 @@ curl --noproxy '*' -sS -X PUT \\
 curl --noproxy '*' -fsS -o manager_publish_client.py ${joinGateway(EL01_GATEWAY, `${MANAGER_PATH}/manager_publish_client.py`)}
 # jp-meta
 curl --noproxy '*' -fsS -o manager_publish_client.py ${joinGateway(JP_GATEWAY, `${MANAGER_PATH}/manager_publish_client.py`)}`}</CodeBlock>
-        <CodeBlock label="update">{`# 当前页所在环境的 Nginx 入口；jp-meta 必须是 ${JP_GATEWAY}/manager/api/
-export MANAGER_API_URL=${manager}/
-
-python3 manager_publish_client.py put-position @cta.json
-python3 manager_publish_client.py get-contract-leverage binance_exec_trade01 BTCUSDT
-python3 manager_publish_client.py set-contract-leverage binance_exec_trade01 BTCUSDT 5
-python3 manager_publish_client.py get-execution-cost --window-sec 300`}</CodeBlock>
+        <CodeBlock label="update">{`# el01 和 jp-meta 是两台独立物理机。必须显式选一边。
+python3 manager_publish_client.py --target el01 put-position @cta.json
+python3 manager_publish_client.py --target jp-meta put-position @cta.json
+python3 manager_publish_client.py --target el01 get-contract-leverage binance_exec_trade01 BTCUSDT
+python3 manager_publish_client.py --target jp-meta get-contract-leverage binance_exec_trade01 BTCUSDT
+python3 manager_publish_client.py --target el01 set-contract-leverage binance_exec_trade01 BTCUSDT 5
+python3 manager_publish_client.py --target jp-meta get-execution-cost --window-sec 300`}</CodeBlock>
         <CodeBlock label="cta.json 精简版">{`{
   "strategy_name": "CTA_SK_C4V6PosT1_LXY_filter_Position",
   "targets": {
@@ -684,7 +684,7 @@ print(json.dumps(request("POST", "catalog/position-strategies", payload), ensure
           标准库即可，不必先下载脚本。日常用精简 payload：只传策略名和裸数字 qty。一次 POST 后 Manager 按各绑定账户份数放大 qty，省略的 signal 按 0 写入 Redis。需要 taker-only 时用完整对象写 signal=±1。
         </Note>
         <Note>
-          脚本只 POST Manager catalog；Redis 与 iceoryx 通知由 Manager 完成。
+          脚本只 POST Manager catalog；Redis 与 iceoryx 通知由 Manager 完成。el01 和 jp-meta 互不影响，必须用 --target 选一边。
         </Note>
       </>
     ),

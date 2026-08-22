@@ -15,7 +15,7 @@ import {
   getAccountStudio,
   getDashboard,
   saveAccountContractLeverage,
-  saveAccountEstimatedFeeRate,
+  saveAccountFeeRates,
 } from '../api'
 import { AppShell, PageIntro } from '../components/AppShell'
 import {
@@ -55,7 +55,8 @@ export function AccountOverviewPage() {
   const [contractSymbol, setContractSymbol] = useState('')
   const [contractLeverage, setContractLeverage] = useState('5')
   const [queriedContractLeverage, setQueriedContractLeverage] = useState<string | null>(null)
-  const [feeRateInput, setFeeRateInput] = useState('')
+  const [makerFeeRateInput, setMakerFeeRateInput] = useState('')
+  const [takerFeeRateInput, setTakerFeeRateInput] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -65,7 +66,8 @@ export function AccountOverviewPage() {
     const nextStudio = await getAccountStudio(sourceId, signal)
     setDashboard(snapshot)
     setStudio(nextStudio)
-    setFeeRateInput(String(nextStudio.estimated_fee_rate))
+    setMakerFeeRateInput(String(nextStudio.maker_fee_rate))
+    setTakerFeeRateInput(String(nextStudio.taker_fee_rate))
   }, [sourceId])
 
   useEffect(() => {
@@ -93,6 +95,12 @@ export function AccountOverviewPage() {
     () => dashboard?.report.sources.find((source) => source.source_id === sourceId),
     [dashboard, sourceId],
   )
+  const knownLiquidityVolume =
+    (report?.maker_volume_quote ?? 0) + (report?.taker_volume_quote ?? 0)
+  const makerRatio = knownLiquidityVolume > 0
+    ? (report?.maker_volume_quote ?? 0) / knownLiquidityVolume
+    : 0
+  const takerRatio = knownLiquidityVolume > 0 ? 1 - makerRatio : 0
 
   const positionByName = useMemo(
     () => new Map(positions.map((item) => [item.strategy_name, item])),
@@ -175,12 +183,22 @@ export function AccountOverviewPage() {
               <CardContent className="space-y-3 pt-5">
                 <div className="flex flex-wrap items-end gap-3">
                   <Label className="min-w-[12rem] flex-1">
-                    estimated_fee_rate（小数）
+                    Maker 费率（小数）
                     <Input
                       inputMode="decimal"
-                      value={feeRateInput}
-                      onChange={(event) => setFeeRateInput(event.target.value)}
-                      placeholder="0.0004"
+                      value={makerFeeRateInput}
+                      onChange={(event) => setMakerFeeRateInput(event.target.value)}
+                      placeholder="-0.00005"
+                      disabled={saving}
+                    />
+                  </Label>
+                  <Label className="min-w-[12rem] flex-1">
+                    Taker 费率（小数）
+                    <Input
+                      inputMode="decimal"
+                      value={takerFeeRateInput}
+                      onChange={(event) => setTakerFeeRateInput(event.target.value)}
+                      placeholder="0.000146"
                       disabled={saving}
                     />
                   </Label>
@@ -190,17 +208,17 @@ export function AccountOverviewPage() {
                     disabled={saving}
                     onClick={() =>
                       void withWrite(async () => {
-                        const parsed = Number(feeRateInput.trim())
-                        if (!Number.isFinite(parsed) || parsed < 0) {
-                          throw new Error('请输入非负小数，例如 0.0004')
+                        const maker = Number(makerFeeRateInput.trim())
+                        const taker = Number(takerFeeRateInput.trim())
+                        if (!Number.isFinite(maker) || !Number.isFinite(taker)) {
+                          throw new Error('Maker 和 Taker 费率必须是有限数字')
                         }
-                        if (parsed > 0.05) {
-                          throw new Error('费率过大（>5%）。请用小数，例如 4 bps 写 0.0004')
-                        }
-                        const next = await saveAccountEstimatedFeeRate(sourceId, parsed)
+                        const next = await saveAccountFeeRates(sourceId, maker, taker)
                         setStudio(next)
-                        setFeeRateInput(String(next.estimated_fee_rate))
-                        return `已保存估算费率 ${feeBps(next.estimated_fee_rate)}（${next.estimated_fee_rate}）`
+                        setMakerFeeRateInput(String(next.maker_fee_rate))
+                        setTakerFeeRateInput(String(next.taker_fee_rate))
+                        await refresh()
+                        return `已保存 Maker ${feeBps(next.maker_fee_rate)} / Taker ${feeBps(next.taker_fee_rate)}，NAV 已重算`
                       })
                     }
                   >
@@ -208,13 +226,29 @@ export function AccountOverviewPage() {
                   </Button>
                 </div>
                 <FieldHint>
-                  当前{' '}
-                  <span className="font-medium text-ink">
-                    {studio ? feeBps(studio.estimated_fee_rate) : '--'}
-                  </span>
-                  {studio ? ` · 原始值 ${studio.estimated_fee_rate}` : ''}
-                  。例：4 bps = 0.0004；每笔估算费 = price × qty × rate。
+                  当前 Maker {studio ? `${feeBps(studio.maker_fee_rate)}（${studio.maker_fee_rate}）` : '--'}
+                  {' · '}Taker {studio ? `${feeBps(studio.taker_fee_rate)}（${studio.taker_fee_rate}）` : '--'}。
+                  负数表示返佣；每笔估算费 = price × qty × 对应流动性费率。
                 </FieldHint>
+                <div className="space-y-2 border-t border-border-soft pt-3">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium text-ink">成交名义比例</span>
+                    <span className="mono text-muted">
+                      Maker {(makerRatio * 100).toFixed(2)}% · Taker {(takerRatio * 100).toFixed(2)}%
+                    </span>
+                  </div>
+                  <div className="flex h-2 overflow-hidden bg-surface-strong">
+                    <div className="bg-emerald-600" style={{ width: `${makerRatio * 100}%` }} />
+                    <div className="bg-amber-500" style={{ width: `${takerRatio * 100}%` }} />
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+                    <span>Maker {money(report?.maker_volume_quote ?? 0)} USDT / {report?.maker_fill_count ?? 0} 笔</span>
+                    <span>Taker {money(report?.taker_volume_quote ?? 0)} USDT / {report?.taker_fill_count ?? 0} 笔</span>
+                    {(report?.unknown_liquidity_fill_count ?? 0) > 0 && (
+                      <span>Unknown {money(report?.unknown_liquidity_volume_quote ?? 0)} USDT / {report?.unknown_liquidity_fill_count ?? 0} 笔</span>
+                    )}
+                  </div>
+                </div>
               </CardContent>
             </Card>
 

@@ -18,7 +18,11 @@ from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
-DEFAULT_BASE_URL = "http://172.16.30.42:10041/manager/api/"
+# Two independent physical hosts. Never infer one from the other.
+HOST_TARGETS = {
+    "el01": "http://172.16.30.42:10041/manager/api/",
+    "jp-meta": "http://13.115.227.29:4191/manager/api/",
+}
 ALLOWED_SIGNALS = (-2, -1, 0, 1, 2)
 
 
@@ -37,6 +41,28 @@ def normalize_base_url(raw: str) -> str:
     if parsed.query or parsed.fragment:
         raise ValueError("--url must not contain a query or fragment")
     return value.rstrip("/") + "/"
+
+
+def resolve_base_url(*, url: Optional[str] = None, target: Optional[str] = None) -> str:
+    url_value = str(url or "").strip() or None
+    target_value = str(target or "").strip() or None
+    if url_value and target_value:
+        raise ValueError("--url and --target cannot be used together")
+    if target_value:
+        if target_value not in HOST_TARGETS:
+            known = ", ".join(sorted(HOST_TARGETS))
+            raise ValueError(f"--target must be one of {known}: {target_value}")
+        return HOST_TARGETS[target_value]
+    if url_value:
+        return normalize_base_url(url_value)
+    env_url = str(os.environ.get("MANAGER_API_URL") or "").strip()
+    if env_url:
+        return normalize_base_url(env_url)
+    known = ", ".join(sorted(HOST_TARGETS))
+    raise ValueError(
+        f"choose a host with --target {known.replace(', ', ' or --target ')} "
+        "(or pass --url / MANAGER_API_URL)"
+    )
 
 
 def api_url(base_url: str, path: str) -> str:
@@ -180,15 +206,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="Update Manager position templates",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  %(prog)s get-position
-  %(prog)s get-position CTA_SK_C40V6PosT1_LXY_filter_Position
-  %(prog)s put-position @cta.json
-  %(prog)s put-position '{"strategy_name":"CTA_A","targets":{"BTCUSDT":-0.006}}'
-  %(prog)s get-bindings binance_exec_trade01
-  %(prog)s get-contract-leverage binance_exec_trade01 BTCUSDT
-  %(prog)s set-contract-leverage binance_exec_trade01 BTCUSDT 5
-  %(prog)s get-execution-cost --start-ms 1755648000000 --end-ms 1755734400000
-  %(prog)s publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position
+  %(prog)s --target el01 get-position
+  %(prog)s --target jp-meta get-position CTA_SK_C40V6PosT1_LXY_filter_Position
+  %(prog)s --target el01 put-position @cta.json
+  %(prog)s --target jp-meta put-position '{"strategy_name":"CTA_A","targets":{"BTCUSDT":-0.006}}'
+  %(prog)s --target el01 get-bindings binance_exec_trade01
+  %(prog)s --target jp-meta get-contract-leverage binance_exec_trade01 BTCUSDT
+  %(prog)s --target el01 set-contract-leverage binance_exec_trade01 BTCUSDT 5
+  %(prog)s --target jp-meta get-execution-cost --start-ms 1755648000000 --end-ms 1755734400000
+  %(prog)s --target el01 publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position
+
+el01 and jp-meta are independent physical hosts. --target selects one of them.
+Do not publish to one host and expect the other to change.
 
 put-position writes the catalog and automatically republishes every bound
 account. qty is scaled by that account's shares; signal is copied unchanged.
@@ -199,9 +228,14 @@ The optional publish command only republishes one existing binding.
 """,
     )
     parser.add_argument(
+        "--target",
+        choices=sorted(HOST_TARGETS),
+        help="Independent host stack: el01 or jp-meta",
+    )
+    parser.add_argument(
         "--url",
-        default=os.environ.get("MANAGER_API_URL", DEFAULT_BASE_URL),
-        help="Manager API base URL (default: %(default)s)",
+        help="Manager API base URL. Mutually exclusive with --target. "
+        "Also accepted as MANAGER_API_URL.",
     )
     parser.add_argument("--timeout", type=float, default=5.0)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -266,9 +300,10 @@ def find_position(payload: Any, strategy_name: str) -> Dict[str, Any]:
 
 
 def run(args: argparse.Namespace) -> int:
+    base_url = resolve_base_url(url=args.url, target=args.target)
     if args.command == "get-position":
         response = request_json(
-            args.url,
+            base_url,
             position_path(),
             timeout=args.timeout,
         )
@@ -276,7 +311,7 @@ def run(args: argparse.Namespace) -> int:
             response = find_position(response, args.strategy_name.strip())
     elif args.command == "put-position":
         response = request_json(
-            args.url,
+            base_url,
             position_path(),
             method="POST",
             payload=normalize_position_payload(load_json_source(args.json)),
@@ -284,19 +319,19 @@ def run(args: argparse.Namespace) -> int:
         )
     elif args.command == "get-bindings":
         response = request_json(
-            args.url,
+            base_url,
             bindings_path(args.source_id),
             timeout=args.timeout,
         )
     elif args.command == "get-contract-leverage":
         response = request_json(
-            args.url,
+            base_url,
             f"{contract_leverage_path(args.source_id)}?symbol={quote(args.symbol)}",
             timeout=args.timeout,
         )
     elif args.command == "set-contract-leverage":
         response = request_json(
-            args.url,
+            base_url,
             contract_leverage_path(args.source_id),
             method="PUT",
             payload={
@@ -319,13 +354,13 @@ def run(args: argparse.Namespace) -> int:
             params.append(f"strategyName={quote(args.strategy_name)}")
         query = f"?{'&'.join(params)}" if params else ""
         response = request_json(
-            args.url,
+            base_url,
             f"catalog/execution-cost{query}",
             timeout=max(args.timeout, 30.0),
         )
     else:
         response = request_json(
-            args.url,
+            base_url,
             publish_path(args.source_id, args.binding_name),
             method="POST",
             timeout=args.timeout,

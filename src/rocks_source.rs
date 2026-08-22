@@ -56,6 +56,43 @@ pub fn read_all_column_families(
     Ok(result)
 }
 
+pub fn read_available_column_families(
+    path: &Path,
+    requested_column_families: &[&str],
+) -> Result<BTreeMap<String, Vec<RawRocksRecord>>> {
+    if !path.is_dir() {
+        bail!("RocksDB path is not a directory: {}", path.display());
+    }
+
+    let mut options = Options::default();
+    options.create_if_missing(false);
+    options.create_missing_column_families(false);
+    let column_families = DB::list_cf(&options, path)
+        .with_context(|| format!("failed to list column families in {}", path.display()))?;
+    let db = DB::open_cf_for_read_only(&options, path, column_families.clone(), false)
+        .with_context(|| format!("failed to open RocksDB {} read-only", path.display()))?;
+    let mut result = BTreeMap::new();
+    for requested in requested_column_families {
+        if !column_families.iter().any(|name| name == requested) {
+            continue;
+        }
+        let column_family = db
+            .cf_handle(requested)
+            .with_context(|| format!("{requested} column family disappeared after open"))?;
+        let mut records = Vec::new();
+        for item in db.iterator_cf(column_family, IteratorMode::Start) {
+            let (key, value) =
+                item.with_context(|| format!("failed while iterating {requested}"))?;
+            records.push(RawRocksRecord {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            });
+        }
+        result.insert((*requested).to_string(), records);
+    }
+    Ok(result)
+}
+
 pub fn read_uniform_orders(
     path: &Path,
     start_ts_us: i64,

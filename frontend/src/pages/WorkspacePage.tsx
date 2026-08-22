@@ -290,7 +290,10 @@ function AccountCard({
             }
           />
           <Metric label="当前持仓" value={report ? `${openPositions} symbols` : '--'} />
-          <Metric label="估算费率" value={report ? feeBps(report.estimated_fee_rate) : '--'} />
+          <Metric
+            label="Maker / Taker 费率"
+            value={report ? `${feeBps(report.maker_fee_rate)} / ${feeBps(report.taker_fee_rate)}` : '--'}
+          />
           <Metric label="最近成交" value={timestampUs(report?.last_fill_ts_us ?? null)} />
         </div>
         <div className="flex flex-wrap gap-2 border-t border-border-soft pt-4">

@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FeeRates {
+    pub maker: f64,
+    pub taker: f64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
@@ -83,6 +89,10 @@ pub struct SourceConfig {
     pub poll_interval_secs: Option<u64>,
     /// Effective fee rate used to estimate fees from fill notional, for example 0.0004.
     pub estimated_fee_rate: Option<f64>,
+    /// Maker fee fraction. Negative values represent rebates.
+    pub maker_fee_rate: Option<f64>,
+    /// Taker fee fraction.
+    pub taker_fee_rate: Option<f64>,
     /// Same-origin gateway path for this account's Exec Viz, for example /exec_trade01.
     pub gateway_prefix: Option<String>,
     /// Loopback-only Exec Config service used by the Manager backend.
@@ -247,12 +257,21 @@ impl AppConfig {
             }
             if source
                 .estimated_fee_rate
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
+                .is_some_and(|value| !value.is_finite())
             {
-                bail!(
-                    "source {} estimated_fee_rate must be finite and nonnegative",
-                    source.id
-                );
+                bail!("source {} estimated_fee_rate must be finite", source.id);
+            }
+            if source
+                .maker_fee_rate
+                .is_some_and(|value| !value.is_finite())
+            {
+                bail!("source {} maker_fee_rate must be finite", source.id);
+            }
+            if source
+                .taker_fee_rate
+                .is_some_and(|value| !value.is_finite())
+            {
+                bail!("source {} taker_fee_rate must be finite", source.id);
             }
             if let Some(gateway_prefix) = &source.gateway_prefix {
                 validate_gateway_prefix(&source.id, gateway_prefix)?;
@@ -301,13 +320,11 @@ impl AppConfig {
 
     /// Overlay operator-managed fee rates (typically loaded from PostgreSQL).
     /// Missing map entries keep the current value (usually toml bootstrap).
-    pub fn with_estimated_fee_rates(
-        mut self,
-        rates: &std::collections::BTreeMap<String, f64>,
-    ) -> Self {
+    pub fn with_fee_rates(mut self, rates: &std::collections::BTreeMap<String, FeeRates>) -> Self {
         for source in &mut self.sources {
-            if let Some(rate) = rates.get(&source.id) {
-                source.estimated_fee_rate = Some(*rate);
+            if let Some(rates) = rates.get(&source.id) {
+                source.maker_fee_rate = Some(rates.maker);
+                source.taker_fee_rate = Some(rates.taker);
             }
         }
         self
@@ -320,13 +337,20 @@ impl SourceConfig {
             .unwrap_or(defaults.poll_interval_secs)
     }
 
-    pub fn nav_fee_rate(&self) -> Result<f64> {
-        self.estimated_fee_rate.with_context(|| {
-            format!(
-                "source {} requires estimated_fee_rate for NAV reconstruction",
-                self.id
-            )
-        })
+    pub fn nav_fee_rates(&self) -> Result<FeeRates> {
+        let legacy = self.estimated_fee_rate;
+        let rates = FeeRates {
+            maker: self
+                .maker_fee_rate
+                .or(legacy)
+                .with_context(|| format!("source {} requires maker_fee_rate", self.id))?,
+            taker: self
+                .taker_fee_rate
+                .or(legacy)
+                .with_context(|| format!("source {} requires taker_fee_rate", self.id))?,
+        };
+        validate_fee_rates(rates)?;
+        Ok(rates)
     }
 
     pub fn env_path(&self) -> PathBuf {
@@ -385,6 +409,16 @@ impl SourceConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
     }
+}
+
+pub fn validate_fee_rates(rates: FeeRates) -> Result<()> {
+    if !rates.maker.is_finite() {
+        bail!("maker_fee_rate must be finite");
+    }
+    if !rates.taker.is_finite() {
+        bail!("taker_fee_rate must be finite");
+    }
+    Ok(())
 }
 
 fn validate_source_id(value: &str) -> Result<()> {
@@ -525,6 +559,8 @@ mod tests {
             start_ts_us: None,
             poll_interval_secs: None,
             estimated_fee_rate: Some(0.0004),
+            maker_fee_rate: None,
+            taker_fee_rate: None,
             gateway_prefix: Some(format!("/{id}")),
             exec_config_url: None,
             exec_viz_url: None,
@@ -613,21 +649,25 @@ mod tests {
         config_with_sources(vec![without_rate.clone()])
             .validate()
             .unwrap();
-        assert!(without_rate.nav_fee_rate().is_err());
+        assert!(without_rate.nav_fee_rates().is_err());
     }
 
     #[test]
-    fn estimated_fee_rates_overlay_replaces_matching_sources_only() {
+    fn fee_rates_overlay_replaces_matching_sources_only() {
         let config = config_with_sources(vec![
             source("binance_exec_trade01", "/srv/trade01/persist_manager"),
             source("binance_exec_trade02", "/srv/trade02/persist_manager"),
         ])
-        .with_estimated_fee_rates(&std::collections::BTreeMap::from([(
+        .with_fee_rates(&std::collections::BTreeMap::from([(
             "binance_exec_trade02".to_string(),
-            0.0008,
+            FeeRates {
+                maker: -0.0001,
+                taker: 0.0008,
+            },
         )]));
-        assert_eq!(config.sources[0].estimated_fee_rate, Some(0.0004));
-        assert_eq!(config.sources[1].estimated_fee_rate, Some(0.0008));
+        assert_eq!(config.sources[0].maker_fee_rate, None);
+        assert_eq!(config.sources[1].maker_fee_rate, Some(-0.0001));
+        assert_eq!(config.sources[1].taker_fee_rate, Some(0.0008));
     }
 
     #[test]
@@ -721,7 +761,7 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.sources.len(), 4);
         assert_eq!(config.sources[0].id, "binance_exec_trade01");
-        assert_eq!(config.sources[0].display_name(), "trade01");
+        assert_eq!(config.sources[0].display_name(), "rpc_hf_cta");
         assert!(config.sources[0].enabled);
         assert!(config.sources[1..].iter().all(|source| !source.enabled));
         assert_eq!(

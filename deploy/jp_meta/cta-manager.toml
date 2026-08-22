@@ -27,12 +27,13 @@ retain_days = 30
 catalog_reload_secs = 30
 compact_interval_secs = 3600
 
-# jp-meta does not yet host a live CTA Exec. trade01 stays enabled so
-# Manager catalog/publish can target the reserved Exec Config on 18161.
+# Independent jp-meta stack. trade01 stays enabled so Manager
+# catalog/publish can target this host's Exec Config on 18161.
 # Missing persist_manager is treated as an empty NAV source.
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"
+alias = "rpc_hf_cta"
 venue = "binance-futures"
 rocksdb_path = "/home/ubuntu/binance_exec_trade01/data/persist_manager"
 enabled = true

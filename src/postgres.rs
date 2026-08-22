@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
-use crate::config::SourceConfig;
+use crate::config::{FeeRates, SourceConfig, validate_fee_rates};
 use crate::model::{DecodeFailure, SignalBboLeg, UniformOrderEvent};
 use crate::snapshot::{PositionSnapshot, SnapshotPosition};
 
@@ -19,6 +19,7 @@ pub async fn connect(database_url: &str, max_connections: u32) -> Result<PgPool>
 }
 
 pub async fn migrate(pool: &PgPool) -> Result<()> {
+    // Keep this call recompiled when the embedded migration set changes.
     sqlx::migrate!("./migrations")
         .run(pool)
         .await
@@ -29,14 +30,17 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
     for source in sources {
         // Seed estimated_fee_rate only on first insert. Later operator edits in
         // PostgreSQL must not be overwritten by toml on every cta_web restart.
-        let seed_fee_rate = source.estimated_fee_rate.unwrap_or(0.0004);
+        let seed_fee_rates = source.nav_fee_rates().unwrap_or(FeeRates {
+            maker: 0.0004,
+            taker: 0.0004,
+        });
         sqlx::query(
             r#"
             INSERT INTO cta_order_sources (
                 source_id, account_label, venue_label, rocksdb_path, enabled,
-                estimated_fee_rate
+                estimated_fee_rate, maker_fee_rate, taker_fee_rate
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (source_id) DO UPDATE SET
                 account_label = EXCLUDED.account_label,
                 venue_label = EXCLUDED.venue_label,
@@ -50,7 +54,9 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
         .bind(&source.venue)
         .bind(path_text(&source.rocksdb_path))
         .bind(source.enabled)
-        .bind(seed_fee_rate)
+        .bind(seed_fee_rates.taker)
+        .bind(seed_fee_rates.maker)
+        .bind(seed_fee_rates.taker)
         .execute(pool)
         .await
         .with_context(|| format!("failed to register source {}", source.id))?;
@@ -60,12 +66,10 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
 
 /// Load per-source estimated fee rates from PostgreSQL.
 /// Missing rows are omitted; callers should fall back to toml defaults.
-pub async fn load_estimated_fee_rates(
-    pool: &PgPool,
-) -> Result<std::collections::BTreeMap<String, f64>> {
+pub async fn load_fee_rates(pool: &PgPool) -> Result<std::collections::BTreeMap<String, FeeRates>> {
     let rows = sqlx::query(
         r#"
-        SELECT source_id, estimated_fee_rate
+        SELECT source_id, maker_fee_rate, taker_fee_rate
         FROM cta_order_sources
         "#,
     )
@@ -77,18 +81,24 @@ pub async fn load_estimated_fee_rates(
         let source_id: String = row
             .try_get("source_id")
             .context("failed to decode source_id for estimated fee rate")?;
-        let rate: f64 = row
-            .try_get("estimated_fee_rate")
-            .with_context(|| format!("failed to decode estimated_fee_rate for {source_id}"))?;
-        out.insert(source_id, rate);
+        let rates = FeeRates {
+            maker: row
+                .try_get("maker_fee_rate")
+                .with_context(|| format!("failed to decode maker_fee_rate for {source_id}"))?,
+            taker: row
+                .try_get("taker_fee_rate")
+                .with_context(|| format!("failed to decode taker_fee_rate for {source_id}"))?,
+        };
+        validate_fee_rates(rates)?;
+        out.insert(source_id, rates);
     }
     Ok(out)
 }
 
-pub async fn load_estimated_fee_rate(pool: &PgPool, source_id: &str) -> Result<Option<f64>> {
-    sqlx::query_scalar::<_, f64>(
+pub async fn load_fee_rate(pool: &PgPool, source_id: &str) -> Result<Option<FeeRates>> {
+    let row = sqlx::query(
         r#"
-        SELECT estimated_fee_rate
+        SELECT maker_fee_rate, taker_fee_rate
         FROM cta_order_sources
         WHERE source_id = $1
         "#,
@@ -96,27 +106,33 @@ pub async fn load_estimated_fee_rate(pool: &PgPool, source_id: &str) -> Result<O
     .bind(source_id)
     .fetch_optional(pool)
     .await
-    .with_context(|| format!("failed to load estimated fee rate for {source_id}"))
+    .with_context(|| format!("failed to load fee rates for {source_id}"))?;
+    row.map(|row| {
+        let rates = FeeRates {
+            maker: row.try_get("maker_fee_rate")?,
+            taker: row.try_get("taker_fee_rate")?,
+        };
+        validate_fee_rates(rates)?;
+        Ok(rates)
+    })
+    .transpose()
 }
 
-pub async fn save_estimated_fee_rate(
-    pool: &PgPool,
-    source_id: &str,
-    estimated_fee_rate: f64,
-) -> Result<()> {
-    if !estimated_fee_rate.is_finite() || estimated_fee_rate < 0.0 {
-        anyhow::bail!("estimated_fee_rate must be finite and nonnegative");
-    }
+pub async fn save_fee_rates(pool: &PgPool, source_id: &str, rates: FeeRates) -> Result<()> {
+    validate_fee_rates(rates)?;
     let result = sqlx::query(
         r#"
         UPDATE cta_order_sources
-        SET estimated_fee_rate = $2,
+        SET maker_fee_rate = $2,
+            taker_fee_rate = $3,
+            estimated_fee_rate = $3,
             updated_at = now()
         WHERE source_id = $1
         "#,
     )
     .bind(source_id)
-    .bind(estimated_fee_rate)
+    .bind(rates.maker)
+    .bind(rates.taker)
     .execute(pool)
     .await
     .with_context(|| format!("failed to save estimated fee rate for {source_id}"))?;
@@ -124,6 +140,22 @@ pub async fn save_estimated_fee_rate(
         anyhow::bail!("source {source_id} is not registered in cta_order_sources");
     }
     Ok(())
+}
+
+pub async fn save_estimated_fee_rate(
+    pool: &PgPool,
+    source_id: &str,
+    estimated_fee_rate: f64,
+) -> Result<()> {
+    save_fee_rates(
+        pool,
+        source_id,
+        FeeRates {
+            maker: estimated_fee_rate,
+            taker: estimated_fee_rate,
+        },
+    )
+    .await
 }
 
 pub async fn load_checkpoint(pool: &PgPool, source_id: &str) -> Result<Option<i64>> {

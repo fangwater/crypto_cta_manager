@@ -5,6 +5,12 @@ export type { TargetPosition }
 export interface NavTotals {
   fill_count: number
   volume_quote: number
+  maker_fill_count: number
+  maker_volume_quote: number
+  taker_fill_count: number
+  taker_volume_quote: number
+  unknown_liquidity_fill_count: number
+  unknown_liquidity_volume_quote: number
   realized_pnl_before_fee_quote: number
   estimated_trading_fee_quote: number
   realized_pnl_after_fee_quote: number
@@ -62,6 +68,8 @@ export interface SourceNavReport extends NavTotals {
   account: string
   configured_venue: string
   estimated_fee_rate: number
+  maker_fee_rate: number
+  taker_fee_rate: number
   initial_position_snapshot_ts_us: number | null
   initial_position_count: number
   order_event_count: number
@@ -154,6 +162,8 @@ export interface AccountStudio {
   source_id: string
   /** NAV estimated trading fee rate as a fraction (e.g. 0.0004 = 4 bps). */
   estimated_fee_rate: number
+  maker_fee_rate: number
+  taker_fee_rate: number
   bindings: AccountBinding[]
 }
 
