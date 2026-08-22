@@ -123,6 +123,8 @@ struct ExecutionCostQuery {
     window_sec: Option<u64>,
     source_ids: Option<String>,
     strategy_name: Option<String>,
+    page: Option<usize>,
+    page_size: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -494,12 +496,31 @@ async fn execution_cost(
     {
         return Ok(bad_request(message));
     }
+    let page = query.page.unwrap_or(1);
+    let page_size = query
+        .page_size
+        .unwrap_or(crate::execution_cost::DEFAULT_PAGE_SIZE);
+    if page == 0 {
+        return Ok(bad_request("page must be greater than zero".to_string()));
+    }
+    if page_size == 0 || page_size > crate::execution_cost::MAX_PAGE_SIZE {
+        return Ok(bad_request(format!(
+            "pageSize must be between 1 and {}",
+            crate::execution_cost::MAX_PAGE_SIZE
+        )));
+    }
 
     let started = Instant::now();
     let config = Arc::clone(&state.config);
     let archive = Arc::clone(&state.position_archive);
     let twap = Arc::clone(&state.twap);
-    let generated_at_us = unix_now_us();
+    let (histories, generated_at_us) = {
+        let cache = state.cache.read().await;
+        (
+            Arc::clone(&cache.nav_histories),
+            cache.dashboard.generated_at_us,
+        )
+    };
     let source_ids = selected_source_ids.clone();
     let strategy_name = strategy_name.map(str::to_string);
     let report = tokio::task::spawn_blocking(move || {
@@ -513,6 +534,9 @@ async fn execution_cost(
             generated_at_us,
             &source_ids,
             strategy_name.as_deref(),
+            page,
+            page_size,
+            &histories,
         )
     })
     .await
@@ -1491,6 +1515,7 @@ fn is_execution_cost_request_error(error: &anyhow::Error) -> bool {
     message.starts_with("start timestamp")
         || message.starts_with("end timestamp")
         || message.starts_with("windowSecs")
+        || message.starts_with("page")
         || message.starts_with("sourceIds")
 }
 

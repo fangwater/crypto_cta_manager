@@ -24,6 +24,29 @@ pub struct NavSourceHistory {
     liquidity_by_order: LiquidityByOrder,
 }
 
+impl NavSourceHistory {
+    pub(crate) fn events(&self) -> &[UniformOrderEvent] {
+        &self.events
+    }
+
+    pub(crate) fn estimated_fee_quote(
+        &self,
+        source: &SourceConfig,
+        event: &UniformOrderEvent,
+    ) -> Result<f64> {
+        let rates = source.nav_fee_rates()?;
+        let rate = match liquidity_role_for_event(event, &self.liquidity_by_order) {
+            LiquidityRole::Maker => rates.maker,
+            LiquidityRole::Taker | LiquidityRole::Unknown => rates.taker,
+        };
+        let fee = event.price * event.amount_update * rate;
+        if !fee.is_finite() {
+            bail!("fill estimated fee overflowed");
+        }
+        Ok(fee)
+    }
+}
+
 pub type NavSourceHistories = BTreeMap<String, NavSourceHistory>;
 
 const NAV_TICK_INTERVAL_US: i64 = 15 * 60 * 1_000_000;

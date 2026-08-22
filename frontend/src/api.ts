@@ -86,6 +86,8 @@ export interface ExecutionCostQuery {
   windowSec?: number
   sourceIds?: string[]
   strategyName?: string
+  page?: number
+  pageSize?: number
   signal?: AbortSignal
 }
 
@@ -96,6 +98,8 @@ export function getExecutionCost(query: ExecutionCostQuery) {
   params.set('windowSec', String(query.windowSec ?? 300))
   if (query.sourceIds?.length) params.set('sourceIds', query.sourceIds.join(','))
   if (query.strategyName?.trim()) params.set('strategyName', query.strategyName.trim())
+  params.set('page', String(query.page ?? 1))
+  params.set('pageSize', String(query.pageSize ?? 25))
   return requestJson<ExecutionCostSnapshot>(`/catalog/execution-cost?${params}`, {
     signal: query.signal,
   })

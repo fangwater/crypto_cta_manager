@@ -1,7 +1,8 @@
-import { LoaderCircle, RefreshCw, Scale } from 'lucide-react'
+import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, Scale } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { getDashboard, getExecutionCost } from '../api'
 import { AppShell, PageIntro, StatTile } from '../components/AppShell'
+import { ExecutionCostChart } from '../components/ExecutionCostChart'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
@@ -22,6 +23,7 @@ const WINDOW_OPTIONS = [
   { label: '15 分钟', value: 900 },
   { label: '30 分钟', value: 1_800 },
 ] as const
+const PAGE_SIZE = 25
 
 function toDatetimeLocal(ms: number) {
   const date = new Date(ms)
@@ -54,6 +56,7 @@ export function ExecutionCostPage() {
   const [startInput, setStartInput] = useState(toDatetimeLocal(now - 24 * 60 * 60 * 1_000))
   const [endInput, setEndInput] = useState(toDatetimeLocal(now))
   const [loading, setLoading] = useState(false)
+  const [page, setPage] = useState(1)
   const [error, setError] = useState<string | null>(null)
   const [dashError, setDashError] = useState<string | null>(null)
 
@@ -73,7 +76,7 @@ export function ExecutionCostPage() {
 
   const accounts = dashboard?.accounts ?? []
   const query = useCallback(
-    async (signal?: AbortSignal) => {
+    async (requestedPage = 1, signal?: AbortSignal) => {
       const startMs = fromDatetimeLocal(startInput)
       const endMs = fromDatetimeLocal(endInput)
       if (startMs == null || endMs == null) {
@@ -93,9 +96,12 @@ export function ExecutionCostPage() {
           windowSec,
           sourceIds: scope === 'all' ? undefined : [scope],
           strategyName: strategyName.trim() || undefined,
+          page: requestedPage,
+          pageSize: PAGE_SIZE,
           signal,
         })
         setSnapshot(next)
+        setPage(next.report.page)
       } catch (reason: unknown) {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
         setError(reason instanceof Error ? reason.message : String(reason))
@@ -145,7 +151,7 @@ export function ExecutionCostPage() {
           size="sm"
           variant="primary"
           disabled={loading}
-          onClick={() => void query()}
+          onClick={() => void query(1)}
         >
           {loading ? (
             <LoaderCircle size={15} className="animate-spin-slow" />
@@ -159,7 +165,7 @@ export function ExecutionCostPage() {
       <PageIntro
         eyebrow="On demand"
         title="实际成交 vs TWAP 预估"
-        description="每次仓位 POST 的目标仓位按当时归档的份数减去快照仓位，得到要执行的数量。默认假设 5 分钟均匀执行：从这次更新起切 5 个 1 分钟，每分钟对其中 5 秒 mid 等权平均，再对这 5 个 1 分钟 mid 平均，得到 TWAP 预估费前，并和同一窗口实际成交 VWAP 的费前成本对比。不是实时任务，点查询才生成。"
+        description="每次仓位 POST 的目标仓位按当时归档的份数减去快照仓位，得到要执行的数量。默认假设 5 分钟均匀执行：从这次更新起切 5 个 1 分钟，每分钟对其中 5 秒 mid 等权平均，再对这 5 个 1 分钟 mid 平均，得到 TWAP 预估费前，并和同一窗口实际成交 VWAP 的费前、费后成本对比。实际手续费按成交 maker/taker 角色估算。"
       />
 
       {dashError && <Alert className="mb-4">账户列表失败：{dashError}</Alert>}
@@ -226,7 +232,12 @@ export function ExecutionCostPage() {
         </CardContent>
       </Card>
 
-      <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+        <StatTile
+          label="实际费后成本"
+          value={report ? money(report.totals.actual_cost_after_fee_usdt) : '--'}
+          hint="实际费前 + maker/taker 估算手续费"
+        />
         <StatTile
           label="实际费前成本"
           value={report ? money(report.totals.actual_cost_before_fee_usdt) : '--'}
@@ -236,6 +247,11 @@ export function ExecutionCostPage() {
           label="TWAP 预估费前"
           value={report ? money(report.totals.twap_cost_before_fee_usdt) : '--'}
           hint="intended × (5×1m mid 平均 − arrival mid)"
+        />
+        <StatTile
+          label="估算手续费"
+          value={report ? money(report.totals.estimated_trading_fee_usdt) : '--'}
+          hint="maker/taker 费率，负数为返佣"
         />
         <StatTile
           label="仓位更新"
@@ -256,6 +272,20 @@ export function ExecutionCostPage() {
         />
       </div>
 
+      {snapshot && report && report.points.length > 0 && (
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>累计执行成本</CardTitle>
+            <CardDescription>
+              完整查询区间的累计成本变化；TWAP 保持费前，实际费后包含 maker/taker 估算手续费。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExecutionCostChart points={report.points} />
+          </CardContent>
+        </Card>
+      )}
+
       {!snapshot && !loading && (
         <Card>
           <CardContent className="py-16 text-center text-sm text-muted">
@@ -275,15 +305,44 @@ export function ExecutionCostPage() {
 
       {snapshot && (
         <Card>
-          <CardHeader className="flex flex-row items-start justify-between gap-3">
+          <CardHeader className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
             <div>
               <CardTitle>每次仓位更新</CardTitle>
               <CardDescription>
                 窗口从该次 POST 开始，最多 {report?.window_secs} 秒，遇到同策略下一次更新提前结束。
-                生成于 {timestampUs(snapshot.generated_at_us)}。
+                共 {report?.update_count ?? 0} 次，本页 {report?.returned_update_count ?? 0} 次。生成于{' '}
+                {timestampUs(snapshot.generated_at_us)}。
               </CardDescription>
             </div>
-            <Badge tone="brand">1m mid TWAP · 费前</Badge>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="w-8 px-0"
+                aria-label="上一页"
+                title="上一页"
+                disabled={loading || page <= 1}
+                onClick={() => void query(page - 1)}
+              >
+                <ChevronLeft size={15} />
+              </Button>
+              <Badge tone="brand">
+                {report?.page_count ? `${page} / ${report.page_count}` : '0 / 0'}
+              </Badge>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="w-8 px-0"
+                aria-label="下一页"
+                title="下一页"
+                disabled={loading || !report || page >= report.page_count}
+                onClick={() => void query(page + 1)}
+              >
+                <ChevronRight size={15} />
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="overflow-x-auto p-0">
             {symbolRows.length === 0 ? (
@@ -305,6 +364,8 @@ export function ExecutionCostPage() {
                     <th className="px-4 py-2 font-medium text-right">实际 VWAP</th>
                     <th className="px-4 py-2 font-medium text-right">TWAP 费前</th>
                     <th className="px-4 py-2 font-medium text-right">实际费前</th>
+                    <th className="px-4 py-2 font-medium text-right">估算手续费</th>
+                    <th className="px-4 py-2 font-medium text-right">实际费后</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -356,6 +417,22 @@ export function ExecutionCostPage() {
                           )}
                         >
                           {optionalMoney(row.symbol.actual_cost_before_fee_usdt)}
+                        </td>
+                        <td
+                          className={cn(
+                            'px-4 py-2 text-right tabular-nums',
+                            costClass(row.symbol.estimated_trading_fee_usdt),
+                          )}
+                        >
+                          {money(row.symbol.estimated_trading_fee_usdt)}
+                        </td>
+                        <td
+                          className={cn(
+                            'px-4 py-2 text-right tabular-nums',
+                            costClass(row.symbol.actual_cost_after_fee_usdt),
+                          )}
+                        >
+                          {optionalMoney(row.symbol.actual_cost_after_fee_usdt)}
                         </td>
                       </tr>
                     )

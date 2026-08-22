@@ -234,6 +234,16 @@ export interface ExecutionCostTotals {
   actual_notional_usdt: number
   twap_cost_before_fee_usdt: number
   actual_cost_before_fee_usdt: number
+  estimated_trading_fee_usdt: number
+  actual_cost_after_fee_usdt: number
+}
+
+export interface ExecutionCostPoint {
+  ts_us: number
+  twap_cost_before_fee_usdt: number
+  actual_cost_before_fee_usdt: number
+  estimated_trading_fee_usdt: number
+  actual_cost_after_fee_usdt: number
 }
 
 export interface SymbolExecutionCost {
@@ -254,6 +264,8 @@ export interface SymbolExecutionCost {
   actual_notional_usdt: number | null
   twap_cost_before_fee_usdt: number | null
   actual_cost_before_fee_usdt: number | null
+  estimated_trading_fee_usdt: number
+  actual_cost_after_fee_usdt: number | null
 }
 
 export interface AccountExecutionCost {
@@ -284,13 +296,19 @@ export interface ExecutionCostReport {
   twap_secs: number
   price_basis: string
   fee_basis: string
+  actual_fee_basis: string
   start_received_at_us: number
   end_received_at_us: number | null
   source_ids: string[]
   strategy_name: string | null
   update_count: number
+  page: number
+  page_size: number
+  page_count: number
+  returned_update_count: number
   skipped_legacy_update_count: number
   totals: ExecutionCostTotals
+  points: ExecutionCostPoint[]
   updates: PositionUpdateExecutionCost[]
 }
 
