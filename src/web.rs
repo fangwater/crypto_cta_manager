@@ -1,10 +1,17 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array};
+use arrow_ipc::{
+    CompressionType,
+    writer::{IpcWriteOptions, StreamWriter},
+};
+use arrow_schema::{DataType, Field, Schema};
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -112,6 +119,15 @@ struct TimelineQuery {
     source_ids: Option<String>,
     symbols: Option<String>,
     max_points: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StrategyPnlQuery {
+    source_id: String,
+    strategy_name: String,
+    start_ms: i64,
+    end_ms: i64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -249,6 +265,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .route("/api/dashboard", get(dashboard))
         .route("/api/timeline", get(timeline))
+        .route("/api/pnl/strategy", get(strategy_pnl))
         .route("/api/catalog/execution-cost", get(execution_cost))
         .route("/api/order-config/auth", post(order_config_auth))
         .route(
@@ -454,6 +471,85 @@ async fn timeline(
         }),
     )
         .into_response())
+}
+
+async fn strategy_pnl(
+    State(state): State<WebState>,
+    Query(query): Query<StrategyPnlQuery>,
+) -> Result<Response, ApiError> {
+    let source_id = query.source_id.trim().to_string();
+    let strategy_name = query.strategy_name.trim().to_string();
+    if source_id.is_empty() {
+        return Ok(bad_request("sourceId must not be empty".to_string()));
+    }
+    if strategy_name.is_empty() {
+        return Ok(bad_request("strategyName must not be empty".to_string()));
+    }
+    if let Err(message) = resolve_sources(&state.config, &[source_id.clone()]) {
+        return Ok(bad_request(message));
+    }
+    let start_ts_us = match milliseconds_to_microseconds(query.start_ms, "startMs") {
+        Ok(value) => value,
+        Err(message) => return Ok(bad_request(message)),
+    };
+    let end_ts_us = match milliseconds_to_microseconds(query.end_ms, "endMs") {
+        Ok(value) => value,
+        Err(message) => return Ok(bad_request(message)),
+    };
+    if end_ts_us < start_ts_us {
+        return Ok(bad_request(
+            "endMs must be greater than or equal to startMs".to_string(),
+        ));
+    }
+
+    let started = Instant::now();
+    let (histories, snapshots, data_generated_at_us) = {
+        let cache = state.cache.read().await;
+        (
+            Arc::clone(&cache.nav_histories),
+            Arc::clone(&cache.position_snapshots),
+            cache.dashboard.generated_at_us,
+        )
+    };
+    let config = Arc::clone(&state.config).as_ref().clone();
+    let payload = tokio::task::spawn_blocking(move || {
+        let report = nav::rebuild_strategy_pnl_from_histories_with_snapshots(
+            &config,
+            nav::StrategyPnlRequest {
+                source_id,
+                strategy_name,
+                start_ts_us,
+                end_ts_us,
+            },
+            &snapshots,
+            &histories,
+        )?;
+        encode_strategy_pnl_arrow(&report, data_generated_at_us)
+    })
+    .await
+    .context("CTA strategy PnL rebuild task failed")?;
+    let payload = match payload {
+        Ok(payload) => payload,
+        Err(error) if is_strategy_pnl_request_error(&error) => {
+            return Ok(bad_request(error.to_string()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    info!(
+        generation_duration_ms,
+        response_bytes = payload.len(),
+        "served raw strategy PnL Arrow stream"
+    );
+
+    let mut response = payload.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.apache.arrow.stream"),
+    );
+    Ok(response)
 }
 
 async fn execution_cost(
@@ -1507,11 +1603,154 @@ fn milliseconds_to_microseconds(value: i64, field: &str) -> std::result::Result<
         .ok_or_else(|| format!("{field} is too large"))
 }
 
+const PNL_ARROW_BATCH_ROWS: usize = 65_536;
+
+fn encode_strategy_pnl_arrow(
+    report: &nav::StrategyPnlReport,
+    generated_at_us: i64,
+) -> Result<Vec<u8>> {
+    let metadata = HashMap::from([
+        ("account".to_string(), report.account.clone()),
+        ("compression".to_string(), "zstd".to_string()),
+        ("end_ts_us".to_string(), report.end_ts_us.to_string()),
+        ("generated_at_us".to_string(), generated_at_us.to_string()),
+        ("source_id".to_string(), report.source_id.clone()),
+        ("start_ts_us".to_string(), report.start_ts_us.to_string()),
+        ("strategy_name".to_string(), report.strategy_name.clone()),
+        (
+            "valuation".to_string(),
+            "quantity_fifo_window_delta".to_string(),
+        ),
+    ]);
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("source_id", DataType::Utf8, false),
+            Field::new("account", DataType::Utf8, false),
+            Field::new("strategy_name", DataType::Utf8, false),
+            Field::new("row_kind", DataType::Utf8, false),
+            Field::new("ts_us", DataType::Int64, false),
+            Field::new("record_key", DataType::Utf8, true),
+            Field::new("symbol", DataType::Utf8, true),
+            Field::new("venue", DataType::Utf8, true),
+            Field::new("fill_count", DataType::UInt64, false),
+            Field::new("realized_pnl_before_fee_quote", DataType::Float64, false),
+            Field::new("estimated_trading_fee_quote", DataType::Float64, false),
+            Field::new("realized_pnl_after_fee_quote", DataType::Float64, false),
+            Field::new("floating_pnl_quote", DataType::Float64, false),
+            Field::new("nav_change_before_fee_quote", DataType::Float64, false),
+            Field::new("nav_change_after_fee_quote", DataType::Float64, false),
+        ],
+        metadata,
+    ));
+    let options = IpcWriteOptions::default()
+        .try_with_compression(Some(CompressionType::ZSTD))?
+        .try_with_compression_level(Some(3))?;
+    let mut payload = Vec::new();
+    {
+        let mut writer =
+            StreamWriter::try_new_with_options(&mut payload, schema.as_ref(), options)?;
+        for rows in report.rows.chunks(PNL_ARROW_BATCH_ROWS) {
+            writer.write(&strategy_pnl_record_batch(
+                Arc::clone(&schema),
+                report,
+                rows,
+            )?)?;
+        }
+        writer.finish()?;
+    }
+    Ok(payload)
+}
+
+fn strategy_pnl_record_batch(
+    schema: Arc<Schema>,
+    report: &nav::StrategyPnlReport,
+    rows: &[nav::StrategyPnlRow],
+) -> Result<RecordBatch> {
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(vec![
+            report.source_id.as_str();
+            rows.len()
+        ])),
+        Arc::new(StringArray::from(vec![report.account.as_str(); rows.len()])),
+        Arc::new(StringArray::from(vec![
+            report.strategy_name.as_str();
+            rows.len()
+        ])),
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.row_kind.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Int64Array::from(
+            rows.iter().map(|row| row.ts_us).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.record_key.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.symbol.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.venue.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(UInt64Array::from(
+            rows.iter()
+                .map(|row| row.totals.fill_count)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter()
+                .map(|row| row.totals.realized_pnl_before_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter()
+                .map(|row| row.totals.estimated_trading_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter()
+                .map(|row| row.totals.realized_pnl_after_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter()
+                .map(|row| row.totals.floating_pnl_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter()
+                .map(|row| row.totals.nav_change_before_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            rows.iter()
+                .map(|row| row.totals.nav_change_after_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+    ];
+    Ok(RecordBatch::try_new(schema, columns)?)
+}
+
 fn is_timeline_request_error(error: &anyhow::Error) -> bool {
     let message = error.to_string();
     message.starts_with("start timestamp")
         || message.starts_with("end timestamp")
         || message.starts_with("none of the requested symbols")
+}
+
+fn is_strategy_pnl_request_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.starts_with("start timestamp")
+        || message.starts_with("end timestamp")
+        || message.starts_with("strategy_name")
+        || message.starts_with("source_id")
 }
 
 fn is_execution_cost_request_error(error: &anyhow::Error) -> bool {
@@ -1673,6 +1912,11 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use arrow_array::Array;
+    use arrow_ipc::reader::StreamReader;
+
     use super::*;
 
     #[test]
@@ -1697,6 +1941,66 @@ mod tests {
         assert_eq!(milliseconds_to_microseconds(123, "startMs"), Ok(123_000));
         assert!(milliseconds_to_microseconds(-1, "startMs").is_err());
         assert!(milliseconds_to_microseconds(i64::MAX, "endMs").is_err());
+    }
+
+    #[test]
+    fn strategy_pnl_arrow_stream_round_trips_without_losing_float_values() {
+        let mut totals = nav::NavTotals::default();
+        totals.nav_change_after_fee_quote = 12.345_678_901;
+        let report = nav::StrategyPnlReport {
+            source_id: "trade01".to_string(),
+            account: "account-01".to_string(),
+            strategy_name: "cta_alpha".to_string(),
+            start_ts_us: 1_000,
+            end_ts_us: 2_000,
+            rows: vec![
+                nav::StrategyPnlRow {
+                    row_kind: nav::StrategyPnlRowKind::WindowStart,
+                    ts_us: 1_000,
+                    record_key: None,
+                    symbol: None,
+                    venue: None,
+                    totals: nav::NavTotals::default(),
+                },
+                nav::StrategyPnlRow {
+                    row_kind: nav::StrategyPnlRowKind::WindowEnd,
+                    ts_us: 2_000,
+                    record_key: None,
+                    symbol: None,
+                    venue: None,
+                    totals,
+                },
+            ],
+        };
+
+        let payload = encode_strategy_pnl_arrow(&report, 3_000).unwrap();
+        let mut reader = StreamReader::try_new_buffered(Cursor::new(payload), None).unwrap();
+        assert_eq!(
+            reader.schema().metadata().get("compression"),
+            Some(&"zstd".to_string())
+        );
+        assert_eq!(
+            reader.schema().metadata().get("strategy_name"),
+            Some(&"cta_alpha".to_string())
+        );
+        let batch = reader.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let kinds = batch
+            .column_by_name("row_kind")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(kinds.value(0), "window_start");
+        assert_eq!(kinds.value(1), "window_end");
+        let after_fee = batch
+            .column_by_name("nav_change_after_fee_quote")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(after_fee.value(1).to_bits(), 12.345_678_901_f64.to_bits());
+        assert!(reader.next().is_none());
     }
 
     #[test]

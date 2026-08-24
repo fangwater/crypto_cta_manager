@@ -177,6 +177,51 @@ the strategy suffix in `batch_exec:<strategy_name>`. Account-level initial
 snapshot positions are shown as unallocated initial positions because they do
 not contain historical strategy ownership.
 
+## Strategy PnL Arrow Export
+
+`GET /api/pnl/strategy` returns raw PnL rows for exactly one enabled account
+and one `batch_exec:<strategy_name>` strategy. It requires camel-case query
+parameters `sourceId`, `strategyName`, `startMs`, and `endMs`; timestamps are
+Unix milliseconds and both interval boundaries are inclusive. The response is
+an Arrow IPC stream with Zstd-compressed record batches and content type
+`application/vnd.apache.arrow.stream`.
+
+Rows are not resampled. `window_start` is a zero PnL baseline at `startMs`,
+each `fill` row is one fill attributed to the requested strategy, and
+`window_end` is the exact final PnL at `endMs`. Fills before the window build
+the isolated `source_id + strategy + symbol + venue` FIFO state but are not
+returned. The terminal row uses the latest account-level fill price for each
+symbol and venue, so its floating PnL remains additive to the account even if
+another strategy supplied the last mark.
+
+The stream has identifiers, timestamp, row kind, optional fill identity, and
+the cumulative window PnL fields `realized_pnl_before_fee_quote`,
+`estimated_trading_fee_quote`, `realized_pnl_after_fee_quote`,
+`floating_pnl_quote`, `nav_change_before_fee_quote`, and
+`nav_change_after_fee_quote`. Monetary values are Arrow `Float64`, preserving
+the existing Rust `f64` result bit-for-bit; the endpoint does not round or
+reduce precision.
+
+```python
+import pyarrow as pa
+import pyarrow.ipc as ipc
+import requests
+
+response = requests.get(
+    "http://172.16.30.42:10041/manager/api/pnl/strategy",
+    params={
+        "sourceId": "binance_exec_trade01",
+        "strategyName": "CTA_ALPHA",
+        "startMs": 1755648000000,
+        "endMs": 1755734400000,
+    },
+    timeout=60,
+)
+response.raise_for_status()
+table = ipc.open_stream(pa.BufferReader(response.content)).read_all()
+frame = table.to_pandas()
+```
+
 Order strategies include `max_batch`, the estimated maximum batch count for a
 single target update. When a target is activated, Exec values the outstanding
 base quantity with the current mark price and calculates

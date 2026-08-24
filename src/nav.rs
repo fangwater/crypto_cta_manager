@@ -225,6 +225,53 @@ pub struct NavTimelineRequest {
     pub max_points: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct StrategyPnlRequest {
+    pub source_id: String,
+    pub strategy_name: String,
+    pub start_ts_us: i64,
+    pub end_ts_us: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyPnlRowKind {
+    WindowStart,
+    Fill,
+    WindowEnd,
+}
+
+impl StrategyPnlRowKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WindowStart => "window_start",
+            Self::Fill => "fill",
+            Self::WindowEnd => "window_end",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StrategyPnlRow {
+    pub row_kind: StrategyPnlRowKind,
+    pub ts_us: i64,
+    pub record_key: Option<String>,
+    pub symbol: Option<String>,
+    pub venue: Option<String>,
+    #[serde(flatten)]
+    pub totals: NavTotals,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StrategyPnlReport {
+    pub source_id: String,
+    pub account: String,
+    pub strategy_name: String,
+    pub start_ts_us: i64,
+    pub end_ts_us: i64,
+    pub rows: Vec<StrategyPnlRow>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Side {
     Buy,
@@ -1592,6 +1639,127 @@ pub fn rebuild_nav_timeline_from_histories_with_snapshots(
     })
 }
 
+/// Rebuilds one account strategy's PnL at raw fill timestamps.
+///
+/// The initial row is always zero at `start_ts_us`. Fills before the window are
+/// applied solely to establish the FIFO baseline. The terminal row always
+/// reflects the exact end-of-window PnL, including a mark set by another
+/// strategy's fill in the same account.
+pub fn rebuild_strategy_pnl_from_histories_with_snapshots(
+    config: &AppConfig,
+    request: StrategyPnlRequest,
+    snapshots: &SourcePositionSnapshots,
+    histories: &NavSourceHistories,
+) -> Result<StrategyPnlReport> {
+    if request.start_ts_us < 0 {
+        bail!("start timestamp must not be negative");
+    }
+    if request.end_ts_us < request.start_ts_us {
+        bail!("end timestamp must be greater than or equal to start timestamp");
+    }
+    if strategy_from_from_key(&format!(
+        "{BATCH_EXEC_FROM_KEY_PREFIX}{}",
+        request.strategy_name
+    )) != request.strategy_name
+    {
+        bail!("strategy_name has an invalid format");
+    }
+
+    let selected = select_sources(config, std::slice::from_ref(&request.source_id))?;
+    let [source] = selected.as_slice() else {
+        bail!("source_id must select exactly one enabled source");
+    };
+    let history = histories
+        .get(&source.id)
+        .with_context(|| format!("NAV history is missing selected source {}", source.id))?;
+    let prepared = prepare_source_events(
+        source,
+        history.events.clone(),
+        snapshots.get(&source.id),
+        &history.liquidity_by_order,
+    )
+    .with_context(|| format!("failed to prepare source {} strategy PnL", source.id))?;
+
+    let initial_strategy_states = prepared
+        .initial_states
+        .iter()
+        .map(|((symbol, venue_code), state)| {
+            (
+                (
+                    INITIAL_POSITION_STRATEGY.to_string(),
+                    symbol.clone(),
+                    *venue_code,
+                ),
+                state.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut runtime = TimelineSourceState {
+        source_id: source.id.clone(),
+        fee_rates: source.nav_fee_rates()?,
+        snapshot_ts_us: prepared.snapshot_ts_us,
+        pending_initial_states: prepared.snapshot_ts_us.map(|_| prepared.initial_states),
+        pending_initial_strategy_states: prepared.snapshot_ts_us.map(|_| initial_strategy_states),
+        states: BTreeMap::new(),
+        strategy_states: BTreeMap::new(),
+        latest_marks: BTreeMap::new(),
+    };
+
+    runtime.activate_snapshot_at(request.start_ts_us);
+    let window_start = prepared
+        .fill_events
+        .partition_point(|fill| fill.fill_ts_us < request.start_ts_us);
+    let window_end = prepared
+        .fill_events
+        .partition_point(|fill| fill.fill_ts_us <= request.end_ts_us);
+    for fill in &prepared.fill_events[..window_start] {
+        runtime.apply_fill(fill)?;
+    }
+    let baseline = strategy_totals(&runtime, &request.strategy_name);
+    let mut rows = vec![StrategyPnlRow {
+        row_kind: StrategyPnlRowKind::WindowStart,
+        ts_us: request.start_ts_us,
+        record_key: None,
+        symbol: None,
+        venue: None,
+        totals: NavTotals::default(),
+    }];
+
+    for fill in &prepared.fill_events[window_start..window_end] {
+        let is_strategy_fill =
+            strategy_from_from_key(&fill.event.from_key_text) == request.strategy_name;
+        runtime.apply_fill(fill)?;
+        if is_strategy_fill {
+            rows.push(StrategyPnlRow {
+                row_kind: StrategyPnlRowKind::Fill,
+                ts_us: fill.fill_ts_us,
+                record_key: Some(fill.event.record_key.clone()),
+                symbol: Some(fill.event.symbol.clone()),
+                venue: Some(fill.event.venue.clone()),
+                totals: strategy_totals(&runtime, &request.strategy_name).difference(baseline),
+            });
+        }
+    }
+    runtime.activate_snapshot_at(request.end_ts_us);
+    rows.push(StrategyPnlRow {
+        row_kind: StrategyPnlRowKind::WindowEnd,
+        ts_us: request.end_ts_us,
+        record_key: None,
+        symbol: None,
+        venue: None,
+        totals: strategy_totals(&runtime, &request.strategy_name).difference(baseline),
+    });
+
+    Ok(StrategyPnlReport {
+        source_id: source.id.clone(),
+        account: source.display_name().to_string(),
+        strategy_name: request.strategy_name,
+        start_ts_us: request.start_ts_us,
+        end_ts_us: request.end_ts_us,
+        rows,
+    })
+}
+
 fn rebuild_nav_from_rocksdb_with_inputs(
     config: &AppConfig,
     selected_source_ids: &[String],
@@ -1730,6 +1898,21 @@ fn timeline_totals_by_strategy_symbol(
         }
     }
     totals
+}
+
+fn strategy_totals(runtime: &TimelineSourceState, strategy_name: &str) -> NavTotals {
+    let mut totals = NavTotals::default();
+    for ((strategy, symbol, venue_code), state) in &runtime.strategy_states {
+        if strategy != strategy_name {
+            continue;
+        }
+        let mark = runtime
+            .latest_marks
+            .get(&(symbol.clone(), *venue_code))
+            .copied();
+        totals.add(state.report(mark).totals);
+    }
+    totals.cleaned()
 }
 
 fn timeline_strategy_position_values(
@@ -2684,6 +2867,48 @@ mod tests {
 
         assert_eq!(report.summary.fill_count, 1);
         assert_close(report.summary.realized_pnl_before_fee_quote, 10.0);
+    }
+
+    #[test]
+    fn strategy_pnl_returns_raw_strategy_fills_and_an_exact_terminal_mark() {
+        let strategy_a = "cta_a";
+        let strategy_b = "cta_b";
+        let config = app_config(vec![source("trade01", Some(0.0))]);
+        let histories = NavSourceHistories::from([(
+            "trade01".to_string(),
+            NavSourceHistory {
+                events: vec![
+                    strategy_event_at(1, 1, "BTCUSDT", 1, 1, 100.0, 1.0, strategy_a),
+                    strategy_event_at(2, 2, "BTCUSDT", 1, 1, 105.0, 1.0, strategy_b),
+                    strategy_event_at(3, 3, "BTCUSDT", 1, 1, 100.0, 1.0, strategy_a),
+                    strategy_event_at(4, 4, "BTCUSDT", 1, 1, 120.0, 1.0, strategy_b),
+                ],
+                liquidity_by_order: LiquidityByOrder::new(),
+            },
+        )]);
+
+        let report = rebuild_strategy_pnl_from_histories_with_snapshots(
+            &config,
+            StrategyPnlRequest {
+                source_id: "trade01".to_string(),
+                strategy_name: strategy_a.to_string(),
+                start_ts_us: 2,
+                end_ts_us: 4,
+            },
+            &SourcePositionSnapshots::new(),
+            &histories,
+        )
+        .unwrap();
+
+        assert_eq!(report.rows.len(), 3);
+        assert_eq!(report.rows[0].row_kind, StrategyPnlRowKind::WindowStart);
+        assert_eq!(report.rows[1].row_kind, StrategyPnlRowKind::Fill);
+        assert_eq!(report.rows[1].ts_us, 3);
+        assert_eq!(report.rows[2].row_kind, StrategyPnlRowKind::WindowEnd);
+        assert_eq!(report.rows[2].ts_us, 4);
+        assert_close(report.rows[1].totals.nav_change_before_fee_quote, 0.0);
+        assert_close(report.rows[2].totals.floating_pnl_quote, 40.0);
+        assert_close(report.rows[2].totals.nav_change_after_fee_quote, 40.0);
     }
 
     #[test]
