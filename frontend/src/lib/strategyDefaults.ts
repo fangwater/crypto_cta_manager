@@ -14,7 +14,7 @@ export const DEFAULT_ORDER: OrderParameters = {
 }
 
 export function emptyPosition(): PositionStrategy {
-  return { strategy_name: '', targets: {}, updated_at_us: 0 }
+  return { strategy_name: '', targets: {}, symbol_order_strategy_overrides: {}, updated_at_us: 0 }
 }
 
 export function emptyOrder(): CatalogOrderStrategy {

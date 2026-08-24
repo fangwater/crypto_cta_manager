@@ -151,7 +151,11 @@ export function saveOrderParameters(
 }
 
 function decodePositionStrategy(raw: PositionStrategy): PositionStrategy {
-  return { ...raw, targets: normalizeTargetMap(raw.targets) }
+  return {
+    ...raw,
+    targets: normalizeTargetMap(raw.targets),
+    symbol_order_strategy_overrides: raw.symbol_order_strategy_overrides ?? {},
+  }
 }
 
 export async function listPositionStrategies(signal?: AbortSignal) {
@@ -167,6 +171,7 @@ export async function savePositionStrategy(body: PositionStrategy) {
     body: {
       strategy_name: body.strategy_name,
       targets: body.targets,
+      symbol_order_strategy_overrides: body.symbol_order_strategy_overrides,
     },
   })
   return {
@@ -181,8 +186,9 @@ export function deletePositionStrategy(name: string) {
   })
 }
 
-export function listOrderStrategies(signal?: AbortSignal) {
-  return requestJson<CatalogOrderStrategy[]>('/catalog/order-strategies', { signal })
+export async function listOrderStrategies(signal?: AbortSignal) {
+  const strategies = await requestJson<CatalogOrderStrategy[]>('/catalog/order-strategies', { signal })
+  return strategies
 }
 
 export function saveOrderStrategy(body: CatalogOrderStrategy) {

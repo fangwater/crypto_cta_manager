@@ -41,7 +41,6 @@ export function OrderStrategyPage() {
             emptyLabel="还没有下单策略。当前阶段通常只需一条 default 模板。"
             items={orders}
             selectedName={selectedOrder.strategy_name}
-            allowCreate={orders.length === 0}
             onSelect={(name) => {
               const item = orders.find((entry) => entry.strategy_name === name)
               if (item) setSelectedOrder(item)

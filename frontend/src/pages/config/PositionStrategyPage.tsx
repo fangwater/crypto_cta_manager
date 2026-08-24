@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { deletePositionStrategy, savePositionStrategy } from '../../api'
 import { ConfigShell } from '../../components/ConfigShell'
 import { StrategyPicker } from '../../components/StrategyPicker'
+import { SymbolOrderStrategyOverridesEditor } from '../../components/SymbolOrderStrategyOverridesEditor'
 import { TargetPositionsEditor } from '../../components/TargetPositionsEditor'
 import { Button } from '../../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/Card'
@@ -12,7 +13,7 @@ import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { emptyPosition } from '../../lib/strategyDefaults'
 
 export function PositionStrategyPage() {
-  const { positions, loading, error, reloadCatalog } = useStrategyCatalog()
+  const { positions, orders, loading, error, reloadCatalog } = useStrategyCatalog()
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [selectedPosition, setSelectedPosition] = useState(emptyPosition)
 
@@ -20,7 +21,7 @@ export function PositionStrategyPage() {
     <ConfigShell
       section="position"
       title="仓位策略"
-      description="维护各 CTA 仓位策略的原始目标持仓。保存后会按每个绑定账户的份数自动写入 Redis。"
+      description="维护原始目标仓位，并可为策略内的各 Symbol 选择独立下单模板。保存后会按绑定账户份数自动写入 Redis。"
       saving={saving}
       error={error ?? writeError}
       notice={notice}
@@ -93,7 +94,26 @@ export function PositionStrategyPage() {
                 </FieldHint>
                 <TargetPositionsEditor
                   targets={selectedPosition.targets}
-                  onChange={(targets) => setSelectedPosition({ ...selectedPosition, targets })}
+                  onChange={(targets) => {
+                    const symbol_order_strategy_overrides = Object.fromEntries(
+                      Object.entries(selectedPosition.symbol_order_strategy_overrides).filter(
+                        ([symbol]) => symbol in targets,
+                      ),
+                    )
+                    setSelectedPosition({
+                      ...selectedPosition,
+                      targets,
+                      symbol_order_strategy_overrides,
+                    })
+                  }}
+                />
+                <SymbolOrderStrategyOverridesEditor
+                  targets={selectedPosition.targets}
+                  orderStrategies={orders}
+                  value={selectedPosition.symbol_order_strategy_overrides}
+                  onChange={(symbol_order_strategy_overrides) =>
+                    setSelectedPosition({ ...selectedPosition, symbol_order_strategy_overrides })
+                  }
                 />
                 <div className="flex flex-wrap gap-2">
                   <Button type="submit" variant="primary" disabled={saving}>

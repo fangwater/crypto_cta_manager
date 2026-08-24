@@ -21,6 +21,22 @@ pub struct OrderParameters {
     pub target_tolerance_usdt: f64,
 }
 
+impl Default for OrderParameters {
+    fn default() -> Self {
+        Self {
+            single_order_usdt: 100.0,
+            orders_per_batch: 3,
+            max_batch: default_max_batch(),
+            maker_price_anchor: "own_best".to_string(),
+            tick_spacing: 1,
+            batch_interval_ms: 500,
+            maker_timeout_ms: 1_000,
+            max_maker_requotes: 2,
+            target_tolerance_usdt: 10.0,
+        }
+    }
+}
+
 impl OrderParameters {
     pub fn validate(&self) -> std::result::Result<(), String> {
         if !self.single_order_usdt.is_finite() || self.single_order_usdt <= 0.0 {
@@ -48,11 +64,120 @@ impl OrderParameters {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderParameterOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub single_order_usdt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orders_per_batch: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maker_price_anchor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_spacing: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_interval_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maker_timeout_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_maker_requotes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_tolerance_usdt: Option<f64>,
+}
+
+impl OrderParameterOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.single_order_usdt.is_none()
+            && self.orders_per_batch.is_none()
+            && self.max_batch.is_none()
+            && self.maker_price_anchor.is_none()
+            && self.tick_spacing.is_none()
+            && self.batch_interval_ms.is_none()
+            && self.maker_timeout_ms.is_none()
+            && self.max_maker_requotes.is_none()
+            && self.target_tolerance_usdt.is_none()
+    }
+
+    pub fn apply_to(&self, defaults: &OrderParameters) -> OrderParameters {
+        OrderParameters {
+            single_order_usdt: self.single_order_usdt.unwrap_or(defaults.single_order_usdt),
+            orders_per_batch: self.orders_per_batch.unwrap_or(defaults.orders_per_batch),
+            max_batch: self.max_batch.unwrap_or(defaults.max_batch),
+            maker_price_anchor: self
+                .maker_price_anchor
+                .clone()
+                .unwrap_or_else(|| defaults.maker_price_anchor.clone()),
+            tick_spacing: self.tick_spacing.unwrap_or(defaults.tick_spacing),
+            batch_interval_ms: self.batch_interval_ms.unwrap_or(defaults.batch_interval_ms),
+            maker_timeout_ms: self.maker_timeout_ms.unwrap_or(defaults.maker_timeout_ms),
+            max_maker_requotes: self
+                .max_maker_requotes
+                .unwrap_or(defaults.max_maker_requotes),
+            target_tolerance_usdt: self
+                .target_tolerance_usdt
+                .unwrap_or(defaults.target_tolerance_usdt),
+        }
+    }
+
+    pub fn from_templates(defaults: &OrderParameters, selected: &OrderParameters) -> Self {
+        Self {
+            single_order_usdt: (selected.single_order_usdt != defaults.single_order_usdt)
+                .then_some(selected.single_order_usdt),
+            orders_per_batch: (selected.orders_per_batch != defaults.orders_per_batch)
+                .then_some(selected.orders_per_batch),
+            max_batch: (selected.max_batch != defaults.max_batch).then_some(selected.max_batch),
+            maker_price_anchor: (selected.maker_price_anchor != defaults.maker_price_anchor)
+                .then(|| selected.maker_price_anchor.clone()),
+            tick_spacing: (selected.tick_spacing != defaults.tick_spacing)
+                .then_some(selected.tick_spacing),
+            batch_interval_ms: (selected.batch_interval_ms != defaults.batch_interval_ms)
+                .then_some(selected.batch_interval_ms),
+            maker_timeout_ms: (selected.maker_timeout_ms != defaults.maker_timeout_ms)
+                .then_some(selected.maker_timeout_ms),
+            max_maker_requotes: (selected.max_maker_requotes != defaults.max_maker_requotes)
+                .then_some(selected.max_maker_requotes),
+            target_tolerance_usdt: (selected.target_tolerance_usdt
+                != defaults.target_tolerance_usdt)
+                .then_some(selected.target_tolerance_usdt),
+        }
+    }
+
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        self.apply_to(&OrderParameters::default()).validate()
+    }
+}
+
+pub fn validate_symbol_order_parameter_overrides(
+    overrides: &BTreeMap<String, OrderParameterOverrides>,
+) -> std::result::Result<(), String> {
+    for (symbol, override_parameters) in overrides {
+        if symbol.is_empty()
+            || !symbol
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        {
+            return Err(format!("invalid symbol override: {symbol}"));
+        }
+        if override_parameters.is_empty() {
+            return Err(format!(
+                "symbol_overrides.{symbol} must override at least one parameter"
+            ));
+        }
+        override_parameters
+            .validate()
+            .map_err(|error| format!("symbol_overrides.{symbol}.{error}"))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderStrategyView {
     pub source_id: String,
     pub strategy_name: String,
     pub order_parameters: OrderParameters,
+    pub symbol_overrides: BTreeMap<String, OrderParameterOverrides>,
     pub updated_at_us: Option<i64>,
     pub target_count: usize,
     pub nonzero_target_count: usize,
@@ -157,6 +282,8 @@ struct ExecConfigPayload {
     target_tolerance_usdt: f64,
     #[serde(default)]
     targets: BTreeMap<String, TargetPosition>,
+    #[serde(default)]
+    symbol_overrides: BTreeMap<String, OrderParameterOverrides>,
     updated_at_us: Option<i64>,
 }
 
@@ -184,6 +311,8 @@ const fn default_max_batch() -> u32 {
 struct SaveResponse {
     strategy_name: String,
     order_parameters: OrderParameters,
+    #[serde(default)]
+    symbol_overrides: BTreeMap<String, OrderParameterOverrides>,
     updated_at_us: i64,
 }
 
@@ -321,6 +450,7 @@ impl ExecConfigClient {
             source_id: source_id.to_string(),
             strategy_name: strategy_name.to_string(),
             order_parameters,
+            symbol_overrides: payload.config.symbol_overrides,
             updated_at_us: payload.config.updated_at_us,
             target_count,
             nonzero_target_count,
@@ -372,6 +502,7 @@ impl ExecConfigClient {
             source_id: source_id.to_string(),
             strategy_name: payload.strategy_name,
             order_parameters: payload.order_parameters,
+            symbol_overrides: payload.symbol_overrides,
             updated_at_us: Some(payload.updated_at_us),
             target_count: 0,
             nonzero_target_count: 0,
@@ -384,30 +515,38 @@ impl ExecConfigClient {
         base_url: &str,
         strategy_name: &str,
         order_parameters: &OrderParameters,
+        symbol_overrides: &BTreeMap<String, OrderParameterOverrides>,
         targets: &BTreeMap<String, TargetPosition>,
     ) -> std::result::Result<OrderStrategyView, ExecConfigError> {
         validate_strategy_name(strategy_name).map_err(ExecConfigError::invalid)?;
         order_parameters
             .validate()
             .map_err(ExecConfigError::invalid)?;
+        validate_symbol_order_parameter_overrides(symbol_overrides)
+            .map_err(ExecConfigError::invalid)?;
         let url = endpoint(base_url, "strategy")?;
+        let mut config = serde_json::json!({
+            "single_order_usdt": order_parameters.single_order_usdt,
+            "orders_per_batch": order_parameters.orders_per_batch,
+            "max_batch": order_parameters.max_batch,
+            "maker_price_anchor": order_parameters.maker_price_anchor,
+            "tick_spacing": order_parameters.tick_spacing,
+            "batch_interval_ms": order_parameters.batch_interval_ms,
+            "maker_timeout_ms": order_parameters.maker_timeout_ms,
+            "max_maker_requotes": order_parameters.max_maker_requotes,
+            "target_tolerance_usdt": order_parameters.target_tolerance_usdt,
+            "targets": targets,
+        });
+        if !symbol_overrides.is_empty() {
+            config["symbol_overrides"] =
+                serde_json::to_value(symbol_overrides).map_err(ExecConfigError::transport)?;
+        }
         let response = self
             .http
             .post(url)
             .json(&serde_json::json!({
                 "strategy_name": strategy_name,
-                "config": {
-                    "single_order_usdt": order_parameters.single_order_usdt,
-                    "orders_per_batch": order_parameters.orders_per_batch,
-                    "max_batch": order_parameters.max_batch,
-                    "maker_price_anchor": order_parameters.maker_price_anchor,
-                    "tick_spacing": order_parameters.tick_spacing,
-                    "batch_interval_ms": order_parameters.batch_interval_ms,
-                    "maker_timeout_ms": order_parameters.maker_timeout_ms,
-                    "max_maker_requotes": order_parameters.max_maker_requotes,
-                    "target_tolerance_usdt": order_parameters.target_tolerance_usdt,
-                    "targets": targets,
-                }
+                "config": config,
             }))
             .send()
             .await
@@ -435,6 +574,7 @@ impl ExecConfigClient {
             source_id: source_id.to_string(),
             strategy_name: payload.strategy_name,
             order_parameters: published_parameters,
+            symbol_overrides: published.symbol_overrides,
             updated_at_us: published.updated_at_us,
             target_count,
             nonzero_target_count,
@@ -520,6 +660,38 @@ mod tests {
         let mut invalid = valid_parameters();
         invalid.maker_price_anchor = "mid".to_string();
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn symbol_overrides_replace_only_their_defined_fields() {
+        let defaults = valid_parameters();
+        let overrides = OrderParameterOverrides {
+            single_order_usdt: Some(250.0),
+            maker_price_anchor: Some("opposite_best_plus_one_tick".to_string()),
+            ..Default::default()
+        };
+        let effective = overrides.apply_to(&defaults);
+        assert_eq!(effective.single_order_usdt, 250.0);
+        assert_eq!(effective.maker_price_anchor, "opposite_best_plus_one_tick");
+        assert_eq!(effective.orders_per_batch, defaults.orders_per_batch);
+
+        let map = BTreeMap::from([("BTCUSDT".to_string(), overrides)]);
+        assert!(validate_symbol_order_parameter_overrides(&map).is_ok());
+        let invalid_symbol = BTreeMap::from([("btc-usdt".to_string(), Default::default())]);
+        assert!(validate_symbol_order_parameter_overrides(&invalid_symbol).is_err());
+        let empty_override = BTreeMap::from([("BTCUSDT".to_string(), Default::default())]);
+        assert!(validate_symbol_order_parameter_overrides(&empty_override).is_err());
+
+        let selected = OrderParameters {
+            single_order_usdt: 250.0,
+            max_maker_requotes: 0,
+            ..defaults.clone()
+        };
+        let derived = OrderParameterOverrides::from_templates(&defaults, &selected);
+        assert_eq!(derived.single_order_usdt, Some(250.0));
+        assert_eq!(derived.max_maker_requotes, Some(0));
+        assert_eq!(derived.orders_per_batch, None);
+        assert_eq!(derived.apply_to(&defaults), selected);
     }
 
     #[test]

@@ -939,6 +939,7 @@ mod tests {
         PositionStrategy {
             strategy_name: "cta_a".into(),
             targets: BTreeMap::from([("BTCUSDT".into(), TargetPosition { qty, signal: 0 })]),
+            symbol_order_strategy_overrides: BTreeMap::new(),
             updated_at_us: 1,
         }
     }

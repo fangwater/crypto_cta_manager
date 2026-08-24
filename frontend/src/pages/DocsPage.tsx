@@ -150,8 +150,8 @@ function buildChapters(gateway: string): Chapter[] {
           rows={[
             [
               '仓位策略',
-              <code>strategy_name / targets</code>,
-              '全局模板。targets 是一份策略的原始目标数量。',
+              <code>strategy_name / targets / symbol_order_strategy_overrides</code>,
+              '全局模板。targets 是原始目标数量；每个 symbol 可选择命名下单策略模板。',
             ],
             [
               '下单策略',
@@ -280,6 +280,9 @@ function buildChapters(gateway: string): Chapter[] {
   "targets": {
     "BTCUSDT": { "qty": -0.006, "signal": -1 },
     "ETHUSDT": { "qty": -0.54, "signal": 0 }
+  },
+  "symbol_order_strategy_overrides": {
+    "BTCUSDT": "fast_order"
   }
 }`}</CodeBlock>
         <FieldRows
@@ -416,8 +419,10 @@ function buildChapters(gateway: string): Chapter[] {
   }
 }`}</CodeBlock>
         <Note>
-          只接受上述 9 个参数字段。max_batch 限制一次目标更新的预估批次数；Exec
-          按目标激活时的 mark price 计算动态单笔金额，并取该值与 single_order_usdt 的较大者。
+          下单策略是可复用的完整模板。账户 binding 选择默认模板；仓位策略可以通过
+          symbol_order_strategy_overrides 为特定 symbol 选择另一条命名模板。max_batch 限制一次
+          目标更新的预估批次数；Exec 按目标激活时的 mark price 计算动态单笔金额，并取该值与
+          single_order_usdt 的较大者。
         </Note>
       </>
     ),
@@ -547,8 +552,8 @@ curl --noproxy '*' -sS -X PUT \\
         <Endpoint method="POST" path={`${ACCOUNT_PATH}/bindings/{name}/publish`} />
         <p>
           每次 <code>POST /catalog/position-strategies</code> 成功后，Manager
-          找出所有绑定了该策略的账户，用各自 <code>qty × shares</code> 和下单参数拼成 Exec
-          标准 JSON，<code>signal</code> 不随份数放大，再由 Manager 自己的 Redis
+          找出所有绑定了该策略的账户，用各自 <code>qty × shares</code>、默认下单模板和 symbol
+          覆盖模板拼成 Exec 标准 JSON，<code>signal</code> 不随份数放大，再由 Manager 自己的 Redis
           长连接写入该账户 key。连接断了会自动重连；写入后回读确认，再发 iceoryx
           notify。notify 只带策略名和 <code>updated_at_us</code>，不带仓位。
           <code>exec-pre-trade</code> 收到后立刻再读 Redis；notify 断了仍有 30s 轮询兜底。

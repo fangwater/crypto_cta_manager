@@ -42,6 +42,8 @@ use crate::{nav, postgres};
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");
+const DEFAULT_POSITION_UPDATE_PAGE_SIZE: usize = 100;
+const MAX_POSITION_UPDATE_PAGE_SIZE: usize = 1_000;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DashboardSnapshot {
@@ -141,6 +143,14 @@ struct ExecutionCostQuery {
     strategy_name: Option<String>,
     page: Option<usize>,
     page_size: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PositionUpdatesQuery {
+    after_us: Option<i64>,
+    after_seq: Option<u32>,
+    limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -267,6 +277,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/timeline", get(timeline))
         .route("/api/pnl/strategy", get(strategy_pnl))
         .route("/api/catalog/execution-cost", get(execution_cost))
+        .route("/api/catalog/position-updates", get(position_updates))
         .route("/api/order-config/auth", post(order_config_auth))
         .route(
             "/api/order-config/{source_id}/strategies",
@@ -659,6 +670,42 @@ async fn execution_cost(
         }),
     )
         .into_response())
+}
+
+async fn position_updates(
+    State(state): State<WebState>,
+    Query(query): Query<PositionUpdatesQuery>,
+) -> Result<Response, ApiError> {
+    let after = match (query.after_us, query.after_seq) {
+        (None, None) => None,
+        (Some(after_us), Some(after_seq)) if after_us >= 0 => Some((after_us, after_seq)),
+        (Some(_), Some(_)) => {
+            return Ok(bad_request("afterUs must not be negative".to_string()));
+        }
+        _ => {
+            return Ok(bad_request(
+                "afterUs and afterSeq must be provided together".to_string(),
+            ));
+        }
+    };
+    let limit = query.limit.unwrap_or(DEFAULT_POSITION_UPDATE_PAGE_SIZE);
+    if limit == 0 || limit > MAX_POSITION_UPDATE_PAGE_SIZE {
+        return Ok(bad_request(format!(
+            "limit must be between 1 and {MAX_POSITION_UPDATE_PAGE_SIZE}"
+        )));
+    }
+    let archive = Arc::clone(&state.position_archive);
+    let payload = tokio::task::spawn_blocking(move || archive.raw_json_page(after, limit))
+        .await
+        .context("position update archive read task failed")??;
+    let mut response = payload.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    Ok(response)
 }
 
 async fn order_config_auth() -> Response {
@@ -1331,16 +1378,32 @@ async fn publish_binding(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
         })?;
-    let Some((position, order, shares)) = loaded else {
+    let Some((position, order, symbol_order_parameters, shares)) = loaded else {
         return Err(PublishFailure {
             status: StatusCode::NOT_FOUND,
             message: "binding was not found".to_string(),
         });
     };
     let targets = strategy_catalog::scale_targets(&position.targets, shares);
+    let symbol_overrides = symbol_order_parameters
+        .into_iter()
+        .filter_map(|(symbol, selected)| {
+            let override_parameters = crate::order_config::OrderParameterOverrides::from_templates(
+                &order.order_parameters,
+                &selected,
+            );
+            (!override_parameters.is_empty()).then_some((symbol, override_parameters))
+        })
+        .collect();
     let published = state
         .redis_runtime
-        .publish_strategy(source, binding_name, &order.order_parameters, &targets)
+        .publish_strategy(
+            source,
+            binding_name,
+            &order.order_parameters,
+            &symbol_overrides,
+            &targets,
+        )
         .await
         .map_err(|error| {
             let message = error.to_string();

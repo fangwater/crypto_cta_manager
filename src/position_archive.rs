@@ -212,6 +212,57 @@ impl PositionArchive {
         }
         Ok(out)
     }
+
+    /// Returns one raw JSON page from the position-update CF without rewriting
+    /// individual stored messages.
+    pub fn raw_json_page(&self, after: Option<(i64, u32)>, limit: usize) -> Result<Vec<u8>> {
+        if limit == 0 {
+            bail!("position update page limit must be greater than zero");
+        }
+        if after.is_some_and(|(received_at_us, _)| received_at_us < 0) {
+            bail!("position update cursor timestamp must not be negative");
+        }
+        let handle = self
+            .db
+            .db()
+            .cf_handle(POSITION_UPDATES_CF)
+            .context("position_updates column family disappeared")?;
+        let mut output = Vec::from(&b"["[..]);
+        let mut first = true;
+        let start = after
+            .map(|(received_at_us, seq)| manager_db::encode_seq_key(received_at_us.max(1), seq))
+            .transpose()?;
+        let iter = match start.as_ref() {
+            Some(key) => self
+                .db
+                .db()
+                .iterator_cf(&handle, IteratorMode::From(key, Direction::Forward)),
+            None => self.db.db().iterator_cf(&handle, IteratorMode::Start),
+        };
+        let mut count = 0;
+        for item in iter {
+            let (key, value) = item.context("failed to iterate position updates")?;
+            let Some(cursor) = manager_db::decode_seq_key(&key) else {
+                bail!("position update archive contains an invalid sequence key");
+            };
+            if after.is_some_and(|after| cursor <= after) {
+                continue;
+            }
+            serde_json::from_slice::<serde_json::Value>(&value)
+                .context("position update archive contains invalid JSON")?;
+            if !first {
+                output.push(b',');
+            }
+            output.extend_from_slice(&value);
+            first = false;
+            count += 1;
+            if count == limit {
+                break;
+            }
+        }
+        output.push(b']');
+        Ok(output)
+    }
 }
 
 fn decode_msg(bytes: &[u8]) -> Result<PositionUpdateMsg> {
@@ -249,6 +300,7 @@ mod tests {
         PositionStrategy {
             strategy_name: name.to_string(),
             targets: BTreeMap::from([("BTCUSDT".to_string(), TargetPosition { qty, signal })]),
+            symbol_order_strategy_overrides: BTreeMap::new(),
             updated_at_us,
         }
     }
@@ -315,6 +367,47 @@ mod tests {
         assert_eq!(latest, second);
         let scanned = archive.scan_from(1_700_000_000_000_001).unwrap();
         assert_eq!(scanned, vec![first, second]);
+    }
+
+    #[test]
+    fn raw_json_page_keeps_stored_messages_unmodified_and_pages_by_sequence() {
+        let dir = TempDir::new().unwrap();
+        let archive = PositionArchive::open(ManagerDb::open(dir.path()).unwrap()).unwrap();
+        let first = archive
+            .append(
+                1_700_000_000_000_001,
+                &strategy("cta_a", 0.1, 1, 11),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+        let second = archive
+            .append(
+                1_700_000_000_000_001,
+                &strategy("cta_b", -0.2, 0, 12),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        let first_json = String::from_utf8(serde_json::to_vec(&first).unwrap()).unwrap();
+        let second_json = String::from_utf8(serde_json::to_vec(&second).unwrap()).unwrap();
+        assert_eq!(
+            archive.raw_json_page(None, 1).unwrap(),
+            format!("[{first_json}]").as_bytes()
+        );
+        assert_eq!(
+            archive
+                .raw_json_page(Some((first.received_at_us, first.seq)), 1)
+                .unwrap(),
+            format!("[{second_json}]").as_bytes()
+        );
+        assert_eq!(
+            archive
+                .raw_json_page(Some((second.received_at_us, second.seq)), 100)
+                .unwrap(),
+            b"[]"
+        );
     }
 
     #[test]

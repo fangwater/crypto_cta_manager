@@ -11,7 +11,8 @@ use tracing::{info, warn};
 
 use crate::config::{RedisSettings, SourceConfig};
 use crate::order_config::{
-    OrderParameters, OrderStrategyView, TargetPosition, validate_strategy_name,
+    OrderParameterOverrides, OrderParameters, OrderStrategyView, TargetPosition,
+    validate_strategy_name, validate_symbol_order_parameter_overrides,
 };
 
 const POSITION_CLOSE_STRATEGY_NAME: &str = "SYSTEM_POSITION_CLOSE";
@@ -27,6 +28,8 @@ struct StoredExecConfig<'a> {
     maker_timeout_ms: u32,
     max_maker_requotes: u32,
     target_tolerance_usdt: f64,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    symbol_overrides: &'a BTreeMap<String, OrderParameterOverrides>,
     targets: &'a BTreeMap<String, TargetPosition>,
     updated_at_us: i64,
 }
@@ -79,10 +82,12 @@ impl RedisRuntime {
         source: &SourceConfig,
         strategy_name: &str,
         order_parameters: &OrderParameters,
+        symbol_overrides: &BTreeMap<String, OrderParameterOverrides>,
         targets: &BTreeMap<String, TargetPosition>,
     ) -> Result<OrderStrategyView> {
         validate_strategy_name(strategy_name).map_err(anyhow::Error::msg)?;
         order_parameters.validate().map_err(anyhow::Error::msg)?;
+        validate_symbol_order_parameter_overrides(symbol_overrides).map_err(anyhow::Error::msg)?;
         if source.venue != "binance-futures" && source.venue != "okex-futures" {
             bail!(
                 "source {} venue must be binance-futures or okex-futures",
@@ -135,6 +140,7 @@ impl RedisRuntime {
                     maker_timeout_ms: order_parameters.maker_timeout_ms,
                     max_maker_requotes: order_parameters.max_maker_requotes,
                     target_tolerance_usdt: order_parameters.target_tolerance_usdt,
+                    symbol_overrides,
                     targets,
                     updated_at_us,
                 };
@@ -194,6 +200,7 @@ impl RedisRuntime {
                     source_id: source.id.clone(),
                     strategy_name: strategy_name.to_string(),
                     order_parameters: order_parameters.clone(),
+                    symbol_overrides: symbol_overrides.clone(),
                     updated_at_us: Some(updated_at_us),
                     target_count: targets.len(),
                     nonzero_target_count: targets
@@ -319,7 +326,23 @@ fn load_stored_config(raw: Option<String>) -> Result<Option<serde_json::Value>> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+
+    fn valid_parameters() -> OrderParameters {
+        OrderParameters {
+            single_order_usdt: 100.0,
+            orders_per_batch: 3,
+            max_batch: 20,
+            maker_price_anchor: "own_best".to_string(),
+            tick_spacing: 1,
+            batch_interval_ms: 500,
+            maker_timeout_ms: 1_000,
+            max_maker_requotes: 2,
+            target_tolerance_usdt: 10.0,
+        }
+    }
 
     #[test]
     fn next_version_never_goes_backwards() {
@@ -338,6 +361,56 @@ mod tests {
         assert!(
             decode_strategy_names(Some(r#"["CTA_A","CTA_A"]"#.to_string()), "strategy index")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn redis_payload_omits_empty_overrides_and_preserves_symbol_overrides() {
+        let parameters = valid_parameters();
+        let targets = BTreeMap::new();
+        let empty = BTreeMap::new();
+        let without_overrides = serde_json::to_value(StoredExecConfig {
+            single_order_usdt: parameters.single_order_usdt,
+            orders_per_batch: parameters.orders_per_batch,
+            max_batch: parameters.max_batch,
+            maker_price_anchor: &parameters.maker_price_anchor,
+            tick_spacing: parameters.tick_spacing,
+            batch_interval_ms: parameters.batch_interval_ms,
+            maker_timeout_ms: parameters.maker_timeout_ms,
+            max_maker_requotes: parameters.max_maker_requotes,
+            target_tolerance_usdt: parameters.target_tolerance_usdt,
+            symbol_overrides: &empty,
+            targets: &targets,
+            updated_at_us: 1,
+        })
+        .unwrap();
+        assert!(without_overrides.get("symbol_overrides").is_none());
+
+        let overrides = BTreeMap::from([(
+            "BTCUSDT".to_string(),
+            OrderParameterOverrides {
+                single_order_usdt: Some(250.0),
+                ..Default::default()
+            },
+        )]);
+        let with_overrides = serde_json::to_value(StoredExecConfig {
+            single_order_usdt: parameters.single_order_usdt,
+            orders_per_batch: parameters.orders_per_batch,
+            max_batch: parameters.max_batch,
+            maker_price_anchor: &parameters.maker_price_anchor,
+            tick_spacing: parameters.tick_spacing,
+            batch_interval_ms: parameters.batch_interval_ms,
+            maker_timeout_ms: parameters.maker_timeout_ms,
+            max_maker_requotes: parameters.max_maker_requotes,
+            target_tolerance_usdt: parameters.target_tolerance_usdt,
+            symbol_overrides: &overrides,
+            targets: &targets,
+            updated_at_us: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            with_overrides["symbol_overrides"]["BTCUSDT"]["single_order_usdt"],
+            250.0
         );
     }
 }

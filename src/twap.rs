@@ -649,6 +649,7 @@ mod tests {
                             signal: 0,
                         },
                     )]),
+                    symbol_order_strategy_overrides: std::collections::BTreeMap::new(),
                     updated_at_us: 1_000_000,
                 },
                 Vec::new(),
