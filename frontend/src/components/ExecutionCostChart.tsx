@@ -95,9 +95,12 @@ export function ExecutionCostChart({ points }: Props) {
       yAxis: {
         type: 'value',
         scale: true,
+        name: 'USDT',
+        nameGap: 12,
+        nameTextStyle: { color: '#697386', fontSize: 11 },
         axisLine: { show: false },
         axisTick: { show: false },
-        axisLabel: { color: '#697386', formatter: (value: number) => money(value) },
+        axisLabel: { color: '#697386', formatter: (value: number) => `${money(value)} U` },
         splitLine: { lineStyle: { color: '#edf0f4' } },
       },
       dataZoom: [

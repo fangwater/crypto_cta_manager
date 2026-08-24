@@ -40,6 +40,10 @@ function optionalMoney(value: number | null | undefined) {
   return value == null ? '--' : money(value)
 }
 
+function moneyU(value: number) {
+  return `${money(value)} U`
+}
+
 function costClass(value: number | null | undefined) {
   if (value == null) return ''
   if (value > 0) return 'number-negative'
@@ -248,22 +252,22 @@ export function ExecutionCostPage() {
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <StatTile
           label="实际价格滑点"
-          value={report ? money(report.totals.actual_price_slippage_usdt) : '--'}
+          value={report ? moneyU(report.totals.actual_price_slippage_usdt) : '--'}
           hint={report ? `${report.totals.actual_slippage_bps.toFixed(2)} bps` : undefined}
         />
         <StatTile
           label="TWAP 价格滑点"
-          value={report ? money(report.totals.twap_price_slippage_on_filled_usdt) : '--'}
+          value={report ? moneyU(report.totals.twap_price_slippage_on_filled_usdt) : '--'}
           hint={report ? `${report.totals.twap_slippage_bps.toFixed(2)} bps · 同成交量` : undefined}
         />
         <StatTile
           label="实际相对 TWAP"
-          value={report ? money(report.totals.shortfall_vs_twap_usdt) : '--'}
+          value={report ? moneyU(report.totals.shortfall_vs_twap_usdt) : '--'}
           hint={report ? `${report.totals.shortfall_vs_twap_bps.toFixed(2)} bps · 正数较差` : undefined}
         />
         <StatTile
           label="实际手续费（独立）"
-          value={report ? money(report.totals.estimated_trading_fee_usdt) : '--'}
+          value={report ? moneyU(report.totals.estimated_trading_fee_usdt) : '--'}
           hint="不计入任何价格滑点"
         />
         <StatTile
@@ -371,8 +375,8 @@ export function ExecutionCostPage() {
                     <th className="px-4 py-2 font-medium text-right">实际滑点</th>
                     <th className="px-4 py-2 font-medium text-right">TWAP 滑点</th>
                     <th className="px-4 py-2 font-medium text-right">相对 TWAP</th>
-                    <th className="px-4 py-2 font-medium text-right">相对 TWAP USDT</th>
-                    <th className="px-4 py-2 font-medium text-right">手续费</th>
+                    <th className="px-4 py-2 font-medium text-right">相对 TWAP U</th>
+                    <th className="px-4 py-2 font-medium text-right">手续费 U</th>
                   </tr>
                 </thead>
                 <tbody>
