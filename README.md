@@ -52,6 +52,12 @@ edits must not be used to reconstruct an older fill. Set
 per `SYMBOL:venue`. Bars older than `retain_days` are deleted and compacted;
 position-update messages are not compacted by that job.
 
+`GET /api/catalog/position-updates` returns a raw JSON page from
+`position_updates` (default `limit=100`, maximum `1000`). Each array member is
+emitted from the raw JSON stored in Manager RocksDB, without rebuilding or
+rescaling historical targets. To continue, set `afterUs` and `afterSeq` to the
+`received_at_us` and `seq` of the preceding page's final member.
+
 `GET /api/catalog/execution-cost` generates an on-demand report. It is not a
 real-time job. Each archived position update's intended qty is template qty ×
 the shares stored in that message minus the snapshot qty. The
@@ -202,6 +208,10 @@ the cumulative window PnL fields `realized_pnl_before_fee_quote`,
 the existing Rust `f64` result bit-for-bit; the endpoint does not round or
 reduce precision.
 
+`GET /api/pnl/strategy/summary` accepts the same query parameters and returns
+only the final selected-window totals as JSON. It does not return raw fill rows
+and does not require an Arrow client.
+
 ```python
 import pyarrow as pa
 import pyarrow.ipc as ipc
@@ -222,6 +232,34 @@ table = ipc.open_stream(pa.BufferReader(response.content)).read_all()
 frame = table.to_pandas()
 ```
 
+The checked-in client validates the Arrow metadata and window rows. Its shortest
+form queries `el01` / `binance_exec_trade01` for the previous day and prints a
+JSON summary:
+
+```bash
+python3 scripts/manager_pnl_client.py CTA_SK_C4V6PosT1_LXY_filter_Position
+```
+
+Use options only when selecting another account, window, host, or Arrow output:
+
+```bash
+python3 -m pip install pyarrow
+python3 scripts/manager_pnl_client.py \
+  CTA_SK_C4V6PosT1_LXY_filter_Position \
+  --target jp-meta \
+  --source-id binance_exec_trade01 \
+  --days 7 \
+  --output /tmp/trade01-cta-pnl.arrow
+```
+
+```python
+import pyarrow as pa
+import pyarrow.ipc as ipc
+
+table = ipc.open_stream(pa.memory_map("/tmp/trade01-cta-pnl.arrow", "r")).read_all()
+frame = table.to_pandas()
+```
+
 Order strategies include `max_batch`, the estimated maximum batch count for a
 single target update. When a target is activated, Exec values the outstanding
 base quantity with the current mark price and calculates
@@ -230,6 +268,12 @@ single-order amount is `max(single_order_usdt, dynamic_single_usdt)` and remains
 fixed for that target generation. The Manager form shows the corresponding
 maximum maker-path estimate:
 `(max_batch - 1) * batch_interval_ms + (max_maker_requotes + 1) * maker_timeout_ms`.
+An account binding's order strategy is the default execution template. A position
+strategy may provide `symbol_order_strategy_overrides`, keyed by uppercase symbol
+and valued by another named order-strategy template. Manager resolves those templates
+at publish time and sends the effective per-symbol parameter differences to Exec.
+Overrides affect execution parameters only, not target qty, binding shares, target
+signal, or exchange contract leverage.
 
 Build the API and frontend locally, then deploy one independent host:
 

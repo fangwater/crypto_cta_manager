@@ -132,6 +132,18 @@ struct StrategyPnlQuery {
     end_ms: i64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct StrategyPnlSummary {
+    generated_at_us: i64,
+    generation_duration_ms: u64,
+    source_id: String,
+    account: String,
+    strategy_name: String,
+    start_ts_us: i64,
+    end_ts_us: i64,
+    totals: nav::NavTotals,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExecutionCostQuery {
@@ -276,6 +288,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/dashboard", get(dashboard))
         .route("/api/timeline", get(timeline))
         .route("/api/pnl/strategy", get(strategy_pnl))
+        .route("/api/pnl/strategy/summary", get(strategy_pnl_summary))
         .route("/api/catalog/execution-cost", get(execution_cost))
         .route("/api/catalog/position-updates", get(position_updates))
         .route("/api/order-config/auth", post(order_config_auth))
@@ -488,64 +501,19 @@ async fn strategy_pnl(
     State(state): State<WebState>,
     Query(query): Query<StrategyPnlQuery>,
 ) -> Result<Response, ApiError> {
-    let source_id = query.source_id.trim().to_string();
-    let strategy_name = query.strategy_name.trim().to_string();
-    if source_id.is_empty() {
-        return Ok(bad_request("sourceId must not be empty".to_string()));
-    }
-    if strategy_name.is_empty() {
-        return Ok(bad_request("strategyName must not be empty".to_string()));
-    }
-    if let Err(message) = resolve_sources(&state.config, &[source_id.clone()]) {
-        return Ok(bad_request(message));
-    }
-    let start_ts_us = match milliseconds_to_microseconds(query.start_ms, "startMs") {
-        Ok(value) => value,
+    let request = match parse_strategy_pnl_request(&state.config, query) {
+        Ok(request) => request,
         Err(message) => return Ok(bad_request(message)),
     };
-    let end_ts_us = match milliseconds_to_microseconds(query.end_ms, "endMs") {
-        Ok(value) => value,
-        Err(message) => return Ok(bad_request(message)),
-    };
-    if end_ts_us < start_ts_us {
-        return Ok(bad_request(
-            "endMs must be greater than or equal to startMs".to_string(),
-        ));
-    }
-
     let started = Instant::now();
-    let (histories, snapshots, data_generated_at_us) = {
-        let cache = state.cache.read().await;
-        (
-            Arc::clone(&cache.nav_histories),
-            Arc::clone(&cache.position_snapshots),
-            cache.dashboard.generated_at_us,
-        )
-    };
-    let config = Arc::clone(&state.config).as_ref().clone();
-    let payload = tokio::task::spawn_blocking(move || {
-        let report = nav::rebuild_strategy_pnl_from_histories_with_snapshots(
-            &config,
-            nav::StrategyPnlRequest {
-                source_id,
-                strategy_name,
-                start_ts_us,
-                end_ts_us,
-            },
-            &snapshots,
-            &histories,
-        )?;
-        encode_strategy_pnl_arrow(&report, data_generated_at_us)
-    })
-    .await
-    .context("CTA strategy PnL rebuild task failed")?;
-    let payload = match payload {
-        Ok(payload) => payload,
+    let (report, data_generated_at_us) = match rebuild_strategy_pnl_report(&state, request).await {
+        Ok(result) => result,
         Err(error) if is_strategy_pnl_request_error(&error) => {
             return Ok(bad_request(error.to_string()));
         }
         Err(error) => return Err(error.into()),
     };
+    let payload = encode_strategy_pnl_arrow(&report, data_generated_at_us)?;
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     info!(
         generation_duration_ms,
@@ -561,6 +529,108 @@ async fn strategy_pnl(
         HeaderValue::from_static("application/vnd.apache.arrow.stream"),
     );
     Ok(response)
+}
+
+async fn strategy_pnl_summary(
+    State(state): State<WebState>,
+    Query(query): Query<StrategyPnlQuery>,
+) -> Result<Response, ApiError> {
+    let request = match parse_strategy_pnl_request(&state.config, query) {
+        Ok(request) => request,
+        Err(message) => return Ok(bad_request(message)),
+    };
+    let started = Instant::now();
+    let (report, data_generated_at_us) = match rebuild_strategy_pnl_report(&state, request).await {
+        Ok(result) => result,
+        Err(error) if is_strategy_pnl_request_error(&error) => {
+            return Ok(bad_request(error.to_string()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    Ok((
+        NO_STORE,
+        Json(strategy_pnl_summary_from_report(
+            report,
+            data_generated_at_us,
+            generation_duration_ms,
+        )),
+    )
+        .into_response())
+}
+
+fn strategy_pnl_summary_from_report(
+    report: nav::StrategyPnlReport,
+    generated_at_us: i64,
+    generation_duration_ms: u64,
+) -> StrategyPnlSummary {
+    let totals = report.rows.last().map(|row| row.totals).unwrap_or_default();
+    StrategyPnlSummary {
+        generated_at_us,
+        generation_duration_ms,
+        source_id: report.source_id,
+        account: report.account,
+        strategy_name: report.strategy_name,
+        start_ts_us: report.start_ts_us,
+        end_ts_us: report.end_ts_us,
+        totals,
+    }
+}
+
+fn parse_strategy_pnl_request(
+    config: &AppConfig,
+    query: StrategyPnlQuery,
+) -> std::result::Result<nav::StrategyPnlRequest, String> {
+    let source_id = query.source_id.trim().to_string();
+    let strategy_name = query.strategy_name.trim().to_string();
+    if source_id.is_empty() {
+        return Err("sourceId must not be empty".to_string());
+    }
+    if strategy_name.is_empty() {
+        return Err("strategyName must not be empty".to_string());
+    }
+    resolve_sources(config, &[source_id.clone()])?;
+    let start_ts_us = match milliseconds_to_microseconds(query.start_ms, "startMs") {
+        Ok(value) => value,
+        Err(message) => return Err(message),
+    };
+    let end_ts_us = match milliseconds_to_microseconds(query.end_ms, "endMs") {
+        Ok(value) => value,
+        Err(message) => return Err(message),
+    };
+    if end_ts_us < start_ts_us {
+        return Err("endMs must be greater than or equal to startMs".to_string());
+    }
+    Ok(nav::StrategyPnlRequest {
+        source_id,
+        strategy_name,
+        start_ts_us,
+        end_ts_us,
+    })
+}
+
+async fn rebuild_strategy_pnl_report(
+    state: &WebState,
+    request: nav::StrategyPnlRequest,
+) -> Result<(nav::StrategyPnlReport, i64)> {
+    let (histories, snapshots, data_generated_at_us) = {
+        let cache = state.cache.read().await;
+        (
+            Arc::clone(&cache.nav_histories),
+            Arc::clone(&cache.position_snapshots),
+            cache.dashboard.generated_at_us,
+        )
+    };
+    let config = Arc::clone(&state.config).as_ref().clone();
+    let report = tokio::task::spawn_blocking(move || {
+        nav::rebuild_strategy_pnl_from_histories_with_snapshots(
+            &config, request, &snapshots, &histories,
+        )
+    })
+    .await
+    .context("CTA strategy PnL rebuild task failed")?;
+    let report = report?;
+    Ok((report, data_generated_at_us))
 }
 
 async fn execution_cost(
@@ -2064,6 +2134,43 @@ mod tests {
             .unwrap();
         assert_eq!(after_fee.value(1).to_bits(), 12.345_678_901_f64.to_bits());
         assert!(reader.next().is_none());
+    }
+
+    #[test]
+    fn strategy_pnl_summary_uses_the_terminal_window_totals() {
+        let mut terminal = nav::NavTotals::default();
+        terminal.fill_count = 3;
+        terminal.nav_change_after_fee_quote = 12.5;
+        let report = nav::StrategyPnlReport {
+            source_id: "trade01".to_string(),
+            account: "account-01".to_string(),
+            strategy_name: "cta_alpha".to_string(),
+            start_ts_us: 1_000,
+            end_ts_us: 2_000,
+            rows: vec![
+                nav::StrategyPnlRow {
+                    row_kind: nav::StrategyPnlRowKind::WindowStart,
+                    ts_us: 1_000,
+                    record_key: None,
+                    symbol: None,
+                    venue: None,
+                    totals: nav::NavTotals::default(),
+                },
+                nav::StrategyPnlRow {
+                    row_kind: nav::StrategyPnlRowKind::WindowEnd,
+                    ts_us: 2_000,
+                    record_key: None,
+                    symbol: None,
+                    venue: None,
+                    totals: terminal,
+                },
+            ],
+        };
+
+        let summary = strategy_pnl_summary_from_report(report, 3_000, 4);
+        assert_eq!(summary.generated_at_us, 3_000);
+        assert_eq!(summary.generation_duration_ms, 4);
+        assert_eq!(summary.totals, terminal);
     }
 
     #[test]
