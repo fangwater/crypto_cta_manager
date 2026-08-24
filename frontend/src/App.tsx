@@ -96,6 +96,11 @@ function realizedValue(totals: NavTotals, feeMode: FeeMode) {
     : totals.realized_pnl_before_fee_quote
 }
 
+function percentage(value: number, total: number) {
+  if (total <= 0) return '--'
+  return `${((value / total) * 100).toFixed(1)}%`
+}
+
 function toDatetimeLocal(ms: number) {
   const date = new Date(ms)
   const local = new Date(ms - date.getTimezoneOffset() * 60_000)
@@ -587,6 +592,8 @@ function NavPage() {
           </div>
         </section>
 
+        <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />
+
         <section className="chart-section" aria-labelledby="chart-title">
           <div className="panel-heading pnl-chart-header">
             <div>
@@ -804,6 +811,9 @@ function NavPage() {
                 <tr>
                   <th>策略</th>
                   <th className="numeric">成交</th>
+                  <th className="numeric">Maker 笔 / 额</th>
+                  <th className="numeric">Taker 笔 / 额</th>
+                  <th className="numeric">未判定 笔 / 额</th>
                   <th className="numeric">持仓币种</th>
                   <th className="numeric">期末总敞口</th>
                   <th className="numeric">区间已实现</th>
@@ -824,6 +834,18 @@ function NavPage() {
                     <td className="numeric mono">
                       {integer(strategy.summary.fill_count)}
                     </td>
+                    <LiquidityTableCell
+                      count={strategy.summary.maker_fill_count}
+                      volume={strategy.summary.maker_volume_quote}
+                    />
+                    <LiquidityTableCell
+                      count={strategy.summary.taker_fill_count}
+                      volume={strategy.summary.taker_volume_quote}
+                    />
+                    <LiquidityTableCell
+                      count={strategy.summary.unknown_liquidity_fill_count}
+                      volume={strategy.summary.unknown_liquidity_volume_quote}
+                    />
                     <td className="numeric mono">{integer(strategy.symbol_count)}</td>
                     <td className="numeric mono">
                       {money(strategy.gross_position_value_quote)}
@@ -949,6 +971,76 @@ function NavPage() {
           </div>
         </section>
     </AppShell>
+  )
+}
+
+function LiquidityExecutionAnalysis({ totals }: { totals: NavTotals }) {
+  const rows = [
+    {
+      label: 'Maker',
+      count: totals.maker_fill_count,
+      volume: totals.maker_volume_quote,
+      className: 'is-maker',
+    },
+    {
+      label: 'Taker',
+      count: totals.taker_fill_count,
+      volume: totals.taker_volume_quote,
+      className: 'is-taker',
+    },
+    {
+      label: '未判定',
+      count: totals.unknown_liquidity_fill_count,
+      volume: totals.unknown_liquidity_volume_quote,
+      className: 'is-unknown',
+    },
+  ]
+
+  return (
+    <section className="execution-section" aria-labelledby="execution-title">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">EXECUTION MIX</p>
+          <h2 id="execution-title">区间成交执行分析</h2>
+        </div>
+        <span className="generation-time">
+          {integer(totals.fill_count)} 笔 · {money(totals.volume_quote)} USDT
+        </span>
+      </div>
+      <div className="liquidity-analysis">
+        {rows.map((row) => (
+          <div className={`liquidity-role ${row.className}`} key={row.label}>
+            <div className="liquidity-role__title">
+              <span />
+              <strong>{row.label}</strong>
+            </div>
+            <dl>
+              <div>
+                <dt>成交笔数</dt>
+                <dd>
+                  {integer(row.count)} <small>{percentage(row.count, totals.fill_count)}</small>
+                </dd>
+              </div>
+              <div>
+                <dt>成交额</dt>
+                <dd>
+                  {money(row.volume)} <small>{percentage(row.volume, totals.volume_quote)}</small>
+                </dd>
+              </div>
+            </dl>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function LiquidityTableCell({ count, volume }: { count: number; volume: number }) {
+  return (
+    <td className="numeric mono liquidity-cell">
+      <strong>{integer(count)} 笔</strong>
+      <small>{money(volume)} USDT</small>
+    </td>
   )
 }
 

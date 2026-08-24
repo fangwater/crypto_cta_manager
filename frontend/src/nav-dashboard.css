@@ -1233,6 +1233,83 @@
   font-weight: 600;
 }
 
+.liquidity-analysis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.liquidity-role {
+  min-width: 0;
+  padding: 18px 20px 20px;
+}
+
+.liquidity-role + .liquidity-role {
+  border-left: 1px solid var(--line-soft);
+}
+
+.liquidity-role__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.liquidity-role__title > span {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.liquidity-role.is-maker .liquidity-role__title > span {
+  background: #18775f;
+}
+
+.liquidity-role.is-taker .liquidity-role__title > span {
+  background: #2563a7;
+}
+
+.liquidity-role.is-unknown .liquidity-role__title > span {
+  background: #b7791f;
+}
+
+.liquidity-role dl {
+  margin: 17px 0 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.liquidity-role dl > div {
+  min-width: 0;
+}
+
+.liquidity-role dt {
+  margin-bottom: 5px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.liquidity-role dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.liquidity-role dd small {
+  margin-left: 4px;
+  color: var(--subtle);
+  font-family: inherit;
+  font-size: 10px;
+}
+
 .number-positive {
   color: var(--green) !important;
 }
@@ -1242,6 +1319,7 @@
 }
 
 .chart-section,
+.execution-section,
 .strategy-section,
 .positions-section,
 .sources-section {
@@ -1481,7 +1559,7 @@ table {
 }
 
 .strategy-table {
-  min-width: 1080px;
+  min-width: 1390px;
 }
 
 .strategy-table th:first-child,
@@ -1559,6 +1637,28 @@ tbody tr.is-selected td {
 .numeric {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.liquidity-cell {
+  min-width: 112px;
+  line-height: 1.25;
+}
+
+.liquidity-cell strong,
+.liquidity-cell small {
+  display: block;
+}
+
+.liquidity-cell strong {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.liquidity-cell small {
+  margin-top: 3px;
+  color: var(--subtle);
+  font-size: 9px;
 }
 
 .expand-column {
@@ -1885,6 +1985,7 @@ tbody tr.is-selected td {
   }
 
   .chart-section,
+  .execution-section,
   .strategy-section,
   .positions-section,
   .sources-section {
@@ -1953,6 +2054,15 @@ tbody tr.is-selected td {
   .pnl-chart-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .liquidity-analysis {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .liquidity-role + .liquidity-role {
+    border-top: 1px solid var(--line-soft);
+    border-left: 0;
   }
 
   .chart-controls {

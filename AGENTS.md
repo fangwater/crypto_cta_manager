@@ -29,6 +29,10 @@ Run `cargo fmt` before committing Rust changes. Prefer focused tests while
 iterating, then run the full crate tests when changing database schemas,
 ingestion checkpoints, or shared order models.
 
+Do not pre-start a local frontend development server by default. Verify frontend
+changes with `npm run build`; start Vite only when the operator explicitly asks
+for a live local URL or browser-render verification.
+
 ## Database Topology
 
 Each CTA Exec host owns a user-managed local PostgreSQL instance. That local
@@ -166,6 +170,14 @@ strategy allocation, so expose them as `__initial_position__` instead of
 assigning them to a CTA strategy. Keep `system_position_close` separate. The
 browser must provide portfolio, per-symbol, and per-strategy curves plus a
 strategy PnL table.
+
+The NAV page must also show interval execution analysis for the selected
+account scope and selected symbols: Maker, Taker, and explicitly Unclassified
+liquidity each need fill count, quote volume, and their share of the selected
+interval total. The strategy PnL table must expose the same per-strategy
+Maker/Taker/Unclassified fill-count and quote-volume breakdown. Use exchange
+trade-update `is_maker` when available, with existing order-type fallback; do
+not silently fold unclassified fills into Maker or Taker.
 
 CTA timeline series are NAV before estimated fees, NAV after estimated fees,
 realized PnL, floating PnL, and estimated trading fees. There is no baseline
