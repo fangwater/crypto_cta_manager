@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './nav-dashboard.css'
-import { getDashboard, getHealth, getTimeline } from './api'
+import { getAccountTimeline, getDashboard, getHealth, getTimeline } from './api'
 import { AppShell } from './components/AppShell'
 import { WorkspacePage } from './pages/WorkspacePage'
 import { AccountOverviewPage } from './pages/AccountOverviewPage'
@@ -58,6 +58,7 @@ const rangeOptions = [
 ] as const
 
 type QuickRange = (typeof rangeOptions)[number]['key']
+type PnlMode = 'strategy' | 'account'
 
 const seriesOptions: NavSeriesKey[] = [
   'nav_change_before_fee_quote',
@@ -111,9 +112,20 @@ function fromDatetimeLocal(value: string) {
   return new Date(value).getTime()
 }
 
-function sourceStartMs(source: SourceNavReport) {
+function sourceStartMs(
+  dashboard: DashboardSnapshot,
+  source: SourceNavReport,
+  pnlMode: PnlMode,
+) {
+  const account = (dashboard.accounts ?? []).find(
+    (item) => item.source_id === source.source_id,
+  )
   const timestamp =
-    source.initial_position_snapshot_ts_us ?? source.first_fill_ts_us
+    (pnlMode === 'account'
+      ? account?.account_pnl_start_ts_us
+      : account?.strategy_pnl_start_ts_us) ??
+    source.initial_position_snapshot_ts_us ??
+    source.first_fill_ts_us
   return timestamp === null ? null : Math.ceil(timestamp / 1_000)
 }
 
@@ -121,13 +133,14 @@ function scopeStartMs(
   dashboard: DashboardSnapshot,
   scope: string,
   fallbackEndMs: number,
+  pnlMode: PnlMode,
 ) {
   const sources =
     scope === 'all'
       ? dashboard.report.sources
       : dashboard.report.sources.filter((source) => source.source_id === scope)
   const starts = sources
-    .map(sourceStartMs)
+    .map((source) => sourceStartMs(dashboard, source, pnlMode))
     .filter((value): value is number => value !== null && value <= fallbackEndMs)
   return starts.length === 0 ? fallbackEndMs : Math.min(...starts)
 }
@@ -158,9 +171,10 @@ function NavPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [timeline, setTimeline] = useState<TimelineSnapshot | null>(null)
   const [scope, setScope] = useState(initialScope)
+  const [pnlMode, setPnlMode] = useState<PnlMode>('strategy')
   const [feeMode, setFeeMode] = useState<FeeMode>('after')
   const [chartMode, setChartMode] =
-    useState<TimelineChartMode>('portfolio')
+    useState<TimelineChartMode>('strategies')
   const [visibleSeries, setVisibleSeries] = useState<NavSeriesKey[]>([
     'nav_change_before_fee_quote',
     'nav_change_after_fee_quote',
@@ -218,12 +232,12 @@ function NavPage() {
     if (!dashboard || initialized.current) return
     initialized.current = true
     const nextEnd = Date.now()
-    const nextStart = scopeStartMs(dashboard, 'all', nextEnd)
+    const nextStart = scopeStartMs(dashboard, scope, nextEnd, pnlMode)
     setStartInput(toDatetimeLocal(nextStart))
     setEndInput(toDatetimeLocal(nextEnd))
     setStartMs(nextStart)
     setEndMs(nextEnd)
-  }, [dashboard])
+  }, [dashboard, pnlMode, scope])
 
   useEffect(() => {
     if (
@@ -237,6 +251,15 @@ function NavPage() {
   }, [dashboard, scope])
 
   useEffect(() => {
+    if (!dashboard || startMs === null || endMs === null) return
+    const earliest = scopeStartMs(dashboard, scope, endMs, pnlMode)
+    if (startMs >= earliest) return
+    setStartInput(toDatetimeLocal(earliest))
+    setStartMs(earliest)
+    setTimelineError(null)
+  }, [dashboard, endMs, pnlMode, scope, startMs])
+
+  useEffect(() => {
     if (startMs === null || endMs === null) return
     if (selectedSymbols?.length === 0) {
       setTimelineLoading(false)
@@ -246,7 +269,8 @@ function NavPage() {
     const controller = new AbortController()
     setTimelineLoading(true)
     setTimelineError(null)
-    getTimeline({
+    const loadTimeline = pnlMode === 'account' ? getAccountTimeline : getTimeline
+    loadTimeline({
       startMs,
       endMs,
       sourceIds: scope === 'all' ? undefined : [scope],
@@ -263,7 +287,7 @@ function NavPage() {
         if (!controller.signal.aborted) setTimelineLoading(false)
       })
     return () => controller.abort()
-  }, [endMs, scope, selectedSymbols, startMs, timelineRevision])
+  }, [endMs, pnlMode, scope, selectedSymbols, startMs, timelineRevision])
 
   const selectedSource = useMemo(
     () => dashboard?.report.sources.find((source) => source.source_id === scope),
@@ -317,14 +341,14 @@ function NavPage() {
     ? ZERO_TOTALS
     : (timeline?.report.summary ?? null)
   const effectiveStartMs = dashboard
-    ? scopeStartMs(dashboard, scope, endMs ?? Date.now())
+    ? scopeStartMs(dashboard, scope, endMs ?? Date.now(), pnlMode)
     : 0
 
   function applyRange() {
     if (!dashboard) return
     const nextStart = fromDatetimeLocal(startInput)
     const nextEnd = fromDatetimeLocal(endInput)
-    const earliest = scopeStartMs(dashboard, scope, nextEnd)
+    const earliest = scopeStartMs(dashboard, scope, nextEnd, pnlMode)
     if (
       !Number.isFinite(nextStart) ||
       !Number.isFinite(nextEnd) ||
@@ -343,11 +367,12 @@ function NavPage() {
     key: QuickRange,
     nextScope = scope,
     endOverride?: number,
+    mode = pnlMode,
   ) {
     if (!dashboard) return
     const parsedEnd = fromDatetimeLocal(endInput)
     const nextEnd = endOverride ?? (Number.isFinite(parsedEnd) ? parsedEnd : Date.now())
-    const earliest = scopeStartMs(dashboard, nextScope, nextEnd)
+    const earliest = scopeStartMs(dashboard, nextScope, nextEnd, mode)
     const days = rangeOptions.find((option) => option.key === key)?.days ?? null
     const nextStart =
       days === null
@@ -374,11 +399,20 @@ function NavPage() {
       applyQuickRange(activeRange, nextScope)
       return
     }
-    const earliest = scopeStartMs(dashboard, nextScope, endMs)
+    const earliest = scopeStartMs(dashboard, nextScope, endMs, pnlMode)
     if (startMs === null || startMs < earliest) {
       setStartInput(toDatetimeLocal(earliest))
       setStartMs(earliest)
     }
+  }
+
+  function selectPnlMode(nextMode: PnlMode) {
+    if (nextMode === pnlMode) return
+    setPnlMode(nextMode)
+    setSelectedStrategies(null)
+    setChartMode(nextMode === 'account' ? 'portfolio' : 'strategies')
+    if (!dashboard) return
+    applyQuickRange('ALL', scope, undefined, nextMode)
   }
 
   function toggleSymbol(symbol: string) {
@@ -511,6 +545,22 @@ function NavPage() {
               </button>
             ))}
           </div>
+          <div className="segmented segmented--compact" aria-label="净值口径">
+            <button
+              type="button"
+              className={pnlMode === 'strategy' ? 'is-active' : ''}
+              onClick={() => selectPnlMode('strategy')}
+            >
+              策略归因
+            </button>
+            <button
+              type="button"
+              className={pnlMode === 'account' ? 'is-active' : ''}
+              onClick={() => selectPnlMode('account')}
+            >
+              账户 PnL
+            </button>
+          </div>
         </section>
 
         <section className="overview" aria-labelledby="overview-title">
@@ -618,10 +668,17 @@ function NavPage() {
                 </button>
                 <button
                   type="button"
-                  className={chartMode === 'strategies' ? 'is-active' : ''}
-                  onClick={() => setChartMode('strategies')}
+                  className={
+                    pnlMode === 'strategy' && chartMode === 'strategies'
+                      ? 'is-active'
+                      : ''
+                  }
+                  onClick={() => {
+                    selectPnlMode('strategy')
+                    setChartMode('strategies')
+                  }}
                 >
-                  分策略
+                  分策略 PnL
                 </button>
               </div>
               {chartMode === 'symbols' && (
@@ -629,7 +686,7 @@ function NavPage() {
                   {selectedSet.size} 条币种曲线
                 </span>
               )}
-              {chartMode === 'strategies' && (
+              {pnlMode === 'strategy' && chartMode === 'strategies' && (
                 <span className="symbol-series-count">
                   {selectedStrategySet.size} 条策略曲线
                 </span>
@@ -795,7 +852,8 @@ function NavPage() {
           )}
         </section>
 
-        <section className="strategy-section" aria-labelledby="strategies-title">
+        {pnlMode === 'strategy' && (
+          <section className="strategy-section" aria-labelledby="strategies-title">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">STRATEGY ATTRIBUTION</p>
@@ -882,7 +940,8 @@ function NavPage() {
               <div className="empty-state">没有选中的策略</div>
             )}
           </div>
-        </section>
+          </section>
+        )}
 
         <section className="positions-section" aria-labelledby="positions-title">
           <div className="panel-heading panel-heading--table">

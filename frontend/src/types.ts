@@ -95,6 +95,8 @@ export interface DashboardAccount {
   enabled: boolean
   gateway_prefix: string | null
   configurable: boolean
+  account_pnl_start_ts_us?: number | null
+  strategy_pnl_start_ts_us?: number | null
   live_equity_usdt?: number | null
   live_equity_status?: 'ok' | 'stale' | string | null
 }

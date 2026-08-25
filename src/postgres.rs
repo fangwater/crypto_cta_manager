@@ -6,7 +6,9 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 
 use crate::config::{FeeRates, SourceConfig, validate_fee_rates};
 use crate::model::{DecodeFailure, SignalBboLeg, UniformOrderEvent};
-use crate::snapshot::{PositionSnapshot, SnapshotPosition};
+use crate::snapshot::{
+    PositionSnapshot, SnapshotPosition, StrategyPositionSnapshot, StrategySnapshotPosition,
+};
 
 const STREAM_NAME: &str = "uniform_orders";
 
@@ -291,6 +293,131 @@ pub async fn load_latest_position_snapshot(
     snapshot
         .validate()
         .with_context(|| format!("invalid stored position snapshot for {source_id}"))?;
+    Ok(Some(snapshot))
+}
+
+pub async fn create_strategy_position_snapshot(
+    pool: &PgPool,
+    snapshot: &StrategyPositionSnapshot,
+    note: Option<&str>,
+) -> Result<()> {
+    snapshot.validate()?;
+    let mut transaction = pool.begin().await.with_context(|| {
+        format!(
+            "failed to begin strategy position snapshot transaction for {}",
+            snapshot.source_id
+        )
+    })?;
+    sqlx::query(
+        r#"
+        INSERT INTO cta_strategy_position_snapshots (source_id, snapshot_ts_us, note)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(&snapshot.source_id)
+    .bind(snapshot.snapshot_ts_us)
+    .bind(note)
+    .execute(&mut *transaction)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to create immutable strategy position snapshot source={} ts_us={}",
+            snapshot.source_id, snapshot.snapshot_ts_us
+        )
+    })?;
+
+    for position in &snapshot.positions {
+        sqlx::query(
+            r#"
+            INSERT INTO cta_strategy_position_snapshot_entries (
+                source_id, snapshot_ts_us, strategy_name, symbol, venue_code, quantity, reference_price
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(&snapshot.source_id)
+        .bind(snapshot.snapshot_ts_us)
+        .bind(&position.strategy_name)
+        .bind(&position.symbol)
+        .bind(position.venue_code)
+        .bind(position.quantity)
+        .bind(position.reference_price)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to insert strategy position snapshot source={} strategy={} symbol={} venue={}",
+                snapshot.source_id, position.strategy_name, position.symbol, position.venue_code
+            )
+        })?;
+    }
+
+    transaction.commit().await.with_context(|| {
+        format!(
+            "failed to commit strategy position snapshot source={} ts_us={}",
+            snapshot.source_id, snapshot.snapshot_ts_us
+        )
+    })
+}
+
+pub async fn load_latest_strategy_position_snapshot(
+    pool: &PgPool,
+    source_id: &str,
+) -> Result<Option<StrategyPositionSnapshot>> {
+    let snapshot_ts_us = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT snapshot_ts_us
+        FROM cta_strategy_position_snapshots
+        WHERE source_id = $1
+        ORDER BY snapshot_ts_us DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(source_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to load latest strategy position snapshot for {source_id}"))?;
+    let Some(snapshot_ts_us) = snapshot_ts_us else {
+        return Ok(None);
+    };
+
+    let rows = sqlx::query(
+        r#"
+        SELECT strategy_name, symbol, venue_code, quantity, reference_price
+        FROM cta_strategy_position_snapshot_entries
+        WHERE source_id = $1 AND snapshot_ts_us = $2
+        ORDER BY strategy_name, symbol, venue_code
+        "#,
+    )
+    .bind(source_id)
+    .bind(snapshot_ts_us)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load strategy position snapshot entries for {source_id} at {snapshot_ts_us}"
+        )
+    })?;
+    let positions = rows
+        .into_iter()
+        .map(|row| {
+            Ok(StrategySnapshotPosition {
+                strategy_name: row.try_get("strategy_name")?,
+                symbol: row.try_get("symbol")?,
+                venue_code: row.try_get("venue_code")?,
+                quantity: row.try_get("quantity")?,
+                reference_price: row.try_get("reference_price")?,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
+    let snapshot = StrategyPositionSnapshot {
+        source_id: source_id.to_string(),
+        snapshot_ts_us,
+        positions,
+    };
+    snapshot
+        .validate()
+        .with_context(|| format!("invalid stored strategy position snapshot for {source_id}"))?;
     Ok(Some(snapshot))
 }
 

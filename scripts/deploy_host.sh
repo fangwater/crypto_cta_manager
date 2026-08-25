@@ -84,7 +84,7 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
     echo "building Manager binaries locally"
     (
         cd "$ROOT"
-        cargo build --release --bin cta_web --bin nav_rebuild --bin nav_snapshot
+        cargo build --release --bin cta_web --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot
     )
     echo "building frontend locally"
     (
@@ -99,6 +99,7 @@ fi
 require_local_file "$ROOT/target/release/cta_web"
 require_local_file "$ROOT/target/release/nav_rebuild"
 require_local_file "$ROOT/target/release/nav_snapshot"
+require_local_file "$ROOT/target/release/nav_strategy_snapshot"
 require_local_file "$ROOT/frontend/dist/index.html"
 require_local_file "$DEPLOY_DIR/cta-manager.toml"
 require_local_file "$DEPLOY_DIR/crypto-cta-manager-web.service"
@@ -124,6 +125,9 @@ scp -q \
     "$ROOT/target/release/nav_snapshot" \
     "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_snapshot.next"
 scp -q \
+    "$ROOT/target/release/nav_strategy_snapshot" \
+    "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_strategy_snapshot.next"
+scp -q \
     "$DEPLOY_DIR/crypto-cta-manager-web.service" \
     "${SSH_HOST}:${REMOTE_ROOT}/"
 if [[ $TARGET == el01 ]]; then
@@ -143,10 +147,11 @@ remote "bash -s" <<EOF
 set -Eeuo pipefail
 umask 0022
 cd '${REMOTE_ROOT}'
-chmod 0755 bin/cta_web.next bin/nav_rebuild.next bin/nav_snapshot.next
+chmod 0755 bin/cta_web.next bin/nav_rebuild.next bin/nav_snapshot.next bin/nav_strategy_snapshot.next
 mv -f bin/cta_web.next bin/cta_web
 mv -f bin/nav_rebuild.next bin/nav_rebuild
 mv -f bin/nav_snapshot.next bin/nav_snapshot
+mv -f bin/nav_strategy_snapshot.next bin/nav_strategy_snapshot
 ln -sfn '${RELEASE}' webroot.next
 mv -Tf webroot.next webroot
 test -f webroot/manager/index.html

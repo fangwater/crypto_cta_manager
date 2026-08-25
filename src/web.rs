@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,7 +21,7 @@ use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
-use crate::account_ipc::LiveEquityHub;
+use crate::account_ipc::{LiveEquityHub, LiveEquitySnapshot};
 use crate::config::{AppConfig, FeeRates, SourceConfig};
 use crate::manager_db::ManagerDb;
 use crate::order_config::{
@@ -42,6 +42,7 @@ use crate::{nav, postgres};
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");
+const MANAGER_PNL_SDK: &[u8] = include_bytes!("../scripts/manager_pnl_sdk.py");
 const DEFAULT_POSITION_UPDATE_PAGE_SIZE: usize = 100;
 const MAX_POSITION_UPDATE_PAGE_SIZE: usize = 1_000;
 
@@ -62,6 +63,10 @@ pub struct DashboardAccount {
     pub enabled: bool,
     pub gateway_prefix: Option<String>,
     pub configurable: bool,
+    /// Account-level PnL starts from the immutable account snapshot when present.
+    pub account_pnl_start_ts_us: Option<i64>,
+    /// Strategy PnL starts from a later immutable allocation anchor when present.
+    pub strategy_pnl_start_ts_us: Option<i64>,
     pub live_equity_usdt: Option<f64>,
     pub live_equity_status: Option<&'static str>,
 }
@@ -83,11 +88,32 @@ pub struct HealthResponse {
     pub last_refresh_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ExchangeNavResponse {
+    generated_at_us: i64,
+    accounts: Vec<ExchangeNavAccount>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ExchangeNavAccount {
+    source_id: String,
+    account: String,
+    venue: String,
+    feed: Option<String>,
+    equity_usdt: Option<f64>,
+    wallet_balance_usdt: Option<f64>,
+    unrealized_pnl_usdt: Option<f64>,
+    available_balance_usdt: Option<f64>,
+    exchange_ts_ms: Option<i64>,
+    status: &'static str,
+}
+
 #[derive(Debug)]
 struct CacheState {
     dashboard: DashboardSnapshot,
     nav_histories: Arc<nav::NavSourceHistories>,
     position_snapshots: Arc<nav::SourcePositionSnapshots>,
+    strategy_position_snapshots: Arc<nav::SourceStrategyPositionSnapshots>,
     last_attempt_at_us: i64,
     last_refresh_error: Option<String>,
 }
@@ -96,6 +122,7 @@ struct DashboardBuild {
     dashboard: DashboardSnapshot,
     nav_histories: Arc<nav::NavSourceHistories>,
     position_snapshots: Arc<nav::SourcePositionSnapshots>,
+    strategy_position_snapshots: Arc<nav::SourceStrategyPositionSnapshots>,
 }
 
 #[derive(Clone)]
@@ -261,6 +288,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         dashboard: first_build.dashboard,
         nav_histories: first_build.nav_histories,
         position_snapshots: first_build.position_snapshots,
+        strategy_position_snapshots: first_build.strategy_position_snapshots,
         last_refresh_error: None,
     }));
 
@@ -281,12 +309,18 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
 
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/nav/exchange", get(exchange_nav))
         .route(
             "/api/manager_publish_client.py",
             get(manager_publish_client),
         )
+        .route("/api/manager_sdk.py", get(manager_sdk))
+        .route("/api/manager_pnl_sdk.py", get(manager_sdk))
         .route("/api/dashboard", get(dashboard))
         .route("/api/timeline", get(timeline))
+        .route("/api/account-timeline", get(account_timeline))
+        .route("/api/pnl/account", get(account_pnl_arrow))
+        .route("/api/pnl/strategies", get(strategies_pnl_arrow))
         .route("/api/pnl/strategy", get(strategy_pnl))
         .route("/api/pnl/strategy/summary", get(strategy_pnl_summary))
         .route("/api/catalog/execution-cost", get(execution_cost))
@@ -403,6 +437,20 @@ async fn manager_publish_client() -> impl IntoResponse {
     )
 }
 
+async fn manager_sdk() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/x-python; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"manager_sdk.py\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        MANAGER_PNL_SDK,
+    )
+}
+
 async fn health(State(state): State<WebState>) -> impl IntoResponse {
     let cache = state.cache.read().await;
     let response = HealthResponse {
@@ -420,19 +468,129 @@ async fn health(State(state): State<WebState>) -> impl IntoResponse {
     (NO_STORE, Json(response))
 }
 
+async fn exchange_nav(State(state): State<WebState>) -> Result<Response, ApiError> {
+    let selected = match resolve_sources(&state.config, &[]) {
+        Ok(sources) => sources,
+        Err(message) => return Ok(bad_request(message)),
+    };
+    let now_ms = unix_now_ms();
+    let accounts = selected
+        .into_iter()
+        .map(|source| exchange_nav_account(source, state.live_equity.get(&source.id), now_ms))
+        .collect();
+    Ok((
+        NO_STORE,
+        Json(ExchangeNavResponse {
+            generated_at_us: unix_now_us(),
+            accounts,
+        }),
+    )
+        .into_response())
+}
+
+fn exchange_nav_account(
+    source: &SourceConfig,
+    snapshot: Option<LiveEquitySnapshot>,
+    now_ms: i64,
+) -> ExchangeNavAccount {
+    let status = snapshot
+        .as_ref()
+        .map(|snapshot| live_equity_status(snapshot.ts_ms, now_ms))
+        .unwrap_or("unavailable");
+    ExchangeNavAccount {
+        source_id: source.id.clone(),
+        account: source.display_name().to_string(),
+        venue: source.venue.clone(),
+        feed: snapshot.as_ref().map(|snapshot| snapshot.source.clone()),
+        equity_usdt: snapshot.as_ref().map(|snapshot| snapshot.equity_usdt),
+        wallet_balance_usdt: snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.wallet_balance_usdt),
+        unrealized_pnl_usdt: snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.unrealized_pnl_usdt),
+        available_balance_usdt: snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.available_balance_usdt),
+        exchange_ts_ms: snapshot.as_ref().map(|snapshot| snapshot.ts_ms),
+        status,
+    }
+}
+
 async fn timeline(
     State(state): State<WebState>,
     Query(query): Query<TimelineQuery>,
 ) -> Result<Response, ApiError> {
+    let snapshot = match rebuild_timeline_snapshot(state, query, true).await? {
+        Ok(snapshot) => snapshot,
+        Err(response) => return Ok(response),
+    };
+    Ok((NO_STORE, Json(snapshot)).into_response())
+}
+
+async fn account_timeline(
+    State(state): State<WebState>,
+    Query(query): Query<TimelineQuery>,
+) -> Result<Response, ApiError> {
+    let snapshot = match rebuild_timeline_snapshot(state, query, false).await? {
+        Ok(snapshot) => snapshot,
+        Err(response) => return Ok(response),
+    };
+    Ok((NO_STORE, Json(snapshot)).into_response())
+}
+
+async fn account_pnl_arrow(
+    State(state): State<WebState>,
+    Query(query): Query<TimelineQuery>,
+) -> Result<Response, ApiError> {
+    timeline_arrow_response(state, query, false).await
+}
+
+async fn strategies_pnl_arrow(
+    State(state): State<WebState>,
+    Query(query): Query<TimelineQuery>,
+) -> Result<Response, ApiError> {
+    timeline_arrow_response(state, query, true).await
+}
+
+async fn timeline_arrow_response(
+    state: WebState,
+    query: TimelineQuery,
+    use_strategy_allocation: bool,
+) -> Result<Response, ApiError> {
+    let snapshot = match rebuild_timeline_snapshot(state, query, use_strategy_allocation).await? {
+        Ok(snapshot) => snapshot,
+        Err(response) => return Ok(response),
+    };
+    let payload = if use_strategy_allocation {
+        encode_strategy_timeline_arrow(&snapshot)?
+    } else {
+        encode_account_timeline_arrow(&snapshot)?
+    };
+    let mut response = payload.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.apache.arrow.stream"),
+    );
+    Ok(response)
+}
+
+async fn rebuild_timeline_snapshot(
+    state: WebState,
+    query: TimelineQuery,
+    use_strategy_allocation: bool,
+) -> Result<std::result::Result<TimelineSnapshot, Response>, ApiError> {
     let selected_source_ids = parse_csv(query.source_ids.as_deref(), false);
     if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
-        return Ok(bad_request(message));
+        return Ok(Err(bad_request(message)));
     }
     let selected_symbols = parse_csv(query.symbols.as_deref(), true);
     let start_ts_us = match query.start_ms {
         Some(value) => match milliseconds_to_microseconds(value, "startMs") {
             Ok(value) => Some(value),
-            Err(message) => return Ok(bad_request(message)),
+            Err(message) => return Ok(Err(bad_request(message))),
         },
         None => None,
     };
@@ -441,23 +599,26 @@ async fn timeline(
         "endMs",
     ) {
         Ok(value) => value,
-        Err(message) => return Ok(bad_request(message)),
+        Err(message) => return Ok(Err(bad_request(message))),
     };
     if start_ts_us.is_some_and(|start_ts_us| end_ts_us < start_ts_us) {
-        return Ok(bad_request(
+        return Ok(Err(bad_request(
             "endMs must be greater than or equal to startMs".to_string(),
-        ));
+        )));
     }
 
     let started = Instant::now();
-    let (histories, snapshots, data_generated_at_us) = {
+    let (histories, snapshots, strategy_snapshots, data_generated_at_us) = {
         let cache = state.cache.read().await;
         (
             Arc::clone(&cache.nav_histories),
             Arc::clone(&cache.position_snapshots),
+            Arc::clone(&cache.strategy_position_snapshots),
             cache.dashboard.generated_at_us,
         )
     };
+    let snapshots = selected_snapshot_map(&snapshots, &selected_source_ids);
+    let strategy_snapshots = selected_snapshot_map(&strategy_snapshots, &selected_source_ids);
     let fee_rates = postgres::load_fee_rates(&state.pool).await?;
     let request = nav::NavTimelineRequest {
         start_ts_us,
@@ -471,30 +632,36 @@ async fn timeline(
         .clone()
         .with_fee_rates(&fee_rates);
     let report = tokio::task::spawn_blocking(move || {
-        nav::rebuild_nav_timeline_from_histories_with_snapshots(
-            &config, request, &snapshots, &histories,
-        )
+        if use_strategy_allocation {
+            nav::rebuild_nav_timeline_from_histories_with_strategy_snapshots(
+                &config,
+                request,
+                &snapshots,
+                &strategy_snapshots,
+                &histories,
+            )
+        } else {
+            nav::rebuild_nav_timeline_from_histories_with_snapshots(
+                &config, request, &snapshots, &histories,
+            )
+        }
     })
     .await
     .context("CTA timeline rebuild task failed")?;
     let report = match report {
         Ok(report) => report,
         Err(error) if is_timeline_request_error(&error) => {
-            return Ok(bad_request(error.to_string()));
+            return Ok(Err(bad_request(error.to_string())));
         }
         Err(error) => return Err(error.into()),
     };
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
 
-    Ok((
-        NO_STORE,
-        Json(TimelineSnapshot {
-            generated_at_us: data_generated_at_us,
-            generation_duration_ms,
-            report,
-        }),
-    )
-        .into_response())
+    Ok(Ok(TimelineSnapshot {
+        generated_at_us: data_generated_at_us,
+        generation_duration_ms,
+        report,
+    }))
 }
 
 async fn strategy_pnl(
@@ -613,18 +780,26 @@ async fn rebuild_strategy_pnl_report(
     state: &WebState,
     request: nav::StrategyPnlRequest,
 ) -> Result<(nav::StrategyPnlReport, i64)> {
-    let (histories, snapshots, data_generated_at_us) = {
+    let (histories, snapshots, strategy_snapshots, data_generated_at_us) = {
         let cache = state.cache.read().await;
         (
             Arc::clone(&cache.nav_histories),
             Arc::clone(&cache.position_snapshots),
+            Arc::clone(&cache.strategy_position_snapshots),
             cache.dashboard.generated_at_us,
         )
     };
+    let requested_source_ids = vec![request.source_id.clone()];
+    let snapshots = selected_snapshot_map(&snapshots, &requested_source_ids);
+    let strategy_snapshots = selected_snapshot_map(&strategy_snapshots, &requested_source_ids);
     let config = Arc::clone(&state.config).as_ref().clone();
     let report = tokio::task::spawn_blocking(move || {
-        nav::rebuild_strategy_pnl_from_histories_with_snapshots(
-            &config, request, &snapshots, &histories,
+        nav::rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
+            &config,
+            request,
+            &snapshots,
+            &strategy_snapshots,
+            &histories,
         )
     })
     .await
@@ -1174,6 +1349,7 @@ async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
     cache.dashboard = build.dashboard;
     cache.nav_histories = build.nav_histories;
     cache.position_snapshots = build.position_snapshots;
+    cache.strategy_position_snapshots = build.strategy_position_snapshots;
     cache.last_refresh_error = None;
     Ok(())
 }
@@ -1695,6 +1871,20 @@ fn parse_csv(value: Option<&str>, uppercase: bool) -> Vec<String> {
         .collect()
 }
 
+fn selected_snapshot_map<T: Clone>(
+    snapshots: &BTreeMap<String, T>,
+    selected_source_ids: &[String],
+) -> BTreeMap<String, T> {
+    if selected_source_ids.is_empty() {
+        return snapshots.clone();
+    }
+    snapshots
+        .iter()
+        .filter(|(source_id, _)| selected_source_ids.iter().any(|id| id == *source_id))
+        .map(|(source_id, snapshot)| (source_id.clone(), snapshot.clone()))
+        .collect()
+}
+
 fn resolve_sources<'a>(
     config: &'a AppConfig,
     selected_source_ids: &[String],
@@ -1737,6 +1927,242 @@ fn milliseconds_to_microseconds(value: i64, field: &str) -> std::result::Result<
 }
 
 const PNL_ARROW_BATCH_ROWS: usize = 65_536;
+const TIMELINE_ARROW_SCHEMA_VERSION: &str = "1";
+
+fn timeline_arrow_metadata(snapshot: &TimelineSnapshot, dataset: &str) -> HashMap<String, String> {
+    HashMap::from([
+        ("compression".to_string(), "zstd".to_string()),
+        ("dataset".to_string(), dataset.to_string()),
+        (
+            "end_ts_us".to_string(),
+            snapshot.report.end_ts_us.to_string(),
+        ),
+        (
+            "generated_at_us".to_string(),
+            snapshot.generated_at_us.to_string(),
+        ),
+        (
+            "schema_version".to_string(),
+            TIMELINE_ARROW_SCHEMA_VERSION.to_string(),
+        ),
+        (
+            "selected_source_ids".to_string(),
+            snapshot.report.selected_source_ids.join(","),
+        ),
+        (
+            "selected_symbols".to_string(),
+            snapshot.report.selected_symbols.join(","),
+        ),
+        (
+            "start_ts_us".to_string(),
+            snapshot.report.start_ts_us.to_string(),
+        ),
+        (
+            "valuation".to_string(),
+            snapshot.report.valuation.to_string(),
+        ),
+    ])
+}
+
+fn timeline_totals_fields() -> Vec<Field> {
+    vec![
+        Field::new("fill_count", DataType::UInt64, false),
+        Field::new("volume_quote", DataType::Float64, false),
+        Field::new("maker_fill_count", DataType::UInt64, false),
+        Field::new("maker_volume_quote", DataType::Float64, false),
+        Field::new("taker_fill_count", DataType::UInt64, false),
+        Field::new("taker_volume_quote", DataType::Float64, false),
+        Field::new("unknown_liquidity_fill_count", DataType::UInt64, false),
+        Field::new("unknown_liquidity_volume_quote", DataType::Float64, false),
+        Field::new("realized_pnl_before_fee_quote", DataType::Float64, false),
+        Field::new("estimated_trading_fee_quote", DataType::Float64, false),
+        Field::new("realized_pnl_after_fee_quote", DataType::Float64, false),
+        Field::new("floating_pnl_quote", DataType::Float64, false),
+        Field::new("nav_change_before_fee_quote", DataType::Float64, false),
+        Field::new("nav_change_after_fee_quote", DataType::Float64, false),
+    ]
+}
+
+fn timeline_totals_arrays<'a>(
+    totals: impl IntoIterator<Item = &'a nav::NavTotals>,
+) -> Vec<ArrayRef> {
+    let totals = totals.into_iter().collect::<Vec<_>>();
+    vec![
+        Arc::new(UInt64Array::from(
+            totals
+                .iter()
+                .map(|value| value.fill_count)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.volume_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(UInt64Array::from(
+            totals
+                .iter()
+                .map(|value| value.maker_fill_count)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.maker_volume_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(UInt64Array::from(
+            totals
+                .iter()
+                .map(|value| value.taker_fill_count)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.taker_volume_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(UInt64Array::from(
+            totals
+                .iter()
+                .map(|value| value.unknown_liquidity_fill_count)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.unknown_liquidity_volume_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.realized_pnl_before_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.estimated_trading_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.realized_pnl_after_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.floating_pnl_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.nav_change_before_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            totals
+                .iter()
+                .map(|value| value.nav_change_after_fee_quote)
+                .collect::<Vec<_>>(),
+        )),
+    ]
+}
+
+fn arrow_write_options() -> Result<IpcWriteOptions> {
+    IpcWriteOptions::default()
+        .try_with_compression(Some(CompressionType::ZSTD))?
+        .try_with_compression_level(Some(3))
+        .map_err(Into::into)
+}
+
+fn encode_account_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>> {
+    let mut fields = vec![Field::new("ts_us", DataType::Int64, false)];
+    fields.extend(timeline_totals_fields());
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        timeline_arrow_metadata(snapshot, "account_pnl"),
+    ));
+    let mut payload = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new_with_options(
+            &mut payload,
+            schema.as_ref(),
+            arrow_write_options()?,
+        )?;
+        for rows in snapshot.report.points.chunks(PNL_ARROW_BATCH_ROWS) {
+            let mut columns: Vec<ArrayRef> = vec![Arc::new(Int64Array::from(
+                rows.iter().map(|row| row.ts_us).collect::<Vec<_>>(),
+            ))];
+            columns.extend(timeline_totals_arrays(rows.iter().map(|row| &row.totals)));
+            writer.write(&RecordBatch::try_new(Arc::clone(&schema), columns)?)?;
+        }
+        writer.finish()?;
+    }
+    Ok(payload)
+}
+
+fn encode_strategy_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>> {
+    let mut fields = vec![
+        Field::new("strategy_name", DataType::Utf8, false),
+        Field::new("ts_us", DataType::Int64, false),
+    ];
+    fields.extend(timeline_totals_fields());
+    let mut metadata = timeline_arrow_metadata(snapshot, "strategy_pnl");
+    metadata.insert(
+        "strategy_count".to_string(),
+        snapshot.report.strategy_points.len().to_string(),
+    );
+    metadata.insert("row_shape".to_string(), "long".to_string());
+    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    let rows = snapshot
+        .report
+        .strategy_points
+        .iter()
+        .flat_map(|strategy| {
+            strategy
+                .points
+                .iter()
+                .map(move |point| (strategy.strategy.as_str(), point))
+        })
+        .collect::<Vec<_>>();
+    let mut payload = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new_with_options(
+            &mut payload,
+            schema.as_ref(),
+            arrow_write_options()?,
+        )?;
+        for batch_rows in rows.chunks(PNL_ARROW_BATCH_ROWS) {
+            let mut columns: Vec<ArrayRef> = vec![
+                Arc::new(StringArray::from(
+                    batch_rows
+                        .iter()
+                        .map(|(strategy, _)| *strategy)
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(Int64Array::from(
+                    batch_rows
+                        .iter()
+                        .map(|(_, point)| point.ts_us)
+                        .collect::<Vec<_>>(),
+                )),
+            ];
+            columns.extend(timeline_totals_arrays(
+                batch_rows.iter().map(|(_, point)| &point.totals),
+            ));
+            writer.write(&RecordBatch::try_new(Arc::clone(&schema), columns)?)?;
+        }
+        writer.finish()?;
+    }
+    Ok(payload)
+}
 
 fn encode_strategy_pnl_arrow(
     report: &nav::StrategyPnlReport,
@@ -1745,8 +2171,13 @@ fn encode_strategy_pnl_arrow(
     let metadata = HashMap::from([
         ("account".to_string(), report.account.clone()),
         ("compression".to_string(), "zstd".to_string()),
+        ("dataset".to_string(), "strategy_fill_pnl".to_string()),
         ("end_ts_us".to_string(), report.end_ts_us.to_string()),
         ("generated_at_us".to_string(), generated_at_us.to_string()),
+        (
+            "schema_version".to_string(),
+            TIMELINE_ARROW_SCHEMA_VERSION.to_string(),
+        ),
         ("source_id".to_string(), report.source_id.clone()),
         ("start_ts_us".to_string(), report.start_ts_us.to_string()),
         ("strategy_name".to_string(), report.strategy_name.clone()),
@@ -1930,6 +2361,7 @@ async fn refresh_loop(
                 state.dashboard = build.dashboard;
                 state.nav_histories = build.nav_histories;
                 state.position_snapshots = build.position_snapshots;
+                state.strategy_position_snapshots = build.strategy_position_snapshots;
                 state.last_refresh_error = None;
             }
             Err(error) => {
@@ -1952,11 +2384,34 @@ async fn build_dashboard(
     let now_ms = unix_now_ms();
     let fee_rates = postgres::load_fee_rates(pool).await?;
     let nav_config = config.clone().with_fee_rates(&fee_rates);
+    let mut snapshots = nav::SourcePositionSnapshots::new();
+    let mut strategy_snapshots = nav::SourceStrategyPositionSnapshots::new();
+    for source in config.sources.iter().filter(|source| source.enabled) {
+        if let Some(snapshot) = postgres::load_latest_position_snapshot(pool, &source.id).await? {
+            snapshots.insert(source.id.clone(), snapshot);
+        }
+        if let Some(snapshot) =
+            postgres::load_latest_strategy_position_snapshot(pool, &source.id).await?
+        {
+            strategy_snapshots.insert(source.id.clone(), snapshot);
+        }
+    }
     let accounts = config
         .sources
         .iter()
         .map(|source| {
             let live = live_equity.get(&source.id);
+            let account_pnl_start_ts_us = snapshots
+                .get(&source.id)
+                .map(|snapshot| snapshot.snapshot_ts_us);
+            let strategy_pnl_start_ts_us = strategy_snapshots
+                .get(&source.id)
+                .filter(|snapshot| {
+                    account_pnl_start_ts_us
+                        .is_none_or(|account_start| snapshot.snapshot_ts_us >= account_start)
+                })
+                .map(|snapshot| snapshot.snapshot_ts_us)
+                .or(account_pnl_start_ts_us);
             DashboardAccount {
                 source_id: source.id.clone(),
                 account: source.display_name().to_string(),
@@ -1964,6 +2419,8 @@ async fn build_dashboard(
                 enabled: source.enabled,
                 gateway_prefix: source.gateway_prefix.clone(),
                 configurable: source.exec_config_url.is_some(),
+                account_pnl_start_ts_us,
+                strategy_pnl_start_ts_us,
                 live_equity_usdt: live.as_ref().map(|snapshot| snapshot.equity_usdt),
                 live_equity_status: live
                     .as_ref()
@@ -1971,25 +2428,21 @@ async fn build_dashboard(
             }
         })
         .collect();
-    let mut snapshots = nav::SourcePositionSnapshots::new();
-    for source in config.sources.iter().filter(|source| source.enabled) {
-        if let Some(snapshot) = postgres::load_latest_position_snapshot(pool, &source.id).await? {
-            snapshots.insert(source.id.clone(), snapshot);
-        }
-    }
 
-    let (report, histories, snapshots) = tokio::task::spawn_blocking(move || {
-        let histories = nav::load_nav_source_histories(&nav_config, &[])?;
-        let report = nav::rebuild_nav_from_histories_with_snapshots(
-            &nav_config,
-            &[],
-            &snapshots,
-            &histories,
-        )?;
-        anyhow::Ok((report, histories, snapshots))
-    })
-    .await
-    .context("CTA dashboard rebuild task failed")??;
+    let (report, histories, snapshots, strategy_snapshots) =
+        tokio::task::spawn_blocking(move || {
+            let histories = nav::load_nav_source_histories(&nav_config, &[])?;
+            let report = nav::rebuild_nav_from_histories_with_strategy_snapshots(
+                &nav_config,
+                &[],
+                &snapshots,
+                &strategy_snapshots,
+                &histories,
+            )?;
+            anyhow::Ok((report, histories, snapshots, strategy_snapshots))
+        })
+        .await
+        .context("CTA dashboard rebuild task failed")??;
     let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
 
     Ok(DashboardBuild {
@@ -2002,6 +2455,7 @@ async fn build_dashboard(
         },
         nav_histories: Arc::new(histories),
         position_snapshots: Arc::new(snapshots),
+        strategy_position_snapshots: Arc::new(strategy_snapshots),
     })
 }
 
@@ -2074,6 +2528,107 @@ mod tests {
         assert_eq!(milliseconds_to_microseconds(123, "startMs"), Ok(123_000));
         assert!(milliseconds_to_microseconds(-1, "startMs").is_err());
         assert!(milliseconds_to_microseconds(i64::MAX, "endMs").is_err());
+    }
+
+    fn timeline_snapshot_for_arrow() -> TimelineSnapshot {
+        let mut totals = nav::NavTotals::default();
+        totals.fill_count = 3;
+        totals.realized_pnl_before_fee_quote = 11.25;
+        totals.floating_pnl_quote = -2.5;
+        totals.estimated_trading_fee_quote = 0.75;
+        totals.nav_change_before_fee_quote = 8.75;
+        totals.nav_change_after_fee_quote = 8.0;
+        let points = vec![
+            nav::NavTimelinePoint {
+                ts_us: 1_000,
+                totals: nav::NavTotals::default(),
+            },
+            nav::NavTimelinePoint {
+                ts_us: 2_000,
+                totals,
+            },
+        ];
+        TimelineSnapshot {
+            generated_at_us: 3_000,
+            generation_duration_ms: 1,
+            report: nav::NavTimelineReport {
+                valuation: "quantity_fifo_window_delta",
+                earliest_start_ts_us: 1_000,
+                start_ts_us: 1_000,
+                end_ts_us: 2_000,
+                selected_source_ids: vec!["trade01".to_string()],
+                available_symbols: vec!["BTCUSDT".to_string()],
+                selected_symbols: vec!["BTCUSDT".to_string()],
+                available_strategies: vec!["cta_alpha".to_string()],
+                summary: totals,
+                symbols: Vec::new(),
+                points: points.clone(),
+                symbol_points: Vec::new(),
+                strategy_points: vec![nav::StrategyNavTimeline {
+                    strategy: "cta_alpha".to_string(),
+                    symbol_count: 1,
+                    gross_position_value_quote: 100.0,
+                    net_position_value_quote: 100.0,
+                    summary: totals,
+                    points,
+                }],
+                sampled: false,
+            },
+        }
+    }
+
+    #[test]
+    fn account_timeline_arrow_is_a_versioned_table_with_separate_pnl_columns() {
+        let payload = encode_account_timeline_arrow(&timeline_snapshot_for_arrow()).unwrap();
+        let mut reader = StreamReader::try_new_buffered(Cursor::new(payload), None).unwrap();
+        assert_eq!(
+            reader.schema().metadata().get("dataset"),
+            Some(&"account_pnl".to_string())
+        );
+        assert_eq!(
+            reader.schema().metadata().get("schema_version"),
+            Some(&TIMELINE_ARROW_SCHEMA_VERSION.to_string())
+        );
+        let batch = reader.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let realized = batch
+            .column_by_name("realized_pnl_before_fee_quote")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let floating = batch
+            .column_by_name("floating_pnl_quote")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(realized.value(1).to_bits(), 11.25_f64.to_bits());
+        assert_eq!(floating.value(1).to_bits(), (-2.5_f64).to_bits());
+    }
+
+    #[test]
+    fn strategy_timeline_arrow_is_a_long_table() {
+        let payload = encode_strategy_timeline_arrow(&timeline_snapshot_for_arrow()).unwrap();
+        let mut reader = StreamReader::try_new_buffered(Cursor::new(payload), None).unwrap();
+        assert_eq!(
+            reader.schema().metadata().get("dataset"),
+            Some(&"strategy_pnl".to_string())
+        );
+        assert_eq!(
+            reader.schema().metadata().get("row_shape"),
+            Some(&"long".to_string())
+        );
+        let batch = reader.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        let strategies = batch
+            .column_by_name("strategy_name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(strategies.value(0), "cta_alpha");
+        assert_eq!(strategies.value(1), "cta_alpha");
     }
 
     #[test]

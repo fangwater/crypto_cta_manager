@@ -81,6 +81,9 @@ included. The browser page is `/manager/execution-cost/`.
 If the account already had positions when its RocksDB history began, store an
 immutable position snapshot in PostgreSQL with `nav_snapshot`. Position
 snapshots are recomputation anchors and are deliberately not deployment config.
+For strategy PnL that follows Exec's actual allocation, create a later immutable
+strategy-allocation snapshot with `nav_strategy_snapshot`; it becomes the new
+recomputation anchor for that source.
 
 ## Run
 
@@ -128,6 +131,56 @@ Snapshots with the same `(source_id, snapshot_ts_us)` cannot be overwritten.
 Create a later snapshot for a new recomputation point. If a position omits its
 reference price, `nav_rebuild` uses the first later positive RocksDB fill for
 that symbol and venue.
+
+## Rebase Strategy PnL
+
+Strategy PnL before the first allocation anchor cannot be recovered from an
+account-level snapshot: that snapshot does not record strategy ownership. To
+begin an auditable strategy PnL period, capture the complete Exec allocation as
+one immutable snapshot. The command reads the configured loopback Exec Viz
+origin, requires the factual position state to be ready, and records the
+snapshot's own timestamp and mark values:
+
+```bash
+nav_strategy_snapshot \
+  --config /home/el01/crypto_cta_manager/config/cta-manager.toml \
+  --source binance_exec_trade01 \
+  --from-exec-viz \
+  --venue-code 1 \
+  --dry-run
+```
+
+After reviewing the printed snapshot, run the same command without `--dry-run`
+to insert the immutable anchor:
+
+```bash
+nav_strategy_snapshot \
+  --config /home/el01/crypto_cta_manager/config/cta-manager.toml \
+  --source binance_exec_trade01 \
+  --from-exec-viz \
+  --venue-code 1 \
+  --note 'strategy PnL allocation rebase'
+```
+
+`SYSTEM_POSITION_CLOSE` and any other non-strategy remainder are never
+invented into a CTA strategy. The command records their account reconciliation
+quantity as `__unallocated__`. After the anchor, a system-close fill consumes
+the oldest opposite strategy lot in that source, symbol, and venue; only an
+unmatched remainder remains `__unallocated__`. The account NAV and the sum of
+strategy NAV therefore use the same anchor. Earlier account history is excluded
+from the rebased strategy NAV rather than being assigned without evidence.
+
+For a controlled manual import, provide every nonzero strategy lot with a
+single common mark for each symbol and venue:
+
+```bash
+nav_strategy_snapshot \
+  --config config/cta-manager.toml \
+  --source binance_exec_trade01 \
+  --snapshot-ts-us 1787636000000000 \
+  --position CTA_ALPHA:BTCUSDT:1:0.01:80500 \
+  --position CTA_BETA:BTCUSDT:1:-0.002:80500
+```
 
 Rebuild all enabled accounts directly from their complete RocksDB order history:
 
@@ -179,9 +232,32 @@ rebuilds quantity FIFO from the later RocksDB fills once per minute, and keeps
 serving the last good report if a later refresh fails.
 
 The timeline can display the selected account as a portfolio, by symbol, or by
-the strategy suffix in `batch_exec:<strategy_name>`. Account-level initial
-snapshot positions are shown as unallocated initial positions because they do
-not contain historical strategy ownership.
+the strategy suffix in `batch_exec:<strategy_name>`. Before an allocation
+anchor, account-level initial snapshot positions remain unallocated because they
+do not contain historical strategy ownership. Once an immutable strategy
+allocation anchor exists, it replaces the older account anchor for that source.
+
+`GET /api/timeline` is the strategy-attribution timeline and uses the latest
+strategy allocation anchor when one exists. `GET /api/account-timeline` uses
+only the account-level PostgreSQL position snapshot and later RocksDB fills; it
+therefore remains available for total-account PnL before a strategy allocation
+anchor. The browser exposes these as separate `策略归因` and `账户 PnL` modes.
+
+For DataFrame clients, `GET /api/pnl/account` returns a versioned Arrow IPC
+account-PnL table keyed by `ts_us`; `GET /api/pnl/strategies` returns a long
+Arrow IPC table keyed by `strategy_name, ts_us`. Both accept `startMs`, `endMs`,
+`sourceIds`, `symbols`, and `maxPoints`. Both include independent
+`realized_pnl_before_fee_quote`, `floating_pnl_quote`,
+`estimated_trading_fee_quote`, `nav_change_before_fee_quote`, and
+`nav_change_after_fee_quote` columns. The Python SDK is available as
+`scripts/manager_pnl_sdk.py` and at `GET /api/manager_sdk.py`.
+
+`GET /api/nav/exchange` is a parameter-free real-time JSON endpoint separate
+from PnL reconstruction. It returns the latest account-monitor exchange wallet
+push for every enabled source, including
+`equity_usdt`, wallet balance, exchange unrealized PnL, available balance,
+exchange timestamp, and freshness status. It is an in-memory latest snapshot,
+not a historical equity series and not part of the FIFO PnL totals.
 
 ## Strategy PnL Arrow Export
 
@@ -283,7 +359,7 @@ scripts/deploy_host.sh --target el01
 scripts/deploy_host.sh --target jp-meta
 
 # or compile first and reuse the artifacts
-cargo build --release --bin cta_web --bin nav_rebuild --bin nav_snapshot
+cargo build --release --bin cta_web --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot
 cd frontend && npm install && npm run lint && npm run build
 ../scripts/deploy_host.sh --target el01 --skip-build
 ```

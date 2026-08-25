@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>();
         let mut snapshots = nav::SourcePositionSnapshots::new();
+        let mut strategy_snapshots = nav::SourceStrategyPositionSnapshots::new();
         for source in config.sources.iter().filter(|source| {
             source.enabled && (requested.is_empty() || requested.contains(source.id.as_str()))
         }) {
@@ -53,8 +54,18 @@ async fn main() -> Result<()> {
             {
                 snapshots.insert(source.id.clone(), snapshot);
             }
+            if let Some(snapshot) =
+                postgres::load_latest_strategy_position_snapshot(&pool, &source.id).await?
+            {
+                strategy_snapshots.insert(source.id.clone(), snapshot);
+            }
         }
-        nav::rebuild_nav_from_rocksdb_with_snapshots(&config, &args.source_ids, &snapshots)?
+        nav::rebuild_nav_from_rocksdb_with_strategy_snapshots(
+            &config,
+            &args.source_ids,
+            &snapshots,
+            &strategy_snapshots,
+        )?
     };
 
     let stdout = io::stdout();

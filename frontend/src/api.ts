@@ -69,13 +69,21 @@ export interface TimelineQuery {
 }
 
 export function getTimeline(query: TimelineQuery) {
+  return getTimelineFromPath('/timeline', query)
+}
+
+export function getAccountTimeline(query: TimelineQuery) {
+  return getTimelineFromPath('/account-timeline', query)
+}
+
+function getTimelineFromPath(path: string, query: TimelineQuery) {
   const params = new URLSearchParams()
   if (query.startMs !== undefined) params.set('startMs', String(query.startMs))
   if (query.endMs !== undefined) params.set('endMs', String(query.endMs))
   if (query.sourceIds?.length) params.set('sourceIds', query.sourceIds.join(','))
   if (query.symbols?.length) params.set('symbols', query.symbols.join(','))
   params.set('maxPoints', String(query.maxPoints ?? 3_000))
-  return requestJson<TimelineSnapshot>(`/timeline?${params}`, {
+  return requestJson<TimelineSnapshot>(`${path}?${params}`, {
     signal: query.signal,
   })
 }

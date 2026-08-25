@@ -62,6 +62,7 @@ export function signedClass(value: number) {
 
 export function strategyLabel(strategy: string) {
   if (strategy === '__initial_position__') return '初始仓位（未归属）'
+  if (strategy === '__unallocated__') return '未分配仓位'
   if (strategy === '__unattributed__') return '未归属成交'
   if (strategy.toLowerCase() === 'system_position_close') return '系统平仓'
   return strategy

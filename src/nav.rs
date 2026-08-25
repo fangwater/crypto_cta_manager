@@ -12,11 +12,12 @@ use crate::model::{
     decode_uniform_order, venue_name,
 };
 use crate::rocks_source;
-use crate::snapshot::PositionSnapshot;
+use crate::snapshot::{PositionSnapshot, StrategyPositionSnapshot};
 
 pub type VenueMarkOverrides = BTreeMap<(String, i16), f64>;
 pub type SourceMarkOverrides = BTreeMap<String, VenueMarkOverrides>;
 pub type SourcePositionSnapshots = BTreeMap<String, PositionSnapshot>;
+pub type SourceStrategyPositionSnapshots = BTreeMap<String, StrategyPositionSnapshot>;
 
 #[derive(Debug)]
 pub struct NavSourceHistory {
@@ -52,6 +53,7 @@ pub type NavSourceHistories = BTreeMap<String, NavSourceHistory>;
 const NAV_TICK_INTERVAL_US: i64 = 15 * 60 * 1_000_000;
 const BATCH_EXEC_FROM_KEY_PREFIX: &str = "batch_exec:";
 const INITIAL_POSITION_STRATEGY: &str = "__initial_position__";
+const UNALLOCATED_STRATEGY: &str = "__unallocated__";
 const UNATTRIBUTED_STRATEGY: &str = "__unattributed__";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
@@ -300,6 +302,8 @@ struct PreparedFill {
 struct PreparedSourceEvents {
     snapshot_ts_us: Option<i64>,
     initial_states: BTreeMap<(String, i16), VenueState>,
+    initial_strategy_states: BTreeMap<(String, String, i16), VenueState>,
+    strategy_allocation_active: bool,
     fill_events: Vec<PreparedFill>,
     order_event_count: u64,
     ignored_at_or_before_snapshot_event_count: u64,
@@ -373,6 +377,7 @@ struct TimelineSourceState {
     states: BTreeMap<(String, i16), VenueState>,
     strategy_states: BTreeMap<(String, String, i16), VenueState>,
     latest_marks: BTreeMap<(String, i16), f64>,
+    strategy_allocation_active: bool,
 }
 
 impl TimelineSourceState {
@@ -421,26 +426,108 @@ impl TimelineSourceState {
             })?;
 
         let strategy = strategy_from_from_key(&fill.event.from_key_text);
-        let strategy_key = (strategy, fill.event.symbol.clone(), fill.event.venue_code);
-        let strategy_state = self
-            .strategy_states
-            .entry(strategy_key)
-            .or_insert_with(|| VenueState::new(&fill.event));
-        strategy_state
-            .apply_fill(
-                &fill.event,
-                fill.side,
-                self.fee_rates,
-                fill.liquidity,
-                fill.fill_ts_us,
-            )
-            .with_context(|| {
-                format!(
-                    "failed to apply strategy attribution for source {} record {}",
-                    self.source_id, fill.event.record_key
+        if self.strategy_allocation_active && is_system_position_close(&strategy) {
+            self.apply_system_close_fill(fill)?;
+        } else {
+            let strategy_key = (strategy, fill.event.symbol.clone(), fill.event.venue_code);
+            let strategy_state = self
+                .strategy_states
+                .entry(strategy_key)
+                .or_insert_with(|| VenueState::new(&fill.event));
+            strategy_state
+                .apply_fill(
+                    &fill.event,
+                    fill.side,
+                    self.fee_rates,
+                    fill.liquidity,
+                    fill.fill_ts_us,
                 )
-            })?;
+                .with_context(|| {
+                    format!(
+                        "failed to apply strategy attribution for source {} record {}",
+                        self.source_id, fill.event.record_key
+                    )
+                })?;
+        }
         self.latest_marks.insert(key, fill.event.price);
+        Ok(())
+    }
+
+    fn apply_system_close_fill(&mut self, fill: &PreparedFill) -> Result<()> {
+        let mut remaining_quantity = fill.event.amount_update;
+        let mut counts_as_fill = true;
+        while remaining_quantity > 1e-12 {
+            let candidate = self
+                .strategy_states
+                .iter()
+                .filter_map(|((strategy, symbol, venue_code), state)| {
+                    (symbol == &fill.event.symbol
+                        && *venue_code == fill.event.venue_code
+                        && state.fifo.opposite_quantity(fill.side) > 1e-12)
+                        .then(|| {
+                            (
+                                state.fifo.oldest_opposite_ts(fill.side),
+                                strategy.clone(),
+                                state.fifo.opposite_quantity(fill.side),
+                            )
+                        })
+                })
+                .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+            let Some((_, strategy, available_quantity)) = candidate else {
+                break;
+            };
+            let applied_quantity = remaining_quantity.min(available_quantity);
+            let state_key = (strategy, fill.event.symbol.clone(), fill.event.venue_code);
+            let state = self
+                .strategy_states
+                .get_mut(&state_key)
+                .expect("strategy close candidate disappeared");
+            state
+                .apply_fill_quantity(
+                    &fill.event,
+                    fill.side,
+                    self.fee_rates,
+                    fill.liquidity,
+                    fill.fill_ts_us,
+                    applied_quantity,
+                    counts_as_fill,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to apply system close for source {} record {}",
+                        self.source_id, fill.event.record_key
+                    )
+                })?;
+            counts_as_fill = false;
+            remaining_quantity -= applied_quantity;
+        }
+        if remaining_quantity > 1e-12 {
+            let state_key = (
+                UNALLOCATED_STRATEGY.to_string(),
+                fill.event.symbol.clone(),
+                fill.event.venue_code,
+            );
+            let state = self
+                .strategy_states
+                .entry(state_key)
+                .or_insert_with(|| VenueState::new(&fill.event));
+            state
+                .apply_fill_quantity(
+                    &fill.event,
+                    fill.side,
+                    self.fee_rates,
+                    fill.liquidity,
+                    fill.fill_ts_us,
+                    remaining_quantity,
+                    counts_as_fill,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to apply unallocated system close for source {} record {}",
+                        self.source_id, fill.event.record_key
+                    )
+                })?;
+        }
         Ok(())
     }
 }
@@ -449,6 +536,7 @@ impl TimelineSourceState {
 struct Lot {
     entry_price: f64,
     quantity: f64,
+    opened_at_us: i64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -459,7 +547,7 @@ struct QuantityFifo {
 }
 
 impl QuantityFifo {
-    fn apply_fill(&mut self, side: Side, price: f64, quantity: f64) {
+    fn apply_fill(&mut self, side: Side, price: f64, quantity: f64, opened_at_us: i64) {
         let (realized_pnl, remaining_quantity) = match side {
             Side::Buy => close_fifo(&mut self.shorts, price, quantity, -1.0),
             Side::Sell => close_fifo(&mut self.longs, price, quantity, 1.0),
@@ -468,6 +556,7 @@ impl QuantityFifo {
             let lot = Lot {
                 entry_price: price,
                 quantity: remaining_quantity,
+                opened_at_us,
             };
             match side {
                 Side::Buy => self.longs.push_back(lot),
@@ -495,6 +584,22 @@ impl QuantityFifo {
 
     fn short_quantity(&self) -> f64 {
         self.shorts.iter().map(|lot| lot.quantity).sum()
+    }
+
+    fn opposite_quantity(&self, side: Side) -> f64 {
+        match side {
+            Side::Buy => self.short_quantity(),
+            Side::Sell => self.long_quantity(),
+        }
+    }
+
+    fn oldest_opposite_ts(&self, side: Side) -> i64 {
+        match side {
+            Side::Buy => self.shorts.front(),
+            Side::Sell => self.longs.front(),
+        }
+        .map(|lot| lot.opened_at_us)
+        .unwrap_or(i64::MAX)
     }
 }
 
@@ -556,6 +661,7 @@ impl VenueState {
         quantity: f64,
         reference_price: f64,
         reference_price_source: InitialReferencePriceSource,
+        snapshot_ts_us: i64,
     ) -> Self {
         let mut fifo = QuantityFifo::default();
         let side = if quantity > 0.0 {
@@ -563,7 +669,7 @@ impl VenueState {
         } else {
             Side::Sell
         };
-        fifo.apply_fill(side, reference_price, quantity.abs());
+        fifo.apply_fill(side, reference_price, quantity.abs(), snapshot_ts_us);
         Self {
             venue_code,
             venue,
@@ -594,6 +700,27 @@ impl VenueState {
         liquidity: LiquidityRole,
         fill_ts_us: i64,
     ) -> Result<()> {
+        self.apply_fill_quantity(
+            event,
+            side,
+            fee_rates,
+            liquidity,
+            fill_ts_us,
+            event.amount_update,
+            true,
+        )
+    }
+
+    fn apply_fill_quantity(
+        &mut self,
+        event: &UniformOrderEvent,
+        side: Side,
+        fee_rates: FeeRates,
+        liquidity: LiquidityRole,
+        fill_ts_us: i64,
+        quantity: f64,
+        counts_as_fill: bool,
+    ) -> Result<()> {
         if self.venue != event.venue {
             bail!(
                 "venue code {} changed name from {:?} to {:?}",
@@ -602,7 +729,10 @@ impl VenueState {
                 event.venue
             );
         }
-        let notional = event.price * event.amount_update;
+        if !quantity.is_finite() || quantity <= 0.0 || quantity > event.amount_update + 1e-12 {
+            bail!("fill quantity must be finite, positive, and no greater than the event amount");
+        }
+        let notional = event.price * quantity;
         let fee_rate = match liquidity {
             LiquidityRole::Maker => fee_rates.maker,
             LiquidityRole::Taker | LiquidityRole::Unknown => fee_rates.taker,
@@ -612,24 +742,33 @@ impl VenueState {
             bail!("fill notional or estimated fee overflowed");
         }
 
-        self.fifo.apply_fill(side, event.price, event.amount_update);
-        self.fill_count = self
-            .fill_count
-            .checked_add(1)
-            .context("fill count overflowed u64")?;
+        self.fifo
+            .apply_fill(side, event.price, quantity, fill_ts_us);
+        if counts_as_fill {
+            self.fill_count = self
+                .fill_count
+                .checked_add(1)
+                .context("fill count overflowed u64")?;
+        }
         self.volume_quote += notional;
         match liquidity {
             LiquidityRole::Maker => {
-                self.maker_fill_count = self.maker_fill_count.saturating_add(1);
+                if counts_as_fill {
+                    self.maker_fill_count = self.maker_fill_count.saturating_add(1);
+                }
                 self.maker_volume_quote += notional;
             }
             LiquidityRole::Taker => {
-                self.taker_fill_count = self.taker_fill_count.saturating_add(1);
+                if counts_as_fill {
+                    self.taker_fill_count = self.taker_fill_count.saturating_add(1);
+                }
                 self.taker_volume_quote += notional;
             }
             LiquidityRole::Unknown => {
-                self.unknown_liquidity_fill_count =
-                    self.unknown_liquidity_fill_count.saturating_add(1);
+                if counts_as_fill {
+                    self.unknown_liquidity_fill_count =
+                        self.unknown_liquidity_fill_count.saturating_add(1);
+                }
                 self.unknown_liquidity_volume_quote += notional;
             }
         }
@@ -854,6 +993,7 @@ fn prepare_source_events(
     source: &SourceConfig,
     events: impl IntoIterator<Item = UniformOrderEvent>,
     snapshot: Option<&PositionSnapshot>,
+    strategy_snapshot: Option<&StrategyPositionSnapshot>,
     liquidity_by_order: &LiquidityByOrder,
 ) -> Result<PreparedSourceEvents> {
     if let Some(snapshot) = snapshot {
@@ -866,6 +1006,26 @@ fn prepare_source_events(
             );
         }
     }
+    if let Some(snapshot) = strategy_snapshot {
+        snapshot.validate()?;
+        if snapshot.source_id != source.id {
+            bail!(
+                "strategy position snapshot source {} does not match configured source {}",
+                snapshot.source_id,
+                source.id
+            );
+        }
+    }
+
+    let strategy_snapshot = strategy_snapshot.filter(|strategy_snapshot| {
+        snapshot.is_none_or(|account_snapshot| {
+            strategy_snapshot.snapshot_ts_us >= account_snapshot.snapshot_ts_us
+        })
+    });
+    let effective_snapshot = match strategy_snapshot {
+        Some(snapshot) => Some(snapshot.account_snapshot()?),
+        None => snapshot.cloned(),
+    };
 
     let mut events = events.into_iter().collect::<Vec<_>>();
     events.sort_by(|left, right| {
@@ -876,7 +1036,9 @@ fn prepare_source_events(
     });
 
     let order_event_count = u64::try_from(events.len()).context("order event count exceeds u64")?;
-    let snapshot_ts_us = snapshot.map(|value| value.snapshot_ts_us);
+    let snapshot_ts_us = effective_snapshot
+        .as_ref()
+        .map(|value| value.snapshot_ts_us);
     let mut ignored_at_or_before_snapshot_event_count = 0_u64;
     let mut ignored_non_fill_event_count = 0_u64;
     let mut fill_events = Vec::new();
@@ -911,7 +1073,8 @@ fn prepare_source_events(
     }
 
     let mut initial_states = BTreeMap::<(String, i16), VenueState>::new();
-    for position in snapshot
+    for position in effective_snapshot
+        .as_ref()
         .map(|value| value.positions.as_slice())
         .unwrap_or_default()
     {
@@ -951,6 +1114,7 @@ fn prepare_source_events(
                     position.quantity,
                     reference_price,
                     reference_price_source,
+                    snapshot_ts_us.unwrap_or_default(),
                 ),
             )
             .is_some()
@@ -964,9 +1128,53 @@ fn prepare_source_events(
         }
     }
 
+    let initial_strategy_states = match strategy_snapshot {
+        Some(snapshot) => {
+            let mut states = BTreeMap::new();
+            for position in &snapshot.positions {
+                let key = (
+                    position.strategy_name.clone(),
+                    position.symbol.clone(),
+                    position.venue_code,
+                );
+                let venue = first_fill_references
+                    .get(&(position.symbol.clone(), position.venue_code))
+                    .map(|fill| fill.venue.clone())
+                    .unwrap_or_else(|| venue_name(position.venue_code as u8));
+                states.insert(
+                    key,
+                    VenueState::from_initial_position(
+                        position.venue_code,
+                        venue,
+                        position.quantity,
+                        position.reference_price,
+                        InitialReferencePriceSource::Configured,
+                        snapshot.snapshot_ts_us,
+                    ),
+                );
+            }
+            states
+        }
+        None => initial_states
+            .iter()
+            .map(|((symbol, venue_code), state)| {
+                (
+                    (
+                        INITIAL_POSITION_STRATEGY.to_string(),
+                        symbol.clone(),
+                        *venue_code,
+                    ),
+                    state.clone(),
+                )
+            })
+            .collect(),
+    };
+
     Ok(PreparedSourceEvents {
         snapshot_ts_us,
         initial_states,
+        initial_strategy_states,
+        strategy_allocation_active: strategy_snapshot.is_some(),
         fill_events,
         order_event_count,
         ignored_at_or_before_snapshot_event_count,
@@ -1150,7 +1358,8 @@ fn estimate_source_events_with_snapshot_and_liquidity(
         order_event_count,
         ignored_at_or_before_snapshot_event_count,
         ignored_non_fill_event_count,
-    } = prepare_source_events(source, events, snapshot, liquidity_by_order)?;
+        ..
+    } = prepare_source_events(source, events, snapshot, None, liquidity_by_order)?;
 
     let mut first_fill_ts_us = None;
     let mut last_fill_ts_us = None;
@@ -1287,11 +1496,27 @@ pub fn rebuild_nav_from_rocksdb_with_snapshots(
     selected_source_ids: &[String],
     snapshots: &SourcePositionSnapshots,
 ) -> Result<NavReport> {
-    rebuild_nav_from_rocksdb_with_inputs(
+    rebuild_nav_from_rocksdb_with_strategy_snapshots(
         config,
         selected_source_ids,
-        &SourceMarkOverrides::new(),
         snapshots,
+        &SourceStrategyPositionSnapshots::new(),
+    )
+}
+
+pub fn rebuild_nav_from_rocksdb_with_strategy_snapshots(
+    config: &AppConfig,
+    selected_source_ids: &[String],
+    snapshots: &SourcePositionSnapshots,
+    strategy_snapshots: &SourceStrategyPositionSnapshots,
+) -> Result<NavReport> {
+    let histories = load_nav_source_histories(config, selected_source_ids)?;
+    rebuild_nav_from_histories_with_strategy_snapshots(
+        config,
+        selected_source_ids,
+        snapshots,
+        strategy_snapshots,
+        &histories,
     )
 }
 
@@ -1300,14 +1525,50 @@ pub fn rebuild_nav_timeline_from_rocksdb_with_snapshots(
     request: NavTimelineRequest,
     snapshots: &SourcePositionSnapshots,
 ) -> Result<NavTimelineReport> {
+    rebuild_nav_timeline_from_rocksdb_with_strategy_snapshots(
+        config,
+        request,
+        snapshots,
+        &SourceStrategyPositionSnapshots::new(),
+    )
+}
+
+pub fn rebuild_nav_timeline_from_rocksdb_with_strategy_snapshots(
+    config: &AppConfig,
+    request: NavTimelineRequest,
+    snapshots: &SourcePositionSnapshots,
+    strategy_snapshots: &SourceStrategyPositionSnapshots,
+) -> Result<NavTimelineReport> {
     let histories = load_nav_source_histories(config, &request.selected_source_ids)?;
-    rebuild_nav_timeline_from_histories_with_snapshots(config, request, snapshots, &histories)
+    rebuild_nav_timeline_from_histories_with_strategy_snapshots(
+        config,
+        request,
+        snapshots,
+        strategy_snapshots,
+        &histories,
+    )
 }
 
 pub fn rebuild_nav_timeline_from_histories_with_snapshots(
     config: &AppConfig,
     request: NavTimelineRequest,
     snapshots: &SourcePositionSnapshots,
+    histories: &NavSourceHistories,
+) -> Result<NavTimelineReport> {
+    rebuild_nav_timeline_from_histories_with_strategy_snapshots(
+        config,
+        request,
+        snapshots,
+        &SourceStrategyPositionSnapshots::new(),
+        histories,
+    )
+}
+
+pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
+    config: &AppConfig,
+    request: NavTimelineRequest,
+    snapshots: &SourcePositionSnapshots,
+    strategy_snapshots: &SourceStrategyPositionSnapshots,
     histories: &NavSourceHistories,
 ) -> Result<NavTimelineReport> {
     if request.end_ts_us < 0 {
@@ -1321,6 +1582,11 @@ pub fn rebuild_nav_timeline_from_histories_with_snapshots(
     for source_id in snapshots.keys() {
         if !selected_ids.contains(source_id.as_str()) {
             bail!("position snapshots contain unselected source {source_id}");
+        }
+    }
+    for source_id in strategy_snapshots.keys() {
+        if !selected_ids.contains(source_id.as_str()) {
+            bail!("strategy position snapshots contain unselected source {source_id}");
         }
     }
 
@@ -1343,6 +1609,7 @@ pub fn rebuild_nav_timeline_from_histories_with_snapshots(
             source,
             history.events.clone(),
             snapshots.get(&source.id),
+            strategy_snapshots.get(&source.id),
             &history.liquidity_by_order,
         )
         .with_context(|| format!("failed to prepare source {} timeline", source.id))?;
@@ -1363,14 +1630,23 @@ pub fn rebuild_nav_timeline_from_histories_with_snapshots(
             .initial_states
             .keys()
             .map(|(symbol, _)| symbol.clone())
+            .chain(
+                prepared
+                    .initial_strategy_states
+                    .keys()
+                    .map(|(_, symbol, _)| symbol.clone()),
+            )
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         if let Some(snapshot_ts_us) = snapshot_ts_us {
             available_symbols.extend(initial_symbols.iter().cloned());
-            if !prepared.initial_states.is_empty() {
-                available_strategies.insert(INITIAL_POSITION_STRATEGY.to_string());
-            }
+            available_strategies.extend(
+                prepared
+                    .initial_strategy_states
+                    .keys()
+                    .map(|(strategy, _, _)| strategy.clone()),
+            );
             timeline_events.push(TimelineEvent::Snapshot {
                 source_index,
                 source_id: source.id.clone(),
@@ -1378,10 +1654,16 @@ pub fn rebuild_nav_timeline_from_histories_with_snapshots(
                 symbols: initial_symbols,
             });
         }
+        let strategy_allocation_active = prepared.strategy_allocation_active;
         for fill in prepared.fill_events {
             if fill.fill_ts_us <= request.end_ts_us {
                 available_symbols.insert(fill.event.symbol.clone());
-                available_strategies.insert(strategy_from_from_key(&fill.event.from_key_text));
+                let strategy = strategy_from_from_key(&fill.event.from_key_text);
+                available_strategies.insert(
+                    (strategy_allocation_active && is_system_position_close(&strategy))
+                        .then_some(UNALLOCATED_STRATEGY.to_string())
+                        .unwrap_or(strategy),
+                );
                 timeline_events.push(TimelineEvent::Fill {
                     source_index,
                     source_id: source.id.clone(),
@@ -1389,20 +1671,6 @@ pub fn rebuild_nav_timeline_from_histories_with_snapshots(
                 });
             }
         }
-        let initial_strategy_states = prepared
-            .initial_states
-            .iter()
-            .map(|((symbol, venue_code), state)| {
-                (
-                    (
-                        INITIAL_POSITION_STRATEGY.to_string(),
-                        symbol.clone(),
-                        *venue_code,
-                    ),
-                    state.clone(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
         runtimes.push(TimelineSourceState {
             source_id: source.id.clone(),
             fee_rates,
@@ -1410,10 +1678,11 @@ pub fn rebuild_nav_timeline_from_histories_with_snapshots(
             pending_initial_states: prepared.snapshot_ts_us.map(|_| prepared.initial_states),
             pending_initial_strategy_states: prepared
                 .snapshot_ts_us
-                .map(|_| initial_strategy_states),
+                .map(|_| prepared.initial_strategy_states),
             states: BTreeMap::new(),
             strategy_states: BTreeMap::new(),
             latest_marks: BTreeMap::new(),
+            strategy_allocation_active: prepared.strategy_allocation_active,
         });
     }
 
@@ -1651,6 +1920,22 @@ pub fn rebuild_strategy_pnl_from_histories_with_snapshots(
     snapshots: &SourcePositionSnapshots,
     histories: &NavSourceHistories,
 ) -> Result<StrategyPnlReport> {
+    rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
+        config,
+        request,
+        snapshots,
+        &SourceStrategyPositionSnapshots::new(),
+        histories,
+    )
+}
+
+pub fn rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
+    config: &AppConfig,
+    request: StrategyPnlRequest,
+    snapshots: &SourcePositionSnapshots,
+    strategy_snapshots: &SourceStrategyPositionSnapshots,
+    histories: &NavSourceHistories,
+) -> Result<StrategyPnlReport> {
     if request.start_ts_us < 0 {
         bail!("start timestamp must not be negative");
     }
@@ -1676,33 +1961,23 @@ pub fn rebuild_strategy_pnl_from_histories_with_snapshots(
         source,
         history.events.clone(),
         snapshots.get(&source.id),
+        strategy_snapshots.get(&source.id),
         &history.liquidity_by_order,
     )
     .with_context(|| format!("failed to prepare source {} strategy PnL", source.id))?;
 
-    let initial_strategy_states = prepared
-        .initial_states
-        .iter()
-        .map(|((symbol, venue_code), state)| {
-            (
-                (
-                    INITIAL_POSITION_STRATEGY.to_string(),
-                    symbol.clone(),
-                    *venue_code,
-                ),
-                state.clone(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
     let mut runtime = TimelineSourceState {
         source_id: source.id.clone(),
         fee_rates: source.nav_fee_rates()?,
         snapshot_ts_us: prepared.snapshot_ts_us,
         pending_initial_states: prepared.snapshot_ts_us.map(|_| prepared.initial_states),
-        pending_initial_strategy_states: prepared.snapshot_ts_us.map(|_| initial_strategy_states),
+        pending_initial_strategy_states: prepared
+            .snapshot_ts_us
+            .map(|_| prepared.initial_strategy_states),
         states: BTreeMap::new(),
         strategy_states: BTreeMap::new(),
         latest_marks: BTreeMap::new(),
+        strategy_allocation_active: prepared.strategy_allocation_active,
     };
 
     runtime.activate_snapshot_at(request.start_ts_us);
@@ -1782,13 +2057,73 @@ pub fn rebuild_nav_from_histories_with_snapshots(
     snapshots: &SourcePositionSnapshots,
     histories: &NavSourceHistories,
 ) -> Result<NavReport> {
-    rebuild_nav_from_histories_with_inputs(
+    rebuild_nav_from_histories_with_strategy_snapshots(
         config,
         selected_source_ids,
-        &SourceMarkOverrides::new(),
         snapshots,
+        &SourceStrategyPositionSnapshots::new(),
         histories,
     )
+}
+
+pub fn rebuild_nav_from_histories_with_strategy_snapshots(
+    config: &AppConfig,
+    selected_source_ids: &[String],
+    snapshots: &SourcePositionSnapshots,
+    strategy_snapshots: &SourceStrategyPositionSnapshots,
+    histories: &NavSourceHistories,
+) -> Result<NavReport> {
+    let selected = select_sources(config, selected_source_ids)?;
+    let selected_ids = selected
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect::<BTreeSet<_>>();
+    for source_id in snapshots.keys() {
+        if !selected_ids.contains(source_id.as_str()) {
+            bail!("position snapshots contain unselected source {source_id}");
+        }
+    }
+    for source_id in strategy_snapshots.keys() {
+        if !selected_ids.contains(source_id.as_str()) {
+            bail!("strategy position snapshots contain unselected source {source_id}");
+        }
+    }
+
+    let mut sources = Vec::with_capacity(selected.len());
+    for source in selected {
+        let history = histories
+            .get(&source.id)
+            .with_context(|| format!("NAV history is missing selected source {}", source.id))?;
+        let effective_snapshot = effective_position_snapshot(
+            snapshots.get(&source.id),
+            strategy_snapshots.get(&source.id),
+        )?;
+        sources.push(estimate_source_events_with_snapshot_and_liquidity(
+            source,
+            history.events.clone(),
+            &VenueMarkOverrides::new(),
+            effective_snapshot.as_ref(),
+            &history.liquidity_by_order,
+        )?);
+    }
+    Ok(aggregate_source_reports(sources))
+}
+
+fn effective_position_snapshot(
+    snapshot: Option<&PositionSnapshot>,
+    strategy_snapshot: Option<&StrategyPositionSnapshot>,
+) -> Result<Option<PositionSnapshot>> {
+    let use_strategy_snapshot = strategy_snapshot.is_some_and(|strategy_snapshot| {
+        snapshot.is_none_or(|snapshot| strategy_snapshot.snapshot_ts_us >= snapshot.snapshot_ts_us)
+    });
+    if use_strategy_snapshot {
+        strategy_snapshot
+            .expect("strategy snapshot was checked")
+            .account_snapshot()
+            .map(Some)
+    } else {
+        Ok(snapshot.cloned())
+    }
 }
 
 fn rebuild_nav_from_histories_with_inputs(
@@ -2052,6 +2387,10 @@ pub fn strategy_from_from_key(from_key: &str) -> String {
     }
 }
 
+fn is_system_position_close(strategy: &str) -> bool {
+    strategy.eq_ignore_ascii_case("system_position_close")
+}
+
 fn push_or_replace_timeline_point(points: &mut Vec<NavTimelinePoint>, point: NavTimelinePoint) {
     if let Some(last) = points.last_mut()
         && last.ts_us == point.ts_us
@@ -2266,7 +2605,7 @@ mod tests {
     use super::*;
     use crate::config::{DatabaseConfig, IngestionConfig, OrderConfigSettings};
     use crate::model::UNIFORM_ORDERS_CF;
-    use crate::snapshot::SnapshotPosition;
+    use crate::snapshot::{SnapshotPosition, StrategyPositionSnapshot, StrategySnapshotPosition};
 
     fn source(id: &str, fee_rate: Option<f64>) -> SourceConfig {
         SourceConfig {
@@ -2306,6 +2645,29 @@ mod tests {
                 quantity,
                 reference_price,
             }],
+        }
+    }
+
+    fn strategy_position_snapshot(
+        source_id: &str,
+        snapshot_ts_us: i64,
+        positions: Vec<(&str, &str, f64, f64)>,
+    ) -> StrategyPositionSnapshot {
+        StrategyPositionSnapshot {
+            source_id: source_id.to_string(),
+            snapshot_ts_us,
+            positions: positions
+                .into_iter()
+                .map(|(strategy_name, symbol, quantity, reference_price)| {
+                    StrategySnapshotPosition {
+                        strategy_name: strategy_name.to_string(),
+                        symbol: symbol.to_string(),
+                        venue_code: 1,
+                        quantity,
+                        reference_price,
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -2978,6 +3340,145 @@ mod tests {
         assert_close(strategy_b_nav, -10.0);
         assert_close(
             strategy_a_nav + strategy_b_nav,
+            report.summary.nav_change_before_fee_quote,
+        );
+    }
+
+    #[test]
+    fn strategy_allocation_anchor_replaces_the_legacy_account_anchor() {
+        let strategy = "cta_a";
+        let config = app_config(vec![source("trade01", Some(0.0))]);
+        let histories = NavSourceHistories::from([(
+            "trade01".to_string(),
+            NavSourceHistory {
+                events: vec![
+                    strategy_event_at(1, 1, "BTCUSDT", 1, 1, 100.0, 1.0, strategy),
+                    strategy_event_at(20, 20, "BTCUSDT", 1, 2, 120.0, 1.0, "system_position_close"),
+                ],
+                liquidity_by_order: LiquidityByOrder::new(),
+            },
+        )]);
+        let snapshots = SourcePositionSnapshots::from([(
+            "trade01".to_string(),
+            position_snapshot("trade01", 1, 1.0, Some(90.0)),
+        )]);
+        let strategy_snapshots = SourceStrategyPositionSnapshots::from([(
+            "trade01".to_string(),
+            strategy_position_snapshot("trade01", 10, vec![(strategy, "BTCUSDT", 1.0, 110.0)]),
+        )]);
+
+        let report = rebuild_nav_timeline_from_histories_with_strategy_snapshots(
+            &config,
+            timeline_request(10, 20, Vec::new(), Vec::new()),
+            &snapshots,
+            &strategy_snapshots,
+            &histories,
+        )
+        .unwrap();
+
+        assert_eq!(report.earliest_start_ts_us, 10);
+        assert_eq!(report.summary.fill_count, 1);
+        assert_close(report.summary.realized_pnl_before_fee_quote, 10.0);
+        assert_close(report.summary.nav_change_before_fee_quote, 10.0);
+        assert!(
+            !report
+                .available_strategies
+                .iter()
+                .any(|name| name == INITIAL_POSITION_STRATEGY || is_system_position_close(name))
+        );
+        let strategy_report = report
+            .strategy_points
+            .iter()
+            .find(|point| point.strategy == strategy)
+            .unwrap();
+        assert_close(strategy_report.summary.realized_pnl_before_fee_quote, 10.0);
+        assert_close(strategy_report.gross_position_value_quote, 0.0);
+        assert_close(
+            report
+                .strategy_points
+                .iter()
+                .map(|point| point.summary.nav_change_before_fee_quote)
+                .sum(),
+            report.summary.nav_change_before_fee_quote,
+        );
+
+        let account_report = rebuild_nav_timeline_from_histories_with_snapshots(
+            &config,
+            timeline_request(1, 20, Vec::new(), Vec::new()),
+            &snapshots,
+            &histories,
+        )
+        .unwrap();
+        assert_eq!(account_report.earliest_start_ts_us, 1);
+        assert_close(account_report.summary.nav_change_before_fee_quote, 30.0);
+        assert!(
+            account_report
+                .available_strategies
+                .iter()
+                .any(|name| name == INITIAL_POSITION_STRATEGY)
+        );
+    }
+
+    #[test]
+    fn allocation_mode_sends_unmatched_system_close_remainder_to_unallocated() {
+        let strategy = "cta_a";
+        let config = app_config(vec![source("trade01", Some(0.0))]);
+        let histories = NavSourceHistories::from([(
+            "trade01".to_string(),
+            NavSourceHistory {
+                events: vec![strategy_event_at(
+                    20,
+                    20,
+                    "BTCUSDT",
+                    1,
+                    2,
+                    110.0,
+                    1.0,
+                    "system_position_close",
+                )],
+                liquidity_by_order: LiquidityByOrder::new(),
+            },
+        )]);
+        let strategy_snapshots = SourceStrategyPositionSnapshots::from([(
+            "trade01".to_string(),
+            strategy_position_snapshot("trade01", 10, vec![(strategy, "BTCUSDT", 0.5, 100.0)]),
+        )]);
+
+        let report = rebuild_nav_timeline_from_histories_with_strategy_snapshots(
+            &config,
+            timeline_request(10, 20, Vec::new(), Vec::new()),
+            &SourcePositionSnapshots::new(),
+            &strategy_snapshots,
+            &histories,
+        )
+        .unwrap();
+
+        assert_close(report.summary.realized_pnl_before_fee_quote, 5.0);
+        assert!(
+            report
+                .available_strategies
+                .iter()
+                .any(|name| name == UNALLOCATED_STRATEGY)
+        );
+        let unallocated = report
+            .strategy_points
+            .iter()
+            .find(|point| point.strategy == UNALLOCATED_STRATEGY)
+            .unwrap();
+        assert_close(unallocated.net_position_value_quote, -55.0);
+        assert_close(unallocated.summary.nav_change_before_fee_quote, 0.0);
+        let strategy_report = report
+            .strategy_points
+            .iter()
+            .find(|point| point.strategy == strategy)
+            .unwrap();
+        assert_close(strategy_report.summary.realized_pnl_before_fee_quote, 5.0);
+        assert_close(
+            report
+                .strategy_points
+                .iter()
+                .map(|point| point.summary.nav_change_before_fee_quote)
+                .sum(),
             report.summary.nav_change_before_fee_quote,
         );
     }
