@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use hmac::{Hmac, Mac};
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::Serialize;
 use sha2::Sha256;
 
@@ -424,11 +424,9 @@ fn unquote(value: &str) -> String {
 }
 
 fn encode_query(params: &BTreeMap<String, String>) -> String {
-    params
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("&")
+    let mut url = Url::parse("http://localhost/").expect("static query URL must be valid");
+    url.query_pairs_mut().extend_pairs(params.iter());
+    url.query().unwrap_or_default().to_string()
 }
 
 fn sign_hmac_hex(secret: &str, payload: &str) -> Result<String> {
@@ -612,6 +610,15 @@ mod tests {
     #[test]
     fn formats_okx_swap_symbol() {
         assert_eq!(okx_swap_inst_id("BTCUSDT"), "BTC-USDT-SWAP");
+    }
+
+    #[test]
+    fn percent_encodes_unicode_binance_symbols_before_signing() {
+        let query = encode_query(&BTreeMap::from([
+            ("symbol".to_string(), "龙虾USDT".to_string()),
+            ("timestamp".to_string(), "123".to_string()),
+        ]));
+        assert_eq!(query, "symbol=%E9%BE%99%E8%99%BEUSDT&timestamp=123");
     }
 
     #[test]

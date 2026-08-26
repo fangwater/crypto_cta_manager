@@ -149,15 +149,26 @@ impl OrderParameterOverrides {
     }
 }
 
+pub fn validate_exec_symbol(symbol: &str) -> std::result::Result<(), String> {
+    if symbol.is_empty()
+        || !symbol.chars().all(|ch| {
+            if ch.is_ascii() {
+                ch.is_ascii_uppercase() || ch.is_ascii_digit()
+            } else {
+                ch.is_alphanumeric()
+            }
+        })
+    {
+        return Err(format!("invalid symbol: {symbol}"));
+    }
+    Ok(())
+}
+
 pub fn validate_symbol_order_parameter_overrides(
     overrides: &BTreeMap<String, OrderParameterOverrides>,
 ) -> std::result::Result<(), String> {
     for (symbol, override_parameters) in overrides {
-        if symbol.is_empty()
-            || !symbol
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-        {
+        if validate_exec_symbol(symbol).is_err() {
             return Err(format!("invalid symbol override: {symbol}"));
         }
         if override_parameters.is_empty() {
@@ -675,6 +686,8 @@ mod tests {
         assert_eq!(effective.maker_price_anchor, "opposite_best_plus_one_tick");
         assert_eq!(effective.orders_per_batch, defaults.orders_per_batch);
 
+        let unicode_map = BTreeMap::from([("龙虾USDT".to_string(), overrides.clone())]);
+        assert!(validate_symbol_order_parameter_overrides(&unicode_map).is_ok());
         let map = BTreeMap::from([("BTCUSDT".to_string(), overrides)]);
         assert!(validate_symbol_order_parameter_overrides(&map).is_ok());
         let invalid_symbol = BTreeMap::from([("btc-usdt".to_string(), Default::default())]);

@@ -6,7 +6,9 @@ use sqlx::Row;
 use sqlx::postgres::PgPool;
 
 use crate::config::{FeeRates, validate_fee_rates};
-use crate::order_config::{OrderParameters, TargetPosition, validate_strategy_name};
+use crate::order_config::{
+    OrderParameters, TargetPosition, validate_exec_symbol, validate_strategy_name,
+};
 
 pub const DEFAULT_CONTRACT_LEVERAGE: i32 = 5;
 pub const MIN_CONTRACT_LEVERAGE: i32 = 1;
@@ -118,13 +120,7 @@ pub fn scale_targets(
 
 pub fn validate_targets(targets: &BTreeMap<String, TargetPosition>) -> Result<(), String> {
     for (symbol, target) in targets {
-        if symbol.is_empty()
-            || !symbol
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-        {
-            return Err(format!("invalid symbol: {symbol}"));
-        }
+        validate_exec_symbol(symbol)?;
         if !target.qty.is_finite() {
             return Err(format!("targets.{symbol}.qty must be finite"));
         }
@@ -139,7 +135,7 @@ pub fn validate_symbol_order_strategy_overrides(
     overrides: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     for (symbol, order_strategy_name) in overrides {
-        validate_contract_symbol(symbol)?;
+        validate_exec_symbol(symbol)?;
         if !targets.contains_key(symbol) {
             return Err(format!(
                 "symbol_order_strategy_overrides.{symbol} has no matching target"
@@ -179,14 +175,7 @@ pub fn validate_account_fee_rates(maker: f64, taker: f64) -> Result<(), String> 
 }
 
 pub fn validate_contract_symbol(symbol: &str) -> Result<(), String> {
-    if symbol.is_empty()
-        || !symbol
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    {
-        return Err(format!("invalid symbol: {symbol}"));
-    }
-    Ok(())
+    validate_exec_symbol(symbol)
 }
 
 impl PositionStrategy {
@@ -865,6 +854,25 @@ mod tests {
     }
 
     #[test]
+    fn official_unicode_symbols_are_valid_targets_and_overrides() {
+        let targets = BTreeMap::from([(
+            "龙虾USDT".to_string(),
+            TargetPosition {
+                qty: 0.1,
+                signal: 0,
+            },
+        )]);
+        assert!(validate_targets(&targets).is_ok());
+        assert!(
+            validate_symbol_order_strategy_overrides(
+                &targets,
+                &BTreeMap::from([("龙虾USDT".to_string(), "fast_order".to_string())]),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn shares_must_be_positive_and_finite() {
         assert!(validate_positive_multiplier(2.0, "shares").is_ok());
         assert!(validate_positive_multiplier(0.0, "shares").is_err());
@@ -893,6 +901,8 @@ mod tests {
         assert!(validate_contract_leverage(126).is_err());
         assert!(validate_contract_leverage(-1).is_err());
         assert!(validate_contract_symbol("BTCUSDT").is_ok());
+        assert!(validate_contract_symbol("龙虾USDT").is_ok());
         assert!(validate_contract_symbol("btc").is_err());
+        assert!(validate_contract_symbol("龙虾 USDT").is_err());
     }
 }
