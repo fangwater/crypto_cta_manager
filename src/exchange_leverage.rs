@@ -30,6 +30,20 @@ pub struct SymbolContractLeverageResult {
     pub recorded_contract_leverage: Option<i32>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ExchangeFeeRatesResult {
+    pub source_id: String,
+    pub symbol: String,
+    pub exchange: String,
+    pub vip_tier: i32,
+    pub maker_fee_rate: f64,
+    pub taker_fee_rate: f64,
+    pub account_endpoint: String,
+    pub commission_endpoint: String,
+    pub account_http_status: u16,
+    pub commission_http_status: u16,
+}
+
 #[derive(Debug, Clone)]
 struct ExchangeCredentials {
     api_key: String,
@@ -92,6 +106,28 @@ pub async fn get_symbol_contract_leverage(
         "okex-futures" => get_okx_symbol_leverage(&client, source, &credentials, &symbol).await,
         other => bail!(
             "source {} venue does not support get leverage: {other}",
+            source.id
+        ),
+    }
+}
+
+pub async fn get_exchange_fee_rates(
+    source: &SourceConfig,
+    symbol: &str,
+) -> Result<ExchangeFeeRatesResult> {
+    let credentials = load_source_credentials(source)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
+        .no_proxy()
+        .build()
+        .context("failed to build exchange fee HTTP client")?;
+
+    match source.venue.as_str() {
+        "binance-futures" => {
+            get_binance_exchange_fee_rates(&client, source, &credentials, symbol).await
+        }
+        other => bail!(
+            "source {} venue does not support exchange fee queries: {other}",
             source.id
         ),
     }
@@ -203,6 +239,100 @@ async fn get_binance_symbol_leverage(
         http_status,
         recorded_contract_leverage: None,
     })
+}
+
+async fn get_binance_exchange_fee_rates(
+    client: &Client,
+    source: &SourceConfig,
+    credentials: &ExchangeCredentials,
+    symbol: &str,
+) -> Result<ExchangeFeeRatesResult> {
+    let (base, account_path, commission_path) = match credentials.account_mode {
+        AccountMode::Standard => (
+            credentials.fapi_url.as_str(),
+            "/fapi/v1/accountConfig",
+            "/fapi/v1/commissionRate",
+        ),
+        AccountMode::Unified => (
+            credentials.papi_url.as_str(),
+            "/papi/v1/um/account",
+            "/papi/v1/um/commissionRate",
+        ),
+    };
+    let (account_http_status, account_body) =
+        binance_signed_get(client, credentials, base, account_path, BTreeMap::new()).await?;
+    if !(200..300).contains(&account_http_status) {
+        bail!(
+            "Binance account fee tier query failed source={} status={} body={}",
+            source.id,
+            account_http_status,
+            truncate(&account_body, 300)
+        );
+    }
+    let vip_tier = parse_binance_fee_tier(&account_body)?;
+
+    let mut commission_params = BTreeMap::new();
+    commission_params.insert("symbol".to_string(), symbol.to_string());
+    let (commission_http_status, commission_body) = binance_signed_get(
+        client,
+        credentials,
+        base,
+        commission_path,
+        commission_params,
+    )
+    .await?;
+    if !(200..300).contains(&commission_http_status) {
+        bail!(
+            "Binance commission-rate query failed source={} symbol={} status={} body={}",
+            source.id,
+            symbol,
+            commission_http_status,
+            truncate(&commission_body, 300)
+        );
+    }
+    let (maker_fee_rate, taker_fee_rate) = parse_binance_commission_rates(&commission_body)?;
+
+    Ok(ExchangeFeeRatesResult {
+        source_id: source.id.clone(),
+        symbol: symbol.to_string(),
+        exchange: "binance".to_string(),
+        vip_tier,
+        maker_fee_rate,
+        taker_fee_rate,
+        account_endpoint: account_path.to_string(),
+        commission_endpoint: commission_path.to_string(),
+        account_http_status,
+        commission_http_status,
+    })
+}
+
+async fn binance_signed_get(
+    client: &Client,
+    credentials: &ExchangeCredentials,
+    base: &str,
+    path: &str,
+    mut params: BTreeMap<String, String>,
+) -> Result<(u16, String)> {
+    params.insert("recvWindow".to_string(), "5000".to_string());
+    params.insert("timestamp".to_string(), now_ms().to_string());
+    let query = encode_query(&params);
+    let signature = sign_hmac_hex(&credentials.api_secret, &query)?;
+    let url = format!(
+        "{}{}?{}&signature={}",
+        base.trim_end_matches('/'),
+        path,
+        query,
+        signature
+    );
+    let response = client
+        .get(url)
+        .header("X-MBX-APIKEY", &credentials.api_key)
+        .send()
+        .await
+        .with_context(|| format!("Binance GET {path} request failed"))?;
+    let http_status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    Ok((http_status, body))
 }
 
 async fn set_okx_symbol_leverage(
@@ -514,6 +644,53 @@ fn parse_binance_symbol_leverage(body: &str, symbol: &str) -> Result<i32> {
     bail!("exchange did not return leverage for {symbol}")
 }
 
+fn parse_binance_fee_tier(body: &str) -> Result<i32> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).context("Binance account response is not JSON")?;
+    ensure_binance_success(&value, body, "account")?;
+    let vip_tier = json_i32(value.get("feeTier").unwrap_or(&serde_json::Value::Null))
+        .context("Binance account response is missing feeTier")?;
+    if vip_tier < 0 {
+        bail!("Binance account response has invalid feeTier={vip_tier}");
+    }
+    Ok(vip_tier)
+}
+
+fn parse_binance_commission_rates(body: &str) -> Result<(f64, f64)> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).context("Binance commission response is not JSON")?;
+    ensure_binance_success(&value, body, "commission")?;
+    let maker = json_f64(
+        value
+            .get("makerCommissionRate")
+            .unwrap_or(&serde_json::Value::Null),
+    )
+    .context("Binance commission response is missing makerCommissionRate")?;
+    let taker = json_f64(
+        value
+            .get("takerCommissionRate")
+            .unwrap_or(&serde_json::Value::Null),
+    )
+    .context("Binance commission response is missing takerCommissionRate")?;
+    Ok((maker, taker))
+}
+
+fn ensure_binance_success(
+    value: &serde_json::Value,
+    body: &str,
+    response_name: &str,
+) -> Result<()> {
+    if let Some(code) = json_i64(value.get("code").unwrap_or(&serde_json::Value::Null)) {
+        if code != 0 && code != 200 {
+            bail!(
+                "Binance {response_name} response error code={code} body={}",
+                truncate(body, 300)
+            );
+        }
+    }
+    Ok(())
+}
+
 fn parse_okx_symbol_leverage(body: &str, inst_id: &str) -> Result<i32> {
     let value: serde_json::Value =
         serde_json::from_str(body).context("OKX leverage response is not JSON")?;
@@ -563,6 +740,13 @@ fn json_i64(value: &serde_json::Value) -> Option<i64> {
         }
     }
     value.as_str().and_then(|raw| raw.trim().parse().ok())
+}
+
+fn json_f64(value: &serde_json::Value) -> Option<f64> {
+    let value = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|raw| raw.trim().parse().ok()))?;
+    value.is_finite().then_some(value)
 }
 
 fn okx_swap_inst_id(symbol: &str) -> String {
@@ -626,6 +810,24 @@ mod tests {
         let body = r#"[{"symbol":"BTCUSDT","leverage":"20","positionAmt":"0.0"}]"#;
         assert_eq!(parse_binance_symbol_leverage(body, "BTCUSDT").unwrap(), 20);
         assert!(parse_binance_symbol_leverage(body, "ETHUSDT").is_err());
+    }
+
+    #[test]
+    fn parses_binance_fee_tier_and_commission_rates() {
+        assert_eq!(parse_binance_fee_tier(r#"{"feeTier":3}"#).unwrap(), 3);
+        assert_eq!(
+            parse_binance_commission_rates(
+                r#"{"symbol":"BTCUSDT","makerCommissionRate":"0.00020000","takerCommissionRate":"0.00050000"}"#,
+            )
+            .unwrap(),
+            (0.0002, 0.0005)
+        );
+    }
+
+    #[test]
+    fn rejects_missing_binance_fee_fields() {
+        assert!(parse_binance_fee_tier(r#"{}"#).is_err());
+        assert!(parse_binance_commission_rates(r#"{"makerCommissionRate":"0.0002"}"#).is_err());
     }
 
     #[test]

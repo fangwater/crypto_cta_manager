@@ -364,6 +364,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             put(save_account_fee_rates),
         )
         .route(
+            "/api/catalog/accounts/{source_id}/exchange-fees",
+            get(get_account_exchange_fee_rates),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/contract-leverage",
             get(get_account_symbol_contract_leverage).put(save_account_symbol_contract_leverage),
         )
@@ -1357,6 +1361,59 @@ async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
 #[derive(Debug, Deserialize)]
 struct ContractLeverageQuery {
     symbol: Option<String>,
+}
+
+async fn get_account_exchange_fee_rates(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Query(query): Query<ContractLeverageQuery>,
+) -> Result<Response, ApiError> {
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
+    let symbol = query
+        .symbol
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
+    if symbol.is_empty() {
+        return Ok(bad_request("symbol is required".to_string()));
+    }
+    if let Err(error) = strategy_catalog::validate_contract_symbol(&symbol) {
+        return Ok(bad_request(error));
+    }
+    match crate::exchange_leverage::get_exchange_fee_rates(source, &symbol).await {
+        Ok(result) => {
+            info!(
+                source_id,
+                symbol = %result.symbol,
+                vip_tier = result.vip_tier,
+                maker_fee_rate = result.maker_fee_rate,
+                taker_fee_rate = result.taker_fee_rate,
+                account_endpoint = %result.account_endpoint,
+                commission_endpoint = %result.commission_endpoint,
+                "account exchange fee rates queried"
+            );
+            Ok((NO_STORE, Json(result)).into_response())
+        }
+        Err(error) => {
+            error!(
+                source_id,
+                symbol = %symbol,
+                error = %format!("{error:#}"),
+                "account exchange fee rate query failed"
+            );
+            Ok((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("{error:#}"),
+                }),
+            )
+                .into_response())
+        }
+    }
 }
 
 async fn get_account_symbol_contract_leverage(
