@@ -14,6 +14,13 @@ The crate was initialized as a Rust 2024 binary. Keep application code under
 Manager may keep its own TWAP RocksDB. It must never write into an Exec
 `persist_manager` RocksDB or publish through persist_manager.
 
+Exec runtime source code lives in `/home/u171/fanghaizhou/mkt_signal`. When
+investigating or fixing `exec-pre-trade`, `trade_engine`, pure-execution order
+state, exchange order submission, or exchange execution reports, inspect that
+repository and follow its own `AGENTS.md`. Keep the projects operationally
+independent: do not add relative-path or shared-runtime coupling from Manager
+to `mkt_signal`.
+
 ## Build And Test
 
 Use the standard Rust workflow:
