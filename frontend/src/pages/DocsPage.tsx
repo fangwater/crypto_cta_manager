@@ -95,7 +95,7 @@ function buildChapters(gateway: string): Chapter[] {
             ],
             [
               '账户绑定',
-              'trade01 / 预留 trade02-04',
+              'el01 trade01-04 / 预留 trade05',
               '启用哪些策略并配置份数；仓位更新后按份数自动写入该账户 Exec',
             ],
             [
@@ -134,7 +134,9 @@ function buildChapters(gateway: string): Chapter[] {
             },
           ]}
         />
-        <Note tone="warn">当前只部署了 trade01。trade02 / trade03 / trade04 已预留独立 Exec 前缀，策略目录仍全局共用。</Note>
+        <Note tone="warn">
+          el01 已部署 trade01–trade04，trade05 已配置但保持停机和禁用；jp-meta 仍仅启用 trade01。策略目录按主机独立。
+        </Note>
       </>
     ),
   },
@@ -236,7 +238,7 @@ function buildChapters(gateway: string): Chapter[] {
           <code>{JP_GATEWAY}</code>，不要写成 el01 的 <code>:10041</code>。
         </Note>
         <Note tone="warn">
-          不要打 <code>/config/</code>。没有账户前缀时无法区分 trade01 / trade02 / trade03 / trade04。
+          不要打 <code>/config/</code>。没有账户前缀时无法区分 trade01 / trade02 / trade03 / trade04 / trade05。
           也不要直接打 <code>127.0.0.1:18201</code> 或 <code>:18161</code>。
         </Note>
       </>

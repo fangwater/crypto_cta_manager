@@ -60,6 +60,9 @@ const rangeOptions = [
 type QuickRange = (typeof rangeOptions)[number]['key']
 type PnlMode = 'strategy' | 'account'
 
+const DEFAULT_QUICK_RANGE: QuickRange = '1D'
+const DAY_MS = 86_400_000
+
 const seriesOptions: NavSeriesKey[] = [
   'nav_change_before_fee_quote',
   'nav_change_after_fee_quote',
@@ -187,7 +190,7 @@ function NavPage() {
   const [endInput, setEndInput] = useState('')
   const [startMs, setStartMs] = useState<number | null>(null)
   const [endMs, setEndMs] = useState<number | null>(null)
-  const [activeRange, setActiveRange] = useState<QuickRange | null>('ALL')
+  const [activeRange, setActiveRange] = useState<QuickRange | null>(DEFAULT_QUICK_RANGE)
   const [loading, setLoading] = useState(true)
   const [timelineLoading, setTimelineLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -232,7 +235,10 @@ function NavPage() {
     if (!dashboard || initialized.current) return
     initialized.current = true
     const nextEnd = Date.now()
-    const nextStart = scopeStartMs(dashboard, scope, nextEnd, pnlMode)
+    const nextStart = Math.max(
+      scopeStartMs(dashboard, scope, nextEnd, pnlMode),
+      nextEnd - DAY_MS,
+    )
     setStartInput(toDatetimeLocal(nextStart))
     setEndInput(toDatetimeLocal(nextEnd))
     setStartMs(nextStart)
@@ -377,7 +383,7 @@ function NavPage() {
     const nextStart =
       days === null
         ? earliest
-        : Math.max(earliest, nextEnd - days * 86_400_000)
+        : Math.max(earliest, nextEnd - days * DAY_MS)
     setActiveRange(key)
     setStartInput(toDatetimeLocal(nextStart))
     setEndInput(toDatetimeLocal(nextEnd))
@@ -412,7 +418,7 @@ function NavPage() {
     setSelectedStrategies(null)
     setChartMode(nextMode === 'account' ? 'portfolio' : 'strategies')
     if (!dashboard) return
-    applyQuickRange('ALL', scope, undefined, nextMode)
+    applyQuickRange(DEFAULT_QUICK_RANGE, scope, undefined, nextMode)
   }
 
   function toggleSymbol(symbol: string) {

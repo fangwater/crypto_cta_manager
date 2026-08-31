@@ -193,12 +193,12 @@ normal window boundary is zero; the final point must equal the selected-window
 summary. PostgreSQL snapshots remain immutable source-specific initial-position
 anchors. Never merge FIFO state across source ID, symbol, or venue.
 
-The unified gateway below was deployed and verified on 2026-08-14 UTC. At that
-time only `binance_exec_trade01` existed on the CTA Exec host. `trade02`,
-`trade03`, and `trade04` are reserved in Manager config and Nginx with distinct
-prefixes and loopback ports, but remain `enabled = false` until those Exec
-accounts are actually deployed. Do not enable a reserved source or assume its
-upstream exists without checking the remote deployment and listeners.
+The unified gateway below was deployed and verified on 2026-08-14 UTC. On
+2026-08-31 UTC, `trade01` through `trade04` were deployed and enabled on the CTA
+Exec host. `trade05` is provisioned in Manager and Nginx on `10045`/`18165`, but
+remains disabled and stopped until explicitly requested. Do not enable a
+reserved source or assume its upstream exists without checking the remote
+deployment and listeners.
 
 On the CTA Exec host, Manager is host-global under
 `/home/el01/crypto_cta_manager`. `cta_web` binds to `127.0.0.1:18201` and
@@ -245,9 +245,10 @@ The deployed Nginx routes are:
 /exec_trade01/ws          -> Exec Viz WebSocket
 /exec_trade01/snapshot    -> Exec Viz snapshot
 /exec_trade01/config/     -> Exec Viz's Config proxy
-/exec_trade02/            -> reserved Exec Viz (127.0.0.1:10042)
-/exec_trade03/            -> reserved Exec Viz (127.0.0.1:10043)
-/exec_trade04/            -> reserved Exec Viz (127.0.0.1:10044)
+/exec_trade02/            -> Exec Viz (127.0.0.1:10042)
+/exec_trade03/            -> Exec Viz (127.0.0.1:10043)
+/exec_trade04/            -> Exec Viz (127.0.0.1:10044)
+/exec_trade05/            -> reserved Exec Viz (127.0.0.1:10045)
 /cta/                     -> compatibility redirect to /manager/
 /cta-api/                 -> compatibility proxy to cta_web /api/
 ```
@@ -279,12 +280,13 @@ in `~/.config/crypto-cta-manager/gateway-tunnel.env` on `el_dev`, with mode
 `0600`; never copy it into this repository, logs, or chat.
 
 Additional Exec accounts receive distinct path prefixes and loopback Viz
-ports. `trade02`/`trade03`/`trade04` are already reserved as
+ports. `trade02`/`trade03`/`trade04` are deployed as
 `/exec_trade02`:`10042`/`18162`, `/exec_trade03`:`10043`/`18163`, and
-`/exec_trade04`:`10044`/`18164`. After an account is actually deployed, enable
-that source and start its own Viz/Config listeners; the external port and SSH
-tunnel remain unchanged. Never route two account prefixes to the same upstream
-by accident.
+`/exec_trade04`:`10044`/`18164`. `trade05` is reserved as
+`/exec_trade05`:`10045`/`18165` and remains disabled/stopped. After a reserved
+account is explicitly activated, enable that source and start its own
+Viz/Config listeners; the external port and SSH tunnel remain unchanged. Never
+route two account prefixes to the same upstream by accident.
 Each source must declare its explicit one-segment `gateway_prefix`; the API
 exposes that prefix with sanitized account metadata so the root workspace can
 render source-scoped NAV, Exec Viz, and Config links. Never infer a gateway path

@@ -378,7 +378,7 @@ User Nginx:    127.0.0.1:10051
 Manager:       /manager/
 Manager Config:/manager/config/
 Manager API:   /manager/api/
-Exec Viz:      /exec_trade01/  (reserved: /exec_trade02/ /exec_trade03/ /exec_trade04/)
+Exec Viz:      /exec_trade01/ through /exec_trade04/ (reserved: /exec_trade05/)
 Exec Config:   /exec_trade01/config/
 ```
 
@@ -407,9 +407,9 @@ ssh -N -L 10051:127.0.0.1:10051 cta_exec
 
 Then open `http://127.0.0.1:10051/manager/`. The same Nginx entry point also
 proxies the Exec dashboard, WebSocket, snapshots, and configuration service
-below `/exec_trade01/`. `trade02`/`trade03`/`trade04` already have reserved
-prefixes and loopback ports; keep those sources disabled until the matching
-Exec account and Viz/Config listeners exist.
+below `/exec_trade01/`. On el01, `trade01` through `trade04` are deployed and
+enabled. `trade05` has reserved `/exec_trade05/`, `10045`, and `18165` routes,
+but stays disabled and stopped until explicitly activated.
 
 GET and POST from browsers and scripts must go through that environment's
 Nginx. Do not call loopback `18201` or `18161` from outside the host.

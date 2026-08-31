@@ -93,3 +93,16 @@ exec_viz_url = "http://127.0.0.1:10044/"
 estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade04"
 account_ipc_service = "account_pubs/binance_pm"
+
+[[sources]]
+id = "binance_exec_trade05"
+account = "trade05"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade05/data/persist_manager"
+enabled = false
+gateway_prefix = "/exec_trade05"
+exec_config_url = "http://127.0.0.1:18165/"
+exec_viz_url = "http://127.0.0.1:10045/"
+estimated_fee_rate = 0.0004
+ipc_namespace = "binance_exec_trade05"
+account_ipc_service = "account_pubs/binance_pm"

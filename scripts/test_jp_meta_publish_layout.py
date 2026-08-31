@@ -61,6 +61,7 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
 
     def test_el01_layout_stays_on_el01_paths(self) -> None:
         toml = (EL01 / "cta-manager.toml").read_text(encoding="utf-8")
+        nginx = (EL01 / "nginx.conf").read_text(encoding="utf-8")
         web = (EL01 / "crypto-cta-manager-web.service").read_text(encoding="utf-8")
         self.assertIn("/home/el01/crypto_cta_manager", toml)
         self.assertIn("WorkingDirectory=/home/el01/crypto_cta_manager", web)
@@ -68,6 +69,30 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
         self.assertNotIn("write_token_env", toml)
         self.assertNotIn("/home/ubuntu/", toml)
         self.assertNotIn("/home/ubuntu/", web)
+        source_enabled = re.findall(
+            r'^id = "binance_exec_trade0(\d)"\n(?:.*\n){0,8}?enabled = (true|false)$',
+            toml,
+            re.M,
+        )
+        self.assertEqual(
+            source_enabled,
+            [
+                ("1", "true"),
+                ("2", "true"),
+                ("3", "true"),
+                ("4", "true"),
+                ("5", "false"),
+            ],
+        )
+        self.assertIn('alias = "Dzy2025B1"', toml)
+        self.assertIn('alias = "prc"', toml)
+        trade04 = toml.split('id = "binance_exec_trade04"', 1)[1].split(
+            "[[sources]]", 1
+        )[0]
+        self.assertIn("maker_fee_rate = 0.0001", trade04)
+        self.assertIn("taker_fee_rate = 0.0003", trade04)
+        self.assertIn("server 127.0.0.1:10045;", nginx)
+        self.assertIn("location /exec_trade05/", nginx)
 
     def test_jp_meta_trade01_alias_is_local_to_that_host(self) -> None:
         jp = (JP / "cta-manager.toml").read_text(encoding="utf-8")
@@ -87,6 +112,9 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
         self.assertIn("cta-manager.toml.template", script)
         self.assertIn("RESTART_NGINX=0", script)
         self.assertIn("cargo build --release --bin cta_web", script)
+        self.assertIn("cargo metadata --no-deps --format-version 1", script)
+        self.assertIn('"$LOCAL_RELEASE_DIR/cta_web"', script)
+        self.assertNotIn('$ROOT/target/release', script)
         self.assertIn("frontend/dist/", script)
 
 

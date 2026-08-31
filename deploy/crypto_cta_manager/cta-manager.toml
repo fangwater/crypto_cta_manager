@@ -40,15 +40,13 @@ estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade01"
 account_ipc_service = "account_pubs/binance_pm"
 
-# Reserved until the matching Exec account is deployed. Keep disabled so
-# Manager does not open a missing persist_manager RocksDB or IPC.
 [[sources]]
 id = "binance_exec_trade02"
 account = "trade02"
 alias = "shaokai"
 venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade02/data/persist_manager"
-enabled = false
+enabled = true
 gateway_prefix = "/exec_trade02"
 exec_config_url = "http://127.0.0.1:18162/"
 exec_viz_url = "http://127.0.0.1:10042/"
@@ -62,7 +60,7 @@ account = "trade03"
 alias = "p1prcp1"
 venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade03/data/persist_manager"
-enabled = false
+enabled = true
 gateway_prefix = "/exec_trade03"
 exec_config_url = "http://127.0.0.1:18163/"
 exec_viz_url = "http://127.0.0.1:10043/"
@@ -73,12 +71,29 @@ account_ipc_service = "account_pubs/binance_pm"
 [[sources]]
 id = "binance_exec_trade04"
 account = "trade04"
+alias = "Dzy2025B1"
 venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade04/data/persist_manager"
-enabled = false
+enabled = true
 gateway_prefix = "/exec_trade04"
 exec_config_url = "http://127.0.0.1:18164/"
 exec_viz_url = "http://127.0.0.1:10044/"
-estimated_fee_rate = 0.0004
+maker_fee_rate = 0.0001
+taker_fee_rate = 0.0003
 ipc_namespace = "binance_exec_trade04"
+account_ipc_service = "account_pubs/binance_pm"
+
+# Provisioned but intentionally disabled until the operator starts trade05.
+[[sources]]
+id = "binance_exec_trade05"
+account = "trade05"
+alias = "prc"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade05/data/persist_manager"
+enabled = false
+gateway_prefix = "/exec_trade05"
+exec_config_url = "http://127.0.0.1:18165/"
+exec_viz_url = "http://127.0.0.1:10045/"
+estimated_fee_rate = 0.0004
+ipc_namespace = "binance_exec_trade05"
 account_ipc_service = "account_pubs/binance_pm"

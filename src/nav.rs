@@ -1704,7 +1704,7 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
     }
 
     let available_symbols = available_symbols.into_iter().collect::<Vec<_>>();
-    let available_strategies = available_strategies.into_iter().collect::<Vec<_>>();
+    let mut available_strategies = available_strategies.into_iter().collect::<Vec<_>>();
     let selected_symbols =
         select_timeline_symbols(&available_symbols, request.selected_symbols.into_iter())?;
     let selected_symbol_set = selected_symbols.iter().cloned().collect::<BTreeSet<_>>();
@@ -1868,7 +1868,7 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
             }
         })
         .collect();
-    let strategy_points = available_strategies
+    let mut strategy_points = available_strategies
         .iter()
         .map(|strategy| {
             let raw = points_by_strategy.remove(strategy).unwrap_or_default();
@@ -1888,7 +1888,17 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
                 points,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    let has_empty_unallocated_series = strategy_points.iter().any(|timeline| {
+        timeline.strategy == UNALLOCATED_STRATEGY
+            && timeline.symbol_count == 0
+            && timeline.summary == NavTotals::default()
+    });
+    if has_empty_unallocated_series {
+        available_strategies.retain(|strategy| strategy != UNALLOCATED_STRATEGY);
+        strategy_points.retain(|timeline| timeline.strategy != UNALLOCATED_STRATEGY);
+    }
 
     Ok(NavTimelineReport {
         valuation: "quantity_fifo_window_delta",
@@ -3380,12 +3390,11 @@ mod tests {
         assert_eq!(report.summary.fill_count, 1);
         assert_close(report.summary.realized_pnl_before_fee_quote, 10.0);
         assert_close(report.summary.nav_change_before_fee_quote, 10.0);
-        assert!(
-            !report
-                .available_strategies
-                .iter()
-                .any(|name| name == INITIAL_POSITION_STRATEGY || is_system_position_close(name))
-        );
+        assert!(!report.available_strategies.iter().any(|name| {
+            name == INITIAL_POSITION_STRATEGY
+                || name == UNALLOCATED_STRATEGY
+                || is_system_position_close(name)
+        }));
         let strategy_report = report
             .strategy_points
             .iter()

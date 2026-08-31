@@ -80,6 +80,13 @@ require_local_file() {
     fi
 }
 
+LOCAL_TARGET_DIR="$(
+    cd "$ROOT"
+    cargo metadata --no-deps --format-version 1 |
+        python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+)"
+LOCAL_RELEASE_DIR="$LOCAL_TARGET_DIR/release"
+
 if [[ $SKIP_BUILD -eq 0 ]]; then
     echo "building Manager binaries locally"
     (
@@ -96,10 +103,10 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
     )
 fi
 
-require_local_file "$ROOT/target/release/cta_web"
-require_local_file "$ROOT/target/release/nav_rebuild"
-require_local_file "$ROOT/target/release/nav_snapshot"
-require_local_file "$ROOT/target/release/nav_strategy_snapshot"
+require_local_file "$LOCAL_RELEASE_DIR/cta_web"
+require_local_file "$LOCAL_RELEASE_DIR/nav_rebuild"
+require_local_file "$LOCAL_RELEASE_DIR/nav_snapshot"
+require_local_file "$LOCAL_RELEASE_DIR/nav_strategy_snapshot"
 require_local_file "$ROOT/frontend/dist/index.html"
 require_local_file "$DEPLOY_DIR/cta-manager.toml"
 require_local_file "$DEPLOY_DIR/crypto-cta-manager-web.service"
@@ -116,16 +123,16 @@ remote "install -d -m 0755 '${REMOTE_ROOT}/bin' '${REMOTE_ROOT}/config' '${REMOT
 echo "uploading binaries and frontend to ${TARGET}"
 # Upload beside the live binaries. Overwriting a running cta_web fails.
 scp -q \
-    "$ROOT/target/release/cta_web" \
+    "$LOCAL_RELEASE_DIR/cta_web" \
     "${SSH_HOST}:${REMOTE_ROOT}/bin/cta_web.next"
 scp -q \
-    "$ROOT/target/release/nav_rebuild" \
+    "$LOCAL_RELEASE_DIR/nav_rebuild" \
     "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_rebuild.next"
 scp -q \
-    "$ROOT/target/release/nav_snapshot" \
+    "$LOCAL_RELEASE_DIR/nav_snapshot" \
     "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_snapshot.next"
 scp -q \
-    "$ROOT/target/release/nav_strategy_snapshot" \
+    "$LOCAL_RELEASE_DIR/nav_strategy_snapshot" \
     "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_strategy_snapshot.next"
 scp -q \
     "$DEPLOY_DIR/crypto-cta-manager-web.service" \
