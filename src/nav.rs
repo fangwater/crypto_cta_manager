@@ -316,7 +316,6 @@ enum TimelineEvent {
         source_index: usize,
         source_id: String,
         ts_us: i64,
-        symbols: Vec<String>,
     },
     Fill {
         source_index: usize,
@@ -356,13 +355,6 @@ impl TimelineEvent {
         match self {
             Self::Snapshot { .. } => ("", i64::MIN),
             Self::Fill { fill, .. } => (&fill.event.record_key, fill.event.event_ts_us),
-        }
-    }
-
-    fn affected_symbols(&self) -> Vec<&str> {
-        match self {
-            Self::Snapshot { symbols, .. } => symbols.iter().map(String::as_str).collect(),
-            Self::Fill { fill, .. } => vec![fill.event.symbol.as_str()],
         }
     }
 }
@@ -1651,7 +1643,6 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
                 source_index,
                 source_id: source.id.clone(),
                 ts_us: snapshot_ts_us,
-                symbols: initial_symbols,
             });
         }
         let strategy_allocation_active = prepared.strategy_allocation_active;
@@ -1730,103 +1721,114 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
 
     let baselines = timeline_totals_by_symbol(&runtimes);
     let strategy_baselines = timeline_totals_by_strategy_symbol(&runtimes);
-    let mut points = vec![timeline_point(
-        start_ts_us,
-        &runtimes,
-        &baselines,
-        &selected_symbol_set,
-    )];
+    let mut points = Vec::new();
     let mut points_by_symbol = selected_symbols
         .iter()
         .cloned()
-        .map(|symbol| {
-            let point = timeline_symbol_point(start_ts_us, &symbol, &runtimes, &baselines);
-            (symbol, vec![point])
-        })
+        .map(|symbol| (symbol, Vec::new()))
         .collect::<BTreeMap<_, _>>();
     let mut points_by_strategy = available_strategies
         .iter()
         .cloned()
-        .map(|strategy| {
-            let point = timeline_strategy_point(
-                start_ts_us,
-                &strategy,
-                &runtimes,
-                &strategy_baselines,
-                &selected_symbol_set,
-            );
-            (strategy, vec![point])
-        })
+        .map(|strategy| (strategy, Vec::new()))
         .collect::<BTreeMap<_, _>>();
 
-    for event in &timeline_events[split..] {
-        if event.ts_us() > request.end_ts_us {
+    push_timeline_sample(
+        start_ts_us,
+        &runtimes,
+        &baselines,
+        &strategy_baselines,
+        &selected_symbols,
+        &available_strategies,
+        &mut points,
+        &mut points_by_symbol,
+        &mut points_by_strategy,
+    );
+
+    // The HTTP response contains fixed 15-minute points. Capture those points while
+    // applying events instead of building one complete strategy/symbol series per fill.
+    let mut next_tick_ts_us = next_timeline_tick(start_ts_us, NAV_TICK_INTERVAL_US);
+    let mut event_index = split;
+    while event_index < timeline_events.len() {
+        let event_ts_us = timeline_events[event_index].ts_us();
+        if event_ts_us > request.end_ts_us {
             break;
         }
-        apply_timeline_event(&mut runtimes, event)?;
-        let affected_symbols = event.affected_symbols();
-        if affected_symbols
-            .iter()
-            .any(|symbol| selected_symbol_set.contains(*symbol))
-        {
-            push_or_replace_timeline_point(
+        while next_tick_ts_us < event_ts_us && next_tick_ts_us < request.end_ts_us {
+            push_timeline_sample(
+                next_tick_ts_us,
+                &runtimes,
+                &baselines,
+                &strategy_baselines,
+                &selected_symbols,
+                &available_strategies,
                 &mut points,
-                timeline_point(event.ts_us(), &runtimes, &baselines, &selected_symbol_set),
+                &mut points_by_symbol,
+                &mut points_by_strategy,
             );
-            for symbol in affected_symbols {
-                if let Some(symbol_points) = points_by_symbol.get_mut(symbol) {
-                    push_or_replace_timeline_point(
-                        symbol_points,
-                        timeline_symbol_point(event.ts_us(), symbol, &runtimes, &baselines),
-                    );
-                }
+            let advanced_tick_ts_us = next_tick_ts_us.saturating_add(NAV_TICK_INTERVAL_US);
+            if advanced_tick_ts_us == next_tick_ts_us {
+                break;
             }
-            for (strategy, strategy_points) in &mut points_by_strategy {
-                push_or_replace_timeline_point(
-                    strategy_points,
-                    timeline_strategy_point(
-                        event.ts_us(),
-                        strategy,
-                        &runtimes,
-                        &strategy_baselines,
-                        &selected_symbol_set,
-                    ),
-                );
+            next_tick_ts_us = advanced_tick_ts_us;
+        }
+
+        while event_index < timeline_events.len()
+            && timeline_events[event_index].ts_us() == event_ts_us
+        {
+            apply_timeline_event(&mut runtimes, &timeline_events[event_index])?;
+            event_index += 1;
+        }
+        if next_tick_ts_us == event_ts_us && next_tick_ts_us <= request.end_ts_us {
+            push_timeline_sample(
+                next_tick_ts_us,
+                &runtimes,
+                &baselines,
+                &strategy_baselines,
+                &selected_symbols,
+                &available_strategies,
+                &mut points,
+                &mut points_by_symbol,
+                &mut points_by_strategy,
+            );
+            let advanced_tick_ts_us = next_tick_ts_us.saturating_add(NAV_TICK_INTERVAL_US);
+            if advanced_tick_ts_us != next_tick_ts_us {
+                next_tick_ts_us = advanced_tick_ts_us;
             }
         }
+    }
+    while next_tick_ts_us < request.end_ts_us {
+        push_timeline_sample(
+            next_tick_ts_us,
+            &runtimes,
+            &baselines,
+            &strategy_baselines,
+            &selected_symbols,
+            &available_strategies,
+            &mut points,
+            &mut points_by_symbol,
+            &mut points_by_strategy,
+        );
+        let advanced_tick_ts_us = next_tick_ts_us.saturating_add(NAV_TICK_INTERVAL_US);
+        if advanced_tick_ts_us == next_tick_ts_us {
+            break;
+        }
+        next_tick_ts_us = advanced_tick_ts_us;
     }
     for runtime in &mut runtimes {
         runtime.activate_snapshot_at(request.end_ts_us);
     }
-    push_or_replace_timeline_point(
+    push_timeline_sample(
+        request.end_ts_us,
+        &runtimes,
+        &baselines,
+        &strategy_baselines,
+        &selected_symbols,
+        &available_strategies,
         &mut points,
-        timeline_point(
-            request.end_ts_us,
-            &runtimes,
-            &baselines,
-            &selected_symbol_set,
-        ),
+        &mut points_by_symbol,
+        &mut points_by_strategy,
     );
-    for symbol in &selected_symbols {
-        if let Some(symbol_points) = points_by_symbol.get_mut(symbol) {
-            push_or_replace_timeline_point(
-                symbol_points,
-                timeline_symbol_point(request.end_ts_us, symbol, &runtimes, &baselines),
-            );
-        }
-    }
-    for (strategy, strategy_points) in &mut points_by_strategy {
-        push_or_replace_timeline_point(
-            strategy_points,
-            timeline_strategy_point(
-                request.end_ts_us,
-                strategy,
-                &runtimes,
-                &strategy_baselines,
-                &selected_symbol_set,
-            ),
-        );
-    }
 
     let current_totals = timeline_totals_by_symbol(&runtimes);
     let mut symbols = timeline_symbol_reports(&runtimes);
@@ -1847,21 +1849,17 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
     }
     summary = summary.cleaned();
 
-    let points =
-        resample_timeline_points(points, start_ts_us, request.end_ts_us, NAV_TICK_INTERVAL_US);
-    let resampled_point_count = points.len();
+    let fixed_point_count = points.len();
     let points = downsample_timeline_points(points, request.max_points.max(2));
-    let mut sampled = points.len() < resampled_point_count;
+    let mut sampled = points.len() < fixed_point_count;
     let symbol_max_points = request.max_points.clamp(100, 800);
     let symbol_points = selected_symbols
         .iter()
         .map(|symbol| {
             let raw = points_by_symbol.remove(symbol).unwrap_or_default();
-            let resampled =
-                resample_timeline_points(raw, start_ts_us, request.end_ts_us, NAV_TICK_INTERVAL_US);
-            let resampled_len = resampled.len();
-            let points = downsample_timeline_points(resampled, symbol_max_points);
-            sampled |= points.len() < resampled_len;
+            let fixed_point_count = raw.len();
+            let points = downsample_timeline_points(raw, symbol_max_points);
+            sampled |= points.len() < fixed_point_count;
             SymbolNavTimeline {
                 symbol: symbol.clone(),
                 points,
@@ -1872,11 +1870,9 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
         .iter()
         .map(|strategy| {
             let raw = points_by_strategy.remove(strategy).unwrap_or_default();
-            let resampled =
-                resample_timeline_points(raw, start_ts_us, request.end_ts_us, NAV_TICK_INTERVAL_US);
-            let resampled_len = resampled.len();
-            let points = downsample_timeline_points(resampled, symbol_max_points);
-            sampled |= points.len() < resampled_len;
+            let fixed_point_count = raw.len();
+            let points = downsample_timeline_points(raw, symbol_max_points);
+            sampled |= points.len() < fixed_point_count;
             let (symbol_count, gross_position_value_quote, net_position_value_quote) =
                 timeline_strategy_position_values(strategy, &runtimes, &selected_symbol_set);
             StrategyNavTimeline {
@@ -2316,69 +2312,81 @@ fn timeline_symbol_reports(runtimes: &[TimelineSourceState]) -> Vec<AggregateSym
         .collect()
 }
 
-fn timeline_point(
+#[allow(clippy::too_many_arguments)]
+fn push_timeline_sample(
     ts_us: i64,
     runtimes: &[TimelineSourceState],
     baselines: &BTreeMap<String, NavTotals>,
-    selected_symbols: &BTreeSet<String>,
-) -> NavTimelinePoint {
-    let current = timeline_totals_by_symbol(runtimes);
-    let mut totals = NavTotals::default();
+    strategy_baselines: &BTreeMap<(String, String), NavTotals>,
+    selected_symbols: &[String],
+    available_strategies: &[String],
+    points: &mut Vec<NavTimelinePoint>,
+    points_by_symbol: &mut BTreeMap<String, Vec<NavTimelinePoint>>,
+    points_by_strategy: &mut BTreeMap<String, Vec<NavTimelinePoint>>,
+) {
+    let current_by_symbol = timeline_totals_by_symbol(runtimes);
+    let current_by_strategy_symbol = timeline_totals_by_strategy_symbol(runtimes);
+    let mut portfolio_totals = NavTotals::default();
     for symbol in selected_symbols {
-        totals.add(
-            current
+        portfolio_totals.add(
+            current_by_symbol
                 .get(symbol)
                 .copied()
                 .unwrap_or_default()
                 .difference(baselines.get(symbol).copied().unwrap_or_default()),
         );
     }
-    NavTimelinePoint {
-        ts_us,
-        totals: totals.cleaned(),
-    }
-}
-
-fn timeline_symbol_point(
-    ts_us: i64,
-    symbol: &str,
-    runtimes: &[TimelineSourceState],
-    baselines: &BTreeMap<String, NavTotals>,
-) -> NavTimelinePoint {
-    let current = timeline_totals_by_symbol(runtimes);
-    NavTimelinePoint {
-        ts_us,
-        totals: current
-            .get(symbol)
-            .copied()
-            .unwrap_or_default()
-            .difference(baselines.get(symbol).copied().unwrap_or_default()),
-    }
-}
-
-fn timeline_strategy_point(
-    ts_us: i64,
-    strategy: &str,
-    runtimes: &[TimelineSourceState],
-    baselines: &BTreeMap<(String, String), NavTotals>,
-    selected_symbols: &BTreeSet<String>,
-) -> NavTimelinePoint {
-    let current = timeline_totals_by_strategy_symbol(runtimes);
-    let mut totals = NavTotals::default();
+    push_or_replace_timeline_point(
+        points,
+        NavTimelinePoint {
+            ts_us,
+            totals: portfolio_totals.cleaned(),
+        },
+    );
     for symbol in selected_symbols {
-        let key = (strategy.to_string(), symbol.clone());
-        totals.add(
-            current
-                .get(&key)
-                .copied()
-                .unwrap_or_default()
-                .difference(baselines.get(&key).copied().unwrap_or_default()),
-        );
+        if let Some(symbol_points) = points_by_symbol.get_mut(symbol) {
+            push_or_replace_timeline_point(
+                symbol_points,
+                NavTimelinePoint {
+                    ts_us,
+                    totals: current_by_symbol
+                        .get(symbol)
+                        .copied()
+                        .unwrap_or_default()
+                        .difference(baselines.get(symbol).copied().unwrap_or_default()),
+                },
+            );
+        }
     }
-    NavTimelinePoint {
-        ts_us,
-        totals: totals.cleaned(),
+    for strategy in available_strategies {
+        if let Some(strategy_points) = points_by_strategy.get_mut(strategy) {
+            let mut totals = NavTotals::default();
+            for symbol in selected_symbols {
+                let key = (strategy.clone(), symbol.clone());
+                totals.add(
+                    current_by_strategy_symbol
+                        .get(&key)
+                        .copied()
+                        .unwrap_or_default()
+                        .difference(strategy_baselines.get(&key).copied().unwrap_or_default()),
+                );
+            }
+            push_or_replace_timeline_point(
+                strategy_points,
+                NavTimelinePoint {
+                    ts_us,
+                    totals: totals.cleaned(),
+                },
+            );
+        }
     }
+}
+
+fn next_timeline_tick(ts_us: i64, interval_us: i64) -> i64 {
+    ts_us
+        .div_euclid(interval_us)
+        .saturating_add(1)
+        .saturating_mul(interval_us)
 }
 
 pub fn strategy_from_from_key(from_key: &str) -> String {
@@ -2409,49 +2417,6 @@ fn push_or_replace_timeline_point(points: &mut Vec<NavTimelinePoint>, point: Nav
         return;
     }
     points.push(point);
-}
-
-fn resample_timeline_points(
-    points: Vec<NavTimelinePoint>,
-    start_ts_us: i64,
-    end_ts_us: i64,
-    interval_us: i64,
-) -> Vec<NavTimelinePoint> {
-    if points.is_empty() || interval_us <= 0 || end_ts_us < start_ts_us {
-        return points;
-    }
-
-    let mut sampled = Vec::with_capacity(
-        usize::try_from((end_ts_us - start_ts_us) / interval_us + 2).unwrap_or(points.len()),
-    );
-    let mut source_index = 0;
-    let mut current = points[0];
-    let mut push_at = |ts_us: i64, sampled: &mut Vec<NavTimelinePoint>| {
-        while source_index + 1 < points.len() && points[source_index + 1].ts_us <= ts_us {
-            source_index += 1;
-            current = points[source_index];
-        }
-        current.ts_us = ts_us;
-        sampled.push(current);
-    };
-
-    push_at(start_ts_us, &mut sampled);
-    let mut tick_ts_us = start_ts_us
-        .div_euclid(interval_us)
-        .saturating_add(1)
-        .saturating_mul(interval_us);
-    while tick_ts_us < end_ts_us {
-        push_at(tick_ts_us, &mut sampled);
-        let next_tick_ts_us = tick_ts_us.saturating_add(interval_us);
-        if next_tick_ts_us == tick_ts_us {
-            break;
-        }
-        tick_ts_us = next_tick_ts_us;
-    }
-    if end_ts_us > start_ts_us {
-        push_at(end_ts_us, &mut sampled);
-    }
-    sampled
 }
 
 fn downsample_timeline_points(
