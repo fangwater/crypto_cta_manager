@@ -4,6 +4,7 @@ pub mod exchange_leverage;
 pub mod execution_cost;
 pub mod ingest;
 pub mod manager_db;
+pub mod market_rules;
 pub mod model;
 pub mod nav;
 pub mod order_config;

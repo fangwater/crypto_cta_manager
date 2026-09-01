@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::config::{RedisSettings, SourceConfig};
+use crate::market_rules::MarketRulesSnapshot;
 use crate::order_config::{
     OrderParameterOverrides, OrderParameters, OrderStrategyView, TargetPosition,
     validate_strategy_name, validate_symbol_order_parameter_overrides,
@@ -219,6 +220,60 @@ impl RedisRuntime {
                 self.mark_broken().await;
                 bail!(
                     "Redis request timed out after {}s",
+                    self.request_timeout_secs().await
+                )
+            }
+        }
+    }
+
+    pub async fn publish_market_rules(
+        &self,
+        source: &SourceConfig,
+        snapshot: &MarketRulesSnapshot,
+    ) -> Result<()> {
+        snapshot.validate()?;
+        if source.venue != snapshot.venue {
+            bail!(
+                "market-rules venue mismatch for source {}: source={} snapshot={}",
+                source.id,
+                source.venue,
+                snapshot.venue
+            );
+        }
+
+        let key = format!("{}:{}:market_rules", source.id, source.venue);
+        let encoded = serde_json::to_string(snapshot).context("encode market-rules snapshot")?;
+        let timeout = Duration::from_secs(self.request_timeout_secs().await);
+        let stored = {
+            let mut inner = self.inner.lock().await;
+            let connection = inner.connection().await?;
+            tokio::time::timeout(timeout, async {
+                connection
+                    .set::<_, _, ()>(&key, &encoded)
+                    .await
+                    .with_context(|| format!("write Redis market-rules key {key}"))?;
+                connection
+                    .get::<_, Option<String>>(&key)
+                    .await
+                    .with_context(|| format!("confirm Redis market-rules key {key}"))
+            })
+            .await
+        };
+
+        match stored {
+            Ok(Ok(Some(stored))) if stored == encoded => Ok(()),
+            Ok(Ok(Some(_))) => bail!("Redis market-rules confirmation mismatched: {key}"),
+            Ok(Ok(None)) => bail!("Redis market-rules key missing after write: {key}"),
+            Ok(Err(error)) => {
+                if is_redis_transport_error(&error) {
+                    self.mark_broken().await;
+                }
+                Err(error)
+            }
+            Err(_) => {
+                self.mark_broken().await;
+                bail!(
+                    "Redis market-rules request timed out after {}s",
                     self.request_timeout_secs().await
                 )
             }

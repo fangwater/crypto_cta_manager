@@ -114,6 +114,15 @@ source in output. Order-only reconstruction does not include funding, deposits,
 withdrawals, liquidation charges, or other account-ledger movements; keep those
 limitations explicit.
 
+Exchange-owned forced-close fills are order events, not account-ledger charges.
+Exec must persist liquidation, ADL, delisting settlement, and contract-delivery
+fills into `uniform_orders` with their factual side, price, base quantity, venue,
+and an `exchange_forced_close:<reason>` source prefix plus exchange order/trade
+identifiers. Manager includes those fills in FIFO NAV. Do not attribute them to
+a CTA strategy when the exchange event has no strategy identity. Liquidation
+penalties and other balance adjustments remain excluded until a separate
+account-ledger source is connected.
+
 ## CTA Dashboard
 
 The CTA dashboard is a React/Vite application under `frontend/`, backed by the
@@ -129,6 +138,25 @@ bound account's then-current `shares`, and factual positions read from each
 source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty`. Published qty
 is reconstructed later as template qty × shares. Later changes to shares must
 not rewrite older messages. PostgreSQL remains the current catalog.
+Manager is the sole owner of pulling venue order-rule metadata used by Exec,
+including price tick, quantity step, minimum quantity, minimum notional, symbol
+status, and contract multiplier. It refreshes that metadata every 60 seconds,
+publishes a complete source- and venue-scoped snapshot through the loopback
+Redis runtime, and retains the last good snapshot when a refresh fails.
+`exec-pre-trade` reads and hot-reloads the Manager-published cache; it must not
+independently poll the venue for the same order rules during normal operation.
+Only venue-active statuses are tradable. A complete loaded snapshot that omits a
+symbol or marks it inactive must block new orders for that symbol. If an exchange
+forced close has already changed the factual account position, BatchExec must
+reconcile its per-strategy position ledger to that account position and must not
+create an offsetting `SYSTEM_POSITION_CLOSE` loop for an untradable symbol.
+Keep exactly one current internal cache contract. Never introduce parallel
+`v1`/`v2` formats, version-suffixed Redis keys, versioned internal API paths,
+versioned duplicate types, or multi-version compatibility branches. Do not add
+a schema-version field for serving multiple formats. Make an incompatible
+contract change as one coordinated Manager/Exec replacement of the single
+format. Venue-owned external API paths such as Binance `/v1` or `/v2` endpoints
+retain the names required by that venue and are not internal contract versions.
 When `[twap]` is enabled, the same database records 5-second mid TWAP bars
 from `spread_pbs/<venue>/ask_bid_spread`. Each configured catalog symbol uses
 column family `SYMBOL:binance-futures`, values are 21-byte binary bars, and
