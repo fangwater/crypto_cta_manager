@@ -141,6 +141,15 @@ struct StoredContribution {
     fee: f64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct LatestTargets {
+    position_strategy_name: String,
+    venue: String,
+    targets: BTreeMap<String, f64>,
+    received_at_us: i64,
+    update_seq: u32,
+}
+
 pub fn spawn(config: AppConfig, pool: PgPool, archive: Arc<PositionArchive>, twap: Arc<TwapStore>) {
     if !config.twap.enabled {
         info!("theoretical 5-minute TWAP NAV materializer disabled with TWAP recorder");
@@ -169,13 +178,12 @@ pub async fn materialize_once(
 ) -> Result<usize> {
     let checkpoint = load_or_initialize_checkpoint(config, pool, now_us).await?;
     let fee_rates = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
-    let messages = archive.scan_from(checkpoint.0.max(1))?;
-    for message in messages
+    let messages = archive
+        .scan_from(checkpoint.0.max(1))?
         .into_iter()
         .filter(|message| (message.received_at_us, message.seq) > checkpoint)
-    {
-        stage_message(config, pool, &message, &fee_rates).await?;
-    }
+        .collect::<Vec<_>>();
+    stage_messages(config, pool, &messages, &fee_rates).await?;
 
     let due_before_us = now_us.saturating_sub(BAR_SETTLE_LAG_US);
     let mut completed = 0usize;
@@ -261,89 +269,80 @@ async fn load_or_initialize_checkpoint(
     Ok((cutoff_us, u32::MAX))
 }
 
-async fn stage_message(
+async fn stage_messages(
     config: &AppConfig,
     pool: &PgPool,
-    message: &PositionUpdateMsg,
+    messages: &[PositionUpdateMsg],
     fee_rates: &BTreeMap<String, f64>,
-) -> Result<()> {
+) -> Result<usize> {
+    if messages.is_empty() {
+        return Ok(0);
+    }
     let mut tx = pool
         .begin()
         .await
         .context("failed to begin theoretical NAV staging transaction")?;
-    for account in &message.published_accounts {
-        let Some(source) = config
-            .sources
-            .iter()
-            .find(|source| source.enabled && source.id == account.source_id)
-        else {
-            continue;
-        };
-        let targets = message
-            .strategy
-            .targets
-            .iter()
-            .map(|(symbol, target)| {
-                (
-                    symbol.clone(),
-                    clean_zero(target.qty * account.effective_shares()),
+    let mut latest = load_latest_targets(&mut tx).await?;
+    let mut touched = BTreeSet::new();
+    let mut staged = 0usize;
+    for message in messages {
+        for account in &message.published_accounts {
+            let Some(source) = config
+                .sources
+                .iter()
+                .find(|source| source.enabled && source.id == account.source_id)
+            else {
+                continue;
+            };
+            let targets = normalized_scaled_targets(message, account.effective_shares())
+                .with_context(|| {
+                    format!(
+                        "failed to scale theoretical targets for {}/{}",
+                        account.source_id, account.binding_name
+                    )
+                })?;
+            let key = (account.source_id.clone(), account.binding_name.clone());
+            let next = LatestTargets {
+                position_strategy_name: message.strategy.strategy_name.clone(),
+                venue: source.venue.clone(),
+                targets,
+                received_at_us: message.received_at_us,
+                update_seq: message.seq,
+            };
+            let changed = target_positions_changed(latest.get(&key), &next);
+            if changed {
+                let fee_rate = fee_rates.get(&source.id).copied().with_context(|| {
+                    format!("missing theoretical TWAP fee rate for {}", source.id)
+                })?;
+                stage_target_change(
+                    &mut tx,
+                    &account.source_id,
+                    &account.binding_name,
+                    &next,
+                    fee_rate,
                 )
-            })
-            .collect::<BTreeMap<_, _>>();
-        if targets.values().any(|quantity| !quantity.is_finite()) {
-            bail!(
-                "theoretical target scaling overflowed for {}/{}",
-                account.source_id,
-                account.binding_name
-            );
+                .await?;
+                staged = staged.saturating_add(1);
+            }
+            latest.insert(key.clone(), next);
+            touched.insert(key);
         }
-        let fee_rate = fee_rates
-            .get(&source.id)
-            .copied()
-            .with_context(|| format!("missing theoretical TWAP fee rate for {}", source.id))?;
-        let seq = i64::from(message.seq);
-        sqlx::query(
-            r#"
-            UPDATE cta_theoretical_nav_pending
-            SET window_end_us = LEAST(window_end_us, $3)
-            WHERE source_id = $1
-              AND binding_name = $2
-              AND (received_at_us, update_seq) < ($3, $4)
-              AND window_end_us > $3
-            "#,
-        )
-        .bind(&account.source_id)
-        .bind(&account.binding_name)
-        .bind(message.received_at_us)
-        .bind(seq)
-        .execute(&mut *tx)
-        .await
-        .context("failed to truncate superseded theoretical NAV window")?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO cta_theoretical_nav_pending (
-                source_id, binding_name, position_strategy_name,
-                received_at_us, update_seq, window_end_us, venue, fee_rate, targets
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (source_id, binding_name, received_at_us, update_seq)
-            DO NOTHING
-            "#,
-        )
-        .bind(&account.source_id)
-        .bind(&account.binding_name)
-        .bind(&message.strategy.strategy_name)
-        .bind(message.received_at_us)
-        .bind(seq)
-        .bind(message.received_at_us.saturating_add(EXECUTION_WINDOW_US))
-        .bind(&source.venue)
-        .bind(fee_rate)
-        .bind(serde_json::to_value(targets)?)
-        .execute(&mut *tx)
-        .await
-        .context("failed to stage theoretical NAV update")?;
     }
 
+    for key in touched {
+        save_latest_targets(
+            &mut tx,
+            &key.0,
+            &key.1,
+            latest
+                .get(&key)
+                .context("theoretical latest target disappeared during staging")?,
+        )
+        .await?;
+    }
+    let last = messages
+        .last()
+        .context("non-empty theoretical message batch lost its tail")?;
     sqlx::query(
         r#"
         INSERT INTO cta_theoretical_nav_checkpoint (
@@ -358,14 +357,174 @@ async fn stage_message(
             < (EXCLUDED.last_received_at_us, EXCLUDED.last_seq)
         "#,
     )
-    .bind(message.received_at_us)
-    .bind(i64::from(message.seq))
+    .bind(last.received_at_us)
+    .bind(i64::from(last.seq))
     .execute(&mut *tx)
     .await
     .context("failed to advance theoretical NAV archive checkpoint")?;
     tx.commit()
         .await
         .context("failed to commit theoretical NAV staging transaction")?;
+    if staged > 0 {
+        info!(
+            scanned = messages.len(),
+            staged, "staged theoretical target changes"
+        );
+    }
+    Ok(staged)
+}
+
+fn normalized_scaled_targets(
+    message: &PositionUpdateMsg,
+    shares: f64,
+) -> Result<BTreeMap<String, f64>> {
+    let mut targets = BTreeMap::new();
+    for (symbol, target) in &message.strategy.targets {
+        let quantity = clean_zero(target.qty * shares);
+        if !quantity.is_finite() {
+            bail!("theoretical target scaling overflowed");
+        }
+        if quantity != 0.0 {
+            targets.insert(symbol.clone(), quantity);
+        }
+    }
+    Ok(targets)
+}
+
+fn normalize_stored_targets(targets: &mut BTreeMap<String, f64>) -> Result<()> {
+    if targets.values().any(|quantity| !quantity.is_finite()) {
+        bail!("stored theoretical target is not finite");
+    }
+    targets.retain(|_, quantity| clean_zero(*quantity) != 0.0);
+    Ok(())
+}
+
+fn target_positions_changed(previous: Option<&LatestTargets>, next: &LatestTargets) -> bool {
+    previous.is_none_or(|previous| previous.venue != next.venue || previous.targets != next.targets)
+}
+
+async fn load_latest_targets(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<BTreeMap<(String, String), LatestTargets>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT source_id, binding_name, position_strategy_name, venue,
+               targets, received_at_us, update_seq
+        FROM cta_theoretical_nav_latest_targets
+        ORDER BY source_id, binding_name
+        FOR UPDATE
+        "#,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .context("failed to load latest theoretical targets")?;
+    rows.into_iter()
+        .map(|row| {
+            let source_id: String = row.try_get("source_id")?;
+            let binding_name: String = row.try_get("binding_name")?;
+            let targets: serde_json::Value = row.try_get("targets")?;
+            let mut targets = serde_json::from_value(targets)
+                .context("failed to decode latest theoretical targets")?;
+            normalize_stored_targets(&mut targets)?;
+            Ok((
+                (source_id, binding_name),
+                LatestTargets {
+                    position_strategy_name: row.try_get("position_strategy_name")?,
+                    venue: row.try_get("venue")?,
+                    targets,
+                    received_at_us: row.try_get("received_at_us")?,
+                    update_seq: u32::try_from(row.try_get::<i64, _>("update_seq")?)?,
+                },
+            ))
+        })
+        .collect()
+}
+
+async fn stage_target_change(
+    tx: &mut Transaction<'_, Postgres>,
+    source_id: &str,
+    binding_name: &str,
+    next: &LatestTargets,
+    fee_rate: f64,
+) -> Result<()> {
+    let seq = i64::from(next.update_seq);
+    sqlx::query(
+        r#"
+        UPDATE cta_theoretical_nav_pending
+        SET window_end_us = LEAST(window_end_us, $3)
+        WHERE source_id = $1
+          AND binding_name = $2
+          AND (received_at_us, update_seq) < ($3, $4)
+          AND window_end_us > $3
+        "#,
+    )
+    .bind(source_id)
+    .bind(binding_name)
+    .bind(next.received_at_us)
+    .bind(seq)
+    .execute(&mut **tx)
+    .await
+    .context("failed to truncate superseded theoretical NAV window")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO cta_theoretical_nav_pending (
+            source_id, binding_name, position_strategy_name,
+            received_at_us, update_seq, window_end_us, venue, fee_rate, targets
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (source_id, binding_name, received_at_us, update_seq)
+        DO NOTHING
+        "#,
+    )
+    .bind(source_id)
+    .bind(binding_name)
+    .bind(&next.position_strategy_name)
+    .bind(next.received_at_us)
+    .bind(seq)
+    .bind(next.received_at_us.saturating_add(EXECUTION_WINDOW_US))
+    .bind(&next.venue)
+    .bind(fee_rate)
+    .bind(serde_json::to_value(&next.targets)?)
+    .execute(&mut **tx)
+    .await
+    .context("failed to stage theoretical NAV target change")?;
+    Ok(())
+}
+
+async fn save_latest_targets(
+    tx: &mut Transaction<'_, Postgres>,
+    source_id: &str,
+    binding_name: &str,
+    latest: &LatestTargets,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO cta_theoretical_nav_latest_targets (
+            source_id, binding_name, position_strategy_name, venue, targets,
+            received_at_us, update_seq, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+        ON CONFLICT (source_id, binding_name) DO UPDATE SET
+            position_strategy_name = EXCLUDED.position_strategy_name,
+            venue = EXCLUDED.venue,
+            targets = EXCLUDED.targets,
+            received_at_us = EXCLUDED.received_at_us,
+            update_seq = EXCLUDED.update_seq,
+            updated_at = now()
+        WHERE (cta_theoretical_nav_latest_targets.received_at_us,
+               cta_theoretical_nav_latest_targets.update_seq)
+            < (EXCLUDED.received_at_us, EXCLUDED.update_seq)
+        "#,
+    )
+    .bind(source_id)
+    .bind(binding_name)
+    .bind(&latest.position_strategy_name)
+    .bind(&latest.venue)
+    .bind(serde_json::to_value(&latest.targets)?)
+    .bind(latest.received_at_us)
+    .bind(i64::from(latest.update_seq))
+    .execute(&mut **tx)
+    .await
+    .context("failed to save latest theoretical targets")?;
     Ok(())
 }
 
@@ -1541,6 +1700,40 @@ mod tests {
             sample_count: 1,
             first_ts_us: end_ts_us - 1_000_000,
         }
+    }
+
+    fn latest_targets(targets: BTreeMap<String, f64>) -> LatestTargets {
+        LatestTargets {
+            position_strategy_name: "cta_a".into(),
+            venue: "binance-futures".into(),
+            targets,
+            received_at_us: 1,
+            update_seq: 0,
+        }
+    }
+
+    #[test]
+    fn repeated_target_metadata_does_not_create_an_execution() {
+        let previous = latest_targets(BTreeMap::from([("BTCUSDT".into(), 1.0)]));
+        let mut repeated = previous.clone();
+        repeated.position_strategy_name = "renamed".into();
+        repeated.received_at_us = 2;
+        repeated.update_seq = 4;
+        assert!(!target_positions_changed(Some(&previous), &repeated));
+
+        repeated.targets.insert("BTCUSDT".into(), 2.0);
+        assert!(target_positions_changed(Some(&previous), &repeated));
+    }
+
+    #[test]
+    fn stored_zero_targets_are_equivalent_to_omitted_targets() {
+        let mut targets = BTreeMap::from([
+            ("BTCUSDT".into(), 0.0),
+            ("ETHUSDT".into(), -0.0),
+            ("SOLUSDT".into(), 3.0),
+        ]);
+        normalize_stored_targets(&mut targets).unwrap();
+        assert_eq!(targets, BTreeMap::from([("SOLUSDT".into(), 3.0)]));
     }
 
     #[test]

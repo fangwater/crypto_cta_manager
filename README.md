@@ -247,12 +247,14 @@ the average of its Maker and Taker rates. The rate is frozen when the update is
 staged and stored with the synthetic fill, so later fee edits do not rewrite
 history. PostgreSQL stores only pending work, current target/FIFO
 state, skips, and one sparse event per nonzero synthetic symbol fill; it does
-not copy the 5-second BBO archive. While a source has a nonzero theoretical
-position, one source-level portfolio mark is materialized at most every five
-minutes from the latest completed 5-second mid; empty periods produce no mark
-rows. Pending rows and closed FIFO lots are deleted as they are consumed. The
-first run backfills only the configured TWAP retention window, currently 30
-days.
+not copy the 5-second BBO archive. Repeated publications of an unchanged
+account/binding target advance the archive cursor without adding pending work
+or shortening the five-minute execution window. While a source has a nonzero
+theoretical position, one source-level portfolio mark is materialized at most
+every five minutes from the latest completed 5-second mid; empty periods
+produce no mark rows. Pending rows and closed FIFO lots are deleted as they are
+consumed. The first run backfills only the configured TWAP retention window,
+currently 30 days.
 
 The JSON returned by `GET /api/timeline` and `GET /api/account-timeline`
 contains the portfolio-only series under `theoretical`. Query-time work is a
