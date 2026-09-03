@@ -111,10 +111,16 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
         self.assertIn("/home/ubuntu/crypto_cta_manager", script)
         self.assertIn("cta-manager.toml.template", script)
         self.assertIn("RESTART_NGINX=0", script)
-        self.assertIn("cargo build --release --bin cta_web", script)
+        self.assertIn("cargo clean -p crypto_cta_manager", script)
+        self.assertIn("cargo build --locked --release --bin cta_web", script)
         self.assertIn("cargo metadata --no-deps --format-version 1", script)
         self.assertIn('"$LOCAL_RELEASE_DIR/cta_web"', script)
         self.assertNotIn('$ROOT/target/release', script)
+        self.assertIn('readlink -f "$ROOT/target"', script)
+        self.assertIn("repository target mismatch", script)
+        self.assertIn("sha256sum -c", script)
+        self.assertIn("RELEASE-MANIFEST.txt", script)
+        self.assertIn("cta_web.next.${STAMP}", script)
         self.assertIn("frontend/dist/", script)
 
 
