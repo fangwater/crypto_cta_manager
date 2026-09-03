@@ -1384,7 +1384,12 @@ fn evaluate_fill(
         apply_fifo_fill(lots, fill_quantity, fill_price, state.next_lot_seq)?;
     let net_quantity = clean_zero(lots.iter().map(|lot| lot.quantity).sum());
     let expected_net = clean_zero(state.net_quantity + fill_quantity);
-    if !quantities_equal(net_quantity, expected_net) {
+    let comparison_scale = state
+        .net_quantity
+        .abs()
+        .max(fill_quantity.abs())
+        .max(net_quantity.abs());
+    if !quantities_equal(net_quantity, expected_net, comparison_scale) {
         bail!("theoretical FIFO quantity diverged: fifo={net_quantity} expected={expected_net}");
     }
     let realized = clean_zero(state.realized_pnl_before_fee_quote + realized_increment);
@@ -1680,8 +1685,8 @@ fn clean_zero(value: f64) -> f64 {
     }
 }
 
-fn quantities_equal(left: f64, right: f64) -> bool {
-    let scale = left.abs().max(right.abs()).max(1.0);
+fn quantities_equal(left: f64, right: f64, scale_hint: f64) -> bool {
+    let scale = left.abs().max(right.abs()).max(scale_hint.abs()).max(1.0);
     (left - right).abs() <= ZERO_EPSILON * scale
 }
 
@@ -1743,9 +1748,10 @@ mod tests {
 
     #[test]
     fn fifo_quantity_check_scales_with_large_positions() {
-        assert!(quantities_equal(100_000.0, 100_000.0 + 1e-8));
-        assert!(!quantities_equal(100_000.0, 100_000.0 + 1e-4));
-        assert!(!quantities_equal(1.0, 1.0 + 1e-8));
+        assert!(quantities_equal(100_000.0, 100_000.0 + 1e-8, 100_000.0));
+        assert!(!quantities_equal(100_000.0, 100_000.0 + 1e-4, 100_000.0));
+        assert!(quantities_equal(0.0, 1.82e-12, 50_000.0));
+        assert!(!quantities_equal(1.0, 1.0 + 1e-8, 1.0));
     }
 
     #[test]
