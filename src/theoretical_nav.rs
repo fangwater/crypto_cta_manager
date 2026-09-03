@@ -1384,8 +1384,8 @@ fn evaluate_fill(
         apply_fifo_fill(lots, fill_quantity, fill_price, state.next_lot_seq)?;
     let net_quantity = clean_zero(lots.iter().map(|lot| lot.quantity).sum());
     let expected_net = clean_zero(state.net_quantity + fill_quantity);
-    if (net_quantity - expected_net).abs() > ZERO_EPSILON {
-        bail!("theoretical FIFO quantity diverged");
+    if !quantities_equal(net_quantity, expected_net) {
+        bail!("theoretical FIFO quantity diverged: fifo={net_quantity} expected={expected_net}");
     }
     let realized = clean_zero(state.realized_pnl_before_fee_quote + realized_increment);
     let fee_quote = fill_quantity.abs() * fill_price * fee_rate;
@@ -1680,6 +1680,11 @@ fn clean_zero(value: f64) -> f64 {
     }
 }
 
+fn quantities_equal(left: f64, right: f64) -> bool {
+    let scale = left.abs().max(right.abs()).max(1.0);
+    (left - right).abs() <= ZERO_EPSILON * scale
+}
+
 fn unix_now_us() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1734,6 +1739,13 @@ mod tests {
         ]);
         normalize_stored_targets(&mut targets).unwrap();
         assert_eq!(targets, BTreeMap::from([("SOLUSDT".into(), 3.0)]));
+    }
+
+    #[test]
+    fn fifo_quantity_check_scales_with_large_positions() {
+        assert!(quantities_equal(100_000.0, 100_000.0 + 1e-8));
+        assert!(!quantities_equal(100_000.0, 100_000.0 + 1e-4));
+        assert!(!quantities_equal(1.0, 1.0 + 1e-8));
     }
 
     #[test]
