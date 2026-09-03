@@ -47,6 +47,8 @@ pub struct AccountStudio {
     pub estimated_fee_rate: f64,
     pub maker_fee_rate: f64,
     pub taker_fee_rate: f64,
+    /// Fee rate frozen onto newly staged theoretical TWAP executions.
+    pub theoretical_twap_fee_rate: f64,
     pub bindings: Vec<AccountBinding>,
 }
 
@@ -59,6 +61,8 @@ pub struct SaveEstimatedFeeRateRequest {
 pub struct SaveFeeRatesRequest {
     pub maker_fee_rate: f64,
     pub taker_fee_rate: f64,
+    #[serde(default)]
+    pub theoretical_twap_fee_rate: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +178,24 @@ pub fn validate_account_fee_rates(maker: f64, taker: f64) -> Result<(), String> 
     validate_fee_rates(FeeRates { maker, taker }).map_err(|error| error.to_string())
 }
 
+pub fn validate_theoretical_twap_fee_rate(value: f64) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err("theoretical_twap_fee_rate must be finite".to_string());
+    }
+    Ok(())
+}
+
+pub fn resolve_theoretical_twap_fee_rate(
+    maker: f64,
+    taker: f64,
+    configured: Option<f64>,
+) -> Result<f64, String> {
+    validate_account_fee_rates(maker, taker)?;
+    let fee_rate = configured.unwrap_or(maker * 0.5 + taker * 0.5);
+    validate_theoretical_twap_fee_rate(fee_rate)?;
+    Ok(fee_rate)
+}
+
 pub fn validate_contract_symbol(symbol: &str) -> Result<(), String> {
     validate_exec_symbol(symbol)
 }
@@ -194,6 +216,7 @@ impl AccountStudio {
     pub fn from_parts(
         source_id: String,
         fee_rates: FeeRates,
+        theoretical_twap_fee_rate: f64,
         bindings: Vec<AccountBinding>,
     ) -> Self {
         Self {
@@ -201,6 +224,7 @@ impl AccountStudio {
             estimated_fee_rate: fee_rates.taker,
             maker_fee_rate: fee_rates.maker,
             taker_fee_rate: fee_rates.taker,
+            theoretical_twap_fee_rate,
             bindings,
         }
     }
@@ -471,9 +495,16 @@ pub async fn load_account_studio(pool: &PgPool, source_id: &str) -> Result<Accou
         .ok_or_else(|| {
             anyhow::anyhow!("source {source_id} is not registered in cta_order_sources")
         })?;
+    let theoretical_twap_fee_rate =
+        crate::postgres::load_theoretical_twap_fee_rate(pool, source_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("source {source_id} is not registered in cta_order_sources")
+            })?;
     Ok(AccountStudio::from_parts(
         source_id.to_string(),
         fee_rates,
+        theoretical_twap_fee_rate,
         bindings,
     ))
 }
@@ -890,6 +921,16 @@ mod tests {
         assert!(validate_estimated_fee_rate(f64::INFINITY).is_err());
         assert!(validate_account_fee_rates(-0.00005, 0.000146).is_ok());
         assert!(validate_account_fee_rates(-100.0, -200.0).is_ok());
+    }
+
+    #[test]
+    fn theoretical_twap_fee_defaults_to_account_maker_taker_average() {
+        let default = resolve_theoretical_twap_fee_rate(-0.00005, 0.00015, None).unwrap();
+        assert!((default - 0.00005).abs() < 1e-12);
+        assert_eq!(
+            resolve_theoretical_twap_fee_rate(-0.00005, 0.00015, Some(0.00008)).unwrap(),
+            0.00008
+        );
     }
 
     #[test]

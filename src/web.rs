@@ -76,6 +76,7 @@ pub struct TimelineSnapshot {
     pub generated_at_us: i64,
     pub generation_duration_ms: u64,
     pub report: nav::NavTimelineReport,
+    pub theoretical: crate::theoretical_nav::TheoreticalNavTimeline,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -283,6 +284,12 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         config.twap.retain_days.max(1),
     )?);
     crate::twap::spawn_with_db(pool.clone(), config.twap.clone(), manager_db);
+    crate::theoretical_nav::spawn(
+        config.clone(),
+        pool.clone(),
+        Arc::clone(&position_archive),
+        Arc::clone(&twap),
+    );
     let first_build = build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await?;
     let cache = Arc::new(RwLock::new(CacheState {
         last_attempt_at_us: first_build.dashboard.generated_at_us,
@@ -592,6 +599,7 @@ async fn rebuild_timeline_snapshot(
         return Ok(Err(bad_request(message)));
     }
     let selected_symbols = parse_csv(query.symbols.as_deref(), true);
+    let theoretical_symbols = selected_symbols.clone();
     let start_ts_us = match query.start_ms {
         Some(value) => match milliseconds_to_microseconds(value, "startMs") {
             Ok(value) => Some(value),
@@ -625,12 +633,13 @@ async fn rebuild_timeline_snapshot(
     let snapshots = selected_snapshot_map(&snapshots, &selected_source_ids);
     let strategy_snapshots = selected_snapshot_map(&strategy_snapshots, &selected_source_ids);
     let fee_rates = postgres::load_fee_rates(&state.pool).await?;
+    let max_points = query.max_points.unwrap_or(3_000).clamp(200, 10_000);
     let request = nav::NavTimelineRequest {
         start_ts_us,
         end_ts_us,
         selected_source_ids,
         selected_symbols,
-        max_points: query.max_points.unwrap_or(3_000).clamp(200, 10_000),
+        max_points,
     };
     let config = Arc::clone(&state.config)
         .as_ref()
@@ -660,12 +669,25 @@ async fn rebuild_timeline_snapshot(
         }
         Err(error) => return Err(error.into()),
     };
+    let theoretical = if theoretical_symbols.is_empty() {
+        crate::theoretical_nav::load_timeline(
+            &state.pool,
+            report.start_ts_us,
+            report.end_ts_us,
+            &report.selected_source_ids,
+            max_points,
+        )
+        .await?
+    } else {
+        crate::theoretical_nav::TheoreticalNavTimeline::default()
+    };
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
 
     Ok(Ok(TimelineSnapshot {
         generated_at_us: data_generated_at_us,
         generation_duration_ms,
         report,
+        theoretical,
     }))
 }
 
@@ -1310,13 +1332,23 @@ async fn save_account_fee_rates(
         maker: request.maker_fee_rate,
         taker: request.taker_fee_rate,
     };
-    match postgres::save_fee_rates(&state.pool, &source_id, rates).await {
+    let theoretical_twap_fee_rate = match strategy_catalog::resolve_theoretical_twap_fee_rate(
+        rates.maker,
+        rates.taker,
+        request.theoretical_twap_fee_rate,
+    ) {
+        Ok(value) => value,
+        Err(error) => return Ok(bad_request(error)),
+    };
+    match postgres::save_fee_rates(&state.pool, &source_id, rates, theoretical_twap_fee_rate).await
+    {
         Ok(()) => {
             info!(
                 source_id,
                 maker_fee_rate = rates.maker,
                 taker_fee_rate = rates.taker,
-                "account maker/taker fee rates updated"
+                theoretical_twap_fee_rate,
+                "account fee rates updated"
             );
             if let Err(error) = refresh_dashboard_cache(&state).await {
                 error!(source_id, error = %error, "dashboard refresh after fee update failed");
@@ -1332,8 +1364,9 @@ async fn save_account_fee_rates(
                 source_id,
                 maker_fee_rate = rates.maker,
                 taker_fee_rate = rates.taker,
+                theoretical_twap_fee_rate,
                 error = %error,
-                "account maker/taker fee rate update failed"
+                "account fee rate update failed"
             );
             Ok(catalog_error(error))
         }
@@ -2632,6 +2665,7 @@ mod tests {
                 }],
                 sampled: false,
             },
+            theoretical: crate::theoretical_nav::TheoreticalNavTimeline::default(),
         }
     }
 

@@ -66,6 +66,8 @@ const DAY_MS = 86_400_000
 const seriesOptions: NavSeriesKey[] = [
   'nav_change_before_fee_quote',
   'nav_change_after_fee_quote',
+  'theoretical_nav_before_fee_quote',
+  'theoretical_nav_after_fee_quote',
   'realized_pnl_before_fee_quote',
   'floating_pnl_quote',
   'estimated_trading_fee_quote',
@@ -181,6 +183,8 @@ function NavPage() {
   const [visibleSeries, setVisibleSeries] = useState<NavSeriesKey[]>([
     'nav_change_before_fee_quote',
     'nav_change_after_fee_quote',
+    'theoretical_nav_before_fee_quote',
+    'theoretical_nav_after_fee_quote',
     'floating_pnl_quote',
   ])
   const [selectedSymbols, setSelectedSymbols] = useState<string[] | null>(null)
@@ -343,6 +347,14 @@ function NavPage() {
   )
   const noSymbolsSelected = selectedSymbols?.length === 0
   const noStrategiesSelected = selectedStrategies?.length === 0
+  const portfolioSeriesOptions =
+    selectedSymbols === null
+      ? seriesOptions
+      : seriesOptions.filter((key) => !key.startsWith('theoretical_'))
+  const portfolioVisibleSeries =
+    selectedSymbols === null
+      ? visibleSeries
+      : visibleSeries.filter((key) => !key.startsWith('theoretical_'))
   const totals = noSymbolsSelected
     ? ZERO_TOTALS
     : (timeline?.report.summary ?? null)
@@ -706,9 +718,10 @@ function NavPage() {
                 !(chartMode === 'strategies' && noStrategiesSelected) && (
                 <NavTimelineChart
                   points={timeline.report.points}
+                  theoreticalPoints={timeline.theoretical.points}
                   symbolPoints={timeline.report.symbol_points}
                   strategyPoints={visibleStrategyPoints}
-                  visibleSeries={visibleSeries}
+                  visibleSeries={portfolioVisibleSeries}
                   mode={chartMode}
                   feeMode={feeMode}
                 />
@@ -737,7 +750,7 @@ function NavPage() {
                   <strong>PNL</strong>
                 </div>
                 <div className="symbol-curve-picker__list">
-                  {seriesOptions.map((key) => (
+                  {portfolioSeriesOptions.map((key) => (
                     <label key={key}>
                       <input
                         type="checkbox"

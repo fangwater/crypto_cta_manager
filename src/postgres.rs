@@ -40,9 +40,10 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
             r#"
             INSERT INTO cta_order_sources (
                 source_id, account_label, venue_label, rocksdb_path, enabled,
-                estimated_fee_rate, maker_fee_rate, taker_fee_rate
+                estimated_fee_rate, maker_fee_rate, taker_fee_rate,
+                theoretical_twap_fee_rate
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (source_id) DO UPDATE SET
                 account_label = EXCLUDED.account_label,
                 venue_label = EXCLUDED.venue_label,
@@ -59,6 +60,7 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
         .bind(seed_fee_rates.taker)
         .bind(seed_fee_rates.maker)
         .bind(seed_fee_rates.taker)
+        .bind(seed_fee_rates.maker * 0.5 + seed_fee_rates.taker * 0.5)
         .execute(pool)
         .await
         .with_context(|| format!("failed to register source {}", source.id))?;
@@ -120,14 +122,61 @@ pub async fn load_fee_rate(pool: &PgPool, source_id: &str) -> Result<Option<FeeR
     .transpose()
 }
 
-pub async fn save_fee_rates(pool: &PgPool, source_id: &str, rates: FeeRates) -> Result<()> {
+pub async fn load_theoretical_twap_fee_rates(
+    pool: &PgPool,
+) -> Result<std::collections::BTreeMap<String, f64>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT source_id, theoretical_twap_fee_rate
+        FROM cta_order_sources
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load theoretical TWAP fee rates")?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let source_id: String = row.try_get("source_id")?;
+        let fee_rate: f64 = row.try_get("theoretical_twap_fee_rate")?;
+        validate_theoretical_twap_fee_rate(fee_rate)?;
+        out.insert(source_id, fee_rate);
+    }
+    Ok(out)
+}
+
+pub async fn load_theoretical_twap_fee_rate(pool: &PgPool, source_id: &str) -> Result<Option<f64>> {
+    let fee_rate = sqlx::query_scalar(
+        r#"
+        SELECT theoretical_twap_fee_rate
+        FROM cta_order_sources
+        WHERE source_id = $1
+        "#,
+    )
+    .bind(source_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to load theoretical TWAP fee rate for {source_id}"))?;
+    if let Some(fee_rate) = fee_rate {
+        validate_theoretical_twap_fee_rate(fee_rate)?;
+    }
+    Ok(fee_rate)
+}
+
+pub async fn save_fee_rates(
+    pool: &PgPool,
+    source_id: &str,
+    rates: FeeRates,
+    theoretical_twap_fee_rate: f64,
+) -> Result<()> {
     validate_fee_rates(rates)?;
+    validate_theoretical_twap_fee_rate(theoretical_twap_fee_rate)?;
     let result = sqlx::query(
         r#"
         UPDATE cta_order_sources
         SET maker_fee_rate = $2,
             taker_fee_rate = $3,
             estimated_fee_rate = $3,
+            theoretical_twap_fee_rate = $4,
             updated_at = now()
         WHERE source_id = $1
         "#,
@@ -135,9 +184,10 @@ pub async fn save_fee_rates(pool: &PgPool, source_id: &str, rates: FeeRates) -> 
     .bind(source_id)
     .bind(rates.maker)
     .bind(rates.taker)
+    .bind(theoretical_twap_fee_rate)
     .execute(pool)
     .await
-    .with_context(|| format!("failed to save estimated fee rate for {source_id}"))?;
+    .with_context(|| format!("failed to save account fee rates for {source_id}"))?;
     if result.rows_affected() == 0 {
         anyhow::bail!("source {source_id} is not registered in cta_order_sources");
     }
@@ -156,8 +206,16 @@ pub async fn save_estimated_fee_rate(
             maker: estimated_fee_rate,
             taker: estimated_fee_rate,
         },
+        estimated_fee_rate,
     )
     .await
+}
+
+fn validate_theoretical_twap_fee_rate(fee_rate: f64) -> Result<()> {
+    if !fee_rate.is_finite() {
+        anyhow::bail!("theoretical_twap_fee_rate must be finite");
+    }
+    Ok(())
 }
 
 pub async fn load_checkpoint(pool: &PgPool, source_id: &str) -> Result<Option<i64>> {

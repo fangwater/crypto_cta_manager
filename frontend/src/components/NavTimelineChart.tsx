@@ -8,11 +8,13 @@ import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { useEffect, useRef } from 'react'
 import type {
+  ActualNavSeriesKey,
   FeeMode,
   NavSeriesKey,
   NavTimelinePoint,
   StrategyNavTimeline,
   SymbolNavTimeline,
+  TheoreticalNavPoint,
   TimelineChartMode,
 } from '../types'
 import { strategyLabel, UI_FONT_SANS } from '../format'
@@ -27,6 +29,7 @@ echarts.use([
 
 interface Props {
   points: NavTimelinePoint[]
+  theoreticalPoints: TheoreticalNavPoint[]
   symbolPoints: SymbolNavTimeline[]
   strategyPoints: StrategyNavTimeline[]
   visibleSeries: NavSeriesKey[]
@@ -51,21 +54,35 @@ const symbolPalette = [
 
 export const navSeriesMeta: Record<
   NavSeriesKey,
-  { label: string; color: string; dashed?: boolean }
+  { label: string; color: string; lineType?: 'dashed' | 'dotted' }
 > = {
   nav_change_before_fee_quote: { label: '费前净值', color: '#2563a7' },
   nav_change_after_fee_quote: { label: '费后净值', color: '#176b5b' },
+  theoretical_nav_before_fee_quote: {
+    label: '理论费前（5m TWAP）',
+    color: '#7357a3',
+    lineType: 'dotted',
+  },
+  theoretical_nav_after_fee_quote: {
+    label: '理论费后（5m TWAP）',
+    color: '#a33f55',
+    lineType: 'dashed',
+  },
   realized_pnl_before_fee_quote: { label: '已实现盈亏', color: '#b7791f' },
   floating_pnl_quote: {
     label: '浮动盈亏',
     color: '#4b6478',
-    dashed: true,
+    lineType: 'dashed',
   },
   estimated_trading_fee_quote: {
     label: '估算手续费',
     color: '#c2413b',
-    dashed: true,
+    lineType: 'dashed',
   },
+}
+
+function isTheoreticalSeries(key: NavSeriesKey) {
+  return key.startsWith('theoretical_')
 }
 
 function money(value: number) {
@@ -86,6 +103,7 @@ function chartTime(value: number) {
 
 export function NavTimelineChart({
   points,
+  theoreticalPoints,
   symbolPoints,
   strategyPoints,
   visibleSeries,
@@ -104,17 +122,34 @@ export function NavTimelineChart({
       mode === 'portfolio'
         ? visibleSeries.map((key) => {
             const meta = navSeriesMeta[key]
+            const theoretical = isTheoreticalSeries(key)
+            const data = theoretical
+              ? theoreticalPoints.map((point) => [
+                  point.ts_us / 1_000,
+                  key === 'theoretical_nav_after_fee_quote'
+                    ? point.nav_change_after_fee_quote
+                    : point.nav_change_before_fee_quote,
+                ])
+              : points.map((point) => [
+                  point.ts_us / 1_000,
+                  point[key as ActualNavSeriesKey],
+                ])
             return {
               name: meta.label,
               type: 'line' as const,
-              data: points.map((point) => [point.ts_us / 1_000, point[key]]),
+              data,
               showSymbol: false,
               sampling: 'lttb' as const,
               connectNulls: true,
+              step: theoretical ? ('end' as const) : undefined,
               lineStyle: {
-                width: key === 'nav_change_after_fee_quote' ? 2.4 : 1.6,
+                width:
+                  key === 'nav_change_after_fee_quote' ||
+                  key === 'theoretical_nav_after_fee_quote'
+                    ? 2.4
+                    : 1.6,
                 color: meta.color,
-                type: meta.dashed ? ('dashed' as const) : ('solid' as const),
+                type: meta.lineType ?? ('solid' as const),
               },
               itemStyle: { color: meta.color },
               emphasis: { focus: 'series' as const },
@@ -223,7 +258,15 @@ export function NavTimelineChart({
       observer.disconnect()
       chart.dispose()
     }
-  }, [feeMode, mode, points, strategyPoints, symbolPoints, visibleSeries])
+  }, [
+    feeMode,
+    mode,
+    points,
+    strategyPoints,
+    symbolPoints,
+    theoreticalPoints,
+    visibleSeries,
+  ])
 
   return (
     <div

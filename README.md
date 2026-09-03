@@ -237,6 +237,31 @@ anchor, account-level initial snapshot positions remain unallocated because they
 do not contain historical strategy ownership. Once an immutable strategy
 allocation anchor exists, it replaces the older account anchor for that source.
 
+The portfolio view also overlays theoretical NAV before and after estimated
+fees. A background materializer consumes archived position updates by cursor,
+executes each nonzero binding-level target change once at the completed
+five-minute mid TWAP, and applies the synthetic fill to source/symbol/venue FIFO
+state. A later update to the same binding truncates the earlier five-minute
+window. Each account has an editable theoretical TWAP fee rate, initialized to
+the average of its Maker and Taker rates. The rate is frozen when the update is
+staged and stored with the synthetic fill, so later fee edits do not rewrite
+history. PostgreSQL stores only pending work, current target/FIFO
+state, skips, and one sparse event per nonzero synthetic symbol fill; it does
+not copy the 5-second BBO archive. While a source has a nonzero theoretical
+position, one source-level portfolio mark is materialized at most every five
+minutes from the latest completed 5-second mid; empty periods produce no mark
+rows. Pending rows and closed FIFO lots are deleted as they are consumed. The
+first run backfills only the configured TWAP retention window, currently 30
+days.
+
+The JSON returned by `GET /api/timeline` and `GET /api/account-timeline`
+contains the portfolio-only series under `theoretical`. Query-time work is a
+direct read of the last pre-window portfolio point plus stored points in the
+requested window. Account filters apply, but no theoretical per-symbol or
+per-strategy curves are exposed. The theoretical overlay is therefore hidden
+when the browser selects only part of the symbol universe. Like the factual
+timeline, returned values are rebased to zero at the selected window start.
+
 `GET /api/timeline` is the strategy-attribution timeline and uses the latest
 strategy allocation anchor when one exists. `GET /api/account-timeline` uses
 only the account-level PostgreSQL position snapshot and later RocksDB fills; it

@@ -16,6 +16,7 @@ pub mod reload_notify;
 pub mod rocks_source;
 pub mod snapshot;
 pub mod strategy_catalog;
+pub mod theoretical_nav;
 pub mod twap;
 pub mod viz_snapshot;
 pub mod web;

@@ -235,12 +235,17 @@ export function saveAccountFeeRates(
   sourceId: string,
   makerFeeRate: number,
   takerFeeRate: number,
+  theoreticalTwapFeeRate: number,
 ) {
   return requestJson<AccountStudio>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/fee-rates`,
     {
       method: 'PUT',
-      body: { maker_fee_rate: makerFeeRate, taker_fee_rate: takerFeeRate },
+      body: {
+        maker_fee_rate: makerFeeRate,
+        taker_fee_rate: takerFeeRate,
+        theoretical_twap_fee_rate: theoreticalTwapFeeRate,
+      },
     },
   )
 }

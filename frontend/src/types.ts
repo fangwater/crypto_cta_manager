@@ -180,6 +180,7 @@ export interface AccountStudio {
   estimated_fee_rate: number
   maker_fee_rate: number
   taker_fee_rate: number
+  theoretical_twap_fee_rate: number
   bindings: AccountBinding[]
 }
 
@@ -240,6 +241,25 @@ export interface TimelineSnapshot {
   generated_at_us: number
   generation_duration_ms: number
   report: NavTimelineReport
+  theoretical: TheoreticalNavTimeline
+}
+
+export interface TheoreticalNavPoint {
+  ts_us: number
+  nav_change_before_fee_quote: number
+  nav_change_after_fee_quote: number
+  estimated_trading_fee_quote: number
+}
+
+export interface TheoreticalNavTimeline {
+  valuation: string
+  execution_window_secs: number
+  price_basis: string
+  fee_basis: string
+  available_from_us: number | null
+  latest_point_ts_us: number | null
+  points: TheoreticalNavPoint[]
+  sampled: boolean
 }
 
 export interface ExecutionCostTotals {
@@ -367,12 +387,16 @@ export interface HealthResponse {
 export type FeeMode = 'after' | 'before'
 export type ChartMode = 'nav' | 'exposure'
 export type TimelineChartMode = 'portfolio' | 'symbols' | 'strategies'
-export type NavSeriesKey =
+export type ActualNavSeriesKey =
   | 'nav_change_before_fee_quote'
   | 'nav_change_after_fee_quote'
   | 'realized_pnl_before_fee_quote'
   | 'floating_pnl_quote'
   | 'estimated_trading_fee_quote'
+export type TheoreticalNavSeriesKey =
+  | 'theoretical_nav_before_fee_quote'
+  | 'theoretical_nav_after_fee_quote'
+export type NavSeriesKey = ActualNavSeriesKey | TheoreticalNavSeriesKey
 export type SymbolRow = AggregateSymbolNavReport & {
   venues?: VenueNavReport[]
 }

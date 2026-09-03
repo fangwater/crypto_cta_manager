@@ -441,12 +441,12 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'GET',
               path: `${ACCOUNT_PATH}`,
-              summary: '读取本账户的策略绑定、份数与 Maker/Taker 估算费率',
+              summary: '读取本账户的策略绑定、份数与三项估算费率',
             },
             {
               method: 'PUT',
               path: `${ACCOUNT_PATH}/fee-rates`,
-              summary: '更新 Maker/Taker 费率，接受任意有限小数，写入 PostgreSQL 并立即重算 NAV',
+              summary: '更新三项费率；事实 NAV 重算，理论费率从后续信号起生效',
             },
             {
               method: 'GET',
@@ -466,7 +466,7 @@ function buildChapters(gateway: string): Chapter[] {
 curl --noproxy '*' -sS -X PUT \\
   '${account}/fee-rates' \\
   -H 'Content-Type: application/json' \\
-  -d '{"maker_fee_rate":-0.00005,"taker_fee_rate":0.000146}'
+  -d '{"maker_fee_rate":-0.00005,"taker_fee_rate":0.000146,"theoretical_twap_fee_rate":0.000048}'
 
 curl --noproxy '*' -sS \\
   '${account}/contract-leverage?symbol=BTCUSDT'
@@ -480,6 +480,10 @@ curl --noproxy '*' -sS -X PUT \\
             {
               field: 'maker_fee_rate / taker_fee_rate',
               detail: '任意有限小数；负数表示返佣。保存后立即重算 Manager NAV，不改交易',
+            },
+            {
+              field: 'theoretical_twap_fee_rate',
+              detail: '理论 5 分钟 TWAP 成交费率；省略时取本次 Maker/Taker 平均值，可按账户修改',
             },
             {
               field: 'contract_leverage',
