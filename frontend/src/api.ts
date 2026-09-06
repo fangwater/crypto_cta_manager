@@ -11,7 +11,6 @@ import type {
   SavedPositionStrategy,
   SavedSymbolContractLeverage,
   ExecutionCostSnapshot,
-  PositionHistorySnapshot,
   TimelineSnapshot,
 } from './types'
 
@@ -75,27 +74,6 @@ export function getTimeline(query: TimelineQuery) {
 
 export function getAccountTimeline(query: TimelineQuery) {
   return getTimelineFromPath('/account-timeline', query)
-}
-
-export interface PositionHistoryQuery {
-  startMs?: number
-  endMs?: number
-  sourceIds?: string[]
-  symbols?: string[]
-  maxPoints?: number
-  signal?: AbortSignal
-}
-
-export function getPositionHistory(query: PositionHistoryQuery) {
-  const params = new URLSearchParams()
-  if (query.startMs !== undefined) params.set('startMs', String(query.startMs))
-  if (query.endMs !== undefined) params.set('endMs', String(query.endMs))
-  if (query.sourceIds?.length) params.set('sourceIds', query.sourceIds.join(','))
-  if (query.symbols?.length) params.set('symbols', query.symbols.join(','))
-  params.set('maxPoints', String(query.maxPoints ?? 1_000))
-  return requestJson<PositionHistorySnapshot>(`/position-history?${params}`, {
-    signal: query.signal,
-  })
 }
 
 function getTimelineFromPath(path: string, query: TimelineQuery) {
