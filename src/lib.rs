@@ -9,6 +9,7 @@ pub mod model;
 pub mod nav;
 pub mod order_config;
 pub mod position_archive;
+pub mod position_history;
 pub mod postgres;
 pub mod reconcile;
 pub mod redis_runtime;

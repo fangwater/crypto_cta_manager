@@ -329,6 +329,7 @@ async fn binance_signed_get(
         .header("X-MBX-APIKEY", &credentials.api_key)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("Binance GET {path} request failed"))?;
     let http_status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();

@@ -137,6 +137,7 @@ struct WebState {
     live_equity: LiveEquityHub,
     position_archive: Arc<PositionArchive>,
     twap: Arc<TwapStore>,
+    position_history: crate::position_history::DailyPositionHistory,
     viz_snapshot: VizSnapshotClient,
     refresh_interval_secs: u64,
 }
@@ -144,6 +145,16 @@ struct WebState {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TimelineQuery {
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    source_ids: Option<String>,
+    symbols: Option<String>,
+    max_points: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PositionHistoryQuery {
     start_ms: Option<i64>,
     end_ms: Option<i64>,
     source_ids: Option<String>,
@@ -315,6 +326,50 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .await;
     });
 
+    let history_config = config.clone();
+    let history_pool = pool.clone();
+    let position_history_service = crate::position_history::DailyPositionHistory::default();
+    let history = position_history_service.clone();
+    tokio::spawn(async move {
+        let period = Duration::from_secs(refresh_interval_secs);
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let mut snapshots = nav::SourcePositionSnapshots::new();
+            let mut snapshot_failed = false;
+            for source in history_config
+                .sources
+                .iter()
+                .filter(|source| source.enabled)
+            {
+                match postgres::load_latest_position_snapshot(&history_pool, &source.id).await {
+                    Ok(Some(snapshot)) => {
+                        snapshots.insert(source.id.clone(), snapshot);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        snapshot_failed = true;
+                        warn!(
+                            source_id = source.id,
+                            ?error,
+                            "position-history snapshot refresh failed"
+                        );
+                    }
+                }
+            }
+            if snapshot_failed {
+                continue;
+            }
+            if let Err(error) = history
+                .refresh_only(&history_pool, &history_config, &snapshots, unix_now_us())
+                .await
+            {
+                warn!(?error, "position-history background refresh failed");
+            }
+        }
+    });
+
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/nav/exchange", get(exchange_nav))
@@ -326,6 +381,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/manager_pnl_sdk.py", get(manager_sdk))
         .route("/api/dashboard", get(dashboard))
         .route("/api/timeline", get(timeline))
+        .route("/api/position-history", get(position_history))
         .route("/api/account-timeline", get(account_timeline))
         .route("/api/pnl/account", get(account_pnl_arrow))
         .route("/api/pnl/strategies", get(strategies_pnl_arrow))
@@ -405,6 +461,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             live_equity,
             position_archive,
             twap,
+            position_history: position_history_service,
             viz_snapshot,
             refresh_interval_secs,
         })
@@ -433,6 +490,102 @@ async fn dashboard(State(state): State<WebState>) -> impl IntoResponse {
         }
     }
     (NO_STORE, Json(dashboard))
+}
+
+async fn position_history(
+    State(state): State<WebState>,
+    Query(query): Query<PositionHistoryQuery>,
+) -> Result<Response, ApiError> {
+    if query.max_points == Some(0) {
+        return Ok(bad_request("maxPoints must be at least one".to_string()));
+    }
+    let end_ms = query.end_ms.unwrap_or_else(unix_now_ms);
+    let start_ms = query
+        .start_ms
+        .unwrap_or_else(|| end_ms.saturating_sub(3 * 24 * 60 * 60 * 1_000));
+    let requested_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    let source_ids = if requested_source_ids.is_empty() {
+        state
+            .config
+            .sources
+            .iter()
+            .filter(|source| source.enabled)
+            .map(|source| source.id.clone())
+            .collect()
+    } else {
+        requested_source_ids
+    };
+    if source_ids.is_empty() {
+        return Ok(bad_request(
+            "sourceIds selects no enabled sources".to_string(),
+        ));
+    }
+    let configured = state
+        .config
+        .sources
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if source_ids
+        .iter()
+        .any(|source_id| !configured.contains(source_id.as_str()))
+    {
+        return Ok(bad_request(
+            "sourceIds contains an unknown source".to_string(),
+        ));
+    }
+    let snapshots = load_position_history_snapshots(&state.pool, &source_ids).await?;
+    let generated_at_us = unix_now_us();
+    let result = state
+        .position_history
+        .load(
+            &state.pool,
+            &state.config,
+            &snapshots,
+            start_ms,
+            end_ms,
+            source_ids,
+            parse_csv(query.symbols.as_deref(), true),
+            query.max_points,
+            generated_at_us,
+        )
+        .await;
+    match result {
+        Ok(mut history) => {
+            let now_ms = unix_now_ms();
+            let current_equity = history
+                .selected_source_ids
+                .iter()
+                .map(|source_id| {
+                    let snapshot = state.live_equity.get(source_id);
+                    crate::position_history::CurrentEquityInput {
+                        source_id: source_id.clone(),
+                        equity_usdt: snapshot.as_ref().map(|snapshot| snapshot.equity_usdt),
+                        ts_ms: snapshot.as_ref().map(|snapshot| snapshot.ts_ms),
+                    }
+                })
+                .collect();
+            history.apply_current_equity(current_equity, now_ms);
+            Ok((NO_STORE, Json(history)).into_response())
+        }
+        Err(error) if error.to_string().contains("invalid position history range") => {
+            Ok(bad_request(error.to_string()))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn load_position_history_snapshots(
+    pool: &PgPool,
+    source_ids: &[String],
+) -> Result<nav::SourcePositionSnapshots> {
+    let mut snapshots = nav::SourcePositionSnapshots::new();
+    for source_id in source_ids {
+        if let Some(snapshot) = postgres::load_latest_position_snapshot(pool, source_id).await? {
+            snapshots.insert(source_id.clone(), snapshot);
+        }
+    }
+    Ok(snapshots)
 }
 
 async fn manager_publish_client() -> impl IntoResponse {

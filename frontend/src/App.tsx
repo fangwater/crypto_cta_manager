@@ -1,6 +1,7 @@
 import {
   Activity,
   CalendarRange,
+  ChartNoAxesCombined,
   Check,
   Clock3,
   Coins,
@@ -22,6 +23,7 @@ import { OrderStrategyPage } from './pages/config/OrderStrategyPage'
 import { AccountBindingsPage } from './pages/config/AccountBindingsPage'
 import { DocsPage } from './pages/DocsPage'
 import { ExecutionCostPage } from './pages/ExecutionCostPage'
+import { PositionHistoryPage } from './pages/PositionHistoryPage'
 import { normalizePath, readSourceId, routes } from './lib/routes'
 import {
   NavTimelineChart,
@@ -53,6 +55,7 @@ const UI_POLL_MS = 15_000
 const rangeOptions = [
   { key: 'ALL', days: null },
   { key: '1D', days: 1 },
+  { key: '3D', days: 3 },
   { key: '7D', days: 7 },
   { key: '30D', days: 30 },
 ] as const
@@ -60,7 +63,7 @@ const rangeOptions = [
 type QuickRange = (typeof rangeOptions)[number]['key']
 type PnlMode = 'strategy' | 'account'
 
-const DEFAULT_QUICK_RANGE: QuickRange = '1D'
+const DEFAULT_QUICK_RANGE: QuickRange = '3D'
 const DAY_MS = 86_400_000
 
 const seriesOptions: NavSeriesKey[] = [
@@ -168,6 +171,7 @@ export default function App() {
   if (path === '/manager/config/bindings') return <AccountBindingsPage />
   if (path === '/manager/docs') return <DocsPage />
   if (path === '/manager/execution-cost') return <ExecutionCostPage />
+  if (path === '/manager/positions') return <PositionHistoryPage />
   return <NavPage />
 }
 
@@ -239,9 +243,12 @@ function NavPage() {
     if (!dashboard || initialized.current) return
     initialized.current = true
     const nextEnd = Date.now()
+    const defaultDays = rangeOptions.find(
+      (option) => option.key === DEFAULT_QUICK_RANGE,
+    )?.days
     const nextStart = Math.max(
       scopeStartMs(dashboard, scope, nextEnd, pnlMode),
-      nextEnd - DAY_MS,
+      nextEnd - (defaultDays ?? 0) * DAY_MS,
     )
     setStartInput(toDatetimeLocal(nextStart))
     setEndInput(toDatetimeLocal(nextEnd))
@@ -498,6 +505,14 @@ function NavPage() {
               )}
             </time>
           </div>
+          <a
+            href={routes.positions(scope === 'all' ? undefined : scope)}
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-xs font-medium text-muted transition-colors hover:border-brand-ring hover:text-brand"
+            title="历史仓位"
+          >
+            <ChartNoAxesCombined size={15} />
+            <span className="hidden lg:inline">历史仓位</span>
+          </a>
           <button
             type="button"
             className="grid h-9 w-9 place-items-center rounded-lg border border-border bg-surface text-muted transition-colors hover:border-brand-ring hover:text-brand disabled:opacity-50"

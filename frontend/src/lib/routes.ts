@@ -12,6 +12,10 @@ export const routes = {
     `/manager/account/?source=${encodeURIComponent(sourceId)}`,
   nav: (sourceId?: string) =>
     sourceId ? `/manager/?source=${encodeURIComponent(sourceId)}` : '/manager/',
+  positions: (sourceId?: string) =>
+    sourceId
+      ? `/manager/positions/?source=${encodeURIComponent(sourceId)}`
+      : '/manager/positions/',
   executionCost: (sourceId?: string) =>
     sourceId
       ? `/manager/execution-cost/?source=${encodeURIComponent(sourceId)}`

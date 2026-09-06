@@ -286,6 +286,88 @@ push for every enabled source, including
 exchange timestamp, and freshness status. It is an in-memory latest snapshot,
 not a historical equity series and not part of the FIFO PnL totals.
 
+## Historical Positions And Leverage
+
+`/manager/positions/` shows account and per-symbol position history, with
+leverage calculated against current account-monitor IPC equity. This is
+not a historical equity series or the leverage actually observed in the past.
+This history is separate from
+the zero-based FIFO PnL timeline and from the venue's configured contract
+leverage. Quantities retain their sign; quantities of different symbols are
+never added together.
+
+Historical quantities are reconstructed from the existing immutable initial
+position snapshot and later Exec fills. Without a snapshot, reconstruction
+assumes zero initial quantity and starts at the first available fill.
+Valuation uses the latest fill price at or before each point, isolated by
+source, symbol, and venue. An explicit initial reference price is a labeled
+fallback only when no fill price is available at the anchor;
+missing prices remain unavailable rather than looking ahead to a future fill.
+This follows the order-reconstructed NAV valuation convention, not a live
+exchange mark-price valuation.
+
+Position history uses derived daily PostgreSQL checkpoints, kept separately
+from the immutable initial-position anchors. Each source's UTC-day checkpoint
+contains signed quantities and the last known fill-price state for each symbol
+and venue, including an explicit empty portfolio. The first initialization
+backfills these checkpoints from existing RocksDB history. Subsequent updates
+read the receive-key tail with a safety lag and overlap, retaining a small
+deduplication ledger rather than duplicating the full trade history.
+A background worker maintains them at the configured web refresh interval
+(normally 60 seconds), independently of browser visits and NAV refresh success.
+Each day also records the exclusive receive-key upper bound required for that
+event-time day; late fills raise that bound. This lets normal historical 1D/3D
+queries scan only the requested days while extending their tail when a late
+fill requires it.
+
+Queries restore a checkpoint preceding the requested window and reconstruct
+the intervening fills. The default window is 3D; both NAV and position pages
+also expose a 3D shortcut. Accounts are processed sequentially, with one history
+calculation active at a time and each account preserving fill chronology.
+There are no minute-by-minute position snapshots or additional exchange account
+requests. The existing FIFO NAV refresh is separate from this position-history
+path and still has its own reconstruction cost.
+
+Receive cursors, overlap fingerprints, and checkpoint changes commit together
+for each source. Newly received older fills repair the affected daily states;
+changes to the original anchor or an existing payload in the overlap trigger
+a rebuild. Arbitrary external edits to RocksDB keys older than the overlap
+require rebuilding the derived cache and are not detected by incremental scans.
+
+For every historical point, gross leverage is the sum of absolute position
+notionals at that point divided by current account equity captured for the
+response. Opposing positions across accounts or venues do not cancel in the
+numerator. For multiple selected accounts, sum their current equities before
+dividing. A symbol's contribution uses the full selected-account current equity
+denominator, unaffected by symbol filtering. The same historical positions can
+therefore produce different leverage values when current equity changes.
+
+The API identifies this basis as `current_account_equity` and supplies the
+current per-account equity values, IPC timestamps, and availability in
+`current_equity`. Existing point-level `equity_usdt` values are the current
+denominators, not historical observations. Missing or stale IPC observations
+(older than 45 seconds), or a nonpositive denominator, leave leverage
+unavailable while historical quantities and notionals remain visible. Missing
+accounts must not silently reduce the portfolio denominator.
+
+Only position history is persisted. This path neither archives nor estimates
+historical equity and does not add FIFO PnL state to daily checkpoints. Funding,
+deposits, and transfers are not reconstructed; their effects already reflected
+in the latest account-monitor equity need no separate estimation for this
+denominator.
+
+`GET /api/position-history` accepts camel-case `startMs`, `endMs`, comma-separated
+`sourceIds`, comma-separated `symbols`, and `maxPoints`. Browser requests use
+`/manager/api/position-history` through the existing Nginx gateway. Reads use
+daily checkpoints and the required RocksDB tail to build a bounded chart;
+they do not replay FIFO or call an exchange. The response retains source and venue
+identity and reports missing account coverage explicitly.
+
+Database integration tests require an isolated PostgreSQL database named by
+`CTA_POSITION_HISTORY_TEST_DATABASE_URL`. Run them with
+`cargo test --test daily_position_history -- --ignored --test-threads=1`.
+They are ignored in the default test run and must not target a live database.
+
 ## Strategy PnL Arrow Export
 
 `GET /api/pnl/strategy` returns raw PnL rows for exactly one enabled account

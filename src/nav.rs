@@ -50,6 +50,60 @@ impl NavSourceHistory {
 
 pub type NavSourceHistories = BTreeMap<String, NavSourceHistory>;
 
+/// A validated fill in the chronology used for CTA position reconstruction.
+/// `signed_quantity` is base quantity: buys are positive and sells negative.
+#[derive(Clone, Debug)]
+pub(crate) struct HistoricalFill {
+    pub ts_us: i64,
+    pub event_ts_us: i64,
+    pub record_key: String,
+    pub symbol: String,
+    pub venue_code: i16,
+    pub venue: String,
+    pub price: f64,
+    pub signed_quantity: f64,
+}
+
+pub(crate) fn historical_fills(
+    source: &SourceConfig,
+    events: &[UniformOrderEvent],
+) -> Result<Vec<HistoricalFill>> {
+    let mut ordered = events.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        fifo_ts_us(left)
+            .cmp(&fifo_ts_us(right))
+            .then_with(|| left.event_ts_us.cmp(&right.event_ts_us))
+            .then_with(|| left.record_key.cmp(&right.record_key))
+    });
+    ordered
+        .into_iter()
+        .filter_map(|event| match validated_fill_side(source, event) {
+            Ok(Some(Side::Buy)) => Some(Ok(HistoricalFill {
+                ts_us: fifo_ts_us(event),
+                event_ts_us: event.event_ts_us,
+                record_key: event.record_key.clone(),
+                symbol: event.symbol.clone(),
+                venue_code: event.venue_code,
+                venue: event.venue.clone(),
+                price: event.price,
+                signed_quantity: event.amount_update,
+            })),
+            Ok(Some(Side::Sell)) => Some(Ok(HistoricalFill {
+                ts_us: fifo_ts_us(event),
+                event_ts_us: event.event_ts_us,
+                record_key: event.record_key.clone(),
+                symbol: event.symbol.clone(),
+                venue_code: event.venue_code,
+                venue: event.venue.clone(),
+                price: event.price,
+                signed_quantity: -event.amount_update,
+            })),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
 const NAV_TICK_INTERVAL_US: i64 = 15 * 60 * 1_000_000;
 const BATCH_EXEC_FROM_KEY_PREFIX: &str = "batch_exec:";
 const INITIAL_POSITION_STRATEGY: &str = "__initial_position__";
