@@ -464,6 +464,9 @@ fn load_source_credentials(source: &SourceConfig) -> Result<ExchangeCredentials>
             env_path.display()
         )
     })?;
+    if crate::market_rules::execution_backend(&source.venue, &values)? != "native" {
+        bail!("native account APIs are disabled for RapidX sources; use the RapidX Exec adapter");
+    }
     match source.venue.as_str() {
         "binance-futures" => {
             let api_key = required_env(&values, "BINANCE_API_KEY")?;
@@ -505,7 +508,7 @@ fn load_source_credentials(source: &SourceConfig) -> Result<ExchangeCredentials>
     }
 }
 
-fn parse_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
+pub(crate) fn parse_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
     let raw =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut values = BTreeMap::new();

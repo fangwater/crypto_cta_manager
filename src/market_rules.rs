@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::config::SourceConfig;
 use crate::redis_runtime::RedisRuntime;
+mod rapidx;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,12 +31,22 @@ pub struct MarketRule {
 #[serde(deny_unknown_fields)]
 pub struct MarketRulesSnapshot {
     pub venue: String,
+    pub execution_backend: String,
+    pub portfolio_id: Option<String>,
     pub fetched_at_us: i64,
     pub symbols: BTreeMap<String, MarketRule>,
 }
 
 impl MarketRulesSnapshot {
     pub fn validate(&self) -> Result<()> {
+        match (
+            self.execution_backend.as_str(),
+            self.portfolio_id.as_deref(),
+        ) {
+            ("native", None) => {}
+            ("ltp", Some(id)) if self.venue != "binance-coin-futures" => validate_portfolio(id)?,
+            _ => bail!("invalid market-rules backend/account scope"),
+        }
         if !matches!(
             self.venue.as_str(),
             "binance-futures" | "binance-coin-futures" | "okex-futures"
@@ -101,42 +112,151 @@ pub fn spawn(sources: Vec<SourceConfig>, redis: RedisRuntime) {
 }
 
 async fn refresh_all(client: &Client, redis: &RedisRuntime, sources: &[SourceConfig]) {
-    let venues = sources
-        .iter()
-        .filter(|source| source.enabled)
-        .map(|source| source.venue.clone())
-        .collect::<BTreeSet<_>>();
-
-    for venue in venues {
-        let snapshot = match fetch_snapshot(client, &venue).await {
+    let mut native_snapshots = BTreeMap::new();
+    for source in sources.iter().filter(|source| source.enabled) {
+        let snapshot = match fetch_source_snapshot(client, source, &mut native_snapshots).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                warn!(venue, error = %error, "market-rules refresh failed; retaining last good snapshot");
+                warn!(source_id = source.id, error = %error, "market-rules refresh failed; retaining last good snapshot");
                 continue;
             }
         };
         let symbol_count = snapshot.symbols.len();
-        for source in sources
-            .iter()
-            .filter(|source| source.enabled && source.venue == venue)
-        {
-            match redis.publish_market_rules(source, &snapshot).await {
-                Ok(()) => info!(
-                    source_id = source.id,
-                    venue,
-                    fetched_at_us = snapshot.fetched_at_us,
-                    symbols = symbol_count,
-                    "market-rules snapshot published"
+        match redis.publish_market_rules(source, &snapshot).await {
+            Ok(()) => info!(
+                source_id = source.id,
+                venue = source.venue,
+                fetched_at_us = snapshot.fetched_at_us,
+                symbols = symbol_count,
+                "market-rules snapshot published"
+            ),
+            Err(error) => warn!(
+                source_id = source.id,
+                venue = source.venue,
+                error = %error,
+                "market-rules Redis publish failed; retaining last good snapshot"
+            ),
+        }
+    }
+}
+
+fn validate_portfolio(id: &str) -> Result<()> {
+    anyhow::ensure!(
+        !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_digit()),
+        "invalid RapidX portfolio identity"
+    );
+    Ok(())
+}
+
+pub(crate) fn execution_backend(
+    venue: &str,
+    values: &BTreeMap<String, String>,
+) -> Result<&'static str> {
+    let exchange = match venue {
+        "binance-futures" | "binance-coin-futures" => "binance",
+        "okex-futures" => "okex",
+        _ => bail!("unsupported rule venue"),
+    };
+    let parse = |value: &str| -> Result<&'static str> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "native" | "exchange" | "direct" => Ok("native"),
+            "ltp" | "rapidx" | "liquidity" | "liquiditytech" => Ok("ltp"),
+            _ => bail!("invalid execution backend in source env"),
+        }
+    };
+    let default = parse(
+        values
+            .get("TRADE_ENGINE_EXEC_BACKEND")
+            .map(String::as_str)
+            .unwrap_or(""),
+    )?;
+    let mut wildcard = None;
+    let mut specific = None;
+    for entry in values
+        .get("TRADE_ENGINE_EXEC_BACKEND_MAP")
+        .map(String::as_str)
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let (key, value) = entry
+            .split_once('=')
+            .context("backend map requires exchange=backend")?;
+        let backend = parse(value)?;
+        let key = key.trim().to_ascii_lowercase();
+        if key == "*" {
+            anyhow::ensure!(
+                wildcard.replace(backend).is_none(),
+                "duplicate wildcard backend mapping"
+            );
+        } else {
+            anyhow::ensure!(
+                matches!(
+                    key.as_str(),
+                    "binance" | "okex" | "bybit" | "bitget" | "gate" | "hyperliquid"
                 ),
-                Err(error) => warn!(
-                    source_id = source.id,
-                    venue,
-                    error = %error,
-                    "market-rules Redis publish failed; retaining last good snapshot"
-                ),
+                "unknown exchange in backend map"
+            );
+            if key == exchange {
+                anyhow::ensure!(
+                    specific.replace(backend).is_none(),
+                    "duplicate exchange backend mapping"
+                );
             }
         }
     }
+    let backend = specific.or(wildcard).unwrap_or(default);
+    anyhow::ensure!(
+        backend == "native" || venue != "binance-coin-futures",
+        "RapidX coin futures rules are unsupported"
+    );
+    Ok(backend)
+}
+
+fn source_values(source: &SourceConfig) -> Result<BTreeMap<String, String>> {
+    let path = source.env_path();
+    match std::fs::metadata(&path) {
+        Ok(_) => crate::exchange_leverage::parse_env_file(&path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && source.env_path.is_none() => {
+            // Public native rules remain available for sources without a local Exec.
+            // RapidX Exec rejects this native provenance until its env is supplied.
+            Ok(BTreeMap::new())
+        }
+        Err(err) => Err(err).context("read source environment metadata"),
+    }
+}
+
+async fn fetch_source_snapshot(
+    client: &Client,
+    source: &SourceConfig,
+    native_snapshots: &mut BTreeMap<String, MarketRulesSnapshot>,
+) -> Result<MarketRulesSnapshot> {
+    let values = source_values(source)?;
+    let backend = execution_backend(&source.venue, &values)?;
+    if backend == "native" {
+        if let Some(snapshot) = native_snapshots.get(&source.venue) {
+            return Ok(snapshot.clone());
+        }
+        let snapshot = fetch_snapshot(client, &source.venue).await?;
+        native_snapshots.insert(source.venue.clone(), snapshot.clone());
+        return Ok(snapshot);
+    }
+    let portfolio = values
+        .get("LTP_PORTFOLIO_ID")
+        .context("LTP_PORTFOLIO_ID missing from source env")?;
+    validate_portfolio(portfolio)?;
+    // All RapidX source requests share this worker; even failed requests stay paced.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let snapshot = MarketRulesSnapshot {
+        venue: source.venue.clone(),
+        execution_backend: backend.into(),
+        portfolio_id: Some(portfolio.clone()),
+        fetched_at_us: now_us(),
+        symbols: rapidx::fetch(client, &source.venue, &values).await?,
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
 }
 
 async fn fetch_snapshot(client: &Client, venue: &str) -> Result<MarketRulesSnapshot> {
@@ -148,6 +268,8 @@ async fn fetch_snapshot(client: &Client, venue: &str) -> Result<MarketRulesSnaps
     };
     let snapshot = MarketRulesSnapshot {
         venue: venue.to_string(),
+        execution_backend: "native".into(),
+        portfolio_id: None,
         fetched_at_us: now_us(),
         symbols,
     };
@@ -345,6 +467,52 @@ fn now_us() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn source_backend_matches_exec_mapping_precedence_and_fails_closed() {
+        for mapping in ["*=native,okex=rapidx", "okex=rapidx,*=native"] {
+            let values = BTreeMap::from([("TRADE_ENGINE_EXEC_BACKEND_MAP".into(), mapping.into())]);
+            assert_eq!(execution_backend("okex-futures", &values).unwrap(), "ltp");
+            assert_eq!(
+                execution_backend("binance-futures", &values).unwrap(),
+                "native"
+            );
+        }
+        for mapping in [
+            "okx=rapidx",
+            "okex=typo",
+            "okex=rapidx,okex=native",
+            "*=native,*=rapidx",
+            "rapidx",
+        ] {
+            let values = BTreeMap::from([("TRADE_ENGINE_EXEC_BACKEND_MAP".into(), mapping.into())]);
+            assert!(execution_backend("okex-futures", &values).is_err());
+        }
+        let values = BTreeMap::from([("TRADE_ENGINE_EXEC_BACKEND".into(), "rapidx".into())]);
+        assert!(execution_backend("binance-coin-futures", &values).is_err());
+        assert!(validate_portfolio("../123").is_err());
+        assert!(validate_portfolio("123").is_ok());
+    }
+
+    #[test]
+    fn explicit_missing_env_never_falls_back_to_native() {
+        let root = tempfile::tempdir().unwrap();
+        let mut source: SourceConfig = toml::from_str(&format!(
+            "id='fixture'\naccount='fixture'\nvenue='okex-futures'\nrocksdb_path='{}'\n",
+            root.path().join("data/persist_manager").display()
+        ))
+        .unwrap();
+        assert!(source_values(&source).unwrap().is_empty());
+        source.env_path = Some(root.path().join("missing.env"));
+        assert!(source_values(&source).is_err());
+        let path = root.path().join("fixture.env");
+        std::fs::write(&path, "export TRADE_ENGINE_EXEC_BACKEND_MAP='binance=native,okex=rapidx'\nexport LTP_PORTFOLIO_ID='123'\n").unwrap();
+        source.env_path = Some(path);
+        let values = source_values(&source).unwrap();
+        assert_eq!(execution_backend(&source.venue, &values).unwrap(), "ltp");
+        assert_eq!(values["LTP_PORTFOLIO_ID"], "123");
+    }
 
     #[test]
     fn parses_binance_unicode_symbol_filters() {
@@ -416,6 +584,8 @@ mod tests {
     fn rejects_non_positive_rule_values() {
         let snapshot = MarketRulesSnapshot {
             venue: "binance-futures".to_string(),
+            execution_backend: "native".into(),
+            portfolio_id: None,
             fetched_at_us: 1,
             symbols: BTreeMap::from([(
                 "BTCUSDT".to_string(),
@@ -438,6 +608,8 @@ mod tests {
     fn wire_contract_has_one_unversioned_shape() {
         let snapshot = MarketRulesSnapshot {
             venue: "binance-futures".to_string(),
+            execution_backend: "native".into(),
+            portfolio_id: None,
             fetched_at_us: 1,
             symbols: BTreeMap::from([(
                 "BTCUSDT".to_string(),
@@ -463,6 +635,8 @@ mod tests {
         assert_eq!(
             fields,
             BTreeSet::from([
+                "execution_backend".to_string(),
+                "portfolio_id".to_string(),
                 "fetched_at_us".to_string(),
                 "symbols".to_string(),
                 "venue".to_string(),
