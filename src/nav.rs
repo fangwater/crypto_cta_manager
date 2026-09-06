@@ -180,6 +180,8 @@ pub struct NavReport {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct NavTimelinePoint {
     pub ts_us: i64,
+    pub gross_position_value_quote: f64,
+    pub net_position_value_quote: f64,
     #[serde(flatten)]
     pub totals: NavTotals,
 }
@@ -2222,6 +2224,31 @@ fn timeline_totals_by_symbol(runtimes: &[TimelineSourceState]) -> BTreeMap<Strin
     totals
 }
 
+fn timeline_position_values(
+    runtimes: &[TimelineSourceState],
+    selected_symbols: &[String],
+) -> (f64, f64) {
+    let selected = selected_symbols.iter().collect::<BTreeSet<_>>();
+    let mut gross = 0.0;
+    let mut net = 0.0;
+    for runtime in runtimes {
+        for ((symbol, venue_code), state) in &runtime.states {
+            if !selected.contains(symbol) {
+                continue;
+            }
+            let mark = runtime
+                .latest_marks
+                .get(&(symbol.clone(), *venue_code))
+                .copied();
+            let report = state.report(mark);
+            gross +=
+                report.long_position_value_quote.abs() + report.short_position_value_quote.abs();
+            net += report.net_position_value_quote;
+        }
+    }
+    (clean_zero(gross), clean_zero(net))
+}
+
 fn timeline_totals_by_strategy_symbol(
     runtimes: &[TimelineSourceState],
 ) -> BTreeMap<(String, String), NavTotals> {
@@ -2326,6 +2353,8 @@ fn push_timeline_sample(
 ) {
     let current_by_symbol = timeline_totals_by_symbol(runtimes);
     let current_by_strategy_symbol = timeline_totals_by_strategy_symbol(runtimes);
+    let (gross_position_value_quote, net_position_value_quote) =
+        timeline_position_values(runtimes, selected_symbols);
     let mut portfolio_totals = NavTotals::default();
     for symbol in selected_symbols {
         portfolio_totals.add(
@@ -2340,15 +2369,21 @@ fn push_timeline_sample(
         points,
         NavTimelinePoint {
             ts_us,
+            gross_position_value_quote,
+            net_position_value_quote,
             totals: portfolio_totals.cleaned(),
         },
     );
     for symbol in selected_symbols {
         if let Some(symbol_points) = points_by_symbol.get_mut(symbol) {
+            let (gross_position_value_quote, net_position_value_quote) =
+                timeline_position_values(runtimes, std::slice::from_ref(symbol));
             push_or_replace_timeline_point(
                 symbol_points,
                 NavTimelinePoint {
                     ts_us,
+                    gross_position_value_quote,
+                    net_position_value_quote,
                     totals: current_by_symbol
                         .get(symbol)
                         .copied()
@@ -2375,6 +2410,8 @@ fn push_timeline_sample(
                 strategy_points,
                 NavTimelinePoint {
                     ts_us,
+                    gross_position_value_quote: 0.0,
+                    net_position_value_quote: 0.0,
                     totals: totals.cleaned(),
                 },
             );
@@ -2423,11 +2460,13 @@ fn downsample_timeline_points(
     points: Vec<NavTimelinePoint>,
     max_points: usize,
 ) -> Vec<NavTimelinePoint> {
-    const VALUE_SELECTORS: [fn(&NavTimelinePoint) -> f64; 4] = [
+    const VALUE_SELECTORS: [fn(&NavTimelinePoint) -> f64; 6] = [
         |point| point.totals.nav_change_before_fee_quote,
         |point| point.totals.nav_change_after_fee_quote,
         |point| point.totals.realized_pnl_before_fee_quote,
         |point| point.totals.floating_pnl_quote,
+        |point| point.gross_position_value_quote,
+        |point| point.net_position_value_quote,
     ];
 
     if points.len() <= max_points || max_points < 10 {
@@ -3704,10 +3743,14 @@ mod tests {
     fn same_timestamp_timeline_points_are_replaced() {
         let mut points = vec![NavTimelinePoint {
             ts_us: 10,
+            gross_position_value_quote: 0.0,
+            net_position_value_quote: 0.0,
             totals: NavTotals::default(),
         }];
         let replacement = NavTimelinePoint {
             ts_us: 10,
+            gross_position_value_quote: 0.0,
+            net_position_value_quote: 0.0,
             totals: NavTotals {
                 nav_change_before_fee_quote: 12.0,
                 ..NavTotals::default()

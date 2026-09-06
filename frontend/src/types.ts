@@ -204,6 +204,8 @@ export interface DashboardSnapshot {
 
 export interface NavTimelinePoint extends NavTotals {
   ts_us: number
+  gross_position_value_quote: number
+  net_position_value_quote: number
 }
 
 export interface SymbolNavTimeline {

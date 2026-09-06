@@ -2632,10 +2632,14 @@ mod tests {
         let points = vec![
             nav::NavTimelinePoint {
                 ts_us: 1_000,
+                gross_position_value_quote: 0.0,
+                net_position_value_quote: 0.0,
                 totals: nav::NavTotals::default(),
             },
             nav::NavTimelinePoint {
                 ts_us: 2_000,
+                gross_position_value_quote: 100.0,
+                net_position_value_quote: 100.0,
                 totals,
             },
         ];

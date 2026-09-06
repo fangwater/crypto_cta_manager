@@ -27,6 +27,7 @@ import {
   NavTimelineChart,
   navSeriesMeta,
 } from './components/NavTimelineChart'
+import { PositionLeverageChart } from './components/PositionLeverageChart'
 import {
   feeBps,
   integer,
@@ -358,6 +359,26 @@ function NavPage() {
   const totals = noSymbolsSelected
     ? ZERO_TOTALS
     : (timeline?.report.summary ?? null)
+  const leverageEquityUsdt = useMemo(() => {
+    const accounts = (dashboard?.accounts ?? []).filter(
+      (account) => scope === 'all' || account.source_id === scope,
+    )
+    if (
+      accounts.length === 0 ||
+      accounts.some(
+        (account) =>
+          account.live_equity_status !== 'ok' ||
+          !Number.isFinite(account.live_equity_usdt) ||
+          (account.live_equity_usdt ?? 0) <= 0,
+      )
+    ) {
+      return null
+    }
+    return accounts.reduce(
+      (total, account) => total + (account.live_equity_usdt ?? 0),
+      0,
+    )
+  }, [dashboard, scope])
   const effectiveStartMs = dashboard
     ? scopeStartMs(dashboard, scope, endMs ?? Date.now(), pnlMode)
     : 0
@@ -869,6 +890,39 @@ function NavPage() {
               {timeline.report.sampled && <span>sampled</span>}
             </div>
           )}
+        </section>
+
+        <section className="chart-section" aria-labelledby="position-chart-title">
+          <div className="panel-heading pnl-chart-header">
+            <div>
+              <p className="eyebrow">POSITION / LEVERAGE</p>
+              <h2 id="position-chart-title">仓位与杠杆率</h2>
+            </div>
+            <span className="symbol-series-count">
+              {chartMode === 'symbols' ? '分币净仓位' : '组合仓位'}
+              {leverageEquityUsdt === null ? '，权益不可用' : ''}
+            </span>
+          </div>
+          <div className="chart-body">
+            <div className="chart-stage">
+              {timeline && !noSymbolsSelected && (
+                <PositionLeverageChart
+                  points={timeline.report.points}
+                  symbolPoints={timeline.report.symbol_points}
+                  mode={chartMode === 'symbols' ? 'symbols' : 'portfolio'}
+                  equityUsdt={leverageEquityUsdt}
+                />
+              )}
+              {noSymbolsSelected && <div className="chart-empty">当前未选择币种</div>}
+              {!timeline && !timelineLoading && <div className="chart-empty">暂无仓位时间线</div>}
+              {timelineLoading && (
+                <div className="chart-loading">
+                  <LoaderCircle size={20} />
+                  <span>计算中</span>
+                </div>
+              )}
+            </div>
+          </div>
         </section>
 
         {pnlMode === 'strategy' && (
