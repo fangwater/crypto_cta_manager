@@ -42,18 +42,6 @@ struct RecentRecord {
     fingerprint: String,
 }
 
-struct BootstrapCheckpoint {
-    day_start_us: i64,
-    fills_recv_end_us: i64,
-    positions: Vec<StoredPosition>,
-}
-
-struct BootstrapPlan {
-    effective_anchor_ts_us: Option<i64>,
-    checkpoints: Vec<BootstrapCheckpoint>,
-    recent_records: Vec<RecentRecord>,
-}
-
 #[derive(Clone, Debug)]
 struct ScannedSource {
     events: Vec<crate::model::UniformOrderEvent>,
@@ -849,26 +837,97 @@ impl DailyPositionHistory {
         })
         .await
         .context("position history initial reader failed")??;
-        let source_for_plan = source.clone();
-        let snapshot_for_plan = snapshot.cloned();
-        let overlap_us = overlap_us(config);
-        let plan = tokio::task::spawn_blocking(move || {
-            build_bootstrap_plan(
-                &source_for_plan,
-                snapshot_for_plan.as_ref(),
-                events,
-                cutoff_us,
-                overlap_us,
-            )
-        })
-        .await
-        .context("position history initial planner failed")??;
-        for checkpoint in plan.checkpoints {
-            sqlx::query("INSERT INTO cta_position_history_daily_checkpoints (source_id, day_start_us, anchor_fingerprint, fills_recv_end_us, positions) VALUES ($1,$2,$3,$4,$5)")
-                .bind(&source.id).bind(checkpoint.day_start_us).bind(&fingerprint).bind(checkpoint.fills_recv_end_us).bind(serde_json::to_value(checkpoint.positions)?).execute(&mut *connection).await?;
+        let mut fills = events
+            .iter()
+            .filter_map(|event| fill_from_event(source, event).transpose())
+            .collect::<Result<Vec<_>>>()?;
+        fills.sort_by(|left, right| {
+            left.ts_us
+                .cmp(&right.ts_us)
+                .then_with(|| left.event_ts_us.cmp(&right.event_ts_us))
+                .then_with(|| left.record_key.cmp(&right.record_key))
+        });
+        let anchor_ts = snapshot
+            .map(|value| value.snapshot_ts_us)
+            .or_else(|| fills.first().map(|fill| fill.ts_us));
+        let Some(anchor_ts) = anchor_ts else {
+            sqlx::query("INSERT INTO cta_position_history_sources (source_id, anchor_fingerprint, effective_anchor_ts_us, scanned_recv_ts_us, recent_records) VALUES ($1,$2,$3,$4,$5)")
+                .bind(&source.id).bind(fingerprint).bind(Option::<i64>::None).bind(cutoff_us).bind(serde_json::json!([])).execute(&mut *connection).await?;
+            return Ok(());
+        };
+        let mut state = BTreeMap::<(String, i16), StoredPosition>::new();
+        for position in snapshot
+            .map(|value| value.positions.as_slice())
+            .unwrap_or_default()
+        {
+            let prior = fills
+                .iter()
+                .filter(|fill| {
+                    fill.ts_us <= anchor_ts
+                        && fill.symbol == position.symbol
+                        && fill.venue_code == position.venue_code
+                })
+                .last();
+            state.insert(
+                (position.symbol.clone(), position.venue_code),
+                StoredPosition {
+                    symbol: position.symbol.clone(),
+                    venue_code: position.venue_code,
+                    venue: crate::model::venue_name(position.venue_code as u8),
+                    quantity: position.quantity,
+                    last_price: prior.map(|fill| fill.price).or(position.reference_price),
+                    valuation_source: prior.map(|_| "last_fill".to_string()).or_else(|| {
+                        position
+                            .reference_price
+                            .map(|_| "initial_reference".to_string())
+                    }),
+                    last_fill_ts_us: prior.map(|fill| fill.ts_us),
+                    last_fill_event_ts_us: prior.map(|fill| fill.event_ts_us),
+                    last_fill_record_key: prior.map(|fill| fill.record_key.clone()),
+                },
+            );
         }
+        let first_day = floor_day(anchor_ts);
+        let today = floor_day(cutoff_us);
+        let mut recv_end_by_day = BTreeMap::<i64, i64>::new();
+        for fill in &fills {
+            if snapshot.is_none_or(|anchor| fill.ts_us > anchor.snapshot_ts_us) {
+                let day = floor_day(fill.ts_us);
+                recv_end_by_day
+                    .entry(day)
+                    .and_modify(|end| *end = (*end).max(fill.recv_ts_us.saturating_add(1)))
+                    .or_insert(fill.recv_ts_us.saturating_add(1));
+            }
+        }
+        let mut fill_index = 0;
+        while snapshot.is_some() && fill_index < fills.len() && fills[fill_index].ts_us <= anchor_ts
+        {
+            fill_index += 1;
+        }
+        let mut day = first_day;
+        while day <= today {
+            sqlx::query("INSERT INTO cta_position_history_daily_checkpoints (source_id, day_start_us, anchor_fingerprint, fills_recv_end_us, positions) VALUES ($1,$2,$3,$4,$5)")
+                .bind(&source.id).bind(day).bind(&fingerprint).bind(recv_end_by_day.get(&day).copied().unwrap_or_else(|| day.saturating_add(DAY_US))).bind(serde_json::to_value(state.values().collect::<Vec<_>>())?).execute(&mut *connection).await?;
+            let next = day.saturating_add(DAY_US);
+            while fill_index < fills.len() && fills[fill_index].ts_us < next {
+                apply_state(&mut state, &fills[fill_index]);
+                fill_index += 1;
+            }
+            day = next;
+        }
+        let overlap_us = overlap_us(config);
+        let recent = events
+            .iter()
+            .filter(|event| event.recv_ts_us >= cutoff_us.saturating_sub(overlap_us))
+            .map(|event| {
+                Ok(RecentRecord {
+                    record_key: event.record_key.clone(),
+                    fingerprint: event_fingerprint(event)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         sqlx::query("INSERT INTO cta_position_history_sources (source_id, anchor_fingerprint, effective_anchor_ts_us, scanned_recv_ts_us, recent_records) VALUES ($1,$2,$3,$4,$5)")
-            .bind(&source.id).bind(&fingerprint).bind(plan.effective_anchor_ts_us).bind(cutoff_us).bind(serde_json::to_value(plan.recent_records)?).execute(&mut *connection).await?;
+            .bind(&source.id).bind(&fingerprint).bind(anchor_ts).bind(cutoff_us).bind(serde_json::to_value(recent)?).execute(&mut *connection).await?;
         Ok(())
     }
 
@@ -1074,115 +1133,6 @@ fn fill_from_event(
             signed_quantity: fill.signed_quantity,
             venue: fill.venue,
         }))
-}
-
-fn build_bootstrap_plan(
-    source: &SourceConfig,
-    snapshot: Option<&PositionSnapshot>,
-    events: Vec<crate::model::UniformOrderEvent>,
-    cutoff_us: i64,
-    overlap_us: i64,
-) -> Result<BootstrapPlan> {
-    let mut fills = events
-        .iter()
-        .filter_map(|event| fill_from_event(source, event).transpose())
-        .collect::<Result<Vec<_>>>()?;
-    fills.sort_by(|left, right| {
-        left.ts_us
-            .cmp(&right.ts_us)
-            .then_with(|| left.event_ts_us.cmp(&right.event_ts_us))
-            .then_with(|| left.record_key.cmp(&right.record_key))
-    });
-    let anchor_ts = snapshot
-        .map(|value| value.snapshot_ts_us)
-        .or_else(|| fills.first().map(|fill| fill.ts_us));
-    let recent_records = events
-        .iter()
-        .filter(|event| event.recv_ts_us >= cutoff_us.saturating_sub(overlap_us))
-        .map(|event| {
-            Ok(RecentRecord {
-                record_key: event.record_key.clone(),
-                fingerprint: event_fingerprint(event)?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let Some(anchor_ts) = anchor_ts else {
-        return Ok(BootstrapPlan {
-            effective_anchor_ts_us: None,
-            checkpoints: Vec::new(),
-            recent_records: Vec::new(),
-        });
-    };
-    let mut state = BTreeMap::<(String, i16), StoredPosition>::new();
-    for position in snapshot
-        .map(|value| value.positions.as_slice())
-        .unwrap_or_default()
-    {
-        let prior = fills
-            .iter()
-            .filter(|fill| {
-                fill.ts_us <= anchor_ts
-                    && fill.symbol == position.symbol
-                    && fill.venue_code == position.venue_code
-            })
-            .last();
-        state.insert(
-            (position.symbol.clone(), position.venue_code),
-            StoredPosition {
-                symbol: position.symbol.clone(),
-                venue_code: position.venue_code,
-                venue: crate::model::venue_name(position.venue_code as u8),
-                quantity: position.quantity,
-                last_price: prior.map(|fill| fill.price).or(position.reference_price),
-                valuation_source: prior.map(|_| "last_fill".to_string()).or_else(|| {
-                    position
-                        .reference_price
-                        .map(|_| "initial_reference".to_string())
-                }),
-                last_fill_ts_us: prior.map(|fill| fill.ts_us),
-                last_fill_event_ts_us: prior.map(|fill| fill.event_ts_us),
-                last_fill_record_key: prior.map(|fill| fill.record_key.clone()),
-            },
-        );
-    }
-    let mut recv_end_by_day = BTreeMap::<i64, i64>::new();
-    for fill in &fills {
-        if snapshot.is_none_or(|anchor| fill.ts_us > anchor.snapshot_ts_us) {
-            let day = floor_day(fill.ts_us);
-            recv_end_by_day
-                .entry(day)
-                .and_modify(|end| *end = (*end).max(fill.recv_ts_us.saturating_add(1)))
-                .or_insert(fill.recv_ts_us.saturating_add(1));
-        }
-    }
-    let mut fill_index = 0;
-    while snapshot.is_some() && fill_index < fills.len() && fills[fill_index].ts_us <= anchor_ts {
-        fill_index += 1;
-    }
-    let mut checkpoints = Vec::new();
-    let mut day = floor_day(anchor_ts);
-    let today = floor_day(cutoff_us);
-    while day <= today {
-        checkpoints.push(BootstrapCheckpoint {
-            day_start_us: day,
-            fills_recv_end_us: recv_end_by_day
-                .get(&day)
-                .copied()
-                .unwrap_or_else(|| day.saturating_add(DAY_US)),
-            positions: state.values().cloned().collect(),
-        });
-        let next = day.saturating_add(DAY_US);
-        while fill_index < fills.len() && fills[fill_index].ts_us < next {
-            apply_state(&mut state, &fills[fill_index]);
-            fill_index += 1;
-        }
-        day = next;
-    }
-    Ok(BootstrapPlan {
-        effective_anchor_ts_us: Some(anchor_ts),
-        checkpoints,
-        recent_records,
-    })
 }
 
 fn apply_state(state: &mut BTreeMap<(String, i16), StoredPosition>, fill: &Fill) {
