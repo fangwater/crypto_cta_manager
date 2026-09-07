@@ -361,7 +361,10 @@ function NavPage() {
     : (timeline?.report.summary ?? null)
   const leverageEquityUsdt = useMemo(() => {
     const accounts = (dashboard?.accounts ?? []).filter(
-      (account) => scope === 'all' || account.source_id === scope,
+      (account) =>
+        account.enabled &&
+        (scope === 'all' || account.source_id === scope) &&
+        (timeline?.report.selected_source_ids ?? []).includes(account.source_id),
     )
     if (
       accounts.length === 0 ||
@@ -378,7 +381,7 @@ function NavPage() {
       (total, account) => total + (account.live_equity_usdt ?? 0),
       0,
     )
-  }, [dashboard, scope])
+  }, [dashboard, scope, timeline])
   const effectiveStartMs = dashboard
     ? scopeStartMs(dashboard, scope, endMs ?? Date.now(), pnlMode)
     : 0
