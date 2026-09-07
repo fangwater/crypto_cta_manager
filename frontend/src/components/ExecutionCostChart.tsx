@@ -74,7 +74,8 @@ export function ExecutionCostChart({ points }: Props) {
         backgroundColor: 'rgba(255,255,255,0.97)',
         borderColor: '#d7dbe2',
         textStyle: { color: '#20252d', fontSize: 12 },
-        valueFormatter: (value: unknown) => `${Number(value).toFixed(2)} bps`,
+        valueFormatter: (value: unknown) =>
+          value == null ? '--' : `${Number(value).toFixed(2)} bps`,
         axisPointer: {
           type: 'line',
           lineStyle: { color: '#8993a4', type: 'dashed' },

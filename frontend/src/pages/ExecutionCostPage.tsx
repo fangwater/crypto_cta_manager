@@ -287,7 +287,7 @@ export function ExecutionCostPage() {
           <CardHeader>
             <CardTitle>成交额加权价格滑点</CardTitle>
             <CardDescription>
-              实际与 TWAP 使用相同的实际成交量；手续费不进入曲线。相对 TWAP 为正表示实际执行更差。
+              实际与 TWAP 使用相同的实际成交量；手续费不进入曲线。累计至少 20 笔且 1,000 USDT 可比成交后开始绘制，避免早期小样本毛刺。相对 TWAP 为正表示实际执行更差。
             </CardDescription>
           </CardHeader>
           <CardContent>

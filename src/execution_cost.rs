@@ -18,6 +18,8 @@ pub const MAX_PAGE_SIZE: usize = 100;
 pub const MINUTE_TWAP_SECS: u64 = 60;
 const MINUTE_US: i64 = 60_000_000;
 const MAX_COST_POINTS: usize = 2_000;
+const MIN_CHART_COMPARABLE_FILLS: u64 = 20;
+const MIN_CHART_COMPARABLE_NOTIONAL_USDT: f64 = 1_000.0;
 const ARRIVAL_LOOKBACK_US: i64 = 10_000_000;
 const ARRIVAL_MAX_AGE_US: i64 = 10_000_000;
 
@@ -134,9 +136,9 @@ pub struct ExecutionCostPoint {
     pub actual_price_slippage_usdt: f64,
     pub twap_price_slippage_on_filled_usdt: f64,
     pub shortfall_vs_twap_usdt: f64,
-    pub actual_slippage_bps: f64,
-    pub twap_slippage_bps: f64,
-    pub shortfall_vs_twap_bps: f64,
+    pub actual_slippage_bps: Option<f64>,
+    pub twap_slippage_bps: Option<f64>,
+    pub shortfall_vs_twap_bps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -327,6 +329,7 @@ pub fn report_execution_cost(
         totals.add(update.totals);
         if update.totals.actual_fill_count > 0 {
             executions.push((*index, *msg, window_end_us));
+            let chart_bps = chart_bps(&totals);
             points.push(ExecutionCostPoint {
                 ts_us: msg.received_at_us,
                 twap_cost_before_fee_usdt: totals.twap_cost_before_fee_usdt,
@@ -336,9 +339,9 @@ pub fn report_execution_cost(
                 actual_price_slippage_usdt: totals.actual_price_slippage_usdt,
                 twap_price_slippage_on_filled_usdt: totals.twap_price_slippage_on_filled_usdt,
                 shortfall_vs_twap_usdt: totals.shortfall_vs_twap_usdt,
-                actual_slippage_bps: totals.actual_slippage_bps,
-                twap_slippage_bps: totals.twap_slippage_bps,
-                shortfall_vs_twap_bps: totals.shortfall_vs_twap_bps,
+                actual_slippage_bps: chart_bps.map(|values| values.0),
+                twap_slippage_bps: chart_bps.map(|values| values.1),
+                shortfall_vs_twap_bps: chart_bps.map(|values| values.2),
             });
         }
     }
@@ -392,6 +395,16 @@ pub fn report_execution_cost(
         points: downsample_cost_points(points, MAX_COST_POINTS),
         updates,
     })
+}
+
+fn chart_bps(totals: &CostTotals) -> Option<(f64, f64, f64)> {
+    (totals.comparable_fill_count >= MIN_CHART_COMPARABLE_FILLS
+        && totals.comparable_arrival_notional_usdt >= MIN_CHART_COMPARABLE_NOTIONAL_USDT)
+        .then_some((
+            totals.actual_slippage_bps,
+            totals.twap_slippage_bps,
+            totals.shortfall_vs_twap_bps,
+        ))
 }
 
 fn cost_for_update(
@@ -1370,9 +1383,9 @@ mod tests {
                 actual_price_slippage_usdt: index as f64,
                 twap_price_slippage_on_filled_usdt: index as f64,
                 shortfall_vs_twap_usdt: index as f64,
-                actual_slippage_bps: index as f64,
-                twap_slippage_bps: index as f64,
-                shortfall_vs_twap_bps: index as f64,
+                actual_slippage_bps: Some(index as f64),
+                twap_slippage_bps: Some(index as f64),
+                shortfall_vs_twap_bps: Some(index as f64),
             })
             .collect();
         let sampled = downsample_cost_points(points, 2_000);
@@ -1380,5 +1393,32 @@ mod tests {
         assert_eq!(sampled.len(), 2_000);
         assert_eq!(sampled.first().unwrap().ts_us, 0);
         assert_eq!(sampled.last().unwrap().ts_us, 2_999);
+    }
+
+    #[test]
+    fn chart_bps_waits_for_a_stable_comparable_sample() {
+        let too_few_fills = CostTotals {
+            comparable_fill_count: MIN_CHART_COMPARABLE_FILLS - 1,
+            comparable_arrival_notional_usdt: MIN_CHART_COMPARABLE_NOTIONAL_USDT,
+            ..CostTotals::default()
+        };
+        assert_eq!(chart_bps(&too_few_fills), None);
+
+        let too_little_notional = CostTotals {
+            comparable_fill_count: MIN_CHART_COMPARABLE_FILLS,
+            comparable_arrival_notional_usdt: MIN_CHART_COMPARABLE_NOTIONAL_USDT - 0.01,
+            ..CostTotals::default()
+        };
+        assert_eq!(chart_bps(&too_little_notional), None);
+
+        let ready = CostTotals {
+            comparable_fill_count: MIN_CHART_COMPARABLE_FILLS,
+            comparable_arrival_notional_usdt: MIN_CHART_COMPARABLE_NOTIONAL_USDT,
+            actual_slippage_bps: 1.25,
+            twap_slippage_bps: 0.75,
+            shortfall_vs_twap_bps: 0.5,
+            ..CostTotals::default()
+        };
+        assert_eq!(chart_bps(&ready), Some((1.25, 0.75, 0.5)));
     }
 }
