@@ -134,6 +134,9 @@ pub struct ExecutionCostPoint {
     pub actual_price_slippage_usdt: f64,
     pub twap_price_slippage_on_filled_usdt: f64,
     pub shortfall_vs_twap_usdt: f64,
+    pub actual_slippage_bps: f64,
+    pub twap_slippage_bps: f64,
+    pub shortfall_vs_twap_bps: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -333,6 +336,9 @@ pub fn report_execution_cost(
                 actual_price_slippage_usdt: totals.actual_price_slippage_usdt,
                 twap_price_slippage_on_filled_usdt: totals.twap_price_slippage_on_filled_usdt,
                 shortfall_vs_twap_usdt: totals.shortfall_vs_twap_usdt,
+                actual_slippage_bps: totals.actual_slippage_bps,
+                twap_slippage_bps: totals.twap_slippage_bps,
+                shortfall_vs_twap_bps: totals.shortfall_vs_twap_bps,
             });
         }
     }
@@ -1364,6 +1370,9 @@ mod tests {
                 actual_price_slippage_usdt: index as f64,
                 twap_price_slippage_on_filled_usdt: index as f64,
                 shortfall_vs_twap_usdt: index as f64,
+                actual_slippage_bps: index as f64,
+                twap_slippage_bps: index as f64,
+                shortfall_vs_twap_bps: index as f64,
             })
             .collect();
         let sampled = downsample_cost_points(points, 2_000);

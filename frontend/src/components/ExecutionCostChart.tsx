@@ -8,7 +8,7 @@ import {
 import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { useEffect, useRef } from 'react'
-import { money, UI_FONT_SANS } from '../format'
+import { UI_FONT_SANS } from '../format'
 import type { ExecutionCostPoint } from '../types'
 
 echarts.use([
@@ -26,18 +26,18 @@ interface Props {
 
 const series = [
   {
-    key: 'twap_price_slippage_on_filled_usdt' as const,
+    key: 'twap_slippage_bps' as const,
     label: 'TWAP 价格滑点',
     color: '#2563a7',
     dashed: true,
   },
   {
-    key: 'actual_price_slippage_usdt' as const,
+    key: 'actual_slippage_bps' as const,
     label: '实际价格滑点',
     color: '#b7791f',
   },
   {
-    key: 'shortfall_vs_twap_usdt' as const,
+    key: 'shortfall_vs_twap_bps' as const,
     label: '实际相对 TWAP',
     color: '#176b5b',
   },
@@ -74,7 +74,7 @@ export function ExecutionCostChart({ points }: Props) {
         backgroundColor: 'rgba(255,255,255,0.97)',
         borderColor: '#d7dbe2',
         textStyle: { color: '#20252d', fontSize: 12 },
-        valueFormatter: (value: unknown) => `${money(Number(value))} USDT`,
+        valueFormatter: (value: unknown) => `${Number(value).toFixed(2)} bps`,
         axisPointer: {
           type: 'line',
           lineStyle: { color: '#8993a4', type: 'dashed' },
@@ -95,12 +95,12 @@ export function ExecutionCostChart({ points }: Props) {
       yAxis: {
         type: 'value',
         scale: true,
-        name: 'USDT',
+        name: 'bps',
         nameGap: 12,
         nameTextStyle: { color: '#697386', fontSize: 11 },
         axisLine: { show: false },
         axisTick: { show: false },
-        axisLabel: { color: '#697386', formatter: (value: number) => `${money(value)} U` },
+        axisLabel: { color: '#697386', formatter: (value: number) => `${value.toFixed(1)} bps` },
         splitLine: { lineStyle: { color: '#edf0f4' } },
       },
       dataZoom: [
@@ -123,7 +123,7 @@ export function ExecutionCostChart({ points }: Props) {
         showSymbol: false,
         sampling: 'lttb',
         lineStyle: {
-          width: item.key === 'shortfall_vs_twap_usdt' ? 2.4 : 1.6,
+          width: item.key === 'shortfall_vs_twap_bps' ? 2.4 : 1.6,
           color: item.color,
           type: item.dashed ? 'dashed' : 'solid',
         },

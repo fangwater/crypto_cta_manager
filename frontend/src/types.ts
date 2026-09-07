@@ -295,6 +295,9 @@ export interface ExecutionCostPoint {
   actual_price_slippage_usdt: number
   twap_price_slippage_on_filled_usdt: number
   shortfall_vs_twap_usdt: number
+  actual_slippage_bps: number
+  twap_slippage_bps: number
+  shortfall_vs_twap_bps: number
 }
 
 export interface SymbolExecutionCost {

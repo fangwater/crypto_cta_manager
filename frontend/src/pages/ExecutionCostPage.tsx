@@ -252,18 +252,18 @@ export function ExecutionCostPage() {
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <StatTile
           label="实际价格滑点"
-          value={report ? moneyU(report.totals.actual_price_slippage_usdt) : '--'}
-          hint={report ? `${report.totals.actual_slippage_bps.toFixed(2)} bps` : undefined}
+          value={report ? optionalBps(report.totals.actual_slippage_bps) : '--'}
+          hint={report ? `${moneyU(report.totals.actual_price_slippage_usdt)} · 成交额加权` : undefined}
         />
         <StatTile
           label="TWAP 价格滑点"
-          value={report ? moneyU(report.totals.twap_price_slippage_on_filled_usdt) : '--'}
-          hint={report ? `${report.totals.twap_slippage_bps.toFixed(2)} bps · 同成交量` : undefined}
+          value={report ? optionalBps(report.totals.twap_slippage_bps) : '--'}
+          hint={report ? `${moneyU(report.totals.twap_price_slippage_on_filled_usdt)} · 同成交量` : undefined}
         />
         <StatTile
           label="实际相对 TWAP"
-          value={report ? moneyU(report.totals.shortfall_vs_twap_usdt) : '--'}
-          hint={report ? `${report.totals.shortfall_vs_twap_bps.toFixed(2)} bps · 正数较差` : undefined}
+          value={report ? optionalBps(report.totals.shortfall_vs_twap_bps) : '--'}
+          hint={report ? `${moneyU(report.totals.shortfall_vs_twap_usdt)} · 正数较差` : undefined}
         />
         <StatTile
           label="实际手续费（独立）"
@@ -285,7 +285,7 @@ export function ExecutionCostPage() {
       {snapshot && report && report.points.length > 0 && (
         <Card className="mb-6">
           <CardHeader>
-            <CardTitle>累计价格滑点</CardTitle>
+            <CardTitle>成交额加权价格滑点</CardTitle>
             <CardDescription>
               实际与 TWAP 使用相同的实际成交量；手续费不进入曲线。相对 TWAP 为正表示实际执行更差。
             </CardDescription>
@@ -375,7 +375,6 @@ export function ExecutionCostPage() {
                     <th className="px-4 py-2 font-medium text-right">实际滑点</th>
                     <th className="px-4 py-2 font-medium text-right">TWAP 滑点</th>
                     <th className="px-4 py-2 font-medium text-right">相对 TWAP</th>
-                    <th className="px-4 py-2 font-medium text-right">相对 TWAP U</th>
                     <th className="px-4 py-2 font-medium text-right">手续费 U</th>
                   </tr>
                 </thead>
@@ -434,14 +433,6 @@ export function ExecutionCostPage() {
                           )}
                         >
                           {optionalBps(row.symbol.shortfall_vs_twap_bps)}
-                        </td>
-                        <td
-                          className={cn(
-                            'px-4 py-2 text-right tabular-nums',
-                            costClass(row.symbol.shortfall_vs_twap_usdt),
-                          )}
-                        >
-                          {optionalMoney(row.symbol.shortfall_vs_twap_usdt)}
                         </td>
                         <td
                           className={cn(
