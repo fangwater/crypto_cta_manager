@@ -239,22 +239,39 @@ allocation anchor exists, it replaces the older account anchor for that source.
 
 The portfolio view also overlays theoretical NAV before and after estimated
 fees. A background materializer consumes archived position updates by cursor,
-executes each nonzero binding-level target change once at the completed
-five-minute mid TWAP, and applies the synthetic fill to source/symbol/venue FIFO
-state. A later update to the same binding truncates the earlier five-minute
-window. Each account has an editable theoretical TWAP fee rate, initialized to
+freezes each nonzero binding-level delta when the complete scaled target vector
+changes, and prices that delta as five equal-quantity virtual fills. The five
+prices are 5-second mid bars sampled 60 seconds apart, beginning with the first
+complete 5-second bar after the target update. Their arithmetic mean is stored
+as the synthetic fill price and is equivalent to summing the five equal-quantity
+costs. Later target changes own independent schedules and never truncate earlier
+deltas. Each account has an editable theoretical TWAP fee rate, initialized to
 the average of its Maker and Taker rates. The rate is frozen when the update is
 staged and stored with the synthetic fill, so later fee edits do not rewrite
 history. PostgreSQL stores only pending work, current target/FIFO
 state, skips, and one sparse event per nonzero synthetic symbol fill; it does
 not copy the 5-second BBO archive. Repeated publications of an unchanged
 account/binding target advance the archive cursor without adding pending work
-or shortening the five-minute execution window. While a source has a nonzero
+or changing an existing delta schedule. While a source has a nonzero
 theoretical position, one source-level portfolio mark is materialized at most
 every five minutes from the latest completed 5-second mid; empty periods
 produce no mark rows. Pending rows and closed FIFO lots are deleted as they are
 consumed. The first run backfills only the configured TWAP retention window,
 currently 30 days.
+
+The virtual acquisition cost for one symbol is
+`delta_qty / 5 * sum(sample_mid[0..5])`; its estimated fee is
+`abs(delta_qty) / 5 * sum(sample_mid[0..5]) * theoretical_twap_fee_rate`.
+These execution-cost values do not require a mark price. FIFO and periodic marks
+are retained only to render the optional theoretical NAV overlay.
+
+`GET /api/catalog/acquisition-cost` is the direct actual-versus-virtual ledger.
+For each materialized delta it returns the five source mids, virtual VWAP,
+virtual turnover and fee, then matches same-direction factual strategy fills up
+to the delta quantity. The aggregate reports matched turnover coverage, actual
+Maker/Taker fee, virtual blended fee, price shortfall, fee shortfall, and their
+sum. Positive shortfall means factual acquisition was more expensive. This
+endpoint never reads a mark price. Its browser is `/manager/acquisition-cost/`.
 
 The JSON returned by `GET /api/timeline` and `GET /api/account-timeline`
 contains the portfolio-only series under `theoretical`. Query-time work is a

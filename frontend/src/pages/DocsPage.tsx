@@ -483,7 +483,7 @@ curl --noproxy '*' -sS -X PUT \\
             },
             {
               field: 'theoretical_twap_fee_rate',
-              detail: '理论 5 分钟 TWAP 成交费率；省略时取本次 Maker/Taker 平均值，可按账户修改',
+              detail: '理论五切片 TWAP 成交费率；省略时取本次 Maker/Taker 平均值，可按账户修改',
             },
             {
               field: 'contract_leverage',

@@ -13,7 +13,8 @@ use crate::position_archive::{PositionArchive, PositionUpdateMsg};
 use crate::twap::{TwapBar, TwapStore};
 
 pub const EXECUTION_WINDOW_SECS: u64 = 300;
-const EXECUTION_WINDOW_US: i64 = 300_000_000;
+const FIVE_SECOND_BAR_US: i64 = 5_000_000;
+const TWAP_SAMPLE_COUNT: usize = 5;
 const MINUTE_US: i64 = 60_000_000;
 const MARK_INTERVAL_US: i64 = 300_000_000;
 const MARK_LOOKBACK_US: i64 = 10_000_000;
@@ -49,9 +50,9 @@ pub struct TheoreticalNavTimeline {
 impl Default for TheoreticalNavTimeline {
     fn default() -> Self {
         Self {
-            valuation: "quantity_fifo_5m_mid_mark_window_delta",
+            valuation: "quantity_fifo_five_slice_mid_mark_window_delta",
             execution_window_secs: EXECUTION_WINDOW_SECS,
-            price_basis: "5m_twap_execution+latest_completed_5s_mid_mark_every_5m",
+            price_basis: "five_equal_qty_5s_mid_samples_60s_apart+latest_completed_5s_mid_mark_every_5m",
             fee_basis: "source_theoretical_twap_fee_rate_at_staging",
             available_from_us: None,
             latest_point_ts_us: None,
@@ -78,13 +79,7 @@ struct PendingUpdate {
     venue: String,
     fee_rate: f64,
     targets: BTreeMap<String, f64>,
-}
-
-#[derive(Clone, Debug)]
-struct BindingPosition {
-    symbol: String,
-    venue: String,
-    quantity: f64,
+    deltas: BTreeMap<String, f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,6 +119,7 @@ enum PlannedSymbol {
         target_quantity: f64,
         executed_quantity: f64,
         twap_price: f64,
+        sample_mids: [f64; TWAP_SAMPLE_COUNT],
     },
     Skip {
         symbol: String,
@@ -152,7 +148,7 @@ struct LatestTargets {
 
 pub fn spawn(config: AppConfig, pool: PgPool, archive: Arc<PositionArchive>, twap: Arc<TwapStore>) {
     if !config.twap.enabled {
-        info!("theoretical 5-minute TWAP NAV materializer disabled with TWAP recorder");
+        info!("theoretical five-slice TWAP NAV materializer disabled with TWAP recorder");
         return;
     }
     tokio::spawn(async move {
@@ -222,7 +218,7 @@ pub async fn materialize_once(
     if completed > 0 {
         info!(
             completed,
-            "materialized theoretical 5-minute TWAP NAV updates"
+            "materialized theoretical five-slice TWAP NAV updates"
         );
     }
     Ok(completed)
@@ -318,6 +314,7 @@ async fn stage_messages(
                     &mut tx,
                     &account.source_id,
                     &account.binding_name,
+                    latest.get(&key),
                     &next,
                     fee_rate,
                 )
@@ -400,7 +397,50 @@ fn normalize_stored_targets(targets: &mut BTreeMap<String, f64>) -> Result<()> {
 }
 
 fn target_positions_changed(previous: Option<&LatestTargets>, next: &LatestTargets) -> bool {
-    previous.is_none_or(|previous| previous.venue != next.venue || previous.targets != next.targets)
+    previous.is_none_or(|previous| {
+        previous.venue != next.venue || !target_maps_equal(&previous.targets, &next.targets)
+    })
+}
+
+fn target_maps_equal(left: &BTreeMap<String, f64>, right: &BTreeMap<String, f64>) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(symbol, left_quantity)| {
+            right.get(symbol).is_some_and(|right_quantity| {
+                quantities_equal(*left_quantity, *right_quantity, left_quantity.abs())
+            })
+        })
+}
+
+fn target_deltas(previous: Option<&LatestTargets>, next: &LatestTargets) -> BTreeMap<String, f64> {
+    let empty = BTreeMap::new();
+    let previous = previous.map(|value| &value.targets).unwrap_or(&empty);
+    previous
+        .keys()
+        .chain(next.targets.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|symbol| {
+            let delta = clean_zero(
+                next.targets.get(&symbol).copied().unwrap_or(0.0)
+                    - previous.get(&symbol).copied().unwrap_or(0.0),
+            );
+            (delta != 0.0).then_some((symbol, delta))
+        })
+        .collect()
+}
+
+fn first_complete_bar_end(received_at_us: i64) -> i64 {
+    received_at_us
+        .saturating_add(FIVE_SECOND_BAR_US - 1)
+        .div_euclid(FIVE_SECOND_BAR_US)
+        .saturating_mul(FIVE_SECOND_BAR_US)
+        .saturating_add(FIVE_SECOND_BAR_US)
+}
+
+fn theoretical_execution_ts(received_at_us: i64) -> i64 {
+    first_complete_bar_end(received_at_us)
+        .saturating_add((TWAP_SAMPLE_COUNT as i64 - 1).saturating_mul(MINUTE_US))
 }
 
 async fn load_latest_targets(
@@ -444,34 +484,18 @@ async fn stage_target_change(
     tx: &mut Transaction<'_, Postgres>,
     source_id: &str,
     binding_name: &str,
+    previous: Option<&LatestTargets>,
     next: &LatestTargets,
     fee_rate: f64,
 ) -> Result<()> {
     let seq = i64::from(next.update_seq);
-    sqlx::query(
-        r#"
-        UPDATE cta_theoretical_nav_pending
-        SET window_end_us = LEAST(window_end_us, $3)
-        WHERE source_id = $1
-          AND binding_name = $2
-          AND (received_at_us, update_seq) < ($3, $4)
-          AND window_end_us > $3
-        "#,
-    )
-    .bind(source_id)
-    .bind(binding_name)
-    .bind(next.received_at_us)
-    .bind(seq)
-    .execute(&mut **tx)
-    .await
-    .context("failed to truncate superseded theoretical NAV window")?;
-
+    let deltas = target_deltas(previous, next);
     sqlx::query(
         r#"
         INSERT INTO cta_theoretical_nav_pending (
             source_id, binding_name, position_strategy_name,
-            received_at_us, update_seq, window_end_us, venue, fee_rate, targets
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            received_at_us, update_seq, window_end_us, venue, fee_rate, targets, deltas
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (source_id, binding_name, received_at_us, update_seq)
         DO NOTHING
         "#,
@@ -481,10 +505,11 @@ async fn stage_target_change(
     .bind(&next.position_strategy_name)
     .bind(next.received_at_us)
     .bind(seq)
-    .bind(next.received_at_us.saturating_add(EXECUTION_WINDOW_US))
+    .bind(theoretical_execution_ts(next.received_at_us))
     .bind(&next.venue)
     .bind(fee_rate)
     .bind(serde_json::to_value(&next.targets)?)
+    .bind(serde_json::to_value(deltas)?)
     .execute(&mut **tx)
     .await
     .context("failed to stage theoretical NAV target change")?;
@@ -779,70 +804,35 @@ async fn process_pending(
         tx.rollback().await.ok();
         return Ok(false);
     };
-    let positions = load_binding_positions(&mut tx, &pending.key).await?;
-    let mut current = positions
-        .iter()
-        .map(|position| {
-            (
-                (position.symbol.clone(), position.venue.clone()),
-                position.quantity,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut markets = current.keys().cloned().collect::<BTreeSet<_>>();
-    markets.extend(
-        pending
-            .targets
-            .keys()
-            .cloned()
-            .map(|symbol| (symbol, pending.venue.clone())),
-    );
-
     let mut planned = Vec::new();
     let mut wait_for_bars = false;
-    for (symbol, venue) in markets {
-        let previous = current
-            .remove(&(symbol.clone(), venue.clone()))
-            .unwrap_or(0.0);
-        let target = if venue == pending.venue {
-            pending.targets.get(&symbol).copied().unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        let executed = clean_zero(target - previous);
-        if executed == 0.0 {
-            continue;
-        }
-        if pending.window_end_us <= pending.key.received_at_us {
-            planned.push(PlannedSymbol::Skip {
-                symbol,
-                venue,
-                reason: "superseded_before_execution",
-            });
-            continue;
-        }
+    for (symbol, executed) in &pending.deltas {
+        let venue = pending.venue.clone();
+        let target = pending.targets.get(symbol).copied().unwrap_or(0.0);
+        let previous = clean_zero(target - executed);
         let bars = twap.scan_bars(
-            &symbol,
+            symbol,
             &venue,
             pending.key.received_at_us.saturating_add(1),
             pending.window_end_us.saturating_add(1),
         )?;
-        match complete_window_twap(&bars, pending.key.received_at_us, pending.window_end_us) {
-            Some(price) => planned.push(PlannedSymbol::Fill {
-                symbol,
+        match five_slice_prices(&bars, pending.key.received_at_us) {
+            Some(sample_mids) => planned.push(PlannedSymbol::Fill {
+                symbol: symbol.clone(),
                 venue,
                 previous_quantity: previous,
                 target_quantity: target,
-                executed_quantity: executed,
-                twap_price: price,
+                executed_quantity: *executed,
+                twap_price: sample_mids.iter().sum::<f64>() / TWAP_SAMPLE_COUNT as f64,
+                sample_mids,
             }),
             None if now_us <= pending.window_end_us.saturating_add(MISSING_BAR_GRACE_US) => {
                 wait_for_bars = true;
             }
             None => planned.push(PlannedSymbol::Skip {
-                symbol,
+                symbol: symbol.clone(),
                 venue,
-                reason: "missing_complete_minute_twap",
+                reason: "missing_five_slice_mid",
             }),
         }
     }
@@ -861,6 +851,7 @@ async fn process_pending(
                 target_quantity,
                 executed_quantity,
                 twap_price,
+                sample_mids,
             } => {
                 had_fill = true;
                 apply_fill(
@@ -872,6 +863,7 @@ async fn process_pending(
                     target_quantity,
                     executed_quantity,
                     twap_price,
+                    sample_mids,
                 )
                 .await?;
                 save_binding_position(&mut tx, &pending, &symbol, &venue, target_quantity).await?;
@@ -907,7 +899,7 @@ async fn lock_pending(
 ) -> Result<Option<PendingUpdate>> {
     let row = sqlx::query(
         r#"
-        SELECT position_strategy_name, window_end_us, venue, fee_rate, targets
+        SELECT position_strategy_name, window_end_us, venue, fee_rate, targets, deltas
         FROM cta_theoretical_nav_pending
         WHERE source_id = $1 AND binding_name = $2
           AND received_at_us = $3 AND update_seq = $4
@@ -923,6 +915,7 @@ async fn lock_pending(
     .context("failed to lock theoretical NAV pending update")?;
     row.map(|row| {
         let targets: serde_json::Value = row.try_get("targets")?;
+        let deltas: serde_json::Value = row.try_get("deltas")?;
         Ok(PendingUpdate {
             key: key.clone(),
             position_strategy_name: row.try_get("position_strategy_name")?,
@@ -931,38 +924,11 @@ async fn lock_pending(
             fee_rate: row.try_get("fee_rate")?,
             targets: serde_json::from_value(targets)
                 .context("failed to decode theoretical NAV pending targets")?,
+            deltas: serde_json::from_value(deltas)
+                .context("failed to decode theoretical NAV pending deltas")?,
         })
     })
     .transpose()
-}
-
-async fn load_binding_positions(
-    tx: &mut Transaction<'_, Postgres>,
-    key: &PendingKey,
-) -> Result<Vec<BindingPosition>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT symbol, venue, quantity
-        FROM cta_theoretical_binding_positions
-        WHERE source_id = $1 AND binding_name = $2
-        ORDER BY symbol, venue
-        FOR UPDATE
-        "#,
-    )
-    .bind(&key.source_id)
-    .bind(&key.binding_name)
-    .fetch_all(&mut **tx)
-    .await
-    .context("failed to load theoretical binding positions")?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(BindingPosition {
-                symbol: row.try_get("symbol")?,
-                venue: row.try_get("venue")?,
-                quantity: row.try_get("quantity")?,
-            })
-        })
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -975,6 +941,7 @@ async fn apply_fill(
     target_quantity: f64,
     executed_quantity: f64,
     twap_price: f64,
+    sample_mids: [f64; TWAP_SAMPLE_COUNT],
 ) -> Result<()> {
     let already_stored: bool = sqlx::query_scalar(
         r#"
@@ -1115,7 +1082,7 @@ async fn apply_fill(
             source_id, binding_name, position_strategy_name, symbol, venue,
             received_at_us, update_seq, execution_ts_us,
             previous_quantity, target_quantity, executed_quantity,
-            twap_price, fee_rate, fee_quote,
+            twap_price, sample_mids, fee_rate, fee_quote,
             cumulative_realized_pnl_before_fee_quote,
             cumulative_estimated_trading_fee_quote,
             cumulative_floating_pnl_quote,
@@ -1123,7 +1090,7 @@ async fn apply_fill(
             cumulative_nav_after_fee_quote
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-            $12, $13, $14, $15, $16, $17, $18, $19
+            $12, $13, $14, $15, $16, $17, $18, $19, $20
         )
         "#,
     )
@@ -1139,6 +1106,7 @@ async fn apply_fill(
     .bind(target_quantity)
     .bind(executed_quantity)
     .bind(twap_price)
+    .bind(serde_json::to_value(sample_mids)?)
     .bind(pending.fee_rate)
     .bind(applied.fee_quote)
     .bind(applied.realized_pnl_before_fee_quote)
@@ -1440,33 +1408,24 @@ fn floating_pnl_at_mark(lots: &VecDeque<FifoLot>, mark_price: f64) -> Result<f64
     Ok(floating)
 }
 
-fn complete_window_twap(bars: &[TwapBar], start_us: i64, end_us: i64) -> Option<f64> {
-    if end_us <= start_us {
-        return None;
-    }
-    let mut weighted = 0.0;
-    let mut total_duration = 0i64;
-    let mut bucket_start = start_us;
-    while bucket_start < end_us {
-        let bucket_end = bucket_start.saturating_add(MINUTE_US).min(end_us);
-        let mut sum = 0.0;
-        let mut count = 0u32;
-        for bar in bars {
-            if bar.end_ts_us > bucket_start && bar.end_ts_us <= bucket_end {
-                sum += bar.twap;
-                count = count.saturating_add(1);
-            }
-        }
-        if count == 0 {
+fn five_slice_prices(bars: &[TwapBar], received_at_us: i64) -> Option<[f64; TWAP_SAMPLE_COUNT]> {
+    let first_end = first_complete_bar_end(received_at_us);
+    let mut prices = [0.0; TWAP_SAMPLE_COUNT];
+    for index in 0..TWAP_SAMPLE_COUNT {
+        let expected_end = first_end.saturating_add(index as i64 * MINUTE_US);
+        let bar = bars.iter().find(|bar| bar.end_ts_us == expected_end)?;
+        if !bar.twap.is_finite() || bar.twap <= 0.0 {
             return None;
         }
-        let duration = bucket_end - bucket_start;
-        weighted += (sum / f64::from(count)) * duration as f64;
-        total_duration = total_duration.saturating_add(duration);
-        bucket_start = bucket_end;
+        prices[index] = bar.twap;
     }
-    let twap = weighted / total_duration as f64;
-    (twap.is_finite() && twap > 0.0).then_some(twap)
+    Some(prices)
+}
+
+#[cfg(test)]
+fn five_slice_twap(bars: &[TwapBar], received_at_us: i64) -> Option<f64> {
+    let prices = five_slice_prices(bars, received_at_us)?;
+    Some(prices.iter().sum::<f64>() / TWAP_SAMPLE_COUNT as f64)
 }
 
 fn completed_mark_mid(bars: &[TwapBar], mark_ts_us: i64) -> Option<f64> {
@@ -1736,6 +1695,43 @@ mod tests {
     }
 
     #[test]
+    fn persisted_float_tail_does_not_create_an_execution() {
+        let previous = latest_targets(BTreeMap::from([
+            ("SOPHUSDT".into(), -58_485.413_990_491_346),
+            ("ORCAUSDT".into(), 404.123_456_789),
+        ]));
+        let mut repeated = previous.clone();
+        repeated.received_at_us = 2;
+        repeated
+            .targets
+            .insert("SOPHUSDT".into(), -58_485.413_990_491_34);
+        assert!(!target_positions_changed(Some(&previous), &repeated));
+
+        repeated.targets.insert("ORCAUSDT".into(), 404.124);
+        assert!(target_positions_changed(Some(&previous), &repeated));
+    }
+
+    #[test]
+    fn target_delta_is_frozen_between_distinct_vectors() {
+        let previous = latest_targets(BTreeMap::from([
+            ("BTCUSDT".into(), 2.0),
+            ("ETHUSDT".into(), -3.0),
+        ]));
+        let next = latest_targets(BTreeMap::from([
+            ("BTCUSDT".into(), 5.0),
+            ("SOLUSDT".into(), 7.0),
+        ]));
+        assert_eq!(
+            target_deltas(Some(&previous), &next),
+            BTreeMap::from([
+                ("BTCUSDT".into(), 3.0),
+                ("ETHUSDT".into(), 3.0),
+                ("SOLUSDT".into(), 7.0),
+            ])
+        );
+    }
+
+    #[test]
     fn stored_zero_targets_are_equivalent_to_omitted_targets() {
         let mut targets = BTreeMap::from([
             ("BTCUSDT".into(), 0.0),
@@ -1755,17 +1751,48 @@ mod tests {
     }
 
     #[test]
-    fn five_minute_twap_uses_equal_minute_buckets() {
-        let bars = (1..=5)
-            .map(|minute| bar(i64::from(minute) * MINUTE_US, 100.0 + f64::from(minute)))
+    fn five_slice_twap_uses_equal_quantity_samples() {
+        let bars = (0..TWAP_SAMPLE_COUNT)
+            .flat_map(|index| {
+                let expected = FIVE_SECOND_BAR_US + index as i64 * MINUTE_US;
+                [
+                    bar(expected, 100.0 + index as f64),
+                    bar(expected + FIVE_SECOND_BAR_US, 1_000.0),
+                ]
+            })
             .collect::<Vec<_>>();
-        assert_eq!(complete_window_twap(&bars, 0, 5 * MINUTE_US), Some(103.0));
+        assert_eq!(five_slice_twap(&bars, 0), Some(102.0));
+        let delta = -10.0_f64;
+        let per_slice_fee = bars
+            .iter()
+            .step_by(2)
+            .map(|bar| (delta / TWAP_SAMPLE_COUNT as f64 * bar.twap).abs() * 0.0002)
+            .sum::<f64>();
+        let average_price_fee = (delta * five_slice_twap(&bars, 0).unwrap()).abs() * 0.0002;
+        assert!((per_slice_fee - average_price_fee).abs() <= f64::EPSILON);
     }
 
     #[test]
-    fn twap_requires_at_least_one_bar_in_every_minute() {
-        let bars = vec![bar(MINUTE_US, 100.0), bar(3 * MINUTE_US, 103.0)];
-        assert_eq!(complete_window_twap(&bars, 0, 3 * MINUTE_US), None);
+    fn five_slice_twap_requires_every_sample() {
+        let bars = (0..TWAP_SAMPLE_COUNT - 1)
+            .map(|index| {
+                bar(
+                    FIVE_SECOND_BAR_US + index as i64 * MINUTE_US,
+                    100.0 + index as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(five_slice_twap(&bars, 0), None);
+    }
+
+    #[test]
+    fn five_slice_schedule_starts_with_first_complete_post_signal_bar() {
+        assert_eq!(first_complete_bar_end(0), FIVE_SECOND_BAR_US);
+        assert_eq!(first_complete_bar_end(1), 2 * FIVE_SECOND_BAR_US);
+        assert_eq!(
+            theoretical_execution_ts(1),
+            2 * FIVE_SECOND_BAR_US + 4 * MINUTE_US
+        );
     }
 
     #[test]

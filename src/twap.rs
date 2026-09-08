@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use iceoryx2::prelude::*;
 use iceoryx2::service::ipc;
 use rocksdb::{CompactOptions, Direction, IteratorMode, WriteBatch};
+use sqlx::Row;
 use sqlx::postgres::PgPool;
 use tracing::{info, warn};
 
@@ -309,7 +310,7 @@ pub fn decode_bar_key(bytes: &[u8]) -> Option<i64> {
 }
 
 #[derive(Clone)]
-struct SharedSymbols {
+pub(crate) struct SharedSymbols {
     inner: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -320,10 +321,19 @@ impl SharedSymbols {
         }
     }
 
-    fn replace(&self, symbols: HashSet<String>) {
+    fn extend(&self, symbols: impl IntoIterator<Item = String>) {
         if let Ok(mut guard) = self.inner.lock() {
-            *guard = symbols;
+            guard.extend(
+                symbols
+                    .into_iter()
+                    .map(|symbol| normalize_symbol(&symbol))
+                    .filter(|symbol| !symbol.is_empty()),
+            );
         }
+    }
+
+    pub(crate) fn track<'a>(&self, symbols: impl IntoIterator<Item = &'a String>) {
+        self.extend(symbols.into_iter().cloned());
     }
 
     fn contains(&self, symbol: &str) -> bool {
@@ -334,13 +344,14 @@ impl SharedSymbols {
     }
 }
 
-pub fn spawn_with_db(pool: PgPool, config: TwapConfig, db: ManagerDb) {
+pub(crate) fn spawn_with_db(pool: PgPool, config: TwapConfig, db: ManagerDb) -> SharedSymbols {
     if !config.enabled {
         info!("CTA Manager TWAP recorder disabled");
-        return;
+        return SharedSymbols::new();
     }
 
     let symbols = SharedSymbols::new();
+    let handle = symbols.clone();
     let catalog_symbols = symbols.clone();
     let catalog_secs = config.catalog_reload_secs.max(1);
     tokio::spawn(async move {
@@ -350,7 +361,7 @@ pub fn spawn_with_db(pool: PgPool, config: TwapConfig, db: ManagerDb) {
             match load_configured_symbols(&pool).await {
                 Ok(next) => {
                     let count = next.len();
-                    catalog_symbols.replace(next);
+                    catalog_symbols.extend(next);
                     info!(count, "CTA Manager TWAP catalog symbols refreshed");
                 }
                 Err(error) => {
@@ -368,6 +379,7 @@ pub fn spawn_with_db(pool: PgPool, config: TwapConfig, db: ManagerDb) {
             }
         })
         .expect("failed to spawn TWAP recorder");
+    handle
 }
 
 fn run_recorder(config: TwapConfig, db: ManagerDb, symbols: SharedSymbols) -> Result<()> {
@@ -499,6 +511,28 @@ async fn load_configured_symbols(pool: &PgPool) -> Result<HashSet<String>> {
             if !normalized.is_empty() {
                 symbols.insert(normalized);
             }
+        }
+    }
+    let retained = sqlx::query(
+        r#"
+        SELECT DISTINCT symbol
+        FROM (
+            SELECT jsonb_object_keys(targets) AS symbol
+            FROM cta_theoretical_nav_pending
+            UNION
+            SELECT symbol
+            FROM cta_theoretical_binding_positions
+        ) tracked
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load theoretical TWAP tracked symbols")?;
+    for row in retained {
+        let symbol: String = row.try_get("symbol")?;
+        let normalized = normalize_symbol(&symbol);
+        if !normalized.is_empty() {
+            symbols.insert(normalized);
         }
     }
     Ok(symbols.into_iter().collect())
@@ -712,5 +746,14 @@ mod tests {
         assert_eq!(bar.sample_count, 3);
         assert!((bar.twap - (100.0 + 102.0 + 102.0) / 3.0).abs() < 1e-12);
         assert!(!open.contains_key("ETHUSDT"));
+    }
+
+    #[test]
+    fn newly_saved_target_symbols_are_tracked_immediately() {
+        let symbols = SharedSymbols::new();
+        let names = ["newusdt".to_string(), "BTCUSDT".to_string()];
+        symbols.track(names.iter());
+        assert!(symbols.contains("NEWUSDT"));
+        assert!(symbols.contains("BTCUSDT"));
     }
 }

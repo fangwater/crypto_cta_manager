@@ -137,6 +137,7 @@ struct WebState {
     live_equity: LiveEquityHub,
     position_archive: Arc<PositionArchive>,
     twap: Arc<TwapStore>,
+    twap_symbols: crate::twap::SharedSymbols,
     viz_snapshot: VizSnapshotClient,
     refresh_interval_secs: u64,
 }
@@ -187,6 +188,17 @@ struct ExecutionCostQuery {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AcquisitionCostQuery {
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    source_ids: Option<String>,
+    strategy_name: Option<String>,
+    page: Option<usize>,
+    page_size: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PositionUpdatesQuery {
     after_us: Option<i64>,
     after_seq: Option<u32>,
@@ -198,6 +210,13 @@ struct ExecutionCostSnapshot {
     generated_at_us: i64,
     generation_duration_ms: u64,
     report: crate::execution_cost::ExecutionCostReport,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AcquisitionCostSnapshot {
+    generated_at_us: i64,
+    generation_duration_ms: u64,
+    report: crate::acquisition_cost::AcquisitionCostReport,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,7 +302,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         manager_db.clone(),
         config.twap.retain_days.max(1),
     )?);
-    crate::twap::spawn_with_db(pool.clone(), config.twap.clone(), manager_db);
+    let twap_symbols = crate::twap::spawn_with_db(pool.clone(), config.twap.clone(), manager_db);
     crate::theoretical_nav::spawn(
         config.clone(),
         pool.clone(),
@@ -332,6 +351,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/pnl/strategy", get(strategy_pnl))
         .route("/api/pnl/strategy/summary", get(strategy_pnl_summary))
         .route("/api/catalog/execution-cost", get(execution_cost))
+        .route("/api/catalog/acquisition-cost", get(acquisition_cost))
         .route("/api/catalog/position-updates", get(position_updates))
         .route("/api/order-config/auth", post(order_config_auth))
         .route(
@@ -405,6 +425,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             live_equity,
             position_archive,
             twap,
+            twap_symbols,
             viz_snapshot,
             refresh_interval_secs,
         })
@@ -944,6 +965,86 @@ async fn execution_cost(
         .into_response())
 }
 
+async fn acquisition_cost(
+    State(state): State<WebState>,
+    Query(query): Query<AcquisitionCostQuery>,
+) -> Result<Response, ApiError> {
+    let selected_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
+        return Ok(bad_request(message));
+    }
+    let start_received_at_us = match query.start_ms {
+        Some(value) => match milliseconds_to_microseconds(value, "startMs") {
+            Ok(value) => value,
+            Err(message) => return Ok(bad_request(message)),
+        },
+        None => 1,
+    };
+    let (histories, generated_at_us) = {
+        let cache = state.cache.read().await;
+        (
+            Arc::clone(&cache.nav_histories),
+            cache.dashboard.generated_at_us,
+        )
+    };
+    let end_received_at_us = match query.end_ms {
+        Some(value) => match milliseconds_to_microseconds(value, "endMs") {
+            Ok(value) => value,
+            Err(message) => return Ok(bad_request(message)),
+        },
+        None => generated_at_us,
+    };
+    if end_received_at_us < start_received_at_us {
+        return Ok(bad_request(
+            "endMs must be greater than or equal to startMs".to_string(),
+        ));
+    }
+    let strategy_name = query
+        .strategy_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(name) = strategy_name
+        && let Err(message) = validate_strategy_name(name)
+    {
+        return Ok(bad_request(message));
+    }
+    let page = query.page.unwrap_or(1);
+    let page_size = query
+        .page_size
+        .unwrap_or(crate::acquisition_cost::DEFAULT_PAGE_SIZE);
+    if page == 0 || page_size == 0 || page_size > crate::acquisition_cost::MAX_PAGE_SIZE {
+        return Ok(bad_request(format!(
+            "page must be positive and pageSize must be between 1 and {}",
+            crate::acquisition_cost::MAX_PAGE_SIZE
+        )));
+    }
+    let started = Instant::now();
+    let report = crate::acquisition_cost::report_acquisition_cost(
+        &state.pool,
+        &state.config,
+        &histories,
+        start_received_at_us,
+        end_received_at_us,
+        generated_at_us,
+        &selected_source_ids,
+        strategy_name,
+        page,
+        page_size,
+    )
+    .await?;
+    let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    Ok((
+        NO_STORE,
+        Json(AcquisitionCostSnapshot {
+            generated_at_us,
+            generation_duration_ms,
+            report,
+        }),
+    )
+        .into_response())
+}
+
 async fn position_updates(
     State(state): State<WebState>,
     Query(query): Query<PositionUpdatesQuery>,
@@ -1161,6 +1262,7 @@ async fn save_position_strategy(
 ) -> Result<Response, ApiError> {
     match strategy_catalog::upsert_position_strategy(&state.pool, &request, unix_now_us()).await {
         Ok(saved) => {
+            state.twap_symbols.track(saved.targets.keys());
             let factual_positions = load_factual_positions(&state, &saved.strategy_name).await;
             let published_accounts = load_published_accounts(&state, &saved.strategy_name).await;
             if let Err(error) = state.position_archive.append(

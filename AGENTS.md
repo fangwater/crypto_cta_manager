@@ -183,6 +183,25 @@ duration-weighted if a later update truncates the last bucket. TWAP cost before 
 and must not be reconstructed from the current catalog. The browser page is
 `/manager/execution-cost/`.
 
+The theoretical target execution model freezes `delta = current target - previous
+distinct target` when a complete scaled target vector changes. It prices that
+delta as five equal-quantity virtual fills at 5-second mid bars sampled 60 seconds
+apart, starting with the first complete bar after the target message. A later
+target change owns a separate schedule and must not truncate an earlier delta.
+Repeated publications and insignificant JSON persistence tails must not create a
+new delta. Virtual cost and fee are respectively `delta / 5 * sum(mid)` and
+`abs(delta) / 5 * sum(mid) * theoretical_twap_fee_rate`; neither requires a mark
+price. FIFO and periodic marks are presentation inputs for the optional NAV
+overlay, not inputs to the acquisition-cost comparison.
+
+`GET /api/catalog/acquisition-cost` is the canonical actual-versus-virtual cost
+contract. It reads materialized delta events and factual `batch_exec:<strategy>`
+fills, matches only the same direction up to each delta's absolute quantity, and
+reports quantity/notional coverage. Price shortfall is
+`matched_signed_qty * (actual_vwap - virtual_vwap)`; fee shortfall is factual
+Maker/Taker fee minus the matched share of virtual blended fee. This endpoint and
+its `/manager/acquisition-cost/` browser do not use mark prices.
+
 The main NAV display is a time series, not a per-symbol contribution bar chart.
 `GET /api/timeline` rebuilds it on demand and accepts camel-case `startMs`,
 `endMs`, comma-separated `sourceIds`, comma-separated `symbols`, and

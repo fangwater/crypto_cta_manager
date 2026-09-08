@@ -380,6 +380,83 @@ export interface ExecutionCostSnapshot {
   report: ExecutionCostReport
 }
 
+export interface AcquisitionCostTotals {
+  virtual_delta_count: number
+  missing_virtual_delta_count: number
+  comparable_delta_count: number
+  virtual_turnover_usdt: number
+  virtual_fee_usdt: number
+  matched_virtual_turnover_usdt: number
+  actual_matched_turnover_usdt: number
+  actual_matched_fee_usdt: number
+  matched_fill_count: number
+  unmatched_fill_count: number
+  unmatched_fill_notional_usdt: number
+  opposite_fill_count: number
+  opposite_fill_notional_usdt: number
+  price_shortfall_usdt: number
+  fee_shortfall_usdt: number
+  after_fee_shortfall_usdt: number
+  price_shortfall_bps: number
+  matched_turnover_coverage: number
+}
+
+export interface AcquisitionCostPoint {
+  ts_us: number
+  virtual_turnover_usdt: number
+  actual_matched_turnover_usdt: number
+  price_shortfall_usdt: number
+  after_fee_shortfall_usdt: number
+}
+
+export interface AcquisitionCostRow {
+  source_id: string
+  binding_name: string
+  strategy_name: string
+  symbol: string
+  venue: string
+  received_at_us: number
+  virtual_execution_ts_us: number
+  delta_qty: number
+  sample_mids: [number, number, number, number, number]
+  virtual_vwap: number
+  virtual_turnover_usdt: number
+  virtual_fee_usdt: number
+  actual_matched_qty: number
+  actual_vwap: number | null
+  actual_matched_turnover_usdt: number
+  actual_matched_fee_usdt: number
+  matched_fill_count: number
+  fill_ratio: number
+  price_shortfall_usdt: number | null
+  fee_shortfall_usdt: number | null
+  after_fee_shortfall_usdt: number | null
+  price_shortfall_bps: number | null
+}
+
+export interface AcquisitionCostReport {
+  generated_at_us: number
+  price_basis: string
+  fee_basis: string
+  start_received_at_us: number
+  end_received_at_us: number
+  source_ids: string[]
+  strategy_name: string | null
+  page: number
+  page_size: number
+  page_count: number
+  returned_row_count: number
+  totals: AcquisitionCostTotals
+  points: AcquisitionCostPoint[]
+  rows: AcquisitionCostRow[]
+}
+
+export interface AcquisitionCostSnapshot {
+  generated_at_us: number
+  generation_duration_ms: number
+  report: AcquisitionCostReport
+}
+
 export interface HealthResponse {
   status: 'ok' | 'degraded'
   source_count: number

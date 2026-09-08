@@ -59,12 +59,12 @@ export const navSeriesMeta: Record<
   nav_change_before_fee_quote: { label: '费前净值', color: '#2563a7' },
   nav_change_after_fee_quote: { label: '费后净值', color: '#176b5b' },
   theoretical_nav_before_fee_quote: {
-    label: '理论费前（5m TWAP）',
+    label: '理论费前（五切片 TWAP）',
     color: '#7357a3',
     lineType: 'dotted',
   },
   theoretical_nav_after_fee_quote: {
-    label: '理论费后（5m TWAP）',
+    label: '理论费后（五切片 TWAP）',
     color: '#a33f55',
     lineType: 'dashed',
   },

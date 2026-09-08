@@ -11,6 +11,7 @@ import type {
   SavedPositionStrategy,
   SavedSymbolContractLeverage,
   ExecutionCostSnapshot,
+  AcquisitionCostSnapshot,
   TimelineSnapshot,
 } from './types'
 
@@ -109,6 +110,19 @@ export function getExecutionCost(query: ExecutionCostQuery) {
   params.set('page', String(query.page ?? 1))
   params.set('pageSize', String(query.pageSize ?? 25))
   return requestJson<ExecutionCostSnapshot>(`/catalog/execution-cost?${params}`, {
+    signal: query.signal,
+  })
+}
+
+export function getAcquisitionCost(query: Omit<ExecutionCostQuery, 'windowSec'>) {
+  const params = new URLSearchParams()
+  params.set('startMs', String(query.startMs))
+  params.set('endMs', String(query.endMs))
+  if (query.sourceIds?.length) params.set('sourceIds', query.sourceIds.join(','))
+  if (query.strategyName) params.set('strategyName', query.strategyName)
+  if (query.page) params.set('page', String(query.page))
+  if (query.pageSize) params.set('pageSize', String(query.pageSize))
+  return requestJson<AcquisitionCostSnapshot>(`/catalog/acquisition-cost?${params}`, {
     signal: query.signal,
   })
 }

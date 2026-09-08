@@ -14,8 +14,8 @@ export const routes = {
     sourceId ? `/manager/?source=${encodeURIComponent(sourceId)}` : '/manager/',
   executionCost: (sourceId?: string) =>
     sourceId
-      ? `/manager/execution-cost/?source=${encodeURIComponent(sourceId)}`
-      : '/manager/execution-cost/',
+      ? `/manager/acquisition-cost/?source=${encodeURIComponent(sourceId)}`
+      : '/manager/acquisition-cost/',
   configPosition: '/manager/config/position/',
   configOrder: '/manager/config/order/',
   configBindings: (sourceId?: string) =>
