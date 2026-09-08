@@ -1020,9 +1020,14 @@ async fn acquisition_cost(
         )));
     }
     let started = Instant::now();
+    let fee_rates = postgres::load_fee_rates(&state.pool).await?;
+    let config = Arc::clone(&state.config)
+        .as_ref()
+        .clone()
+        .with_fee_rates(&fee_rates);
     let report = crate::acquisition_cost::report_acquisition_cost(
         &state.pool,
-        &state.config,
+        &config,
         &histories,
         start_received_at_us,
         end_received_at_us,
