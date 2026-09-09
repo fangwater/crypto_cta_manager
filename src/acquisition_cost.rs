@@ -11,6 +11,7 @@ use crate::nav;
 pub const DEFAULT_PAGE_SIZE: usize = 25;
 pub const MAX_PAGE_SIZE: usize = 100;
 const ZERO_EPSILON: f64 = 1e-12;
+const MAX_VIRTUAL_REFERENCE_AGE_US: i64 = 300_000_000;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct AcquisitionCostTotals {
@@ -30,6 +31,8 @@ pub struct AcquisitionCostTotals {
     pub unmatched_fill_notional_usdt: f64,
     pub opposite_fill_count: u64,
     pub opposite_fill_notional_usdt: f64,
+    pub stale_reference_fill_count: u64,
+    pub stale_reference_fill_notional_usdt: f64,
     pub price_shortfall_usdt: f64,
     pub fee_shortfall_usdt: f64,
     pub after_fee_shortfall_usdt: f64,
@@ -406,6 +409,12 @@ pub async fn report_acquisition_cost(
                 continue;
             };
             let fill = &mut virtual_fills[index];
+            if signal_ts_us.saturating_sub(fill.received_at_us) > MAX_VIRTUAL_REFERENCE_AGE_US {
+                totals.stale_reference_fill_count =
+                    totals.stale_reference_fill_count.saturating_add(1);
+                totals.stale_reference_fill_notional_usdt += (signed_qty * event.price).abs();
+                continue;
+            }
             if signed_qty * fill.delta_qty <= 0.0 {
                 totals.opposite_fill_count = totals.opposite_fill_count.saturating_add(1);
                 totals.opposite_fill_notional_usdt += (signed_qty * event.price).abs();

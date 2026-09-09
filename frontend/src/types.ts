@@ -397,6 +397,8 @@ export interface AcquisitionCostTotals {
   unmatched_fill_notional_usdt: number
   opposite_fill_count: number
   opposite_fill_notional_usdt: number
+  stale_reference_fill_count: number
+  stale_reference_fill_notional_usdt: number
   price_shortfall_usdt: number
   fee_shortfall_usdt: number
   after_fee_shortfall_usdt: number

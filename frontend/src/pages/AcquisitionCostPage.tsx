@@ -127,6 +127,12 @@ export function AcquisitionCostPage() {
           {totals.missing_virtual_delta_count} 个 delta 缺少完整五点行情，未进入可比成本。
         </Alert>
       )}
+      {totals && totals.stale_reference_fill_count > 0 && (
+        <Alert className="mb-4">
+          {totals.stale_reference_fill_count} 笔事实 fill 的最近虚拟参考超过 300 秒，成交额{' '}
+          {moneyU(totals.stale_reference_fill_notional_usdt)}，未进入价格差。
+        </Alert>
+      )}
 
       <Card className="mb-6">
         <CardHeader>
