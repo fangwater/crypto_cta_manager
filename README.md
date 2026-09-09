@@ -267,11 +267,16 @@ are retained only to render the optional theoretical NAV overlay.
 
 `GET /api/catalog/acquisition-cost` is the direct actual-versus-virtual ledger.
 For each materialized delta it returns the five source mids, virtual VWAP,
-virtual turnover and fee, then matches same-direction factual strategy fills up
-to the delta quantity. The aggregate reports matched turnover coverage, actual
-Maker/Taker fee, virtual blended fee, price shortfall, fee shortfall, and their
-sum. Positive shortfall means factual acquisition was more expensive. This
-endpoint never reads a mark price. Its browser is `/manager/acquisition-cost/`.
+virtual turnover and fee, then maps each same-direction factual strategy fill by
+its order `signal_ts_us` to the latest preceding symbol delta. The comparison
+keeps the factual fill quantity unchanged and replaces only its price and fee;
+target completion is reported separately from price shortfall. The aggregate
+reports actual-fill reference coverage, actual Maker/Taker fee, virtual blended
+fee, price shortfall, fee shortfall, and their sum. Symbol, side, liquidity-role,
+target-to-fill delay, and order-signal-to-fill delay breakdowns add exactly to
+the comparable total. Positive shortfall means factual acquisition was more
+expensive. This endpoint never reads a mark price. Its browser is
+`/manager/acquisition-cost/`.
 
 The JSON returned by `GET /api/timeline` and `GET /api/account-timeline`
 contains the portfolio-only series under `theoretical`. Query-time work is a

@@ -19,6 +19,9 @@ pub struct AcquisitionCostTotals {
     pub comparable_delta_count: usize,
     pub virtual_turnover_usdt: f64,
     pub virtual_fee_usdt: f64,
+    pub actual_fill_count: u64,
+    pub actual_turnover_usdt: f64,
+    pub actual_fee_usdt: f64,
     pub matched_virtual_turnover_usdt: f64,
     pub actual_matched_turnover_usdt: f64,
     pub actual_matched_fee_usdt: f64,
@@ -32,6 +35,7 @@ pub struct AcquisitionCostTotals {
     pub after_fee_shortfall_usdt: f64,
     pub price_shortfall_bps: f64,
     pub matched_turnover_coverage: f64,
+    pub actual_fill_reference_coverage: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -41,6 +45,67 @@ pub struct AcquisitionCostPoint {
     pub actual_matched_turnover_usdt: f64,
     pub price_shortfall_usdt: f64,
     pub after_fee_shortfall_usdt: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AcquisitionCostBreakdown {
+    pub bucket: String,
+    pub fill_count: u64,
+    pub reference_turnover_usdt: f64,
+    pub actual_turnover_usdt: f64,
+    pub actual_fee_usdt: f64,
+    pub virtual_fee_usdt: f64,
+    pub price_shortfall_usdt: f64,
+    pub price_shortfall_bps: f64,
+    pub after_fee_shortfall_usdt: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BreakdownAccumulator {
+    fill_count: u64,
+    reference_turnover_usdt: f64,
+    actual_turnover_usdt: f64,
+    actual_fee_usdt: f64,
+    virtual_fee_usdt: f64,
+    price_shortfall_usdt: f64,
+}
+
+impl BreakdownAccumulator {
+    fn add(
+        &mut self,
+        signed_qty: f64,
+        actual_price: f64,
+        virtual_price: f64,
+        actual_fee: f64,
+        virtual_fee_rate: f64,
+    ) {
+        let reference_turnover = (signed_qty * virtual_price).abs();
+        self.fill_count = self.fill_count.saturating_add(1);
+        self.reference_turnover_usdt += reference_turnover;
+        self.actual_turnover_usdt += (signed_qty * actual_price).abs();
+        self.actual_fee_usdt += actual_fee;
+        self.virtual_fee_usdt += reference_turnover * virtual_fee_rate;
+        self.price_shortfall_usdt += signed_qty * (actual_price - virtual_price);
+    }
+
+    fn finish(self, bucket: String) -> AcquisitionCostBreakdown {
+        AcquisitionCostBreakdown {
+            bucket,
+            fill_count: self.fill_count,
+            reference_turnover_usdt: self.reference_turnover_usdt,
+            actual_turnover_usdt: self.actual_turnover_usdt,
+            actual_fee_usdt: self.actual_fee_usdt,
+            virtual_fee_usdt: self.virtual_fee_usdt,
+            price_shortfall_usdt: self.price_shortfall_usdt,
+            price_shortfall_bps: if self.reference_turnover_usdt > 0.0 {
+                self.price_shortfall_usdt / self.reference_turnover_usdt * 10_000.0
+            } else {
+                0.0
+            },
+            after_fee_shortfall_usdt: self.price_shortfall_usdt + self.actual_fee_usdt
+                - self.virtual_fee_usdt,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -84,6 +149,11 @@ pub struct AcquisitionCostReport {
     pub returned_row_count: usize,
     pub totals: AcquisitionCostTotals,
     pub points: Vec<AcquisitionCostPoint>,
+    pub by_symbol: Vec<AcquisitionCostBreakdown>,
+    pub by_side: Vec<AcquisitionCostBreakdown>,
+    pub by_liquidity: Vec<AcquisitionCostBreakdown>,
+    pub by_target_delay: Vec<AcquisitionCostBreakdown>,
+    pub by_order_delay: Vec<AcquisitionCostBreakdown>,
     pub rows: Vec<AcquisitionCostRow>,
 }
 
@@ -100,6 +170,7 @@ struct VirtualFill {
     sample_mids: [f64; 5],
     virtual_vwap: f64,
     virtual_fee_usdt: f64,
+    virtual_fee_rate: f64,
     actual_matched_qty: f64,
     actual_signed_notional_usdt: f64,
     actual_fee_usdt: f64,
@@ -131,6 +202,7 @@ fn decode_virtual_fill(row: PgRow) -> Result<VirtualFill> {
         sample_mids,
         virtual_vwap: row.try_get("twap_price")?,
         virtual_fee_usdt: row.try_get("fee_quote")?,
+        virtual_fee_rate: row.try_get("fee_rate")?,
         actual_matched_qty: 0.0,
         actual_signed_notional_usdt: 0.0,
         actual_fee_usdt: 0.0,
@@ -142,6 +214,36 @@ fn page_bounds(count: usize, page: usize, page_size: usize) -> (usize, usize) {
     let offset = page.saturating_sub(1).saturating_mul(page_size);
     let end = count.saturating_sub(offset);
     (end.saturating_sub(page_size), end)
+}
+
+fn delay_bucket(delay_us: i64) -> &'static str {
+    match delay_us.max(0) {
+        0..5_000_000 => "00_00-05s",
+        5_000_000..10_000_000 => "01_05-10s",
+        10_000_000..30_000_000 => "02_10-30s",
+        30_000_000..60_000_000 => "03_30-60s",
+        60_000_000..300_000_000 => "04_60-300s",
+        _ => "05_after-300s",
+    }
+}
+
+fn finish_breakdowns(
+    values: BTreeMap<String, BreakdownAccumulator>,
+    sort_by_shortfall: bool,
+) -> Vec<AcquisitionCostBreakdown> {
+    let mut output = values
+        .into_iter()
+        .map(|(bucket, value)| value.finish(bucket))
+        .collect::<Vec<_>>();
+    if sort_by_shortfall {
+        output.sort_by(|left, right| {
+            right
+                .price_shortfall_usdt
+                .partial_cmp(&left.price_shortfall_usdt)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    output
 }
 
 pub async fn report_acquisition_cost(
@@ -166,7 +268,7 @@ pub async fn report_acquisition_cost(
         r#"
         SELECT source_id, binding_name, position_strategy_name, symbol, venue,
                received_at_us, execution_ts_us, executed_quantity,
-               twap_price, sample_mids, fee_quote
+               twap_price, sample_mids, fee_rate, fee_quote
         FROM cta_theoretical_nav_events
         WHERE received_at_us >= $1 AND received_at_us <= $2
           AND (cardinality($3::text[]) = 0 OR source_id = ANY($3))
@@ -219,6 +321,11 @@ pub async fn report_acquisition_cost(
         missing_virtual_delta_count: usize::try_from(missing_virtual_delta_count.max(0))?,
         ..AcquisitionCostTotals::default()
     };
+    let mut by_symbol = BTreeMap::<String, BreakdownAccumulator>::new();
+    let mut by_side = BTreeMap::<String, BreakdownAccumulator>::new();
+    let mut by_liquidity = BTreeMap::<String, BreakdownAccumulator>::new();
+    let mut by_target_delay = BTreeMap::<String, BreakdownAccumulator>::new();
+    let mut by_order_delay = BTreeMap::<String, BreakdownAccumulator>::new();
     for fill in &virtual_fills {
         totals.virtual_turnover_usdt += (fill.delta_qty * fill.virtual_vwap).abs();
         totals.virtual_fee_usdt += fill.virtual_fee_usdt;
@@ -249,15 +356,23 @@ pub async fn report_acquisition_cost(
             if strategy_name.is_some_and(|selected| selected != event_strategy) {
                 continue;
             }
+            let actual_fee = history.estimated_fee_quote(source, event)?;
+            totals.actual_fill_count = totals.actual_fill_count.saturating_add(1);
+            totals.actual_turnover_usdt += (signed_qty * event.price).abs();
+            totals.actual_fee_usdt += actual_fee;
             let key = (source_id.clone(), event_strategy, event.symbol.clone());
             let Some(indices) = by_key.get(&key) else {
                 totals.unmatched_fill_count = totals.unmatched_fill_count.saturating_add(1);
                 totals.unmatched_fill_notional_usdt += (signed_qty * event.price).abs();
                 continue;
             };
-            let position = indices.partition_point(|index| {
-                virtual_fills[*index].received_at_us <= event.update_ts_us
-            });
+            let signal_ts_us = if event.signal_ts_us > 0 {
+                event.signal_ts_us
+            } else {
+                event.update_ts_us
+            };
+            let position = indices
+                .partition_point(|index| virtual_fills[*index].received_at_us <= signal_ts_us);
             let Some(index) = position.checked_sub(1).map(|position| indices[position]) else {
                 totals.unmatched_fill_count = totals.unmatched_fill_count.saturating_add(1);
                 totals.unmatched_fill_notional_usdt += (signed_qty * event.price).abs();
@@ -269,23 +384,28 @@ pub async fn report_acquisition_cost(
                 totals.opposite_fill_notional_usdt += (signed_qty * event.price).abs();
                 continue;
             }
-            let remaining = (fill.delta_qty.abs() - fill.actual_matched_qty.abs()).max(0.0);
-            let matched_abs = signed_qty.abs().min(remaining);
-            if matched_abs <= ZERO_EPSILON {
-                totals.unmatched_fill_count = totals.unmatched_fill_count.saturating_add(1);
-                totals.unmatched_fill_notional_usdt += (signed_qty * event.price).abs();
-                continue;
-            }
-            let matched_qty = signed_qty.signum() * matched_abs;
-            let ratio = matched_abs / signed_qty.abs();
-            fill.actual_matched_qty += matched_qty;
-            fill.actual_signed_notional_usdt += matched_qty * event.price;
-            fill.actual_fee_usdt += history.estimated_fee_quote(source, event)? * ratio;
+            fill.actual_matched_qty += signed_qty;
+            fill.actual_signed_notional_usdt += signed_qty * event.price;
+            fill.actual_fee_usdt += actual_fee;
             fill.matched_fill_count = fill.matched_fill_count.saturating_add(1);
-            let excess = signed_qty.abs() - matched_abs;
-            if excess > ZERO_EPSILON {
-                totals.unmatched_fill_count = totals.unmatched_fill_count.saturating_add(1);
-                totals.unmatched_fill_notional_usdt += excess * event.price;
+            let side = if signed_qty > 0.0 { "buy" } else { "sell" };
+            let liquidity = history.liquidity_role_name(event);
+            let target_delay = delay_bucket(event.update_ts_us - fill.received_at_us);
+            let order_delay = delay_bucket(event.update_ts_us - signal_ts_us);
+            for (values, bucket) in [
+                (&mut by_symbol, event.symbol.as_str()),
+                (&mut by_side, side),
+                (&mut by_liquidity, liquidity),
+                (&mut by_target_delay, target_delay),
+                (&mut by_order_delay, order_delay),
+            ] {
+                values.entry(bucket.to_string()).or_default().add(
+                    signed_qty,
+                    event.price,
+                    fill.virtual_vwap,
+                    actual_fee,
+                    fill.virtual_fee_rate,
+                );
             }
         }
     }
@@ -302,11 +422,7 @@ pub async fn report_acquisition_cost(
         let actual_turnover = fill.actual_signed_notional_usdt.abs();
         let actual_vwap = (fill.actual_matched_qty.abs() > ZERO_EPSILON)
             .then(|| fill.actual_signed_notional_usdt / fill.actual_matched_qty);
-        let virtual_matched_fee = if virtual_turnover > 0.0 {
-            fill.virtual_fee_usdt * matched_turnover / virtual_turnover
-        } else {
-            0.0
-        };
+        let virtual_matched_fee = matched_turnover * fill.virtual_fee_rate;
         let price_shortfall = actual_vwap
             .map(|actual_vwap| fill.actual_matched_qty * (actual_vwap - fill.virtual_vwap));
         let fee_shortfall = price_shortfall.map(|_| fill.actual_fee_usdt - virtual_matched_fee);
@@ -385,6 +501,11 @@ pub async fn report_acquisition_cost(
     } else {
         0.0
     };
+    totals.actual_fill_reference_coverage = if totals.actual_turnover_usdt > 0.0 {
+        totals.actual_matched_turnover_usdt / totals.actual_turnover_usdt
+    } else {
+        0.0
+    };
     let page_count = output_rows.len().div_ceil(page_size);
     let (start, end) = page_bounds(output_rows.len(), page, page_size);
     let rows = output_rows[start..end].to_vec();
@@ -402,6 +523,11 @@ pub async fn report_acquisition_cost(
         returned_row_count: rows.len(),
         totals,
         points,
+        by_symbol: finish_breakdowns(by_symbol, true),
+        by_side: finish_breakdowns(by_side, false),
+        by_liquidity: finish_breakdowns(by_liquidity, false),
+        by_target_delay: finish_breakdowns(by_target_delay, false),
+        by_order_delay: finish_breakdowns(by_order_delay, false),
         rows,
     })
 }
@@ -425,5 +551,26 @@ mod tests {
         assert_eq!(page_bounds(55, 1, 25), (30, 55));
         assert_eq!(page_bounds(55, 2, 25), (5, 30));
         assert_eq!(page_bounds(55, 3, 25), (0, 5));
+    }
+
+    #[test]
+    fn acquisition_breakdown_uses_the_same_quantity_for_both_prices() {
+        let mut value = BreakdownAccumulator::default();
+        value.add(2.0, 101.0, 100.0, 0.02, 0.0002);
+        value.add(-3.0, 99.0, 100.0, 0.03, 0.0002);
+        let row = value.finish("all".to_string());
+        assert_eq!(row.reference_turnover_usdt, 500.0);
+        assert_eq!(row.actual_turnover_usdt, 499.0);
+        assert_eq!(row.price_shortfall_usdt, 5.0);
+        assert_eq!(row.price_shortfall_bps, 100.0);
+        assert!((row.virtual_fee_usdt - 0.1).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn acquisition_delay_buckets_have_stable_boundaries() {
+        assert_eq!(delay_bucket(4_999_999), "00_00-05s");
+        assert_eq!(delay_bucket(5_000_000), "01_05-10s");
+        assert_eq!(delay_bucket(10_000_000), "02_10-30s");
+        assert_eq!(delay_bucket(300_000_000), "05_after-300s");
     }
 }

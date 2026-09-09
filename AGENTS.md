@@ -196,11 +196,13 @@ overlay, not inputs to the acquisition-cost comparison.
 
 `GET /api/catalog/acquisition-cost` is the canonical actual-versus-virtual cost
 contract. It reads materialized delta events and factual `batch_exec:<strategy>`
-fills, matches only the same direction up to each delta's absolute quantity, and
-reports quantity/notional coverage. Price shortfall is
-`matched_signed_qty * (actual_vwap - virtual_vwap)`; fee shortfall is factual
-Maker/Taker fee minus the matched share of virtual blended fee. This endpoint and
-its `/manager/acquisition-cost/` browser do not use mark prices.
+fills, maps each fill by its stable order `signal_ts_us` to the latest preceding
+same-symbol delta, and keeps the factual quantity unchanged on both price paths.
+Target completion and actual-fill reference coverage are separate metrics. Price
+shortfall is `factual_signed_qty * (actual_price - virtual_vwap)`; fee shortfall
+is factual Maker/Taker fee minus the same-quantity virtual blended fee. Symbol,
+side, liquidity, target-delay, and order-delay breakdowns must add to the total.
+This endpoint and its `/manager/acquisition-cost/` browser do not use mark prices.
 
 The main NAV display is a time series, not a per-symbol contribution bar chart.
 `GET /api/timeline` rebuilds it on demand and accepts camel-case `startMs`,

@@ -386,6 +386,9 @@ export interface AcquisitionCostTotals {
   comparable_delta_count: number
   virtual_turnover_usdt: number
   virtual_fee_usdt: number
+  actual_fill_count: number
+  actual_turnover_usdt: number
+  actual_fee_usdt: number
   matched_virtual_turnover_usdt: number
   actual_matched_turnover_usdt: number
   actual_matched_fee_usdt: number
@@ -399,6 +402,7 @@ export interface AcquisitionCostTotals {
   after_fee_shortfall_usdt: number
   price_shortfall_bps: number
   matched_turnover_coverage: number
+  actual_fill_reference_coverage: number
 }
 
 export interface AcquisitionCostPoint {
@@ -406,6 +410,18 @@ export interface AcquisitionCostPoint {
   virtual_turnover_usdt: number
   actual_matched_turnover_usdt: number
   price_shortfall_usdt: number
+  after_fee_shortfall_usdt: number
+}
+
+export interface AcquisitionCostBreakdown {
+  bucket: string
+  fill_count: number
+  reference_turnover_usdt: number
+  actual_turnover_usdt: number
+  actual_fee_usdt: number
+  virtual_fee_usdt: number
+  price_shortfall_usdt: number
+  price_shortfall_bps: number
   after_fee_shortfall_usdt: number
 }
 
@@ -448,6 +464,11 @@ export interface AcquisitionCostReport {
   returned_row_count: number
   totals: AcquisitionCostTotals
   points: AcquisitionCostPoint[]
+  by_symbol: AcquisitionCostBreakdown[]
+  by_side: AcquisitionCostBreakdown[]
+  by_liquidity: AcquisitionCostBreakdown[]
+  by_target_delay: AcquisitionCostBreakdown[]
+  by_order_delay: AcquisitionCostBreakdown[]
   rows: AcquisitionCostRow[]
 }
 

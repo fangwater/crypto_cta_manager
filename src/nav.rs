@@ -46,6 +46,14 @@ impl NavSourceHistory {
         }
         Ok(fee)
     }
+
+    pub(crate) fn liquidity_role_name(&self, event: &UniformOrderEvent) -> &'static str {
+        match liquidity_role_for_event(event, &self.liquidity_by_order) {
+            LiquidityRole::Maker => "maker",
+            LiquidityRole::Taker => "taker",
+            LiquidityRole::Unknown => "unclassified",
+        }
+    }
 }
 
 pub type NavSourceHistories = BTreeMap<String, NavSourceHistory>;
