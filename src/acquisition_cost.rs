@@ -60,6 +60,27 @@ pub struct AcquisitionCostBreakdown {
     pub after_fee_shortfall_usdt: f64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct AcquisitionFillDiagnostic {
+    pub source_id: String,
+    pub strategy_name: String,
+    pub symbol: String,
+    pub target_received_at_us: i64,
+    pub order_signal_ts_us: i64,
+    pub fill_ts_us: i64,
+    pub client_order_id: i64,
+    pub side: &'static str,
+    pub liquidity: &'static str,
+    pub actual_qty: f64,
+    pub actual_price: f64,
+    pub virtual_price: f64,
+    pub target_delay_us: i64,
+    pub order_delay_us: i64,
+    pub reference_turnover_usdt: f64,
+    pub price_shortfall_usdt: f64,
+    pub price_shortfall_bps: f64,
+}
+
 #[derive(Clone, Debug, Default)]
 struct BreakdownAccumulator {
     fill_count: u64,
@@ -156,6 +177,7 @@ pub struct AcquisitionCostReport {
     pub by_order_delay: Vec<AcquisitionCostBreakdown>,
     pub by_symbol_liquidity: Vec<AcquisitionCostBreakdown>,
     pub by_symbol_target_delay: Vec<AcquisitionCostBreakdown>,
+    pub worst_fills: Vec<AcquisitionFillDiagnostic>,
     pub rows: Vec<AcquisitionCostRow>,
 }
 
@@ -330,6 +352,7 @@ pub async fn report_acquisition_cost(
     let mut by_order_delay = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_symbol_liquidity = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_symbol_target_delay = BTreeMap::<String, BreakdownAccumulator>::new();
+    let mut fill_diagnostics = Vec::new();
     for fill in &virtual_fills {
         totals.virtual_turnover_usdt += (fill.delta_qty * fill.virtual_vwap).abs();
         totals.virtual_fee_usdt += fill.virtual_fee_usdt;
@@ -396,6 +419,31 @@ pub async fn report_acquisition_cost(
             let liquidity = history.liquidity_role_name(event);
             let target_delay = delay_bucket(event.update_ts_us - fill.received_at_us);
             let order_delay = delay_bucket(event.update_ts_us - signal_ts_us);
+            let reference_turnover = (signed_qty * fill.virtual_vwap).abs();
+            let price_shortfall = signed_qty * (event.price - fill.virtual_vwap);
+            fill_diagnostics.push(AcquisitionFillDiagnostic {
+                source_id: source_id.clone(),
+                strategy_name: nav::strategy_from_from_key(&event.from_key_text),
+                symbol: event.symbol.clone(),
+                target_received_at_us: fill.received_at_us,
+                order_signal_ts_us: signal_ts_us,
+                fill_ts_us: event.update_ts_us,
+                client_order_id: event.client_order_id,
+                side,
+                liquidity,
+                actual_qty: signed_qty,
+                actual_price: event.price,
+                virtual_price: fill.virtual_vwap,
+                target_delay_us: event.update_ts_us - fill.received_at_us,
+                order_delay_us: event.update_ts_us - signal_ts_us,
+                reference_turnover_usdt: reference_turnover,
+                price_shortfall_usdt: price_shortfall,
+                price_shortfall_bps: if reference_turnover > 0.0 {
+                    price_shortfall / reference_turnover * 10_000.0
+                } else {
+                    0.0
+                },
+            });
             for (values, bucket) in [
                 (&mut by_symbol, event.symbol.as_str()),
                 (&mut by_side, side),
@@ -531,6 +579,13 @@ pub async fn report_acquisition_cost(
     let page_count = output_rows.len().div_ceil(page_size);
     let (start, end) = page_bounds(output_rows.len(), page, page_size);
     let rows = output_rows[start..end].to_vec();
+    fill_diagnostics.sort_by(|left, right| {
+        right
+            .price_shortfall_usdt
+            .partial_cmp(&left.price_shortfall_usdt)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    fill_diagnostics.truncate(100);
     Ok(AcquisitionCostReport {
         generated_at_us,
         price_basis: "delta_split_into_five_equal_qty_5s_mid_samples_60s_apart",
@@ -552,6 +607,7 @@ pub async fn report_acquisition_cost(
         by_order_delay: finish_breakdowns(by_order_delay, false),
         by_symbol_liquidity: finish_breakdowns(by_symbol_liquidity, true),
         by_symbol_target_delay: finish_breakdowns(by_symbol_target_delay, true),
+        worst_fills: fill_diagnostics,
         rows,
     })
 }

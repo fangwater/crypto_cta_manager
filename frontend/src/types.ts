@@ -425,6 +425,26 @@ export interface AcquisitionCostBreakdown {
   after_fee_shortfall_usdt: number
 }
 
+export interface AcquisitionFillDiagnostic {
+  source_id: string
+  strategy_name: string
+  symbol: string
+  target_received_at_us: number
+  order_signal_ts_us: number
+  fill_ts_us: number
+  client_order_id: number
+  side: string
+  liquidity: string
+  actual_qty: number
+  actual_price: number
+  virtual_price: number
+  target_delay_us: number
+  order_delay_us: number
+  reference_turnover_usdt: number
+  price_shortfall_usdt: number
+  price_shortfall_bps: number
+}
+
 export interface AcquisitionCostRow {
   source_id: string
   binding_name: string
@@ -471,6 +491,7 @@ export interface AcquisitionCostReport {
   by_order_delay: AcquisitionCostBreakdown[]
   by_symbol_liquidity: AcquisitionCostBreakdown[]
   by_symbol_target_delay: AcquisitionCostBreakdown[]
+  worst_fills: AcquisitionFillDiagnostic[]
   rows: AcquisitionCostRow[]
 }
 
