@@ -35,9 +35,12 @@ pub struct AcquisitionCostTotals {
     pub stale_reference_fill_count: u64,
     pub stale_reference_fill_notional_usdt: f64,
     pub price_shortfall_usdt: f64,
+    pub first_mid_shortfall_usdt: f64,
+    pub five_sample_drift_usdt: f64,
     pub fee_shortfall_usdt: f64,
     pub after_fee_shortfall_usdt: f64,
     pub price_shortfall_bps: f64,
+    pub first_mid_shortfall_bps: f64,
     pub matched_turnover_coverage: f64,
     pub actual_fill_reference_coverage: f64,
 }
@@ -60,7 +63,10 @@ pub struct AcquisitionCostBreakdown {
     pub actual_fee_usdt: f64,
     pub virtual_fee_usdt: f64,
     pub price_shortfall_usdt: f64,
+    pub first_mid_shortfall_usdt: f64,
+    pub five_sample_drift_usdt: f64,
     pub price_shortfall_bps: f64,
+    pub first_mid_shortfall_bps: f64,
     pub after_fee_shortfall_usdt: f64,
 }
 
@@ -84,6 +90,8 @@ pub struct AcquisitionFillDiagnostic {
     pub order_delay_us: i64,
     pub reference_turnover_usdt: f64,
     pub price_shortfall_usdt: f64,
+    pub first_mid_shortfall_usdt: f64,
+    pub five_sample_drift_usdt: f64,
     pub price_shortfall_bps: f64,
 }
 
@@ -95,6 +103,8 @@ struct BreakdownAccumulator {
     actual_fee_usdt: f64,
     virtual_fee_usdt: f64,
     price_shortfall_usdt: f64,
+    first_mid_shortfall_usdt: f64,
+    five_sample_drift_usdt: f64,
 }
 
 impl BreakdownAccumulator {
@@ -103,6 +113,7 @@ impl BreakdownAccumulator {
         signed_qty: f64,
         actual_price: f64,
         virtual_price: f64,
+        first_mid: f64,
         actual_fee: f64,
         virtual_fee_rate: f64,
     ) {
@@ -113,6 +124,8 @@ impl BreakdownAccumulator {
         self.actual_fee_usdt += actual_fee;
         self.virtual_fee_usdt += reference_turnover * virtual_fee_rate;
         self.price_shortfall_usdt += signed_qty * (actual_price - virtual_price);
+        self.first_mid_shortfall_usdt += signed_qty * (actual_price - first_mid);
+        self.five_sample_drift_usdt += signed_qty * (first_mid - virtual_price);
     }
 
     fn finish(self, bucket: String) -> AcquisitionCostBreakdown {
@@ -124,8 +137,15 @@ impl BreakdownAccumulator {
             actual_fee_usdt: self.actual_fee_usdt,
             virtual_fee_usdt: self.virtual_fee_usdt,
             price_shortfall_usdt: self.price_shortfall_usdt,
+            first_mid_shortfall_usdt: self.first_mid_shortfall_usdt,
+            five_sample_drift_usdt: self.five_sample_drift_usdt,
             price_shortfall_bps: if self.reference_turnover_usdt > 0.0 {
                 self.price_shortfall_usdt / self.reference_turnover_usdt * 10_000.0
+            } else {
+                0.0
+            },
+            first_mid_shortfall_bps: if self.reference_turnover_usdt > 0.0 {
+                self.first_mid_shortfall_usdt / self.reference_turnover_usdt * 10_000.0
             } else {
                 0.0
             },
@@ -482,6 +502,10 @@ pub async fn report_acquisition_cost(
             };
             let reference_turnover = (signed_qty * fill.virtual_vwap).abs();
             let price_shortfall = signed_qty * (event.price - fill.virtual_vwap);
+            let first_mid_shortfall = signed_qty * (event.price - fill.sample_mids[0]);
+            let five_sample_drift = signed_qty * (fill.sample_mids[0] - fill.virtual_vwap);
+            totals.first_mid_shortfall_usdt += first_mid_shortfall;
+            totals.five_sample_drift_usdt += five_sample_drift;
             fill_diagnostics.push(AcquisitionFillDiagnostic {
                 source_id: source_id.clone(),
                 strategy_name: nav::strategy_from_from_key(&event.from_key_text),
@@ -501,6 +525,8 @@ pub async fn report_acquisition_cost(
                 execution_mode,
                 reference_turnover_usdt: reference_turnover,
                 price_shortfall_usdt: price_shortfall,
+                first_mid_shortfall_usdt: first_mid_shortfall,
+                five_sample_drift_usdt: five_sample_drift,
                 price_shortfall_bps: if reference_turnover > 0.0 {
                     price_shortfall / reference_turnover * 10_000.0
                 } else {
@@ -530,6 +556,7 @@ pub async fn report_acquisition_cost(
                     signed_qty,
                     event.price,
                     fill.virtual_vwap,
+                    fill.sample_mids[0],
                     actual_fee,
                     fill.virtual_fee_rate,
                 );
@@ -548,6 +575,7 @@ pub async fn report_acquisition_cost(
                     signed_qty,
                     event.price,
                     fill.virtual_vwap,
+                    fill.sample_mids[0],
                     actual_fee,
                     fill.virtual_fee_rate,
                 );
@@ -641,6 +669,11 @@ pub async fn report_acquisition_cost(
     } else {
         0.0
     };
+    totals.first_mid_shortfall_bps = if totals.matched_virtual_turnover_usdt > 0.0 {
+        totals.first_mid_shortfall_usdt / totals.matched_virtual_turnover_usdt * 10_000.0
+    } else {
+        0.0
+    };
     totals.matched_turnover_coverage = if totals.virtual_turnover_usdt > 0.0 {
         totals.matched_virtual_turnover_usdt / totals.virtual_turnover_usdt
     } else {
@@ -713,12 +746,16 @@ mod tests {
     #[test]
     fn acquisition_breakdown_uses_the_same_quantity_for_both_prices() {
         let mut value = BreakdownAccumulator::default();
-        value.add(2.0, 101.0, 100.0, 0.02, 0.0002);
-        value.add(-3.0, 99.0, 100.0, 0.03, 0.0002);
+        value.add(2.0, 101.0, 100.0, 100.5, 0.02, 0.0002);
+        value.add(-3.0, 99.0, 100.0, 99.5, 0.03, 0.0002);
         let row = value.finish("all".to_string());
         assert_eq!(row.reference_turnover_usdt, 500.0);
         assert_eq!(row.actual_turnover_usdt, 499.0);
         assert_eq!(row.price_shortfall_usdt, 5.0);
+        assert_eq!(
+            row.price_shortfall_usdt,
+            row.first_mid_shortfall_usdt + row.five_sample_drift_usdt
+        );
         assert_eq!(row.price_shortfall_bps, 100.0);
         assert!((row.virtual_fee_usdt - 0.1).abs() <= f64::EPSILON);
     }

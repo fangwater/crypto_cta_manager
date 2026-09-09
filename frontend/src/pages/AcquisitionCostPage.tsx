@@ -169,7 +169,7 @@ export function AcquisitionCostPage() {
         <StatTile label="事实成交额" value={totals ? moneyU(totals.actual_turnover_usdt) : '--'} hint={totals ? `${totals.actual_fill_count} 笔 · 费 ${moneyU(totals.actual_fee_usdt)}` : undefined} />
         <StatTile label="同量虚拟成交额" value={totals ? moneyU(totals.matched_virtual_turnover_usdt) : '--'} hint="完全使用事实 fill 数量" />
         <StatTile label="事实成交覆盖" value={totals ? `${(totals.actual_fill_reference_coverage * 100).toFixed(1)}%` : '--'} />
-        <StatTile label="价格差" value={totals ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? moneyU(totals.price_shortfall_usdt) : undefined} />
+        <StatTile label="价格差" value={totals ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? `首个 mid ${moneyU(totals.first_mid_shortfall_usdt)} · 后续路径 ${moneyU(totals.five_sample_drift_usdt)}` : undefined} />
         <StatTile label="费后差" value={totals ? moneyU(totals.after_fee_shortfall_usdt) : '--'} hint={totals ? `手续费差 ${moneyU(totals.fee_shortfall_usdt)}` : undefined} />
       </div>
 

@@ -400,9 +400,12 @@ export interface AcquisitionCostTotals {
   stale_reference_fill_count: number
   stale_reference_fill_notional_usdt: number
   price_shortfall_usdt: number
+  first_mid_shortfall_usdt: number
+  five_sample_drift_usdt: number
   fee_shortfall_usdt: number
   after_fee_shortfall_usdt: number
   price_shortfall_bps: number
+  first_mid_shortfall_bps: number
   matched_turnover_coverage: number
   actual_fill_reference_coverage: number
 }
@@ -423,7 +426,10 @@ export interface AcquisitionCostBreakdown {
   actual_fee_usdt: number
   virtual_fee_usdt: number
   price_shortfall_usdt: number
+  first_mid_shortfall_usdt: number
+  five_sample_drift_usdt: number
   price_shortfall_bps: number
+  first_mid_shortfall_bps: number
   after_fee_shortfall_usdt: number
 }
 
@@ -446,6 +452,8 @@ export interface AcquisitionFillDiagnostic {
   order_delay_us: number
   reference_turnover_usdt: number
   price_shortfall_usdt: number
+  first_mid_shortfall_usdt: number
+  five_sample_drift_usdt: number
   price_shortfall_bps: number
 }
 
