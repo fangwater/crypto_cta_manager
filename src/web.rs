@@ -1028,6 +1028,7 @@ async fn acquisition_cost(
     let report = crate::acquisition_cost::report_acquisition_cost(
         &state.pool,
         &config,
+        &state.position_archive,
         &histories,
         start_received_at_us,
         end_received_at_us,

@@ -7,6 +7,7 @@ use sqlx::postgres::{PgPool, PgRow};
 
 use crate::config::AppConfig;
 use crate::nav;
+use crate::position_archive::PositionArchive;
 
 pub const DEFAULT_PAGE_SIZE: usize = 25;
 pub const MAX_PAGE_SIZE: usize = 100;
@@ -74,6 +75,8 @@ pub struct AcquisitionFillDiagnostic {
     pub client_order_id: i64,
     pub side: &'static str,
     pub liquidity: &'static str,
+    pub target_signal: i32,
+    pub execution_mode: &'static str,
     pub actual_qty: f64,
     pub actual_price: f64,
     pub virtual_price: f64,
@@ -180,6 +183,8 @@ pub struct AcquisitionCostReport {
     pub by_order_delay: Vec<AcquisitionCostBreakdown>,
     pub by_symbol_liquidity: Vec<AcquisitionCostBreakdown>,
     pub by_symbol_target_delay: Vec<AcquisitionCostBreakdown>,
+    pub by_target_signal: Vec<AcquisitionCostBreakdown>,
+    pub by_execution_mode: Vec<AcquisitionCostBreakdown>,
     pub worst_fills: Vec<AcquisitionFillDiagnostic>,
     pub rows: Vec<AcquisitionCostRow>,
 }
@@ -198,6 +203,7 @@ struct VirtualFill {
     virtual_vwap: f64,
     virtual_fee_usdt: f64,
     virtual_fee_rate: f64,
+    target_signal: i32,
     actual_matched_qty: f64,
     actual_signed_notional_usdt: f64,
     actual_fee_usdt: f64,
@@ -230,6 +236,7 @@ fn decode_virtual_fill(row: PgRow) -> Result<VirtualFill> {
         virtual_vwap: row.try_get("twap_price")?,
         virtual_fee_usdt: row.try_get("fee_quote")?,
         virtual_fee_rate: row.try_get("fee_rate")?,
+        target_signal: 0,
         actual_matched_qty: 0.0,
         actual_signed_notional_usdt: 0.0,
         actual_fee_usdt: 0.0,
@@ -276,6 +283,7 @@ fn finish_breakdowns(
 pub async fn report_acquisition_cost(
     pool: &PgPool,
     config: &AppConfig,
+    archive: &PositionArchive,
     histories: &nav::NavSourceHistories,
     start_received_at_us: i64,
     end_received_at_us: i64,
@@ -314,6 +322,42 @@ pub async fn report_acquisition_cost(
         .into_iter()
         .map(decode_virtual_fill)
         .collect::<Result<Vec<_>>>()?;
+    let mut target_signals = BTreeMap::<(String, String, i64, String), i32>::new();
+    for message in archive.scan_from(start_received_at_us.max(1))? {
+        if message.received_at_us > end_received_at_us {
+            break;
+        }
+        if strategy_name.is_some_and(|selected| selected != message.strategy.strategy_name) {
+            continue;
+        }
+        for account in &message.published_accounts {
+            if !source_ids.is_empty() && !source_ids.contains(&account.source_id) {
+                continue;
+            }
+            for (symbol, target) in &message.strategy.targets {
+                target_signals.insert(
+                    (
+                        account.source_id.clone(),
+                        account.binding_name.clone(),
+                        message.received_at_us,
+                        symbol.clone(),
+                    ),
+                    target.signal,
+                );
+            }
+        }
+    }
+    for fill in &mut virtual_fills {
+        fill.target_signal = target_signals
+            .get(&(
+                fill.source_id.clone(),
+                fill.binding_name.clone(),
+                fill.received_at_us,
+                fill.symbol.clone(),
+            ))
+            .copied()
+            .unwrap_or(0);
+    }
     let missing_virtual_delta_count: i64 = sqlx::query_scalar(
         r#"
         SELECT count(*)
@@ -355,6 +399,8 @@ pub async fn report_acquisition_cost(
     let mut by_order_delay = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_symbol_liquidity = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_symbol_target_delay = BTreeMap::<String, BreakdownAccumulator>::new();
+    let mut by_target_signal = BTreeMap::<String, BreakdownAccumulator>::new();
+    let mut by_execution_mode = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut fill_diagnostics = Vec::new();
     for fill in &virtual_fills {
         totals.virtual_turnover_usdt += (fill.delta_qty * fill.virtual_vwap).abs();
@@ -428,6 +474,12 @@ pub async fn report_acquisition_cost(
             let liquidity = history.liquidity_role_name(event);
             let target_delay = delay_bucket(event.update_ts_us - fill.received_at_us);
             let order_delay = delay_bucket(event.update_ts_us - signal_ts_us);
+            let execution_mode = match (liquidity, fill.target_signal.abs()) {
+                ("taker", 1) => "forced_signal_taker",
+                ("taker", _) => "fallback_or_other_taker",
+                ("maker", _) => "maker",
+                _ => "unclassified",
+            };
             let reference_turnover = (signed_qty * fill.virtual_vwap).abs();
             let price_shortfall = signed_qty * (event.price - fill.virtual_vwap);
             fill_diagnostics.push(AcquisitionFillDiagnostic {
@@ -445,6 +497,8 @@ pub async fn report_acquisition_cost(
                 virtual_price: fill.virtual_vwap,
                 target_delay_us: event.update_ts_us - fill.received_at_us,
                 order_delay_us: event.update_ts_us - signal_ts_us,
+                target_signal: fill.target_signal,
+                execution_mode,
                 reference_turnover_usdt: reference_turnover,
                 price_shortfall_usdt: price_shortfall,
                 price_shortfall_bps: if reference_turnover > 0.0 {
@@ -459,6 +513,18 @@ pub async fn report_acquisition_cost(
                 (&mut by_liquidity, liquidity),
                 (&mut by_target_delay, target_delay),
                 (&mut by_order_delay, order_delay),
+                (
+                    &mut by_target_signal,
+                    match fill.target_signal {
+                        -2 => "signal_-2",
+                        -1 => "signal_-1",
+                        0 => "signal_0",
+                        1 => "signal_1",
+                        2 => "signal_2",
+                        _ => "signal_invalid",
+                    },
+                ),
+                (&mut by_execution_mode, execution_mode),
             ] {
                 values.entry(bucket.to_string()).or_default().add(
                     signed_qty,
@@ -616,6 +682,8 @@ pub async fn report_acquisition_cost(
         by_order_delay: finish_breakdowns(by_order_delay, false),
         by_symbol_liquidity: finish_breakdowns(by_symbol_liquidity, true),
         by_symbol_target_delay: finish_breakdowns(by_symbol_target_delay, true),
+        by_target_signal: finish_breakdowns(by_target_signal, false),
+        by_execution_mode: finish_breakdowns(by_execution_mode, false),
         worst_fills: fill_diagnostics,
         rows,
     })

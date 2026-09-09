@@ -437,6 +437,8 @@ export interface AcquisitionFillDiagnostic {
   client_order_id: number
   side: string
   liquidity: string
+  target_signal: number
+  execution_mode: string
   actual_qty: number
   actual_price: number
   virtual_price: number
@@ -493,6 +495,8 @@ export interface AcquisitionCostReport {
   by_order_delay: AcquisitionCostBreakdown[]
   by_symbol_liquidity: AcquisitionCostBreakdown[]
   by_symbol_target_delay: AcquisitionCostBreakdown[]
+  by_target_signal: AcquisitionCostBreakdown[]
+  by_execution_mode: AcquisitionCostBreakdown[]
   worst_fills: AcquisitionFillDiagnostic[]
   rows: AcquisitionCostRow[]
 }
