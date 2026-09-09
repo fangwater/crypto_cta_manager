@@ -469,6 +469,8 @@ export interface AcquisitionCostReport {
   by_liquidity: AcquisitionCostBreakdown[]
   by_target_delay: AcquisitionCostBreakdown[]
   by_order_delay: AcquisitionCostBreakdown[]
+  by_symbol_liquidity: AcquisitionCostBreakdown[]
+  by_symbol_target_delay: AcquisitionCostBreakdown[]
   rows: AcquisitionCostRow[]
 }
 

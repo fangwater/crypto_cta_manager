@@ -154,6 +154,8 @@ pub struct AcquisitionCostReport {
     pub by_liquidity: Vec<AcquisitionCostBreakdown>,
     pub by_target_delay: Vec<AcquisitionCostBreakdown>,
     pub by_order_delay: Vec<AcquisitionCostBreakdown>,
+    pub by_symbol_liquidity: Vec<AcquisitionCostBreakdown>,
+    pub by_symbol_target_delay: Vec<AcquisitionCostBreakdown>,
     pub rows: Vec<AcquisitionCostRow>,
 }
 
@@ -326,6 +328,8 @@ pub async fn report_acquisition_cost(
     let mut by_liquidity = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_target_delay = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_order_delay = BTreeMap::<String, BreakdownAccumulator>::new();
+    let mut by_symbol_liquidity = BTreeMap::<String, BreakdownAccumulator>::new();
+    let mut by_symbol_target_delay = BTreeMap::<String, BreakdownAccumulator>::new();
     for fill in &virtual_fills {
         totals.virtual_turnover_usdt += (fill.delta_qty * fill.virtual_vwap).abs();
         totals.virtual_fee_usdt += fill.virtual_fee_usdt;
@@ -400,6 +404,24 @@ pub async fn report_acquisition_cost(
                 (&mut by_order_delay, order_delay),
             ] {
                 values.entry(bucket.to_string()).or_default().add(
+                    signed_qty,
+                    event.price,
+                    fill.virtual_vwap,
+                    actual_fee,
+                    fill.virtual_fee_rate,
+                );
+            }
+            for (values, bucket) in [
+                (
+                    &mut by_symbol_liquidity,
+                    format!("{}|{}", event.symbol, liquidity),
+                ),
+                (
+                    &mut by_symbol_target_delay,
+                    format!("{}|{}", event.symbol, target_delay),
+                ),
+            ] {
+                values.entry(bucket).or_default().add(
                     signed_qty,
                     event.price,
                     fill.virtual_vwap,
@@ -528,6 +550,8 @@ pub async fn report_acquisition_cost(
         by_liquidity: finish_breakdowns(by_liquidity, false),
         by_target_delay: finish_breakdowns(by_target_delay, false),
         by_order_delay: finish_breakdowns(by_order_delay, false),
+        by_symbol_liquidity: finish_breakdowns(by_symbol_liquidity, true),
+        by_symbol_target_delay: finish_breakdowns(by_symbol_target_delay, true),
         rows,
     })
 }
