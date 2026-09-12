@@ -114,7 +114,11 @@ pub fn scale_targets(
             (
                 symbol.clone(),
                 TargetPosition {
-                    qty: target.qty * shares,
+                    qty: if shares == 0.0 {
+                        0.0
+                    } else {
+                        target.qty * shares
+                    },
                     signal: target.signal,
                 },
             )
@@ -151,9 +155,9 @@ pub fn validate_symbol_order_strategy_overrides(
     Ok(())
 }
 
-pub fn validate_positive_multiplier(value: f64, field: &str) -> Result<(), String> {
-    if !value.is_finite() || value <= 0.0 {
-        return Err(format!("{field} must be finite and greater than zero"));
+pub fn validate_nonnegative_multiplier(value: f64, field: &str) -> Result<(), String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!("{field} must be finite and non-negative"));
     }
     Ok(())
 }
@@ -230,11 +234,11 @@ impl AccountStudio {
     }
 }
 
-pub async fn list_binding_source_ids_for_position(
+pub async fn list_active_binding_source_ids_for_position(
     pool: &PgPool,
     strategy_name: &str,
 ) -> Result<Vec<String>> {
-    let bindings = list_bindings_for_position(pool, strategy_name).await?;
+    let bindings = list_active_bindings_for_position(pool, strategy_name).await?;
     let mut source_ids = bindings
         .into_iter()
         .map(|binding| binding.source_id)
@@ -263,6 +267,7 @@ pub async fn list_publish_snapshots_for_position(
             b.shares
         FROM cta_account_strategy_bindings b
         WHERE b.position_strategy_name = $1
+          AND b.shares > 0
         ORDER BY b.source_id, b.binding_name
         "#,
     )
@@ -283,7 +288,7 @@ pub async fn list_publish_snapshots_for_position(
         .collect()
 }
 
-pub async fn list_bindings_for_position(
+pub async fn list_active_bindings_for_position(
     pool: &PgPool,
     strategy_name: &str,
 ) -> Result<Vec<AccountBinding>> {
@@ -298,6 +303,7 @@ pub async fn list_bindings_for_position(
             b.updated_at_us
         FROM cta_account_strategy_bindings b
         WHERE b.position_strategy_name = $1
+          AND b.shares > 0
         ORDER BY b.source_id, b.binding_name
         "#,
     )
@@ -576,7 +582,7 @@ pub async fn save_binding(
     validate_strategy_name(&request.position_strategy_name)
         .map_err(|error| anyhow::anyhow!(error))?;
     validate_strategy_name(&request.order_strategy_name).map_err(|error| anyhow::anyhow!(error))?;
-    validate_positive_multiplier(request.shares, "shares")
+    validate_nonnegative_multiplier(request.shares, "shares")
         .map_err(|error| anyhow::anyhow!(error))?;
     if !list_position_strategies(pool)
         .await?
@@ -633,7 +639,7 @@ pub async fn save_binding_shares(
     updated_at_us: i64,
 ) -> Result<AccountStudio> {
     validate_strategy_name(binding_name).map_err(|error| anyhow::anyhow!(error))?;
-    validate_positive_multiplier(request.shares, "shares")
+    validate_nonnegative_multiplier(request.shares, "shares")
         .map_err(|error| anyhow::anyhow!(error))?;
     let result = sqlx::query(
         r#"
@@ -659,7 +665,7 @@ pub async fn delete_binding(pool: &PgPool, source_id: &str, binding_name: &str) 
     let result = sqlx::query(
         r#"
         DELETE FROM cta_account_strategy_bindings
-        WHERE source_id = $1 AND binding_name = $2
+        WHERE source_id = $1 AND binding_name = $2 AND shares = 0
         "#,
     )
     .bind(source_id)
@@ -667,7 +673,27 @@ pub async fn delete_binding(pool: &PgPool, source_id: &str, binding_name: &str) 
     .execute(pool)
     .await
     .with_context(|| format!("failed to delete binding {binding_name} on {source_id}"))?;
-    Ok(result.rows_affected() > 0)
+    if result.rows_affected() > 0 {
+        return Ok(true);
+    }
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM cta_account_strategy_bindings
+            WHERE source_id = $1 AND binding_name = $2
+        )
+        "#,
+    )
+    .bind(source_id)
+    .bind(binding_name)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to check binding {binding_name} on {source_id}"))?;
+    if exists {
+        bail!("binding must have zero shares before deletion");
+    }
+    Ok(false)
 }
 
 pub async fn load_binding_parts(
@@ -838,18 +864,20 @@ mod tests {
 
     #[test]
     fn binding_shares_are_the_only_target_multiplier() {
-        let scaled = scale_targets(
-            &BTreeMap::from([(
-                "BTCUSDT".into(),
-                TargetPosition {
-                    qty: -0.006,
-                    signal: -1,
-                },
-            )]),
-            3.0,
-        );
+        let targets = BTreeMap::from([(
+            "BTCUSDT".into(),
+            TargetPosition {
+                qty: -0.006,
+                signal: -1,
+            },
+        )]);
+        let scaled = scale_targets(&targets, 3.0);
         assert!((scaled["BTCUSDT"].qty + 0.018).abs() < 1e-12);
         assert_eq!(scaled["BTCUSDT"].signal, -1);
+
+        let stopped = scale_targets(&targets, 0.0);
+        assert_eq!(stopped["BTCUSDT"].qty.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(stopped["BTCUSDT"].signal, -1);
     }
 
     #[test]
@@ -904,11 +932,12 @@ mod tests {
     }
 
     #[test]
-    fn shares_must_be_positive_and_finite() {
-        assert!(validate_positive_multiplier(2.0, "shares").is_ok());
-        assert!(validate_positive_multiplier(0.0, "shares").is_err());
-        assert!(validate_positive_multiplier(-1.0, "shares").is_err());
-        assert!(validate_positive_multiplier(f64::NAN, "shares").is_err());
+    fn shares_must_be_nonnegative_and_finite() {
+        assert!(validate_nonnegative_multiplier(2.0, "shares").is_ok());
+        assert!(validate_nonnegative_multiplier(0.0, "shares").is_ok());
+        assert!(validate_nonnegative_multiplier(-1.0, "shares").is_err());
+        assert!(validate_nonnegative_multiplier(f64::NAN, "shares").is_err());
+        assert!(validate_nonnegative_multiplier(f64::INFINITY, "shares").is_err());
     }
 
     #[test]

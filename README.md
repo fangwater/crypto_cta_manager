@@ -40,9 +40,11 @@ gateway. The dashboard never derives service paths from account names.
 must not live under `binance_exec_trade01` and must never reuse an Exec
 `persist_manager` path. Each accepted `POST /api/catalog/position-strategies`
 is also appended as one JSON message in column family `position_updates`.
-PostgreSQL remains the current catalog; RocksDB is the append-only history of
-those POST bodies. The archived message also records each bound account's
-then-current `shares`, and factual positions from each source's Exec Viz
+Setting binding shares to zero appends an additional stop message before the
+zero target is published. PostgreSQL remains the current catalog; RocksDB is
+the append-only position-publication history. Each archived message records
+the affected account's then-current `shares`, and factual positions from its
+Exec Viz
 `/snapshot` `exec_pre_trade_state` row (`current_qty` for that strategy).
 Published qty is reconstructed later as template qty × shares. Later share
 edits must not be used to reconstruct an older fill. Set
@@ -62,9 +64,9 @@ rescaling historical targets. To continue, set `afterUs` and `afterSeq` to the
 real-time job. Each archived position update's intended qty is template qty ×
 the shares stored in that message minus the snapshot qty. The
 default execution window is 5 minutes (`windowSec`, later adjustable) and ends
-early at the next same-strategy update. Assume the intended qty is executed
-uniformly over that window. Split from the update timestamp into consecutive
-1-minute buckets; each 1-minute mid is the equal average of the 5-second mid
+early at that same source and binding's next publication. Assume the intended
+qty is executed uniformly over that window. Split from the update timestamp
+into consecutive 1-minute buckets; each 1-minute mid is the equal average of the 5-second mid
 bars in that bucket, then those 1-minute mids are averaged. A 5-minute window
 therefore uses five 1-minute mids. The latest non-stale completed 5-second mid
 at the update is `arrival_mid`. For windows with actual fills, price execution
@@ -491,9 +493,12 @@ read-only. Runtime Redis JSON is written only by Manager through the loopback
 Exec Config `POST /api/strategy`. There is no write token. Each target is
 `{qty, signal}`; `signal=±1` means that symbol uses taker-only for the current
 execution. A successful `POST /api/catalog/position-strategies` republishes
-every bound account automatically using `qty × shares`. Each binding stores a
-positive `shares` multiplier. Manager keeps a reconnecting Redis long
-connection, writes and rereads the runtime JSON there, then notifies
+every active bound account automatically using `qty × shares`. Each binding
+stores a non-negative `shares` multiplier. Setting it to zero immediately
+publishes one complete zero target vector under the original strategy name,
+then excludes that binding from later automatic publishes. This closes the
+strategy without routing its fills through `SYSTEM_POSITION_CLOSE`. Manager
+keeps a reconnecting Redis long connection, writes and rereads the runtime JSON there, then notifies
 `exec-pre-trade` over iceoryx. The 30s Redis poll remains the fallback.
 
 Exchange contract leverage is an independent venue margin setting. Query and

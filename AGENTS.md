@@ -134,10 +134,17 @@ default `/home/el01/crypto_cta_manager/db`. This is not an Exec-account store,
 so it must not live under `binance_exec_trade01`. Each accepted
 `POST /api/catalog/position-strategies` is appended as one JSON message in
 column family `position_updates`. The message includes the POST body, each
-bound account's then-current `shares`, and factual positions read from each
+active bound account's then-current `shares`, and factual positions read from each
 source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty`. Published qty
 is reconstructed later as template qty × shares. Later changes to shares must
-not rewrite older messages. PostgreSQL remains the current catalog.
+not rewrite older messages. A binding with `shares = 0` is stopped: Manager
+archives and publishes one complete zero target vector under the original
+strategy name when zero is saved, then excludes the binding from later
+automatic position publishes. Keep the zero-share binding so a failed clear can
+be retried. Do not route this normal stop through `SYSTEM_POSITION_CLOSE`;
+attributed close fills must remain `batch_exec:<strategy_name>`. PostgreSQL
+remains the current catalog. Deleting an account binding is allowed only after
+its shares are zero and does not remove the zero-target strategy from Exec.
 Manager is the sole owner of pulling venue order-rule metadata used by Exec,
 including price tick, quantity step, minimum quantity, minimum notional, symbol
 status, and contract multiplier. It refreshes that metadata every 60 seconds,
@@ -169,9 +176,10 @@ from archived position updates, 5-second mid bars, and later Exec
 `uniform_orders` fills. Query parameters are camel-case `startMs`, `endMs`,
 `windowSec` (default 300, max 86400), comma-separated `sourceIds`, and
 `strategyName`. Intended qty is template qty × archived shares minus the
-snapshot `current_qty`. Each update's window starts at
-`received_at_us` and ends at the earlier of `received_at_us + windowSec`, the
-next same-strategy update, or now. Assume uniform execution over that window.
+snapshot `current_qty`. Each account binding's update window starts at
+`received_at_us` and ends at the earlier of `received_at_us + windowSec`, that
+same source and binding's next strategy publication, or now. Assume uniform
+execution over that window.
 Split the window into consecutive 1-minute buckets from `received_at_us`, not
 wall-clock minutes. Each 1-minute mid is the equal average of the 5-second mid
 bars in that bucket (12 bars in a full minute). The window TWAP is the equal
@@ -346,8 +354,9 @@ configured sources, while `/manager/` remains the detailed NAV timeline.
 and publish. The Exec `/exec_trade01/config/` page stays read-only. The browser
 talks only to Manager endpoints below `/manager/api/`; it never connects to
 Redis or an Exec Config write port. Catalog writes stay in PostgreSQL. Each
-account binding stores a positive `shares` multiplier. Runtime Redis JSON is
-written when Manager scales each target `qty` by shares, copies `signal`
+account binding stores a non-negative `shares` multiplier. A positive value is
+active; zero has the stop-and-clear behavior described above. Runtime Redis
+JSON is written when Manager scales each target `qty` by shares, copies `signal`
 unchanged, assembles the Exec payload, and `POST`s `/api/strategy`. A
 successful `POST /api/catalog/position-strategies` does that automatically for
 every account bound to the strategy. Changing binding shares affects later

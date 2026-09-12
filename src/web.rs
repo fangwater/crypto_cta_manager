@@ -1692,10 +1692,25 @@ async fn save_account_binding(
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
-    match strategy_catalog::save_binding(&state.pool, &source_id, &request, unix_now_us()).await {
-        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
-        Err(error) => Ok(catalog_error(error)),
+    let updated_at_us = unix_now_us();
+    let studio = match strategy_catalog::save_binding(
+        &state.pool,
+        &source_id,
+        &request,
+        updated_at_us,
+    )
+    .await
+    {
+        Ok(studio) => studio,
+        Err(error) => return Ok(catalog_error(error)),
+    };
+    if request.shares == 0.0
+        && let Err(failure) =
+            stop_binding(&state, &source_id, &request.binding_name, updated_at_us).await
+    {
+        return Ok(publish_failure_response(failure));
     }
+    Ok((NO_STORE, Json(studio)).into_response())
 }
 
 async fn save_account_binding_shares(
@@ -1706,18 +1721,27 @@ async fn save_account_binding_shares(
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
-    match strategy_catalog::save_binding_shares(
+    let updated_at_us = unix_now_us();
+    let studio = match strategy_catalog::save_binding_shares(
         &state.pool,
         &source_id,
         &binding_name,
         &request,
-        unix_now_us(),
+        updated_at_us,
     )
     .await
     {
-        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
-        Err(error) => Ok(catalog_error(error)),
+        Ok(studio) => studio,
+        Err(error) => return Ok(catalog_error(error)),
+    };
+    if request.shares > 0.0 {
+        return Ok((NO_STORE, Json(studio)).into_response());
     }
+
+    if let Err(failure) = stop_binding(&state, &source_id, &binding_name, updated_at_us).await {
+        return Ok(publish_failure_response(failure));
+    }
+    Ok((NO_STORE, Json(studio)).into_response())
 }
 
 async fn delete_account_binding(
@@ -1735,6 +1759,15 @@ async fn publish_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
+    let shares = strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name)
+        .await?
+        .map(|loaded| loaded.3);
+    if shares == Some(0.0) {
+        return match stop_binding(&state, &source_id, &binding_name, unix_now_us()).await {
+            Ok(published) => Ok((NO_STORE, Json(published)).into_response()),
+            Err(error) => Ok(publish_failure_response(error)),
+        };
+    }
     match publish_binding(&state, &source_id, &binding_name).await {
         Ok(published) => Ok((NO_STORE, Json(published)).into_response()),
         Err(error) => Ok(publish_failure_response(error)),
@@ -1746,7 +1779,8 @@ async fn publish_bound_accounts(
     strategy_name: &str,
 ) -> Vec<BindingPublishResult> {
     let bindings =
-        match strategy_catalog::list_bindings_for_position(&state.pool, strategy_name).await {
+        match strategy_catalog::list_active_bindings_for_position(&state.pool, strategy_name).await
+        {
             Ok(bindings) => bindings,
             Err(error) => {
                 warn!(
@@ -1806,6 +1840,71 @@ async fn publish_bound_accounts(
 struct PublishFailure {
     status: StatusCode,
     message: String,
+}
+
+async fn stop_binding(
+    state: &WebState,
+    source_id: &str,
+    binding_name: &str,
+    updated_at_us: i64,
+) -> std::result::Result<OrderStrategyView, PublishFailure> {
+    // Keep the strategy in Exec and publish zero under its original name so
+    // close fills remain attributable instead of becoming SYSTEM_POSITION_CLOSE.
+    let loaded = strategy_catalog::load_binding_parts(&state.pool, source_id, binding_name)
+        .await
+        .map_err(|error| PublishFailure {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!(
+                "shares were saved as zero, but the binding could not be loaded: {error}"
+            ),
+        })?
+        .ok_or_else(|| PublishFailure {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "shares were saved as zero, but the binding disappeared".to_string(),
+        })?;
+    let position = loaded.0;
+    let factual_positions = load_factual_position(state, source_id, binding_name)
+        .await
+        .into_iter()
+        .collect();
+    state
+        .position_archive
+        .append(
+            updated_at_us,
+            &position,
+            factual_positions,
+            vec![crate::position_archive::published_account(
+                source_id,
+                binding_name,
+                0.0,
+            )],
+        )
+        .map_err(|error| {
+            error!(
+                source_id,
+                binding_name,
+                error = %error,
+                "binding stopped but stop event archive write failed before zero target publish"
+            );
+            PublishFailure {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "shares were saved as zero, but the stop event archive failed; the zero target was not published, retry the stop or manual publish".to_string(),
+            }
+        })?;
+    let published = publish_binding(state, source_id, binding_name)
+        .await
+        .map_err(|mut failure| {
+            failure.message = format!(
+                "shares were saved as zero, but the zero target publish failed: {}; retry the stop or manual publish",
+                failure.message
+            );
+            failure
+        })?;
+    info!(
+        source_id,
+        binding_name, "binding stopped with an attributed zero target"
+    );
+    Ok(published)
 }
 
 async fn publish_binding(
@@ -1946,48 +2045,58 @@ async fn load_factual_positions(
     state: &WebState,
     strategy_name: &str,
 ) -> Vec<SourceFactualPositions> {
-    let source_ids =
-        match strategy_catalog::list_binding_source_ids_for_position(&state.pool, strategy_name)
-            .await
-        {
-            Ok(source_ids) => source_ids,
-            Err(error) => {
-                warn!(
-                    strategy_name,
-                    error = %error,
-                    "failed to list bound sources for position update archive"
-                );
-                return Vec::new();
-            }
-        };
+    let source_ids = match strategy_catalog::list_active_binding_source_ids_for_position(
+        &state.pool,
+        strategy_name,
+    )
+    .await
+    {
+        Ok(source_ids) => source_ids,
+        Err(error) => {
+            warn!(
+                strategy_name,
+                error = %error,
+                "failed to list bound sources for position update archive"
+            );
+            return Vec::new();
+        }
+    };
     let mut out = Vec::new();
     for source_id in source_ids {
-        let Some(source) = state
-            .config
-            .sources
-            .iter()
-            .find(|source| source.id == source_id && source.enabled)
-        else {
-            continue;
-        };
-        let Some(viz_url) = source.exec_viz_origin() else {
-            continue;
-        };
-        match state
-            .viz_snapshot
-            .load_strategy_positions(&source_id, viz_url, strategy_name)
-            .await
-        {
-            Ok(positions) => out.push(positions),
-            Err(error) => warn!(
+        if let Some(positions) = load_factual_position(state, &source_id, strategy_name).await {
+            out.push(positions);
+        }
+    }
+    out
+}
+
+async fn load_factual_position(
+    state: &WebState,
+    source_id: &str,
+    strategy_name: &str,
+) -> Option<SourceFactualPositions> {
+    let source = state
+        .config
+        .sources
+        .iter()
+        .find(|source| source.id == source_id && source.enabled)?;
+    let viz_url = source.exec_viz_origin()?;
+    match state
+        .viz_snapshot
+        .load_strategy_positions(source_id, viz_url, strategy_name)
+        .await
+    {
+        Ok(positions) => Some(positions),
+        Err(error) => {
+            warn!(
                 source_id,
                 strategy_name,
                 error = %error,
                 "Exec Viz snapshot factual positions unavailable"
-            ),
+            );
+            None
         }
     }
-    out
 }
 
 fn catalog_error(error: anyhow::Error) -> Response {
@@ -2980,7 +3089,7 @@ mod tests {
     fn manager_publish_client_download_is_the_checked_in_script() {
         let script = std::str::from_utf8(MANAGER_PUBLISH_CLIENT).unwrap();
         assert!(script.contains("put-position"));
-        assert!(script.contains("automatically republishes every bound"));
+        assert!(script.contains("automatically republishes every active"));
         assert!(script.contains("Manager writes Redis on a reconnecting long connection"));
         assert!(script.contains(r#"{"strategy_name":"CTA_A","targets":{"BTCUSDT":-0.006}}"#));
         assert!(script.contains("catalog/accounts/"));

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Update Manager position templates.
 
-A successful POST writes the catalog, then Manager republishes every bound
-account automatically. Redis writes still go through Manager, not Exec Config.
+A successful POST writes the catalog, then Manager republishes every active
+bound account automatically. Redis writes still go through Manager, not Exec Config.
 """
 
 from __future__ import annotations
@@ -219,8 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
 el01 and jp-meta are independent physical hosts. --target selects one of them.
 Do not publish to one host and expect the other to change.
 
-put-position writes the catalog and automatically republishes every bound
-account. qty is scaled by that account's shares; signal is copied unchanged.
+put-position writes the catalog and automatically republishes every active
+bound account. qty is scaled by that account's shares; signal is copied unchanged.
 Manager writes Redis on a reconnecting long connection, confirms the value is
 readable, then notifies exec-pre-trade; the 30s Redis poll remains the fallback
 if notify is lost.
@@ -245,7 +245,7 @@ The optional publish command only republishes one existing binding.
 
     put_parser = commands.add_parser(
         "put-position",
-        help="POST position JSON; Manager republishes every bound account",
+        help="POST position JSON; Manager republishes every active bound account",
     )
     put_parser.add_argument(
         "json",

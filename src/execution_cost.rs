@@ -268,7 +268,7 @@ pub fn report_execution_cost(
                 .is_none_or(|name| msg.strategy.strategy_name == name)
         })
         .collect();
-    let next_same_strategy = next_same_strategy_starts(&matching);
+    let next_publications = next_account_starts(&matching);
     let selected: Vec<(usize, &PositionUpdateMsg)> = matching
         .iter()
         .enumerate()
@@ -282,7 +282,7 @@ pub fn report_execution_cost(
         &matching,
         window_us,
         generated_at_us,
-        &next_same_strategy,
+        &next_publications,
         &selected_sources,
         end_received_at_us,
     );
@@ -294,7 +294,7 @@ pub fn report_execution_cost(
         &selected,
         window_us,
         generated_at_us,
-        &next_same_strategy,
+        &next_publications,
         &selected_sources,
     );
     let twap_started = Instant::now();
@@ -304,21 +304,17 @@ pub fn report_execution_cost(
     let update_count = selected.len();
     let mut totals = CostTotals::default();
     let mut points = Vec::with_capacity(update_count.min(MAX_COST_POINTS));
-    let mut executions = Vec::<(usize, &PositionUpdateMsg, i64)>::new();
+    let mut executions = Vec::<(usize, &PositionUpdateMsg)>::new();
     let mut skipped_legacy_update_count = 0usize;
     let compute_started = Instant::now();
     for (index, msg) in &selected {
-        let window_end_us = execution_window_end(
-            msg,
-            next_same_strategy.get(*index).copied().flatten(),
-            window_us,
-            generated_at_us,
-        );
         let update = cost_for_update(
             config,
             &twap_bars,
             msg,
-            window_end_us,
+            &next_publications[*index],
+            window_us,
+            generated_at_us,
             &fills,
             &selected_sources,
             false,
@@ -328,7 +324,7 @@ pub fn report_execution_cost(
         }
         totals.add(update.totals);
         if update.totals.actual_fill_count > 0 {
-            executions.push((*index, *msg, window_end_us));
+            executions.push((*index, *msg));
             let chart_bps = chart_bps(&totals);
             points.push(ExecutionCostPoint {
                 ts_us: msg.received_at_us,
@@ -349,12 +345,14 @@ pub fn report_execution_cost(
     let page_count = execution_update_count.div_ceil(page_size);
     let (detail_start, detail_end) = page_bounds(execution_update_count, page, page_size);
     let mut updates = Vec::with_capacity(detail_end.saturating_sub(detail_start));
-    for (_, msg, window_end_us) in &executions[detail_start..detail_end] {
+    for (index, msg) in &executions[detail_start..detail_end] {
         updates.push(cost_for_update(
             config,
             &twap_bars,
             msg,
-            *window_end_us,
+            &next_publications[*index],
+            window_us,
+            generated_at_us,
             &fills,
             &selected_sources,
             true,
@@ -411,7 +409,9 @@ fn cost_for_update(
     config: &AppConfig,
     twap_bars: &TwapBarsByMarket,
     msg: &PositionUpdateMsg,
-    window_end_us: i64,
+    next_account_starts: &BTreeMap<(String, String), i64>,
+    window_us: i64,
+    generated_at_us: i64,
     fills: &BTreeMap<(String, String, String), Vec<(i64, SignedFill)>>,
     selected_sources: &BTreeSet<&str>,
     include_details: bool,
@@ -419,6 +419,7 @@ fn cost_for_update(
     let skipped_legacy = msg.published_accounts.is_empty();
     let mut accounts = Vec::with_capacity(msg.published_accounts.len());
     let mut totals = CostTotals::default();
+    let mut latest_window_end_us = None;
     for account in &msg.published_accounts {
         if !selected_sources.is_empty() && !selected_sources.contains(account.source_id.as_str()) {
             continue;
@@ -434,6 +435,13 @@ fn cost_for_update(
         let venue = source
             .map(|source| source.venue.as_str())
             .unwrap_or("binance-futures");
+        let next_start = next_account_starts
+            .get(&(account.source_id.clone(), account.binding_name.clone()))
+            .copied();
+        let window_end_us = execution_window_end(msg, next_start, window_us, generated_at_us);
+        latest_window_end_us = Some(
+            latest_window_end_us.map_or(window_end_us, |latest: i64| latest.max(window_end_us)),
+        );
         let account_cost = cost_for_account(
             twap_bars,
             msg,
@@ -455,7 +463,8 @@ fn cost_for_update(
         schema_version: msg.schema_version,
         strategy_name: msg.strategy.strategy_name.clone(),
         window_start_us: msg.received_at_us,
-        window_end_us,
+        window_end_us: latest_window_end_us
+            .unwrap_or_else(|| execution_window_end(msg, None, window_us, generated_at_us)),
         skipped_legacy,
         totals,
         accounts,
@@ -646,24 +655,34 @@ fn message_matches_sources(msg: &PositionUpdateMsg, selected_sources: &BTreeSet<
             .any(|account| selected_sources.contains(account.source_id.as_str()))
 }
 
-fn next_same_strategy_starts(messages: &[PositionUpdateMsg]) -> Vec<Option<i64>> {
-    let mut next = vec![None; messages.len()];
-    let mut upcoming: BTreeMap<String, i64> = BTreeMap::new();
+fn next_account_starts(messages: &[PositionUpdateMsg]) -> Vec<BTreeMap<(String, String), i64>> {
+    let mut next = vec![BTreeMap::new(); messages.len()];
+    let mut upcoming = BTreeMap::<(String, String, String), i64>::new();
     for (index, msg) in messages.iter().enumerate().rev() {
-        next[index] = upcoming.get(&msg.strategy.strategy_name).copied();
-        upcoming.insert(msg.strategy.strategy_name.clone(), msg.received_at_us);
+        for account in &msg.published_accounts {
+            let account_key = (account.source_id.clone(), account.binding_name.clone());
+            let publication_key = (
+                msg.strategy.strategy_name.clone(),
+                account.source_id.clone(),
+                account.binding_name.clone(),
+            );
+            if let Some(next_start) = upcoming.get(&publication_key) {
+                next[index].insert(account_key, *next_start);
+            }
+            upcoming.insert(publication_key, msg.received_at_us);
+        }
     }
     next
 }
 
 fn execution_window_end(
     msg: &PositionUpdateMsg,
-    next_same_strategy: Option<i64>,
+    next_account_publication: Option<i64>,
     window_us: i64,
     generated_at_us: i64,
 ) -> i64 {
     let mut end = msg.received_at_us.saturating_add(window_us);
-    if let Some(next) = next_same_strategy {
+    if let Some(next) = next_account_publication {
         end = end.min(next);
     }
     end.min(generated_at_us.max(msg.received_at_us))
@@ -673,7 +692,7 @@ fn needed_fill_ranges(
     messages: &[PositionUpdateMsg],
     window_us: i64,
     generated_at_us: i64,
-    next_same_strategy: &[Option<i64>],
+    next_account_starts: &[BTreeMap<(String, String), i64>],
     selected_sources: &BTreeSet<&str>,
     end_received_at_us: Option<i64>,
 ) -> BTreeMap<String, (i64, i64)> {
@@ -688,18 +707,16 @@ fn needed_fill_ranges(
         if end_received_at_us.is_some_and(|end| msg.received_at_us > end) {
             continue;
         }
-        let end = execution_window_end(
-            msg,
-            next_same_strategy.get(index).copied().flatten(),
-            window_us,
-            generated_at_us,
-        );
         for account in &msg.published_accounts {
             if !selected_sources.is_empty()
                 && !selected_sources.contains(account.source_id.as_str())
             {
                 continue;
             }
+            let next_start = next_account_starts[index]
+                .get(&(account.source_id.clone(), account.binding_name.clone()))
+                .copied();
+            let end = execution_window_end(msg, next_start, window_us, generated_at_us);
             let entry = ranges
                 .entry(account.source_id.clone())
                 .or_insert((msg.received_at_us, end));
@@ -715,7 +732,7 @@ fn needed_twap_ranges(
     selected: &[(usize, &PositionUpdateMsg)],
     window_us: i64,
     generated_at_us: i64,
-    next_same_strategy: &[Option<i64>],
+    next_account_starts: &[BTreeMap<(String, String), i64>],
     selected_sources: &BTreeSet<&str>,
 ) -> TwapRangesByMarket {
     let mut ranges = TwapRangesByMarket::new();
@@ -723,18 +740,16 @@ fn needed_twap_ranges(
         if msg.published_accounts.is_empty() {
             continue;
         }
-        let end = execution_window_end(
-            msg,
-            next_same_strategy.get(*index).copied().flatten(),
-            window_us,
-            generated_at_us,
-        );
         for account in &msg.published_accounts {
             if !selected_sources.is_empty()
                 && !selected_sources.contains(account.source_id.as_str())
             {
                 continue;
             }
+            let next_start = next_account_starts[*index]
+                .get(&(account.source_id.clone(), account.binding_name.clone()))
+                .copied();
+            let end = execution_window_end(msg, next_start, window_us, generated_at_us);
             let venue = config
                 .sources
                 .iter()
@@ -966,6 +981,7 @@ mod tests {
     #[test]
     fn intended_qty_uses_direct_archived_shares() {
         assert!((intended_qty(0.1, 2.0, 0.15) - 0.05).abs() < 1e-12);
+        assert!((intended_qty(0.1, 0.0, 0.15) + 0.15).abs() < 1e-12);
     }
 
     fn five_second_bars_for_minutes(
@@ -1103,6 +1119,8 @@ mod tests {
             &config,
             &twap_bars,
             &msg,
+            &BTreeMap::new(),
+            5 * MINUTE_US,
             1_000_000 + 5 * MINUTE_US,
             &fills,
             &BTreeSet::new(),
@@ -1203,6 +1221,8 @@ mod tests {
             &config,
             &twap_bars,
             &msg,
+            &BTreeMap::new(),
+            5 * MINUTE_US,
             1_000_000 + 5 * MINUTE_US,
             &fills,
             &BTreeSet::new(),
@@ -1275,7 +1295,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_window_stops_at_next_same_strategy() {
+    fn execution_window_stops_at_next_account_publication() {
         let msg = PositionUpdateMsg {
             msg_type: "position_update".into(),
             schema_version: 3,
@@ -1287,6 +1307,45 @@ mod tests {
         };
         let end = execution_window_end(&msg, Some(10_000_000), 300_000_000, 1_000_000_000);
         assert_eq!(end, 10_000_000);
+    }
+
+    #[test]
+    fn next_publication_is_isolated_by_source_and_binding() {
+        let account = |source_id: &str, binding_name: &str, shares: f64| {
+            position_archive::published_account(source_id, binding_name, shares)
+        };
+        let message = |received_at_us, published_accounts| PositionUpdateMsg {
+            msg_type: "position_update".into(),
+            schema_version: 4,
+            received_at_us,
+            seq: 0,
+            strategy: strategy(1.0),
+            factual_positions: Vec::new(),
+            published_accounts,
+        };
+        let messages = vec![
+            message(
+                1_000_000,
+                vec![
+                    account("trade01", "cta_a", 1.0),
+                    account("trade02", "cta_a", 1.0),
+                ],
+            ),
+            message(2_000_000, vec![account("trade01", "cta_a", 0.0)]),
+            message(3_000_000, vec![account("trade02", "cta_a", 1.0)]),
+        ];
+
+        let next = next_account_starts(&messages);
+        assert_eq!(
+            next[0].get(&("trade01".to_string(), "cta_a".to_string())),
+            Some(&2_000_000)
+        );
+        assert_eq!(
+            next[0].get(&("trade02".to_string(), "cta_a".to_string())),
+            Some(&3_000_000)
+        );
+        assert!(next[1].is_empty());
+        assert!(next[2].is_empty());
     }
 
     #[test]

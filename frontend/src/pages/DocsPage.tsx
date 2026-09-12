@@ -110,7 +110,7 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'POST',
               path: `${CATALOG_PATH}/position-strategies`,
-              summary: '创建/更新仓位策略，并自动推送到全部绑定账户',
+              summary: '创建/更新仓位策略，并自动推送到全部活动绑定账户',
             },
             {
               method: 'POST',
@@ -180,7 +180,7 @@ function buildChapters(gateway: string): Chapter[] {
           ]}
         />
         <Note>
-          每个账户为每条绑定策略配置正数份数；发布数量 = 模板 qty × 份数。
+          份数必须是非负数；发布数量 = 模板 qty × 份数。0 表示停止该账户绑定并清理仓位。
         </Note>
       </>
     ),
@@ -261,12 +261,12 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'POST',
               path: `${CATALOG_PATH}/position-strategies`,
-              summary: '按 strategy_name upsert，并自动推送到全部绑定账户',
+              summary: '按 strategy_name upsert，并自动推送到全部活动绑定账户',
             },
             {
               method: 'DELETE',
               path: `${CATALOG_PATH}/position-strategies/{name}`,
-              summary: '删除模板；已绑定账户需先停用',
+              summary: '删除模板；已有账户绑定需先删除',
             },
           ]}
         />
@@ -324,7 +324,10 @@ function buildChapters(gateway: string): Chapter[] {
         <FieldRows
           rows={[
             { field: 'startMs / endMs', detail: '按仓位更新 received_at 过滤；省略 start 从最早开始，省略 end 到现在' },
-            { field: 'windowSec', detail: '每次更新的最长执行窗口，默认 300（5 分钟），上限 86400' },
+            {
+              field: 'windowSec',
+              detail: '每次账户绑定发布的最长执行窗口；同一账户与绑定的下一次发布会提前截断',
+            },
             { field: 'sourceIds', detail: '逗号分隔账户；省略则全部' },
             { field: 'strategyName', detail: '只看一个仓位策略；省略则全部' },
             {
@@ -518,7 +521,7 @@ curl --noproxy '*' -sS -X PUT \\
             {
               method: 'DELETE',
               path: `${ACCOUNT_PATH}/bindings/{name}`,
-              summary: '停用本地绑定，不自动删 Exec',
+              summary: '只删除已为 0 份的本地绑定；Exec 零目标保持不变',
             },
           ]}
         />
@@ -535,7 +538,7 @@ curl --noproxy '*' -sS -X PUT \\
     id: 'account-alloc',
     group: '账户绑定',
     title: '份数',
-    lead: '每个账户为每条绑定策略填写一个正数 shares；发布 qty = 模板 qty × shares。',
+    lead: 'shares 是非负数；正数按比例发布，0 表示停止并清仓。',
     content: (
       <>
         <Endpoint
@@ -543,8 +546,11 @@ curl --noproxy '*' -sS -X PUT \\
           path={`${ACCOUNT_PATH}/bindings/{name}/shares`}
           summary="设置该绑定的份数"
         />
-        <CodeBlock label="body">{`{"shares": 2.5}`}</CodeBlock>
-        <Note>保存份数只改 Manager 本地。下一次仓位 POST 会按新份数自动推 Redis；也可以点重推立即应用。</Note>
+        <CodeBlock label="body">{`{"shares": 0}`}</CodeBlock>
+        <Note>
+          正数份数在下一次仓位 POST 或手动重推时生效。设为 0 会立即以原策略名发布一次完整零目标，
+          后续仓位 POST 跳过该绑定；平仓成交因此仍归属原策略，不进入 SYSTEM_POSITION_CLOSE。
+        </Note>
       </>
     ),
   },
@@ -552,13 +558,13 @@ curl --noproxy '*' -sS -X PUT \\
     id: 'account-publish',
     group: '账户绑定',
     title: '发布到 Exec',
-    lead: '日常仓位更新会自动推到全部绑定账户。这条接口只用于手工重推一个已有绑定。',
+    lead: '日常仓位更新会自动推到全部正数份数的绑定账户。这条接口只用于手工重推一个已有绑定。',
     content: (
       <>
         <Endpoint method="POST" path={`${ACCOUNT_PATH}/bindings/{name}/publish`} />
         <p>
           每次 <code>POST /catalog/position-strategies</code> 成功后，Manager
-          找出所有绑定了该策略的账户，用各自 <code>qty × shares</code>、默认下单模板和 symbol
+          找出所有正数份数的绑定账户，用各自 <code>qty × shares</code>、默认下单模板和 symbol
           覆盖模板拼成 Exec 标准 JSON，<code>signal</code> 不随份数放大，再由 Manager 自己的 Redis
           长连接写入该账户 key。连接断了会自动重连；写入后回读确认，再发 iceoryx
           notify。notify 只带策略名和 <code>updated_at_us</code>，不带仓位。
@@ -624,7 +630,7 @@ curl --noproxy '*' -sS -X PUT \\
         rows={[
           ['200', '成功'],
           ['202', '删除已受理'],
-          ['400', '字段缺失、策略不存在、份数不是正数、合约杠杆缺 symbol'],
+          ['400', '字段缺失、策略不存在、份数为负数或非有限数、合约杠杆缺 symbol'],
           ['404', '路径不存在或缺少账户前缀'],
           ['409', '参数乐观锁冲突'],
           ['502', '交易所/env.sh 不可用，或 Exec Config 不可达'],

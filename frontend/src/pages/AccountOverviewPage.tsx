@@ -354,7 +354,9 @@ export function AccountOverviewPage() {
                               Exec 策略名
                             </CardDescription>
                           </div>
-                          <Badge tone="brand">{binding.shares} 份</Badge>
+                          <Badge tone={binding.shares === 0 ? 'neutral' : 'brand'}>
+                            {binding.shares === 0 ? '已停止' : `${binding.shares} 份`}
+                          </Badge>
                         </div>
                       </CardHeader>
                       <CardContent className="space-y-5 pt-5">

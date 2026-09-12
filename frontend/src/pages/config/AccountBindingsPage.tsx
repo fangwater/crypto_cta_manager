@@ -1,4 +1,4 @@
-import { CheckCircle2, Layers3, LoaderCircle, Plus, Save, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { CheckCircle2, Layers3, LoaderCircle, Plus, Power, Save, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   deleteAccountBinding,
@@ -56,6 +56,9 @@ export function AccountBindingsPage() {
     () => positions.filter((item) => !boundNames.has(item.strategy_name)),
     [boundNames, positions],
   )
+  const parsedNewShares = Number(newShares)
+  const validNewShares =
+    newShares.trim() !== '' && Number.isFinite(parsedNewShares) && parsedNewShares >= 0
 
   useEffect(() => {
     const controller = new AbortController()
@@ -244,7 +247,7 @@ export function AccountBindingsPage() {
                   onSubmit={(event) => {
                     event.preventDefault()
                     void withWrite(async () => {
-                      await bindExecution(newPosition, newOrder, Number(newShares))
+                      await bindExecution(newPosition, newOrder, parsedNewShares)
                       setNewPosition('')
                       setNewShares('1')
                     })
@@ -279,9 +282,14 @@ export function AccountBindingsPage() {
                       inputMode="decimal"
                       onChange={(event) => setNewShares(event.target.value)}
                     />
-                    <FieldHint>初始份数</FieldHint>
+                    <FieldHint>0 表示保持停用，不自动发布</FieldHint>
                   </Label>
-                  <Button type="submit" variant="primary" className="md:self-end" disabled={saving}>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    className="md:self-end"
+                    disabled={saving || !newPosition || !newOrder || !validNewShares}
+                  >
                     <Plus size={15} /> 启用
                   </Button>
                 </form>
@@ -292,7 +300,7 @@ export function AccountBindingsPage() {
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm font-medium text-ink">
               <Layers3 size={16} className="text-brand" />
-              已启用策略
+              策略配置
             </div>
             {(studio?.bindings ?? []).length === 0 ? (
               <Card>
@@ -304,7 +312,8 @@ export function AccountBindingsPage() {
               (studio?.bindings ?? []).map((binding) => {
                 const shareDraft = shareDrafts[binding.binding_name] ?? String(binding.shares)
                 const parsedShares = Number(shareDraft)
-                const validShares = Number.isFinite(parsedShares) && parsedShares > 0
+                const validShares =
+                  shareDraft.trim() !== '' && Number.isFinite(parsedShares) && parsedShares >= 0
                 const sharesChanged = validShares && parsedShares !== binding.shares
                 return <Card key={binding.binding_name}>
                   <CardContent className="space-y-4 pt-5">
@@ -316,8 +325,14 @@ export function AccountBindingsPage() {
                           执行算法：{binding.order_strategy_name}
                         </p>
                       </div>
-                      <span className="rounded-full bg-brand-soft px-3 py-1 text-sm font-semibold text-brand">
-                        {binding.shares} 份
+                      <span
+                        className={
+                          binding.shares === 0
+                            ? 'rounded-full bg-slate-100 px-3 py-1 text-sm font-semibold text-subtle'
+                            : 'rounded-full bg-brand-soft px-3 py-1 text-sm font-semibold text-brand'
+                        }
+                      >
+                        {binding.shares === 0 ? '已停止' : `${binding.shares} 份`}
                       </span>
                     </div>
                     <div className="flex flex-wrap items-end gap-3">
@@ -368,11 +383,14 @@ export function AccountBindingsPage() {
                                 parsedShares,
                               )
                               applyStudio(next)
-                              return `已将 ${binding.binding_name} 设为 ${parsedShares} 份；下次仓位更新生效`
+                              return parsedShares === 0
+                                ? `已停止 ${binding.binding_name}；零目标已发送，后续仓位更新将跳过此账户绑定`
+                                : `已将 ${binding.binding_name} 设为 ${parsedShares} 份；下次仓位更新或手动重推生效`
                             })
                           }
                         >
-                          <Save size={15} /> 保存份数
+                          {parsedShares === 0 ? <Power size={15} /> : <Save size={15} />}
+                          {parsedShares === 0 ? '停止并清仓' : '保存份数'}
                         </Button>
                         <Button
                           type="button"
@@ -384,22 +402,42 @@ export function AccountBindingsPage() {
                             })
                           }
                         >
-                          <CheckCircle2 size={15} /> 重推到 Exec
+                          <CheckCircle2 size={15} />
+                          {binding.shares === 0 ? '重推清仓目标' : '重推到 Exec'}
                         </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          disabled={saving}
-                          onClick={() =>
-                            void withWrite(async () => {
-                              await deleteAccountBinding(sourceId, binding.binding_name)
-                              const next = await getAccountStudio(sourceId)
-                              applyStudio(next)
-                            })
-                          }
-                        >
-                          <Trash2 size={15} /> 停用
-                        </Button>
+                        {binding.shares > 0 && parsedShares !== 0 && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={saving}
+                            onClick={() =>
+                              void withWrite(async () => {
+                                const next = await saveBindingShares(sourceId, binding.binding_name, 0)
+                                applyStudio(next)
+                                return `已停止 ${binding.binding_name}；零目标已发送，平仓成交继续归属原策略`
+                              })
+                            }
+                          >
+                            <Power size={15} /> 停止并清仓
+                          </Button>
+                        )}
+                        {binding.shares === 0 && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={saving}
+                            onClick={() =>
+                              void withWrite(async () => {
+                                await deleteAccountBinding(sourceId, binding.binding_name)
+                                const next = await getAccountStudio(sourceId)
+                                applyStudio(next)
+                                return `已删除 ${binding.binding_name} 的本地绑定；Exec 零目标保持不变`
+                              })
+                            }
+                          >
+                            <Trash2 size={15} /> 删除配置
+                          </Button>
+                        )}
                       </div>
                     </div>
                   </CardContent>
