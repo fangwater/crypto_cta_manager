@@ -25,6 +25,27 @@ set +a
 
 The default URL variable is `CRYPTO_CTA_LOCAL_DATABASE_URL`.
 
+## Login and account permissions
+
+`cta_web` protects all Manager APIs with an HttpOnly session cookie. On a new
+database, open `/manager/` and register the first user; that account is made an
+administrator automatically. Later registrations create ordinary users with
+no visible accounts until an administrator grants access.
+
+Administrators can open `/manager/admin/` to promote users and select the
+configured `source_id` values each ordinary user may view. Dashboard, NAV
+timeline, execution-cost, acquisition-cost, account details, and Manager
+position-update responses are filtered on the server. The machine-to-machine
+`POST /api/catalog/position-strategies` push endpoint is intentionally direct
+and does not require a browser session; catalog reads, deletes, account
+settings, Exec Config updates, and permission changes still require an
+administrator session. Direct Exec Viz and Config gateway routes also
+validate the same session and source permission.
+
+The password is stored as a salted PBKDF2-HMAC-SHA256 record in Manager's
+PostgreSQL; session tokens are stored only as SHA-256 hashes. Do not copy the
+database credential file or session values into this repository.
+
 Set `maker_fee_rate` and `taker_fee_rate` on every source used for NAV
 reconstruction. Both accept any finite decimal rate; negative values represent
 rebates. Each fill uses `price * amount_update * role_fee_rate`. Liquidity role
@@ -53,6 +74,32 @@ edits must not be used to reconstruct an older fill. Set
 `spread_pbs/<venue>/ask_bid_spread`. TWAP uses one compact binary column family
 per `SYMBOL:venue`. Bars older than `retain_days` are deleted and compacted;
 position-update messages are not compacted by that job.
+
+## CTA Health Monitor
+
+`cta_monitor` is an independent process that checks the public BBO stream, the
+recent read-only Exec order records, and each Exec Viz pre-trade position
+snapshot. It reports stale market data, stalled live orders, unmatched order or
+trade updates, stale/not-ready position state, and inconsistent or overdue
+position execution to DingTalk. It never writes to Exec RocksDB, PostgreSQL,
+Redis, Exec Config, or an exchange API.
+
+Configure `[monitor]` and `[monitor.dingtalk]` in the host TOML. Set the market
+webhook in `CTA_DINGTALK_MARKET_WEBHOOK_URL` and the order/position webhook in
+`CTA_DINGTALK_ORDER_WEBHOOK_URL` in the host `EnvironmentFile`; optional
+signing secrets use the per-channel environment names in the TOML. Do not put
+the full webhook URLs in this repository.
+
+```bash
+cta_monitor --config /home/el01/crypto_cta_manager/config/cta-manager.toml \
+  --once --dry-run
+```
+
+After reviewing the dry-run output, set `monitor.enabled = true` and start the
+independent `crypto-cta-manager-monitor.service`. Each channel retries failed
+webhook requests with exponential backoff. Notifications are sent on state
+transitions, repeated at `repeat_alert_secs`, and followed by a recovery notice;
+the monitor does not send every poll.
 
 `GET /api/catalog/position-updates` returns a raw JSON page from
 `position_updates` (default `limit=100`, maximum `1000`). Each array member is

@@ -185,6 +185,19 @@ pub struct NavReport {
     pub sources: Vec<SourceNavReport>,
 }
 
+/// Restrict a reconstructed report to the sources visible to one Manager user.
+/// Source reports are already fully materialized in the cache, so this keeps
+/// authorization at the response boundary without touching Exec data.
+pub fn restrict_report(report: &NavReport, allowed_source_ids: &BTreeSet<String>) -> NavReport {
+    let sources = report
+        .sources
+        .iter()
+        .filter(|source| allowed_source_ids.contains(&source.source_id))
+        .cloned()
+        .collect();
+    aggregate_source_reports(sources)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct NavTimelinePoint {
     pub ts_us: i64,
@@ -1299,7 +1312,10 @@ pub fn load_nav_source_histories(
     let selected = select_sources(config, selected_source_ids)?;
     let mut histories = NavSourceHistories::new();
     for source in selected {
-        let history = if source.rocksdb_path.is_dir() {
+        // An account can be registered in Manager before Exec creates its
+        // persist_manager. Treat both a missing path and an empty directory as
+        // an empty source; Manager must never initialize the Exec RocksDB.
+        let history = if source.rocksdb_path.join("CURRENT").is_file() {
             load_source_history(source)
                 .with_context(|| format!("failed to read source {} RocksDB", source.id))?
         } else {
@@ -2841,6 +2857,7 @@ mod tests {
             order_config: OrderConfigSettings::default(),
             redis: crate::config::RedisSettings::default(),
             twap: crate::config::TwapConfig::default(),
+            monitor: crate::config::MonitorConfig::default(),
             sources,
         }
     }
@@ -3748,6 +3765,19 @@ mod tests {
     }
 
     #[test]
+    fn uninitialized_source_directory_is_an_empty_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("trade08");
+        std::fs::create_dir_all(&path).unwrap();
+        let config = app_config(vec![source_at("trade08", &path, 0.0)]);
+
+        let histories = load_nav_source_histories(&config, &[]).unwrap();
+
+        assert!(histories["trade08"].events.is_empty());
+        assert!(histories["trade08"].liquidity_by_order.is_empty());
+    }
+
+    #[test]
     fn same_timestamp_timeline_points_are_replaced() {
         let mut points = vec![NavTimelinePoint {
             ts_us: 10,
@@ -3811,6 +3841,7 @@ mod tests {
             order_config: OrderConfigSettings::default(),
             redis: crate::config::RedisSettings::default(),
             twap: crate::config::TwapConfig::default(),
+            monitor: crate::config::MonitorConfig::default(),
             sources: vec![source],
         };
 

@@ -96,12 +96,16 @@ pub fn db_options() -> Options {
     let mut opts = Options::default();
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);
+    // The host-global TWAP store can accumulate tens of thousands of SST
+    // files. Keep RocksDB from opening every file at once during startup.
+    opts.set_max_open_files(4096);
     opts.set_compression_type(DBCompressionType::Lz4);
     opts
 }
 
 pub fn cf_options() -> Options {
     let mut opts = Options::default();
+    opts.set_max_open_files(4096);
     opts.set_compression_type(DBCompressionType::Lz4);
     opts
 }

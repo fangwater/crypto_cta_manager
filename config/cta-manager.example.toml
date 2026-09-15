@@ -30,6 +30,35 @@ retain_days = 30
 catalog_reload_secs = 30
 compact_interval_secs = 3600
 
+[monitor]
+# Standalone cta_monitor checks market BBO, Exec order persistence, and
+# Exec pre-trade position execution. Keep the webhook secret in the host
+# credential environment, never in TOML.
+enabled = false
+poll_interval_secs = 10
+repeat_alert_secs = 1800
+market_stale_secs = 10
+order_stale_secs = 120
+position_stale_secs = 30
+execution_grace_secs = 30
+recent_order_records = 2000
+position_tolerance = 0.00000001
+# Empty means check that the venue has any fresh BBO. Set symbols to require
+# freshness for particular instruments, for example ["BTCUSDT", "ETHUSDT"].
+market_symbols = []
+
+[monitor.dingtalk]
+market_webhook_url_env = "CTA_DINGTALK_MARKET_WEBHOOK_URL"
+order_webhook_url_env = "CTA_DINGTALK_ORDER_WEBHOOK_URL"
+# Optional signing secret environment variables for each robot.
+# market_secret_env = "CTA_DINGTALK_MARKET_WEBHOOK_SECRET"
+# order_secret_env = "CTA_DINGTALK_ORDER_WEBHOOK_SECRET"
+request_timeout_secs = 5
+retry_attempts = 5
+retry_backoff_ms = 1000
+at_mobiles = []
+is_at_all = false
+
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"

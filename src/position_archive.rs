@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
@@ -216,6 +217,15 @@ impl PositionArchive {
     /// Returns one raw JSON page from the position-update CF without rewriting
     /// individual stored messages.
     pub fn raw_json_page(&self, after: Option<(i64, u32)>, limit: usize) -> Result<Vec<u8>> {
+        self.raw_json_page_for_sources(after, limit, None)
+    }
+
+    pub fn raw_json_page_for_sources(
+        &self,
+        after: Option<(i64, u32)>,
+        limit: usize,
+        allowed_source_ids: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<u8>> {
         if limit == 0 {
             bail!("position update page limit must be greater than zero");
         }
@@ -248,8 +258,21 @@ impl PositionArchive {
             if after.is_some_and(|after| cursor <= after) {
                 continue;
             }
-            serde_json::from_slice::<serde_json::Value>(&value)
+            let mut message: PositionUpdateMsg = serde_json::from_slice(&value)
                 .context("position update archive contains invalid JSON")?;
+            if let Some(allowed_source_ids) = allowed_source_ids {
+                message
+                    .published_accounts
+                    .retain(|account| allowed_source_ids.contains(&account.source_id));
+                message
+                    .factual_positions
+                    .retain(|source| allowed_source_ids.contains(&source.source_id));
+                if message.published_accounts.is_empty() && message.factual_positions.is_empty() {
+                    continue;
+                }
+            }
+            let value = serde_json::to_vec(&message)
+                .context("failed to encode filtered position update")?;
             if !first {
                 output.push(b',');
             }

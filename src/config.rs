@@ -24,6 +24,8 @@ pub struct AppConfig {
     pub redis: RedisSettings,
     #[serde(default)]
     pub twap: TwapConfig,
+    #[serde(default)]
+    pub monitor: MonitorConfig,
     pub sources: Vec<SourceConfig>,
 }
 
@@ -69,6 +71,46 @@ pub struct TwapConfig {
     pub retain_days: u32,
     pub catalog_reload_secs: u64,
     pub compact_interval_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MonitorConfig {
+    /// Enables the standalone cta_monitor process checks.
+    pub enabled: bool,
+    pub poll_interval_secs: u64,
+    /// Repeat an unresolved alert after this interval.
+    pub repeat_alert_secs: u64,
+    pub market_stale_secs: u64,
+    pub order_stale_secs: u64,
+    pub position_stale_secs: u64,
+    /// Grace after the Exec estimated completion time before alerting.
+    pub execution_grace_secs: u64,
+    /// Maximum recent records read from each Exec RocksDB column family per poll.
+    pub recent_order_records: usize,
+    pub position_tolerance: f64,
+    /// Empty means monitor any symbol seen on the configured venue feed.
+    pub market_symbols: Vec<String>,
+    pub dingtalk: DingTalkConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DingTalkConfig {
+    /// Environment variable containing the market-data robot webhook URL.
+    pub market_webhook_url_env: String,
+    /// Environment variable containing the order/position robot webhook URL.
+    pub order_webhook_url_env: String,
+    /// Optional signing secret environment variables for each robot.
+    pub market_secret_env: Option<String>,
+    pub order_secret_env: Option<String>,
+    pub request_timeout_secs: u64,
+    /// Number of attempts per webhook batch, including the first request.
+    pub retry_attempts: u32,
+    /// Initial delay between failed webhook attempts.
+    pub retry_backoff_ms: u64,
+    pub at_mobiles: Vec<String>,
+    pub is_at_all: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +197,40 @@ impl Default for TwapConfig {
     }
 }
 
+impl Default for MonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: 10,
+            repeat_alert_secs: 1_800,
+            market_stale_secs: 10,
+            order_stale_secs: 120,
+            position_stale_secs: 30,
+            execution_grace_secs: 30,
+            recent_order_records: 2_000,
+            position_tolerance: 1e-8,
+            market_symbols: Vec::new(),
+            dingtalk: DingTalkConfig::default(),
+        }
+    }
+}
+
+impl Default for DingTalkConfig {
+    fn default() -> Self {
+        Self {
+            market_webhook_url_env: "CTA_DINGTALK_MARKET_WEBHOOK_URL".to_string(),
+            order_webhook_url_env: "CTA_DINGTALK_ORDER_WEBHOOK_URL".to_string(),
+            market_secret_env: None,
+            order_secret_env: None,
+            request_timeout_secs: 5,
+            retry_attempts: 5,
+            retry_backoff_ms: 1_000,
+            at_mobiles: Vec::new(),
+            is_at_all: false,
+        }
+    }
+}
+
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
@@ -183,6 +259,74 @@ impl AppConfig {
         }
         if self.redis.reconnect_interval_ms == 0 {
             bail!("redis.reconnect_interval_ms must be greater than zero");
+        }
+        if self.monitor.poll_interval_secs == 0 {
+            bail!("monitor.poll_interval_secs must be greater than zero");
+        }
+        if self.monitor.repeat_alert_secs == 0 {
+            bail!("monitor.repeat_alert_secs must be greater than zero");
+        }
+        if self.monitor.market_stale_secs == 0 {
+            bail!("monitor.market_stale_secs must be greater than zero");
+        }
+        if self.monitor.order_stale_secs == 0 {
+            bail!("monitor.order_stale_secs must be greater than zero");
+        }
+        if self.monitor.position_stale_secs == 0 {
+            bail!("monitor.position_stale_secs must be greater than zero");
+        }
+        if self.monitor.recent_order_records == 0 {
+            bail!("monitor.recent_order_records must be greater than zero");
+        }
+        if !self.monitor.position_tolerance.is_finite() || self.monitor.position_tolerance < 0.0 {
+            bail!("monitor.position_tolerance must be finite and non-negative");
+        }
+        if self.monitor.dingtalk.request_timeout_secs == 0 {
+            bail!("monitor.dingtalk.request_timeout_secs must be greater than zero");
+        }
+        if self.monitor.dingtalk.retry_attempts == 0 {
+            bail!("monitor.dingtalk.retry_attempts must be greater than zero");
+        }
+        if self.monitor.dingtalk.retry_backoff_ms == 0 {
+            bail!("monitor.dingtalk.retry_backoff_ms must be greater than zero");
+        }
+        if self.monitor.enabled {
+            if self
+                .monitor
+                .dingtalk
+                .market_webhook_url_env
+                .trim()
+                .is_empty()
+            {
+                bail!("monitor.dingtalk.market_webhook_url_env must not be empty");
+            }
+            if self
+                .monitor
+                .dingtalk
+                .order_webhook_url_env
+                .trim()
+                .is_empty()
+            {
+                bail!("monitor.dingtalk.order_webhook_url_env must not be empty");
+            }
+            if self
+                .monitor
+                .dingtalk
+                .market_secret_env
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                bail!("monitor.dingtalk.market_secret_env must not be empty when set");
+            }
+            if self
+                .monitor
+                .dingtalk
+                .order_secret_env
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                bail!("monitor.dingtalk.order_secret_env must not be empty when set");
+            }
         }
         validate_loopback_redis_url(&self.redis.url)?;
         if !self.twap.rocksdb_path.is_absolute() {
@@ -544,6 +688,7 @@ mod tests {
             order_config: OrderConfigSettings::default(),
             redis: RedisSettings::default(),
             twap: TwapConfig::default(),
+            monitor: MonitorConfig::default(),
             sources,
         }
     }
@@ -708,6 +853,23 @@ mod tests {
         );
         config.redis.url = "http://127.0.0.1:6379/0".to_string();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn enabled_monitor_requires_a_webhook_environment_name() {
+        let mut config = config_with_sources(vec![source(
+            "binance_exec_trade01",
+            "/srv/trade01/persist_manager",
+        )]);
+        config.monitor.enabled = true;
+        config.monitor.dingtalk.market_webhook_url_env.clear();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("market_webhook_url_env")
+        );
     }
 
     #[test]

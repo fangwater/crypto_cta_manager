@@ -32,6 +32,19 @@ interface RequestOptions {
   body?: unknown
 }
 
+export interface AuthUser {
+  user_id: number
+  username: string
+  role: 'admin' | 'user'
+  source_ids: string[]
+}
+
+export interface AuthStatus {
+  authenticated: boolean
+  setup_required: boolean
+  user: AuthUser | null
+}
+
 async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
@@ -40,6 +53,7 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
     cache: 'no-store',
+    credentials: 'same-origin',
     signal: options.signal,
   })
   if (!response.ok) {
@@ -50,6 +64,46 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
+}
+
+export function getAuthStatus(signal?: AbortSignal) {
+  return requestJson<AuthStatus>('/auth/status', { signal })
+}
+
+export function register(username: string, password: string) {
+  return requestJson<{ user: AuthUser }>('/auth/register', {
+    method: 'POST',
+    body: { username, password },
+  })
+}
+
+export function login(username: string, password: string) {
+  return requestJson<{ user: AuthUser }>('/auth/login', {
+    method: 'POST',
+    body: { username, password },
+  })
+}
+
+export function logout() {
+  return requestJson<void>('/auth/logout', { method: 'POST' })
+}
+
+export function listAuthUsers(signal?: AbortSignal) {
+  return requestJson<AuthUser[]>('/auth/users', { signal })
+}
+
+export function setAuthUserSources(userId: number, sourceIds: string[]) {
+  return requestJson<AuthUser>(`/auth/users/${userId}/sources`, {
+    method: 'PUT',
+    body: { source_ids: sourceIds },
+  })
+}
+
+export function setAuthUserRole(userId: number, role: 'admin' | 'user') {
+  return requestJson<AuthUser>(`/auth/users/${userId}/role`, {
+    method: 'PUT',
+    body: { role },
+  })
 }
 
 export function getDashboard(signal?: AbortSignal) {

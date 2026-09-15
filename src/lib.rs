@@ -1,5 +1,6 @@
 pub mod account_ipc;
 pub mod acquisition_cost;
+pub mod auth;
 pub mod config;
 pub mod exchange_leverage;
 pub mod execution_cost;
@@ -7,6 +8,7 @@ pub mod ingest;
 pub mod manager_db;
 pub mod market_rules;
 pub mod model;
+pub mod monitor;
 pub mod nav;
 pub mod order_config;
 pub mod position_archive;

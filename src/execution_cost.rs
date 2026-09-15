@@ -1111,6 +1111,7 @@ mod tests {
                 catalog_reload_secs: 30,
                 compact_interval_secs: 3600,
             },
+            monitor: crate::config::MonitorConfig::default(),
             sources: vec![],
         };
         let fills = BTreeMap::new();
@@ -1188,6 +1189,7 @@ mod tests {
                 catalog_reload_secs: 30,
                 compact_interval_secs: 3600,
             },
+            monitor: crate::config::MonitorConfig::default(),
             sources: vec![],
         };
         let mut fills = BTreeMap::new();
@@ -1377,6 +1379,7 @@ mod tests {
             order_config: crate::config::OrderConfigSettings::default(),
             redis: crate::config::RedisSettings::default(),
             twap: crate::config::TwapConfig::default(),
+            monitor: crate::config::MonitorConfig::default(),
             sources: Vec::new(),
         };
         let histories = nav::NavSourceHistories::new();

@@ -50,6 +50,7 @@ case "$TARGET" in
         REMOTE_ROOT="/home/el01/crypto_cta_manager"
         DEPLOY_DIR="$ROOT/deploy/crypto_cta_manager"
         UNIT_NAME="crypto-cta-manager-web.service"
+        MONITOR_UNIT_NAME="crypto-cta-manager-monitor.service"
         EXPECTED_USER="el01"
         RESTART_NGINX=1
         ;;
@@ -58,6 +59,7 @@ case "$TARGET" in
         REMOTE_ROOT="/home/ubuntu/crypto_cta_manager"
         DEPLOY_DIR="$ROOT/deploy/jp_meta"
         UNIT_NAME="crypto-cta-manager-web.service"
+        MONITOR_UNIT_NAME="crypto-cta-manager-monitor.service"
         EXPECTED_USER="ubuntu"
         RESTART_NGINX=0
         ;;
@@ -102,7 +104,7 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
     (
         cd "$ROOT"
         cargo clean -p crypto_cta_manager
-        cargo build --locked --release --bin cta_web --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot
+        cargo build --locked --release --bin cta_web --bin cta_monitor --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot
     )
     echo "building frontend locally"
     (
@@ -115,12 +117,14 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
 fi
 
 require_local_file "$LOCAL_RELEASE_DIR/cta_web"
+require_local_file "$LOCAL_RELEASE_DIR/cta_monitor"
 require_local_file "$LOCAL_RELEASE_DIR/nav_rebuild"
 require_local_file "$LOCAL_RELEASE_DIR/nav_snapshot"
 require_local_file "$LOCAL_RELEASE_DIR/nav_strategy_snapshot"
 require_local_file "$ROOT/frontend/dist/index.html"
 require_local_file "$DEPLOY_DIR/cta-manager.toml"
 require_local_file "$DEPLOY_DIR/crypto-cta-manager-web.service"
+require_local_file "$DEPLOY_DIR/crypto-cta-manager-monitor.service"
 require_local_file "$ROOT/scripts/manager_publish_client.py"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -134,7 +138,7 @@ cleanup_local() {
 }
 trap cleanup_local EXIT
 
-BINARIES=(cta_web nav_rebuild nav_snapshot nav_strategy_snapshot)
+BINARIES=(cta_web cta_monitor nav_rebuild nav_snapshot nav_strategy_snapshot)
 for name in "${BINARIES[@]}"; do
     read -r artifact_hash _ < <(sha256sum "$LOCAL_RELEASE_DIR/$name")
     printf '%s  bin/%s.next.%s\n' "$artifact_hash" "$name" "$STAMP" >>"$STAGE_CHECKSUMS"
@@ -162,6 +166,9 @@ scp -q \
     "$LOCAL_RELEASE_DIR/cta_web" \
     "${SSH_HOST}:${REMOTE_ROOT}/bin/cta_web.next.${STAMP}"
 scp -q \
+    "$LOCAL_RELEASE_DIR/cta_monitor" \
+    "${SSH_HOST}:${REMOTE_ROOT}/bin/cta_monitor.next.${STAMP}"
+scp -q \
     "$LOCAL_RELEASE_DIR/nav_rebuild" \
     "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_rebuild.next.${STAMP}"
 scp -q \
@@ -172,6 +179,9 @@ scp -q \
     "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_strategy_snapshot.next.${STAMP}"
 scp -q \
     "$DEPLOY_DIR/crypto-cta-manager-web.service" \
+    "${SSH_HOST}:${REMOTE_ROOT}/"
+scp -q \
+    "$DEPLOY_DIR/crypto-cta-manager-monitor.service" \
     "${SSH_HOST}:${REMOTE_ROOT}/"
 if [[ $TARGET == el01 ]]; then
     scp -q "$DEPLOY_DIR/nginx.conf" "${SSH_HOST}:${REMOTE_ROOT}/nginx/nginx.conf.next"
@@ -196,8 +206,9 @@ remote "bash -s" <<EOF
 set -Eeuo pipefail
 umask 0022
 cd '${REMOTE_ROOT}'
-chmod 0755 bin/cta_web.next.${STAMP} bin/nav_rebuild.next.${STAMP} bin/nav_snapshot.next.${STAMP} bin/nav_strategy_snapshot.next.${STAMP}
+chmod 0755 bin/cta_web.next.${STAMP} bin/cta_monitor.next.${STAMP} bin/nav_rebuild.next.${STAMP} bin/nav_snapshot.next.${STAMP} bin/nav_strategy_snapshot.next.${STAMP}
 mv -f bin/cta_web.next.${STAMP} bin/cta_web
+mv -f bin/cta_monitor.next.${STAMP} bin/cta_monitor
 mv -f bin/nav_rebuild.next.${STAMP} bin/nav_rebuild
 mv -f bin/nav_snapshot.next.${STAMP} bin/nav_snapshot
 mv -f bin/nav_strategy_snapshot.next.${STAMP} bin/nav_strategy_snapshot
@@ -208,9 +219,13 @@ sha256sum -c '.deploy-final-${STAMP}.sha256'
 rm -f '.deploy-stage-${STAMP}.sha256' '.deploy-final-${STAMP}.sha256'
 install -d -m 0700 "\$HOME/.config/systemd/user"
 install -m 0644 crypto-cta-manager-web.service "\$HOME/.config/systemd/user/${UNIT_NAME}"
+install -m 0644 crypto-cta-manager-monitor.service "\$HOME/.config/systemd/user/${MONITOR_UNIT_NAME}"
 systemctl --user daemon-reload
 systemctl --user restart '${UNIT_NAME}'
 systemctl --user --quiet is-active '${UNIT_NAME}'
+if systemctl --user --quiet is-active '${MONITOR_UNIT_NAME}'; then
+    systemctl --user restart '${MONITOR_UNIT_NAME}'
+fi
 EOF
 
 if [[ $RESTART_NGINX -eq 1 ]]; then

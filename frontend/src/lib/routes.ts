@@ -23,6 +23,7 @@ export const routes = {
       ? `/manager/config/bindings/?source=${encodeURIComponent(sourceId)}`
       : '/manager/config/bindings/',
   docs: '/manager/docs/',
+  admin: '/manager/admin/',
 } as const
 
 export type ConfigSection = 'position' | 'order' | 'bindings'

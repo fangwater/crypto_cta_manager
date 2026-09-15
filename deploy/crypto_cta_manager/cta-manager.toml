@@ -26,6 +26,33 @@ retain_days = 30
 catalog_reload_secs = 30
 compact_interval_secs = 3600
 
+[monitor]
+# Enable only after both webhook URLs are installed in the host EnvironmentFile.
+# The process is independently deployed by systemd.
+enabled = false
+poll_interval_secs = 10
+repeat_alert_secs = 1800
+market_stale_secs = 10
+order_stale_secs = 120
+position_stale_secs = 30
+execution_grace_secs = 30
+recent_order_records = 2000
+position_tolerance = 0.00000001
+market_symbols = []
+
+[monitor.dingtalk]
+market_webhook_url_env = "CTA_DINGTALK_MARKET_WEBHOOK_URL"
+order_webhook_url_env = "CTA_DINGTALK_ORDER_WEBHOOK_URL"
+# Optional signing secrets can be enabled by adding these fields and the
+# corresponding variables to the host EnvironmentFile.
+# market_secret_env = "CTA_DINGTALK_MARKET_WEBHOOK_SECRET"
+# order_secret_env = "CTA_DINGTALK_ORDER_WEBHOOK_SECRET"
+request_timeout_secs = 5
+retry_attempts = 5
+retry_backoff_ms = 1000
+at_mobiles = []
+is_at_all = false
+
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"
@@ -38,6 +65,22 @@ exec_config_url = "http://127.0.0.1:18161/"
 exec_viz_url = "http://127.0.0.1:10041/"
 estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade01"
+account_ipc_service = "account_pubs/binance_pm"
+
+# Manager-visible account; Exec trading processes remain operator-controlled
+# and are intentionally not started by this configuration change.
+[[sources]]
+id = "binance_exec_trade08"
+account = "trade08"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade08/data/persist_manager"
+enabled = true
+gateway_prefix = "/exec_trade08"
+exec_config_url = "http://127.0.0.1:18168/"
+exec_viz_url = "http://127.0.0.1:10048/"
+maker_fee_rate = 0.00012
+taker_fee_rate = 0.00032
+ipc_namespace = "binance_exec_trade08"
 account_ipc_service = "account_pubs/binance_pm"
 
 [[sources]]
@@ -97,4 +140,35 @@ exec_viz_url = "http://127.0.0.1:10045/"
 maker_fee_rate = 0.00018
 taker_fee_rate = 0.0005
 ipc_namespace = "binance_exec_trade05"
+account_ipc_service = "account_pubs/binance_pm"
+
+[[sources]]
+id = "binance_exec_trade06"
+account = "trade06"
+alias = "stable_happiness"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade06/data/persist_manager"
+enabled = true
+gateway_prefix = "/exec_trade06"
+exec_config_url = "http://127.0.0.1:18166/"
+exec_viz_url = "http://127.0.0.1:10046/"
+maker_fee_rate = 0.00012
+taker_fee_rate = 0.00032
+ipc_namespace = "binance_exec_trade06"
+account_ipc_service = "account_pubs/binance_pm"
+
+# Manager-visible account; Exec trading processes remain operator-controlled
+# and are intentionally not started by this configuration change.
+[[sources]]
+id = "binance_exec_trade07"
+account = "trade07"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade07/data/persist_manager"
+enabled = true
+gateway_prefix = "/exec_trade07"
+exec_config_url = "http://127.0.0.1:18167/"
+exec_viz_url = "http://127.0.0.1:10047/"
+maker_fee_rate = 0.00012
+taker_fee_rate = 0.00032
+ipc_namespace = "binance_exec_trade07"
 account_ipc_service = "account_pubs/binance_pm"

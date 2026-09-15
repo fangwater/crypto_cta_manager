@@ -1,0 +1,20 @@
+[Unit]
+Description=Crypto CTA Manager DingTalk health monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/el01/crypto_cta_manager
+EnvironmentFile=/home/el01/.config/crypto-cta-manager/database.env
+Environment=RUST_LOG=crypto_cta_manager=info
+ExecStart=/home/el01/crypto_cta_manager/bin/cta_monitor --config /home/el01/crypto_cta_manager/config/cta-manager.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+UMask=0077
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

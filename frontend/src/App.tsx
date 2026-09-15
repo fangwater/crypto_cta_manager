@@ -23,6 +23,8 @@ import { AccountBindingsPage } from './pages/config/AccountBindingsPage'
 import { DocsPage } from './pages/DocsPage'
 import { ExecutionCostPage } from './pages/ExecutionCostPage'
 import { AcquisitionCostPage } from './pages/AcquisitionCostPage'
+import { AdminPage } from './pages/AdminPage'
+import { AuthGate } from './components/AuthGate'
 import { normalizePath, readSourceId, routes } from './lib/routes'
 import {
   NavTimelineChart,
@@ -157,6 +159,10 @@ function initialScope() {
 }
 
 export default function App() {
+  return <AuthGate><AuthenticatedApp /></AuthGate>
+}
+
+function AuthenticatedApp() {
   const path = normalizePath(window.location.pathname)
   if (path === '/' || path === '/manager/workspace') return <WorkspacePage />
   if (path === '/manager/account') return <AccountOverviewPage />
@@ -171,6 +177,7 @@ export default function App() {
   if (path === '/manager/docs') return <DocsPage />
   if (path === '/manager/execution-cost') return <ExecutionCostPage />
   if (path === '/manager/acquisition-cost') return <AcquisitionCostPage />
+  if (path === '/manager/admin') return <AdminPage />
   return <NavPage />
 }
 

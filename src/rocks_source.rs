@@ -96,6 +96,47 @@ pub fn read_available_column_families(
     Ok(result)
 }
 
+/// Read the newest records from each available requested column family in one
+/// read-only RocksDB open. The live persist_manager remains writable by Exec.
+pub fn read_latest_column_families(
+    path: &Path,
+    requested_column_families: &[&str],
+    limit: usize,
+) -> Result<BTreeMap<String, Vec<RawRocksRecord>>> {
+    if limit == 0 {
+        return Ok(BTreeMap::new());
+    }
+    if !path.is_dir() {
+        bail!("RocksDB path is not a directory: {}", path.display());
+    }
+
+    let options = read_only_options();
+    let column_families = DB::list_cf(&options, path)
+        .with_context(|| format!("failed to list column families in {}", path.display()))?;
+    let db = DB::open_cf_for_read_only(&options, path, column_families.clone(), false)
+        .with_context(|| format!("failed to open RocksDB {} read-only", path.display()))?;
+    let mut result = BTreeMap::new();
+    for requested in requested_column_families {
+        if !column_families.iter().any(|name| name == requested) {
+            continue;
+        }
+        let column_family = db
+            .cf_handle(requested)
+            .with_context(|| format!("{requested} column family disappeared after open"))?;
+        let mut records = Vec::new();
+        for item in db.iterator_cf(column_family, IteratorMode::End).take(limit) {
+            let (key, value) =
+                item.with_context(|| format!("failed while iterating newest {requested}"))?;
+            records.push(RawRocksRecord {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            });
+        }
+        result.insert((*requested).to_string(), records);
+    }
+    Ok(result)
+}
+
 pub fn read_uniform_orders(
     path: &Path,
     start_ts_us: i64,
@@ -215,5 +256,37 @@ mod tests {
             read_all_column_families(temp.path(), &[UNIFORM_ORDERS_CF, "trade_updates"]).unwrap();
         assert_eq!(records[UNIFORM_ORDERS_CF][0].value, b"uniform");
         assert_eq!(records["trade_updates"][0].value, b"trade");
+    }
+
+    #[test]
+    fn reads_newest_records_in_reverse_key_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &options,
+            temp.path(),
+            vec![ColumnFamilyDescriptor::new(
+                UNIFORM_ORDERS_CF,
+                Options::default(),
+            )],
+        )
+        .unwrap();
+        let cf = db.cf_handle(UNIFORM_ORDERS_CF).unwrap();
+        for (key, value) in [
+            (b"001".as_slice(), b"a".as_slice()),
+            (b"002", b"b"),
+            (b"003", b"c"),
+        ] {
+            db.put_cf(cf, key, value).unwrap();
+        }
+        drop(db);
+
+        let records = read_latest_column_families(temp.path(), &[UNIFORM_ORDERS_CF], 2).unwrap();
+        let records = &records[UNIFORM_ORDERS_CF];
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].value, b"c");
+        assert_eq!(records[1].value, b"b");
     }
 }

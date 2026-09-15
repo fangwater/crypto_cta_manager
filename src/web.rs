@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,8 +10,10 @@ use arrow_ipc::{
     writer::{IpcWriteOptions, StreamWriter},
 };
 use arrow_schema::{DataType, Field, Schema};
-use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
+use axum::http::Request;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -22,6 +24,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use crate::account_ipc::{LiveEquityHub, LiveEquitySnapshot};
+use crate::auth::{self, AuthUser};
 use crate::config::{AppConfig, FeeRates, SourceConfig};
 use crate::manager_db::ManagerDb;
 use crate::order_config::{
@@ -236,6 +239,27 @@ struct AuthResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct AuthStatusResponse {
+    authenticated: bool,
+    setup_required: bool,
+    user: Option<auth::UserView>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthSessionResponse {
+    user: auth::UserView,
+}
+
+#[derive(Clone, Debug)]
+struct VisibleSources(BTreeSet<String>);
+
+#[derive(Clone)]
+struct AuthMiddlewareState {
+    pool: PgPool,
+    configured_source_ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
 }
@@ -334,7 +358,20 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .await;
     });
 
+    let configured_source_ids = config
+        .sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect::<BTreeSet<_>>();
     let app = Router::new()
+        .route("/api/auth/status", get(auth_status))
+        .route("/api/auth/register", post(auth_register))
+        .route("/api/auth/login", post(auth_login))
+        .route("/api/auth/logout", post(auth_logout))
+        .route("/api/auth/verify", get(auth_verify))
+        .route("/api/auth/users", get(auth_users))
+        .route("/api/auth/users/{user_id}/sources", put(auth_user_sources))
+        .route("/api/auth/users/{user_id}/role", put(auth_user_role))
         .route("/api/health", get(health))
         .route("/api/nav/exchange", get(exchange_nav))
         .route(
@@ -418,7 +455,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .with_state(WebState {
             cache,
             config: Arc::new(config),
-            pool,
+            pool: pool.clone(),
             exec_config,
             redis_runtime,
             reload_notify,
@@ -429,6 +466,13 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             viz_snapshot,
             refresh_interval_secs,
         })
+        .layer(middleware::from_fn_with_state(
+            AuthMiddlewareState {
+                pool: pool.clone(),
+                configured_source_ids,
+            },
+            auth_middleware,
+        ))
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -444,8 +488,261 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     .context("CTA web API stopped unexpectedly")
 }
 
-async fn dashboard(State(state): State<WebState>) -> impl IntoResponse {
+async fn auth_middleware(
+    State(auth_state): State<AuthMiddlewareState>,
+    mut request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if matches!(
+        path,
+        "/api/auth/status" | "/api/auth/register" | "/api/auth/login" | "/api/auth/logout"
+    ) || (path == "/api/catalog/position-strategies"
+        && request.method() == axum::http::Method::POST)
+    {
+        return next.run(request).await;
+    }
+    let token = auth::extract_session_cookie(
+        request
+            .headers()
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let user = match token {
+        Some(token) => match auth::load_session(&auth_state.pool, &token).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return unauthorized("login required"),
+            Err(error) => {
+                error!(error = ?error, "failed to load authentication session");
+                return internal_error();
+            }
+        },
+        None => return unauthorized("login required"),
+    };
+    if request.method() != axum::http::Method::GET
+        && request.method() != axum::http::Method::HEAD
+        && !user.is_admin()
+    {
+        return forbidden("administrator permission required");
+    }
+    let allowed =
+        match auth::allowed_source_ids(&auth_state.pool, &user, &auth_state.configured_source_ids)
+            .await
+        {
+            Ok(allowed) => allowed,
+            Err(error) => {
+                error!(error = ?error, "failed to resolve source permissions");
+                return internal_error();
+            }
+        };
+    if let Some(source_id) = source_id_from_path(path)
+        && !allowed.contains(source_id)
+    {
+        return forbidden("you are not authorized to view this account");
+    }
+    request.extensions_mut().insert(user);
+    request.extensions_mut().insert(VisibleSources(allowed));
+    next.run(request).await
+}
+
+fn source_id_from_path(path: &str) -> Option<&str> {
+    if path == "/api/order-config/auth" {
+        return None;
+    }
+    let prefixes = [
+        "/api/catalog/accounts/",
+        "/api/order-config/",
+        "/api/pnl/strategy",
+    ];
+    let prefix = prefixes.iter().find(|prefix| path.starts_with(**prefix))?;
+    let rest = path.strip_prefix(prefix)?.trim_matches('/');
+    if *prefix == "/api/order-config/" {
+        return rest.split('/').next().filter(|value| !value.is_empty());
+    }
+    if *prefix == "/api/pnl/strategy" {
+        return None;
+    }
+    rest.split('/').next().filter(|value| !value.is_empty())
+}
+
+async fn auth_status(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let user = load_request_user(&state.pool, &headers).await?;
+    let setup_required = !auth::has_users(&state.pool).await?;
+    let response = AuthStatusResponse {
+        authenticated: user.is_some(),
+        setup_required,
+        user: match user {
+            Some(user) => Some(auth::user_view(&state.pool, &user).await?),
+            None => None,
+        },
+    };
+    Ok((NO_STORE, Json(response)).into_response())
+}
+
+async fn auth_register(
+    State(state): State<WebState>,
+    Json(request): Json<auth::RegisterRequest>,
+) -> Result<Response, ApiError> {
+    let user = match auth::register(&state.pool, request).await {
+        Ok(user) => user,
+        Err(error) => return Ok(bad_request(error.to_string())),
+    };
+    let token = auth::create_session(&state.pool, user.user_id).await?;
+    let view = auth::user_view(&state.pool, &user).await?;
+    Ok((
+        [(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&auth::session_cookie(&token))?,
+        )],
+        NO_STORE,
+        Json(AuthSessionResponse { user: view }),
+    )
+        .into_response())
+}
+
+async fn auth_login(
+    State(state): State<WebState>,
+    Json(request): Json<auth::LoginRequest>,
+) -> Result<Response, ApiError> {
+    let user = match auth::login(&state.pool, request).await {
+        Ok(user) => user,
+        Err(_) => return Ok(unauthorized("invalid username or password")),
+    };
+    let token = auth::create_session(&state.pool, user.user_id).await?;
+    let view = auth::user_view(&state.pool, &user).await?;
+    Ok((
+        [(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&auth::session_cookie(&token))?,
+        )],
+        NO_STORE,
+        Json(AuthSessionResponse { user: view }),
+    )
+        .into_response())
+}
+
+async fn auth_logout(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if let Some(token) = auth::extract_session_cookie(
+        headers
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        auth::delete_session(&state.pool, &token).await?;
+    }
+    Ok((
+        [(
+            header::SET_COOKIE,
+            HeaderValue::from_static(auth::clear_session_cookie()),
+        )],
+        StatusCode::NO_CONTENT,
+    )
+        .into_response())
+}
+
+/// Used by the gateway's auth_request for direct Exec Viz/Config links.
+/// The source ID is injected by the per-source Nginx location and is never
+/// trusted from the browser.
+async fn auth_verify(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let Some(user) = load_request_user(&state.pool, &headers).await? else {
+        return Ok(unauthorized("login required"));
+    };
+    if !user.is_admin() {
+        let source_id = headers
+            .get("x-cta-source-id")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let configured = state
+            .config
+            .sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect();
+        let allowed = auth::allowed_source_ids(&state.pool, &user, &configured).await?;
+        if !allowed.contains(source_id) {
+            return Ok(forbidden("you are not authorized to view this account"));
+        }
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn auth_users(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() {
+        return Ok(forbidden("administrator permission required"));
+    }
+    Ok((NO_STORE, Json(auth::list_users(&state.pool).await?)).into_response())
+}
+
+async fn auth_user_sources(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Path(user_id): Path<i64>,
+    Json(request): Json<auth::SetSourcesRequest>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() {
+        return Ok(forbidden("administrator permission required"));
+    }
+    let configured = state
+        .config
+        .sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect();
+    match auth::set_sources(&state.pool, user_id, &request.source_ids, &configured).await {
+        Ok(view) => Ok((NO_STORE, Json(view)).into_response()),
+        Err(error) => Ok(bad_request(error.to_string())),
+    }
+}
+
+async fn auth_user_role(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Path(user_id): Path<i64>,
+    Json(request): Json<auth::SetRoleRequest>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() {
+        return Ok(forbidden("administrator permission required"));
+    }
+    match auth::set_role(&state.pool, user_id, &request.role).await {
+        Ok(view) => Ok((NO_STORE, Json(view)).into_response()),
+        Err(error) => Ok(bad_request(error.to_string())),
+    }
+}
+
+async fn load_request_user(
+    pool: &PgPool,
+    headers: &HeaderMap,
+) -> Result<Option<AuthUser>, ApiError> {
+    let Some(token) = auth::extract_session_cookie(
+        headers
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok()),
+    ) else {
+        return Ok(None);
+    };
+    Ok(auth::load_session(pool, &token).await?)
+}
+
+async fn dashboard(
+    State(state): State<WebState>,
+    Extension(visible): Extension<VisibleSources>,
+) -> impl IntoResponse {
     let mut dashboard = state.cache.read().await.dashboard.clone();
+    dashboard
+        .accounts
+        .retain(|account| visible.0.contains(&account.source_id));
+    dashboard.report = nav::restrict_report(&dashboard.report, &visible.0);
     let now_ms = unix_now_ms();
     for account in &mut dashboard.accounts {
         if let Some(snapshot) = state.live_equity.get(&account.source_id) {
@@ -484,7 +781,10 @@ async fn manager_sdk() -> impl IntoResponse {
     )
 }
 
-async fn health(State(state): State<WebState>) -> impl IntoResponse {
+async fn health(
+    State(state): State<WebState>,
+    Extension(visible): Extension<VisibleSources>,
+) -> impl IntoResponse {
     let cache = state.cache.read().await;
     let response = HealthResponse {
         status: if cache.last_refresh_error.is_some() {
@@ -492,7 +792,13 @@ async fn health(State(state): State<WebState>) -> impl IntoResponse {
         } else {
             "ok"
         },
-        source_count: cache.dashboard.report.source_count,
+        source_count: cache
+            .dashboard
+            .report
+            .sources
+            .iter()
+            .filter(|source| visible.0.contains(&source.source_id))
+            .count(),
         generated_at_us: cache.dashboard.generated_at_us,
         last_attempt_at_us: cache.last_attempt_at_us,
         refresh_interval_secs: cache.dashboard.refresh_interval_secs,
@@ -501,8 +807,11 @@ async fn health(State(state): State<WebState>) -> impl IntoResponse {
     (NO_STORE, Json(response))
 }
 
-async fn exchange_nav(State(state): State<WebState>) -> Result<Response, ApiError> {
-    let selected = match resolve_sources(&state.config, &[]) {
+async fn exchange_nav(
+    State(state): State<WebState>,
+    Extension(visible): Extension<VisibleSources>,
+) -> Result<Response, ApiError> {
+    let selected = match resolve_visible_sources(&state.config, &[], &visible.0) {
         Ok(sources) => sources,
         Err(message) => return Ok(bad_request(message)),
     };
@@ -553,8 +862,9 @@ fn exchange_nav_account(
 async fn timeline(
     State(state): State<WebState>,
     Query(query): Query<TimelineQuery>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
-    let snapshot = match rebuild_timeline_snapshot(state, query, true).await? {
+    let snapshot = match rebuild_timeline_snapshot(state, query, true, visible.0).await? {
         Ok(snapshot) => snapshot,
         Err(response) => return Ok(response),
     };
@@ -564,8 +874,9 @@ async fn timeline(
 async fn account_timeline(
     State(state): State<WebState>,
     Query(query): Query<TimelineQuery>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
-    let snapshot = match rebuild_timeline_snapshot(state, query, false).await? {
+    let snapshot = match rebuild_timeline_snapshot(state, query, false, visible.0).await? {
         Ok(snapshot) => snapshot,
         Err(response) => return Ok(response),
     };
@@ -575,26 +886,32 @@ async fn account_timeline(
 async fn account_pnl_arrow(
     State(state): State<WebState>,
     Query(query): Query<TimelineQuery>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
-    timeline_arrow_response(state, query, false).await
+    timeline_arrow_response(state, query, false, visible.0).await
 }
 
 async fn strategies_pnl_arrow(
     State(state): State<WebState>,
     Query(query): Query<TimelineQuery>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
-    timeline_arrow_response(state, query, true).await
+    timeline_arrow_response(state, query, true, visible.0).await
 }
 
 async fn timeline_arrow_response(
     state: WebState,
     query: TimelineQuery,
     use_strategy_allocation: bool,
+    visible_source_ids: BTreeSet<String>,
 ) -> Result<Response, ApiError> {
-    let snapshot = match rebuild_timeline_snapshot(state, query, use_strategy_allocation).await? {
-        Ok(snapshot) => snapshot,
-        Err(response) => return Ok(response),
-    };
+    let snapshot =
+        match rebuild_timeline_snapshot(state, query, use_strategy_allocation, visible_source_ids)
+            .await?
+        {
+            Ok(snapshot) => snapshot,
+            Err(response) => return Ok(response),
+        };
     let payload = if use_strategy_allocation {
         encode_strategy_timeline_arrow(&snapshot)?
     } else {
@@ -614,8 +931,25 @@ async fn rebuild_timeline_snapshot(
     state: WebState,
     query: TimelineQuery,
     use_strategy_allocation: bool,
+    visible_source_ids: BTreeSet<String>,
 ) -> Result<std::result::Result<TimelineSnapshot, Response>, ApiError> {
-    let selected_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    let requested_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    if requested_source_ids
+        .iter()
+        .any(|source_id| !visible_source_ids.contains(source_id))
+    {
+        return Ok(Err(forbidden(
+            "you are not authorized to view one or more accounts",
+        )));
+    }
+    let selected_source_ids = if requested_source_ids.is_empty() {
+        visible_source_ids.into_iter().collect::<Vec<_>>()
+    } else {
+        requested_source_ids
+    };
+    if selected_source_ids.is_empty() {
+        return Ok(Err(forbidden("you are not authorized to view any account")));
+    }
     if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
         return Ok(Err(bad_request(message)));
     }
@@ -715,7 +1049,11 @@ async fn rebuild_timeline_snapshot(
 async fn strategy_pnl(
     State(state): State<WebState>,
     Query(query): Query<StrategyPnlQuery>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
+    if !visible.0.contains(&query.source_id) {
+        return Ok(forbidden("you are not authorized to view this account"));
+    }
     let request = match parse_strategy_pnl_request(&state.config, query) {
         Ok(request) => request,
         Err(message) => return Ok(bad_request(message)),
@@ -749,7 +1087,11 @@ async fn strategy_pnl(
 async fn strategy_pnl_summary(
     State(state): State<WebState>,
     Query(query): Query<StrategyPnlQuery>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
+    if !visible.0.contains(&query.source_id) {
+        return Ok(forbidden("you are not authorized to view this account"));
+    }
     let request = match parse_strategy_pnl_request(&state.config, query) {
         Ok(request) => request,
         Err(message) => return Ok(bad_request(message)),
@@ -859,8 +1201,25 @@ async fn rebuild_strategy_pnl_report(
 async fn execution_cost(
     State(state): State<WebState>,
     Query(query): Query<ExecutionCostQuery>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
-    let selected_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    let requested_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    if requested_source_ids
+        .iter()
+        .any(|source_id| !visible.0.contains(source_id))
+    {
+        return Ok(forbidden(
+            "you are not authorized to view one or more accounts",
+        ));
+    }
+    let selected_source_ids = if requested_source_ids.is_empty() {
+        visible.0.iter().cloned().collect::<Vec<_>>()
+    } else {
+        requested_source_ids
+    };
+    if selected_source_ids.is_empty() {
+        return Ok(forbidden("you are not authorized to view any account"));
+    }
     if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
         return Ok(bad_request(message));
     }
@@ -968,8 +1327,25 @@ async fn execution_cost(
 async fn acquisition_cost(
     State(state): State<WebState>,
     Query(query): Query<AcquisitionCostQuery>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
-    let selected_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    let requested_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    if requested_source_ids
+        .iter()
+        .any(|source_id| !visible.0.contains(source_id))
+    {
+        return Ok(forbidden(
+            "you are not authorized to view one or more accounts",
+        ));
+    }
+    let selected_source_ids = if requested_source_ids.is_empty() {
+        visible.0.iter().cloned().collect::<Vec<_>>()
+    } else {
+        requested_source_ids
+    };
+    if selected_source_ids.is_empty() {
+        return Ok(forbidden("you are not authorized to view any account"));
+    }
     if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
         return Ok(bad_request(message));
     }
@@ -1054,6 +1430,7 @@ async fn acquisition_cost(
 async fn position_updates(
     State(state): State<WebState>,
     Query(query): Query<PositionUpdatesQuery>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
     let after = match (query.after_us, query.after_seq) {
         (None, None) => None,
@@ -1074,9 +1451,11 @@ async fn position_updates(
         )));
     }
     let archive = Arc::clone(&state.position_archive);
-    let payload = tokio::task::spawn_blocking(move || archive.raw_json_page(after, limit))
-        .await
-        .context("position update archive read task failed")??;
+    let payload = tokio::task::spawn_blocking(move || {
+        archive.raw_json_page_for_sources(after, limit, Some(&visible.0))
+    })
+    .await
+    .context("position update archive read task failed")??;
     let mut response = payload.into_response();
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -2114,6 +2493,36 @@ fn catalog_error(error: anyhow::Error) -> Response {
     (status, Json(ErrorResponse { error: message })).into_response()
 }
 
+fn unauthorized(message: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: message.to_string(),
+        }),
+    )
+        .into_response()
+}
+
+fn forbidden(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: message.to_string(),
+        }),
+    )
+        .into_response()
+}
+
+fn internal_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "internal server error".to_string(),
+        }),
+    )
+        .into_response()
+}
+
 fn not_found(message: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -2223,6 +2632,27 @@ fn resolve_sources<'a>(
         return Err("sourceIds selects no enabled sources".to_string());
     }
     Ok(selected)
+}
+
+fn resolve_visible_sources<'a>(
+    config: &'a AppConfig,
+    selected_source_ids: &[String],
+    visible_source_ids: &BTreeSet<String>,
+) -> std::result::Result<Vec<&'a SourceConfig>, String> {
+    if selected_source_ids.is_empty() {
+        return Ok(config
+            .sources
+            .iter()
+            .filter(|source| source.enabled && visible_source_ids.contains(&source.id))
+            .collect());
+    }
+    if selected_source_ids
+        .iter()
+        .any(|source_id| !visible_source_ids.contains(source_id))
+    {
+        return Err("you are not authorized to view one or more accounts".to_string());
+    }
+    resolve_sources(config, selected_source_ids)
 }
 
 fn milliseconds_to_microseconds(value: i64, field: &str) -> std::result::Result<i64, String> {
@@ -3052,6 +3482,7 @@ mod tests {
             order_config: crate::config::OrderConfigSettings::default(),
             redis: crate::config::RedisSettings::default(),
             twap: crate::config::TwapConfig::default(),
+            monitor: crate::config::MonitorConfig::default(),
             sources: vec![crate::config::SourceConfig {
                 id: "binance_exec_trade01".into(),
                 account: "trade01".into(),

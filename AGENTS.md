@@ -32,6 +32,39 @@ cargo test
 cargo build --release
 ```
 
+The standalone `cta_monitor` binary is the DingTalk health monitor for CTA
+market data, order flow, and position execution. Keep it independent from
+`cta_web` and the ingestion worker; build and deploy it as its own binary and
+systemd user service:
+
+```bash
+cargo check --bin cta_monitor
+cargo build --release --bin cta_monitor
+cta_monitor --config config/cta-manager.toml --once --dry-run
+```
+
+`cta_monitor` is read-only. It subscribes to the public
+`spread_pbs/<venue>/ask_bid_spread` Iceoryx BBO stream, opens each enabled
+source's Exec `persist_manager` RocksDB read-only to inspect recent
+`uniform_orders`, `order_updates`, and `trade_updates`, and reads the Exec Viz
+`/snapshot` endpoint for `exec_pre_trade_state`. It must never write to an Exec
+RocksDB, PostgreSQL order store, Redis, Exec Config endpoint, or exchange API.
+Each source check is isolated so a missing or corrupt source cannot stop checks
+for other accounts.
+
+When `[monitor].enabled = true`, DingTalk credentials are read only from the
+environment names in `[monitor.dingtalk]` (`market_webhook_url_env` and
+`order_webhook_url_env`, with optional per-channel signing secrets). Market
+issues use the market webhook; order, report, and position issues use the order
+webhook. Never commit or print a webhook URL, access token, signing secret, or
+the host credential file. Each channel retries failed sends with exponential
+backoff and keeps the issue pending until that channel succeeds. The monitor
+sends on issue transitions, repeats unresolved issues at `repeat_alert_secs`,
+and sends a recovery notice; it must not send one message on every poll. Use
+`--once --dry-run` before enabling the user service. The deployment unit is
+`crypto-cta-manager-monitor.service`; installing it must not start or restart
+trading, Viz, Config, Nginx, or `cta_web` services.
+
 Run `cargo fmt` before committing Rust changes. Prefer focused tests while
 iterating, then run the full crate tests when changing database schemas,
 ingestion checkpoints, or shared order models.

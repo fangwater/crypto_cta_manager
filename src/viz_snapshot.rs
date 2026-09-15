@@ -40,6 +40,29 @@ pub struct SourceStrategyAllocation {
     pub rows: Vec<StrategyAllocationRow>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecStateSnapshot {
+    pub source_id: String,
+    pub snapshot_ts_ms: i64,
+    pub position_ready: bool,
+    pub rows: Vec<ExecStateRowSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecStateRowSnapshot {
+    pub strategy_name: String,
+    pub symbol: String,
+    pub source_updated_at_ms: i64,
+    pub current_qty: Option<f64>,
+    pub target_qty: Option<f64>,
+    pub pending_qty: Option<f64>,
+    pub live_order_qty: Option<f64>,
+    pub estimated_completion_ts_ms: i64,
+    pub execution_complete: bool,
+    pub completion_reason: String,
+    pub account_position_qty: Option<f64>,
+}
+
 #[derive(Clone)]
 pub struct VizSnapshotClient {
     http: Client,
@@ -111,6 +134,35 @@ impl VizSnapshotClient {
             source_id, &snapshot,
         ))
     }
+
+    pub async fn load_exec_state(
+        &self,
+        source_id: &str,
+        base_url: &str,
+    ) -> Result<ExecStateSnapshot> {
+        let snapshot = self.fetch_snapshot(source_id, base_url).await?;
+        Ok(extract_exec_state_from_decoded(source_id, &snapshot))
+    }
+
+    async fn fetch_snapshot(&self, source_id: &str, base_url: &str) -> Result<VizSnapshot> {
+        let url = snapshot_url(base_url)?;
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("failed to request Exec Viz snapshot for {source_id}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("failed to read Exec Viz snapshot for {source_id}"))?;
+        if status != StatusCode::OK {
+            bail!("Exec Viz snapshot for {source_id} returned {status}: {body}");
+        }
+        serde_json::from_str(&body)
+            .with_context(|| format!("failed to decode Exec Viz snapshot for {source_id}"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,6 +201,86 @@ struct ExecStateRow {
     current_qty: Option<f64>,
     current_usdt: Option<f64>,
     account_position_qty: Option<f64>,
+    #[serde(default)]
+    source_updated_at_ms: i64,
+    target_qty: Option<f64>,
+    pending_qty: Option<f64>,
+    live_order_qty: Option<f64>,
+    #[serde(default)]
+    estimated_completion_ts_ms: i64,
+    #[serde(default)]
+    execution_complete: bool,
+    #[serde(default)]
+    completion_reason: String,
+}
+
+fn extract_exec_state_from_decoded(source_id: &str, snapshot: &VizSnapshot) -> ExecStateSnapshot {
+    let Some(entry) = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.msg_type.as_deref() == Some(EXEC_PRE_TRADE_STATE))
+    else {
+        return ExecStateSnapshot {
+            source_id: source_id.to_string(),
+            snapshot_ts_ms: snapshot.ts_ms,
+            position_ready: false,
+            rows: Vec::new(),
+        };
+    };
+    let Some(state) = &entry.entry else {
+        return ExecStateSnapshot {
+            source_id: source_id.to_string(),
+            snapshot_ts_ms: entry.ts_ms.unwrap_or(snapshot.ts_ms),
+            position_ready: false,
+            rows: Vec::new(),
+        };
+    };
+    ExecStateSnapshot {
+        source_id: source_id.to_string(),
+        snapshot_ts_ms: if state.ts_ms > 0 {
+            state.ts_ms
+        } else {
+            entry.ts_ms.unwrap_or(snapshot.ts_ms)
+        },
+        position_ready: state.position_ready,
+        rows: state
+            .rows
+            .iter()
+            .map(|row| ExecStateRowSnapshot {
+                strategy_name: row.strategy_name.clone(),
+                symbol: normalize_symbol(&row.symbol),
+                source_updated_at_ms: row.source_updated_at_ms,
+                current_qty: row.current_qty.filter(|value| value.is_finite()),
+                target_qty: row.target_qty.filter(|value| value.is_finite()),
+                pending_qty: row.pending_qty.filter(|value| value.is_finite()),
+                live_order_qty: row.live_order_qty.filter(|value| value.is_finite()),
+                estimated_completion_ts_ms: row.estimated_completion_ts_ms,
+                execution_complete: row.execution_complete,
+                completion_reason: row.completion_reason.clone(),
+                account_position_qty: row.account_position_qty.filter(|value| value.is_finite()),
+            })
+            .filter(|row| !row.strategy_name.trim().is_empty() && !row.symbol.is_empty())
+            .collect(),
+    }
+}
+
+pub fn extract_exec_state(source_id: &str, snapshot_json: &serde_json::Value) -> ExecStateSnapshot {
+    match serde_json::from_value::<VizSnapshot>(snapshot_json.clone()) {
+        Ok(snapshot) => extract_exec_state_from_decoded(source_id, &snapshot),
+        Err(error) => {
+            warn!(
+                source_id,
+                error = %error,
+                "Exec Viz snapshot JSON did not match expected execution state shape"
+            );
+            ExecStateSnapshot {
+                source_id: source_id.to_string(),
+                snapshot_ts_ms: 0,
+                position_ready: false,
+                rows: Vec::new(),
+            }
+        }
+    }
 }
 
 pub fn extract_strategy_allocation(
@@ -421,5 +553,40 @@ mod tests {
         assert_eq!(allocation.rows[0].symbol, "BTCUSDT");
         assert_eq!(allocation.rows[0].account_position_qty, Some(0.3));
         assert_eq!(allocation.rows[1].strategy_name, "SYSTEM_POSITION_CLOSE");
+    }
+
+    #[test]
+    fn extracts_execution_fields_for_health_monitoring() {
+        let snapshot = serde_json::json!({
+            "ts_ms": 1000,
+            "entries": [{
+                "type": "exec_pre_trade_state",
+                "entry": {
+                    "ts_ms": 1000,
+                    "position_ready": true,
+                    "rows": [{
+                        "strategy_name": "cta_a",
+                        "symbol": "BTC-USDT",
+                        "source_updated_at_ms": 990,
+                        "current_qty": 0.5,
+                        "target_qty": 0.8,
+                        "pending_qty": 0.2,
+                        "live_order_qty": 0.1,
+                        "estimated_completion_ts_ms": 2000,
+                        "execution_complete": false,
+                        "completion_reason": "",
+                        "account_position_qty": 0.3
+                    }]
+                }
+            }]
+        });
+        let state = extract_exec_state("trade01", &snapshot);
+        assert!(state.position_ready);
+        assert_eq!(state.rows.len(), 1);
+        assert_eq!(state.rows[0].symbol, "BTCUSDT");
+        assert_eq!(state.rows[0].target_qty, Some(0.8));
+        assert_eq!(state.rows[0].pending_qty, Some(0.2));
+        assert_eq!(state.rows[0].live_order_qty, Some(0.1));
+        assert_eq!(state.rows[0].estimated_completion_ts_ms, 2000);
     }
 }

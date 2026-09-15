@@ -1,7 +1,8 @@
-import { Activity, BookOpen, LayoutDashboard, Settings, Scale } from 'lucide-react'
+import { Activity, BookOpen, LayoutDashboard, Settings, Shield, Scale } from 'lucide-react'
+import { useAuth } from './AuthGate'
 import { cn } from '../lib/cn'
 
-export type AppNavId = 'workspace' | 'manager' | 'execution-cost' | 'config' | 'docs'
+export type AppNavId = 'workspace' | 'manager' | 'execution-cost' | 'config' | 'docs' | 'admin'
 
 const links: Array<{
   id: AppNavId
@@ -14,12 +15,15 @@ const links: Array<{
   { id: 'execution-cost', href: '/manager/acquisition-cost/', label: '成本', icon: Scale },
   { id: 'config', href: '/manager/config/position/', label: '策略', icon: Settings },
   { id: 'docs', href: '/manager/docs/', label: '文档', icon: BookOpen },
+  { id: 'admin', href: '/manager/admin/', label: '权限', icon: Shield },
 ]
 
 export function AppNav({ active }: { active: AppNavId }) {
+  const { user, logout } = useAuth()
   return (
-    <nav className="hidden items-center gap-1 rounded-xl border border-border bg-canvas/80 p-1 md:flex">
-      {links.map((link) => {
+    <div className="flex items-center gap-2">
+      <nav className="hidden items-center gap-1 rounded-xl border border-border bg-canvas/80 p-1 md:flex">
+        {links.filter((link) => link.id !== 'admin' || user.role === 'admin').map((link) => {
         const Icon = link.icon
         const isActive = active === link.id
         return (
@@ -38,7 +42,9 @@ export function AppNav({ active }: { active: AppNavId }) {
             <span>{link.label}</span>
           </a>
         )
-      })}
-    </nav>
+        })}
+      </nav>
+      <button type="button" onClick={() => void logout()} className="hidden rounded-lg border border-border bg-surface px-3 py-2 text-xs text-muted hover:text-ink sm:inline-flex">退出</button>
+    </div>
   )
 }
