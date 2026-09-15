@@ -72,6 +72,7 @@ account_ipc_service = "account_pubs/binance_pm"
 [[sources]]
 id = "binance_exec_trade08"
 account = "trade08"
+alias = "Crypto_cta1"
 venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade08/data/persist_manager"
 enabled = true
@@ -162,6 +163,7 @@ account_ipc_service = "account_pubs/binance_pm"
 [[sources]]
 id = "binance_exec_trade07"
 account = "trade07"
+alias = "dzy_group0807"
 venue = "binance-futures"
 rocksdb_path = "/home/el01/binance_exec_trade07/data/persist_manager"
 enabled = true
