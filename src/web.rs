@@ -259,6 +259,10 @@ struct AuthSessionResponse {
 #[derive(Clone, Debug)]
 struct VisibleSources(BTreeSet<String>);
 
+const POSITION_STRATEGY_PUBLISH_PATH: &str = "/api/catalog/position-strategies";
+const PUBLISH_TOKEN_HEADER: &str = "x-cta-publish-token";
+const MAX_PUBLISH_BODY_BYTES: usize = 1 << 20;
+
 #[derive(Clone)]
 struct AuthMiddlewareState {
     pool: PgPool,
@@ -375,7 +379,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/auth/login", post(auth_login))
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/verify", get(auth_verify))
-        .route("/api/auth/users", get(auth_users))
+        .route("/api/auth/users", get(auth_users).post(auth_create_user))
         .route("/api/auth/users/{user_id}/sources", put(auth_user_sources))
         .route("/api/auth/users/{user_id}/role", put(auth_user_role))
         .route("/api/health", get(health))
@@ -417,6 +421,34 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route(
             "/api/catalog/position-strategies/{name}",
             delete(delete_position_strategy),
+        )
+        .route(
+            "/api/catalog/position-strategies-access",
+            get(list_position_access),
+        )
+        .route(
+            "/api/catalog/position-strategies/{name}/publish-token",
+            put(save_position_publish_token),
+        )
+        .route(
+            "/api/catalog/position-strategies/{name}/publish-token/reset",
+            post(reset_position_publish_token),
+        )
+        .route(
+            "/api/catalog/position-strategies/{name}/managers",
+            put(save_position_managers),
+        )
+        .route(
+            "/api/catalog/position-strategies/{name}/viewers",
+            put(save_position_viewers),
+        )
+        .route(
+            "/api/catalog/publish-tokens",
+            get(list_fallback_tokens).post(add_fallback_token),
+        )
+        .route(
+            "/api/catalog/publish-tokens/{token_id}",
+            delete(delete_fallback_token),
         )
         .route(
             "/api/catalog/order-strategies",
@@ -497,6 +529,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
 
 async fn auth_middleware(
     State(auth_state): State<AuthMiddlewareState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -508,10 +541,11 @@ async fn auth_middleware(
             | "/api/auth/login"
             | "/api/auth/logout"
             | "/api/symbols"
-    ) || (path == "/api/catalog/position-strategies"
-        && request.method() == axum::http::Method::POST)
-    {
+    ) {
         return next.run(request).await;
+    }
+    if path == POSITION_STRATEGY_PUBLISH_PATH && request.method() == axum::http::Method::POST {
+        return gate_position_publish(&auth_state, peer_addr, request, next).await;
     }
     let token = auth::extract_session_cookie(
         request
@@ -556,6 +590,110 @@ async fn auth_middleware(
     next.run(request).await
 }
 
+/// Position publishes arrive from machine publishers without a session, so the
+/// endpoint keeps its own gate. Any one of these suffices: an admin session, a
+/// session of the strategy's creator or an authorized manager, the strategy's
+/// own publish token, or a fallback publish token stored in
+/// cta_publish_fallback_tokens (accepted for every strategy). A strategy that
+/// has no token configured keeps the legacy open push, so deployments stay
+/// compatible until tokens are assigned. The body is buffered once so the gate
+/// can read strategy_name before the handler parses it again.
+async fn gate_position_publish(
+    auth_state: &AuthMiddlewareState,
+    peer_addr: SocketAddr,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, MAX_PUBLISH_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => return bad_request("position publish body is too large".to_string()),
+    };
+    let strategy_name = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("strategy_name")
+                .and_then(|name| name.as_str())
+                .map(str::to_string)
+        });
+
+    let mut session_user = None;
+    if let Some(token) = auth::extract_session_cookie(
+        parts
+            .headers
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        match auth::load_session(&auth_state.pool, &token).await {
+            Ok(user) => session_user = user,
+            Err(error) => {
+                error!(error = ?error, "failed to load authentication session");
+                return internal_error();
+            }
+        }
+    }
+
+    let access = match &strategy_name {
+        Some(name) => match strategy_catalog::load_position_access(&auth_state.pool, name).await {
+            Ok(access) => access,
+            Err(error) => {
+                error!(error = ?error, "failed to load position strategy access");
+                return internal_error();
+            }
+        },
+        None => None,
+    };
+
+    let mut allowed = session_user.as_ref().is_some_and(AuthUser::is_admin);
+    if !allowed && let (Some(user), Some(access)) = (&session_user, &access) {
+        allowed = access.user_can_publish(user.user_id);
+    }
+
+    if !allowed {
+        let required_hash = access
+            .and_then(|access| access.publish_token_hash)
+            .filter(|hash| !hash.is_empty());
+        allowed = match required_hash {
+            None => true,
+            Some(hash) => {
+                let provided = parts
+                    .headers
+                    .get(PUBLISH_TOKEN_HEADER)
+                    .and_then(|value| value.to_str().ok());
+                if auth::publish_token_matches(provided, &hash) {
+                    true
+                } else {
+                    match auth::publish_fallback_token_matches(&auth_state.pool, provided).await {
+                        Ok(found) => found,
+                        Err(error) => {
+                            error!(error = ?error, "failed to check fallback publish token");
+                            return internal_error();
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    if !allowed {
+        warn!(
+            peer = %peer_addr,
+            strategy = strategy_name.as_deref().unwrap_or_default(),
+            "rejected position strategy publish"
+        );
+        return forbidden(
+            "position publish requires an admin or authorized session, or the strategy publish token",
+        );
+    }
+
+    let mut request = Request::from_parts(parts, axum::body::Body::from(bytes));
+    if let Some(user) = session_user {
+        request.extensions_mut().insert(user);
+    }
+    next.run(request).await
+}
+
 fn source_id_from_path(path: &str) -> Option<&str> {
     if path == "/api/order-config/auth" {
         return None;
@@ -593,10 +731,21 @@ async fn auth_status(
     Ok((NO_STORE, Json(response)).into_response())
 }
 
+/// Self-registration only bootstraps the very first administrator. Once any
+/// user exists, accounts are created by admins through POST /api/auth/users.
 async fn auth_register(
     State(state): State<WebState>,
+    headers: HeaderMap,
     Json(request): Json<auth::RegisterRequest>,
 ) -> Result<Response, ApiError> {
+    if auth::has_users(&state.pool).await? {
+        let user = load_request_user(&state.pool, &headers).await?;
+        if !user.as_ref().is_some_and(AuthUser::is_admin) {
+            return Ok(forbidden(
+                "self-registration is closed; ask an administrator to create your account",
+            ));
+        }
+    }
     let user = match auth::register(&state.pool, request).await {
         Ok(user) => user,
         Err(error) => return Ok(bad_request(error.to_string())),
@@ -693,6 +842,20 @@ async fn auth_users(
         return Ok(forbidden("administrator permission required"));
     }
     Ok((NO_STORE, Json(auth::list_users(&state.pool).await?)).into_response())
+}
+
+async fn auth_create_user(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Json(request): Json<auth::CreateUserRequest>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() {
+        return Ok(forbidden("administrator permission required"));
+    }
+    match auth::create_user(&state.pool, request).await {
+        Ok(view) => Ok((NO_STORE, Json(view)).into_response()),
+        Err(error) => Ok(bad_request(error.to_string())),
+    }
 }
 
 async fn auth_user_sources(
@@ -1564,6 +1727,7 @@ async fn position_updates(
     State(state): State<WebState>,
     Query(query): Query<PositionUpdatesQuery>,
     Extension(visible): Extension<VisibleSources>,
+    Extension(user): Extension<AuthUser>,
 ) -> Result<Response, ApiError> {
     let after = match (query.after_us, query.after_seq) {
         (None, None) => None,
@@ -1583,9 +1747,28 @@ async fn position_updates(
             "limit must be between 1 and {MAX_POSITION_UPDATE_PAGE_SIZE}"
         )));
     }
+    // Strategy visibility mirrors the catalog list: non-admin users only read
+    // updates of strategies they are allowed to see.
+    let allowed_strategies = if user.is_admin() {
+        None
+    } else {
+        let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
+        Some(
+            visibility
+                .iter()
+                .filter(|entry| entry.user_can_view(user.user_id))
+                .map(|entry| entry.strategy_name.clone())
+                .collect::<std::collections::BTreeSet<String>>(),
+        )
+    };
     let archive = Arc::clone(&state.position_archive);
     let payload = tokio::task::spawn_blocking(move || {
-        archive.raw_json_page_for_sources(after, limit, Some(&visible.0))
+        archive.raw_json_page_for_sources(
+            after,
+            limit,
+            Some(&visible.0),
+            allowed_strategies.as_ref(),
+        )
     })
     .await
     .context("position update archive read task failed")??;
@@ -1769,16 +1952,40 @@ async fn save_order_parameters(
     Ok((NO_STORE, Json(saved)).into_response())
 }
 
-async fn list_position_strategies(State(state): State<WebState>) -> Result<Response, ApiError> {
-    let strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
+/// Admins see every strategy. Other users see a strategy when it has no
+/// viewer grants (legacy open visibility), or when they are its creator, a
+/// viewer, or a publish manager.
+async fn list_position_strategies(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Response, ApiError> {
+    let mut strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
+    if !user.is_admin() {
+        let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
+        strategies.retain(|strategy| {
+            visibility
+                .iter()
+                .find(|entry| entry.strategy_name == strategy.strategy_name)
+                .is_none_or(|entry| entry.user_can_view(user.user_id))
+        });
+    }
     Ok((NO_STORE, Json(strategies)).into_response())
 }
 
 async fn save_position_strategy(
     State(state): State<WebState>,
+    user: Option<Extension<AuthUser>>,
     Json(request): Json<SavePositionStrategyRequest>,
 ) -> Result<Response, ApiError> {
-    match strategy_catalog::upsert_position_strategy(&state.pool, &request, unix_now_us()).await {
+    let created_by = user.map(|Extension(user)| user.user_id);
+    match strategy_catalog::upsert_position_strategy(
+        &state.pool,
+        &request,
+        created_by,
+        unix_now_us(),
+    )
+    .await
+    {
         Ok(saved) => {
             state.twap_symbols.track(saved.targets.keys());
             let factual_positions = load_factual_positions(&state, &saved.strategy_name).await;
@@ -1840,6 +2047,178 @@ async fn delete_position_strategy(
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("position strategy was not found")),
         Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn list_position_access(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() {
+        return Ok(forbidden("administrator permission required"));
+    }
+    Ok((
+        NO_STORE,
+        Json(strategy_catalog::list_position_access(&state.pool).await?),
+    )
+        .into_response())
+}
+
+async fn save_position_publish_token(
+    State(state): State<WebState>,
+    Path(name): Path<String>,
+    Json(request): Json<strategy_catalog::SavePositionPublishTokenRequest>,
+) -> Result<Response, ApiError> {
+    let token = request.publish_token.trim();
+    if !token.is_empty()
+        && let Err(message) = strategy_catalog::validate_publish_token(token)
+    {
+        return Ok(bad_request(message));
+    }
+    // Empty clears the token and restores the legacy open push.
+    let hash = if token.is_empty() {
+        None
+    } else {
+        Some(auth::publish_token_hash(token))
+    };
+    match strategy_catalog::set_position_publish_token(&state.pool, &name, hash).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(not_found("position strategy was not found")),
+        Err(error) => return Ok(catalog_error(error)),
+    }
+    match strategy_catalog::position_access_view(&state.pool, &name).await {
+        Ok(Some(view)) => Ok((NO_STORE, Json(view)).into_response()),
+        Ok(None) => Ok(not_found("position strategy was not found")),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+/// Admin-only reset: generates a fresh random token, stores its hash, and
+/// returns the plaintext once so it can be distributed to the publisher.
+async fn reset_position_publish_token(
+    State(state): State<WebState>,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    let token = auth::generate_publish_token();
+    let hash = auth::publish_token_hash(&token);
+    match strategy_catalog::set_position_publish_token(&state.pool, &name, Some(hash)).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(not_found("position strategy was not found")),
+        Err(error) => return Ok(catalog_error(error)),
+    }
+    match strategy_catalog::position_access_view(&state.pool, &name).await {
+        Ok(Some(access)) => Ok((
+            NO_STORE,
+            Json(serde_json::json!({
+                "publish_token": token,
+                "access": access,
+            })),
+        )
+            .into_response()),
+        Ok(None) => Ok(not_found("position strategy was not found")),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn save_position_managers(
+    State(state): State<WebState>,
+    Path(name): Path<String>,
+    Json(request): Json<strategy_catalog::SavePositionManagersRequest>,
+) -> Result<Response, ApiError> {
+    match strategy_catalog::set_position_managers(&state.pool, &name, &request.user_ids).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(not_found("position strategy was not found")),
+        Err(error) => return Ok(catalog_error(error)),
+    }
+    match strategy_catalog::position_access_view(&state.pool, &name).await {
+        Ok(Some(view)) => Ok((NO_STORE, Json(view)).into_response()),
+        Ok(None) => Ok(not_found("position strategy was not found")),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+/// Replaces the strategy's viewer list. An empty `user_ids` restores open
+/// visibility for every logged-in user.
+async fn save_position_viewers(
+    State(state): State<WebState>,
+    Path(name): Path<String>,
+    Json(request): Json<strategy_catalog::SavePositionManagersRequest>,
+) -> Result<Response, ApiError> {
+    match strategy_catalog::set_position_viewers(&state.pool, &name, &request.user_ids).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(not_found("position strategy was not found")),
+        Err(error) => return Ok(catalog_error(error)),
+    }
+    match strategy_catalog::position_access_view(&state.pool, &name).await {
+        Ok(Some(view)) => Ok((NO_STORE, Json(view)).into_response()),
+        Ok(None) => Ok(not_found("position strategy was not found")),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+/// Fallback publish tokens live in PostgreSQL (hashed) and are accepted for
+/// every strategy in addition to that strategy's own token.
+async fn list_fallback_tokens(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() {
+        return Ok(forbidden("administrator permission required"));
+    }
+    Ok((
+        NO_STORE,
+        Json(auth::list_publish_tokens(&state.pool).await?),
+    )
+        .into_response())
+}
+
+/// Creates a fallback token. When the body omits publish_token a random one is
+/// generated; the plaintext is returned once in the response and only its hash
+/// is stored.
+async fn add_fallback_token(
+    State(state): State<WebState>,
+    Json(request): Json<auth::AddPublishTokenRequest>,
+) -> Result<Response, ApiError> {
+    let token = match request
+        .publish_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(token) => {
+            if let Err(message) = strategy_catalog::validate_publish_token(token) {
+                return Ok(bad_request(message));
+            }
+            token.to_string()
+        }
+        None => auth::generate_publish_token(),
+    };
+    let view =
+        match auth::add_publish_token(&state.pool, &request.note, auth::publish_token_hash(&token))
+            .await
+        {
+            Ok(view) => view,
+            Err(error) => return Ok(bad_request(error.to_string())),
+        };
+    Ok((
+        NO_STORE,
+        Json(serde_json::json!({
+            "token_id": view.token_id,
+            "note": view.note,
+            "created_at": view.created_at,
+            "publish_token": token,
+        })),
+    )
+        .into_response())
+}
+
+async fn delete_fallback_token(
+    State(state): State<WebState>,
+    Path(token_id): Path<i64>,
+) -> Result<Response, ApiError> {
+    match auth::delete_publish_token(&state.pool, token_id).await? {
+        true => Ok(StatusCode::NO_CONTENT.into_response()),
+        false => Ok(not_found("publish token was not found")),
     }
 }
 
@@ -3747,5 +4126,45 @@ mod tests {
         assert_eq!(symbols[1].symbol, "ETHUSDT");
         assert_eq!(symbols[1].venue, None);
         assert_eq!(symbols[1].first_fill_ts_us, None);
+    }
+
+    #[test]
+    fn position_access_token_rules() {
+        let open = crate::strategy_catalog::PositionAccess {
+            created_by_user_id: None,
+            publish_token_hash: None,
+            manager_user_ids: vec![],
+            viewer_user_ids: vec![],
+        };
+        assert!(!open.token_required());
+        assert!(!open.user_can_publish(7));
+        assert!(open.user_can_view(99));
+
+        let protected = crate::strategy_catalog::PositionAccess {
+            created_by_user_id: Some(3),
+            publish_token_hash: Some(auth::publish_token_hash("s3cret-token")),
+            manager_user_ids: vec![7],
+            viewer_user_ids: vec![11],
+        };
+        assert!(protected.token_required());
+        assert!(protected.user_can_publish(3));
+        assert!(protected.user_can_publish(7));
+        assert!(!protected.user_can_publish(8));
+        assert!(protected.user_can_view(3));
+        assert!(protected.user_can_view(7));
+        assert!(protected.user_can_view(11));
+        assert!(!protected.user_can_view(8));
+        assert!(auth::publish_token_matches(
+            Some("s3cret-token"),
+            protected.publish_token_hash.as_deref().unwrap()
+        ));
+        assert!(!auth::publish_token_matches(
+            Some("wrong-token"),
+            protected.publish_token_hash.as_deref().unwrap()
+        ));
+        assert!(!auth::publish_token_matches(
+            None,
+            protected.publish_token_hash.as_deref().unwrap()
+        ));
     }
 }

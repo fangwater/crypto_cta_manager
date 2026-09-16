@@ -79,8 +79,8 @@ enabled = true
 gateway_prefix = "/exec_trade08"
 exec_config_url = "http://127.0.0.1:18168/"
 exec_viz_url = "http://127.0.0.1:10048/"
-maker_fee_rate = 0.00012
-taker_fee_rate = 0.00032
+maker_fee_rate = 0.0002
+taker_fee_rate = 0.0005
 ipc_namespace = "binance_exec_trade08"
 account_ipc_service = "account_pubs/binance_pm"
 

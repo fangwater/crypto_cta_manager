@@ -339,9 +339,370 @@ pub async fn list_position_strategies(pool: &PgPool) -> Result<Vec<PositionStrat
     rows.into_iter().map(decode_position_row).collect()
 }
 
+/// Access control state for one position strategy's publish endpoint.
+#[derive(Debug, Clone)]
+pub struct PositionAccess {
+    /// Session user who first created the strategy; NULL for machine-created
+    /// or pre-existing strategies.
+    pub created_by_user_id: Option<i64>,
+    /// SHA-256 hex of the publish token. NULL/empty keeps legacy open pushes.
+    pub publish_token_hash: Option<String>,
+    pub manager_user_ids: Vec<i64>,
+    pub viewer_user_ids: Vec<i64>,
+}
+
+impl PositionAccess {
+    pub fn token_required(&self) -> bool {
+        self.publish_token_hash
+            .as_deref()
+            .is_some_and(|hash| !hash.is_empty())
+    }
+
+    pub fn user_can_publish(&self, user_id: i64) -> bool {
+        self.created_by_user_id == Some(user_id) || self.manager_user_ids.contains(&user_id)
+    }
+
+    /// Viewers are a separate axis from publish managers: with no viewer rows
+    /// the strategy stays visible to every logged-in user; once assigned, only
+    /// the creator, viewers, and managers can see it (admins always see all).
+    pub fn user_can_view(&self, user_id: i64) -> bool {
+        self.viewer_user_ids.is_empty()
+            || self.created_by_user_id == Some(user_id)
+            || self.viewer_user_ids.contains(&user_id)
+            || self.manager_user_ids.contains(&user_id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PositionManagerView {
+    pub user_id: i64,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PositionAccessView {
+    pub strategy_name: String,
+    pub created_by: Option<String>,
+    pub publish_token_set: bool,
+    pub managers: Vec<PositionManagerView>,
+    /// Empty means the strategy is visible to every logged-in user.
+    pub viewers: Vec<PositionManagerView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SavePositionPublishTokenRequest {
+    pub publish_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SavePositionManagersRequest {
+    pub user_ids: Vec<i64>,
+}
+
+pub fn validate_publish_token(token: &str) -> Result<(), String> {
+    if !(8..=128).contains(&token.len()) {
+        return Err("publish_token must contain between 8 and 128 characters".to_string());
+    }
+    Ok(())
+}
+
+pub async fn load_position_access(
+    pool: &PgPool,
+    strategy_name: &str,
+) -> Result<Option<PositionAccess>> {
+    let row = sqlx::query(
+        "SELECT created_by_user_id, publish_token_hash FROM cta_position_strategies WHERE strategy_name = $1",
+    )
+    .bind(strategy_name)
+    .fetch_optional(pool)
+    .await
+    .context("failed to load position strategy access")?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let manager_user_ids = sqlx::query_scalar::<_, i64>(
+        "SELECT user_id FROM cta_position_strategy_managers WHERE strategy_name = $1",
+    )
+    .bind(strategy_name)
+    .fetch_all(pool)
+    .await
+    .context("failed to load position strategy managers")?;
+    let viewer_user_ids = sqlx::query_scalar::<_, i64>(
+        "SELECT user_id FROM cta_position_strategy_viewers WHERE strategy_name = $1",
+    )
+    .bind(strategy_name)
+    .fetch_all(pool)
+    .await
+    .context("failed to load position strategy viewers")?;
+    Ok(Some(PositionAccess {
+        created_by_user_id: row.try_get("created_by_user_id")?,
+        publish_token_hash: row.try_get("publish_token_hash")?,
+        manager_user_ids,
+        viewer_user_ids,
+    }))
+}
+
+/// Per-strategy visibility used to filter the catalog list for non-admin
+/// users. Mirrors PositionAccess but without the publish token hash.
+#[derive(Debug, Clone)]
+pub struct PositionVisibility {
+    pub strategy_name: String,
+    pub created_by_user_id: Option<i64>,
+    pub manager_user_ids: Vec<i64>,
+    pub viewer_user_ids: Vec<i64>,
+}
+
+impl PositionVisibility {
+    pub fn user_can_view(&self, user_id: i64) -> bool {
+        self.viewer_user_ids.is_empty()
+            || self.created_by_user_id == Some(user_id)
+            || self.viewer_user_ids.contains(&user_id)
+            || self.manager_user_ids.contains(&user_id)
+    }
+}
+
+pub async fn list_position_visibility(pool: &PgPool) -> Result<Vec<PositionVisibility>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT p.strategy_name, p.created_by_user_id,
+            COALESCE((SELECT array_agg(m.user_id) FROM cta_position_strategy_managers m
+                      WHERE m.strategy_name = p.strategy_name), '{}') AS manager_user_ids,
+            COALESCE((SELECT array_agg(v.user_id) FROM cta_position_strategy_viewers v
+                      WHERE v.strategy_name = p.strategy_name), '{}') AS viewer_user_ids
+        FROM cta_position_strategies p
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to list position strategy visibility")?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(PositionVisibility {
+                strategy_name: row.try_get("strategy_name")?,
+                created_by_user_id: row.try_get("created_by_user_id")?,
+                manager_user_ids: row.try_get("manager_user_ids")?,
+                viewer_user_ids: row.try_get("viewer_user_ids")?,
+            })
+        })
+        .collect()
+}
+
+pub async fn list_position_access(pool: &PgPool) -> Result<Vec<PositionAccessView>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT p.strategy_name, u.username AS created_by, p.publish_token_hash
+        FROM cta_position_strategies p
+        LEFT JOIN cta_users u ON u.user_id = p.created_by_user_id
+        ORDER BY p.strategy_name
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to list position strategy access")?;
+    let manager_rows = sqlx::query(
+        r#"
+        SELECT m.strategy_name, m.user_id, u.username
+        FROM cta_position_strategy_managers m
+        JOIN cta_users u ON u.user_id = m.user_id
+        WHERE u.disabled = false
+        ORDER BY u.username
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to list position strategy managers")?;
+    let viewer_rows = sqlx::query(
+        r#"
+        SELECT v.strategy_name, v.user_id, u.username
+        FROM cta_position_strategy_viewers v
+        JOIN cta_users u ON u.user_id = v.user_id
+        WHERE u.disabled = false
+        ORDER BY u.username
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to list position strategy viewers")?;
+    let mut managers_by_strategy: std::collections::HashMap<String, Vec<PositionManagerView>> =
+        std::collections::HashMap::new();
+    for row in manager_rows {
+        managers_by_strategy
+            .entry(row.try_get("strategy_name")?)
+            .or_default()
+            .push(PositionManagerView {
+                user_id: row.try_get("user_id")?,
+                username: row.try_get("username")?,
+            });
+    }
+    let mut viewers_by_strategy: std::collections::HashMap<String, Vec<PositionManagerView>> =
+        std::collections::HashMap::new();
+    for row in viewer_rows {
+        viewers_by_strategy
+            .entry(row.try_get("strategy_name")?)
+            .or_default()
+            .push(PositionManagerView {
+                user_id: row.try_get("user_id")?,
+                username: row.try_get("username")?,
+            });
+    }
+    rows.into_iter()
+        .map(|row| {
+            let strategy_name: String = row.try_get("strategy_name")?;
+            Ok(PositionAccessView {
+                publish_token_set: row
+                    .try_get::<Option<String>, _>("publish_token_hash")?
+                    .is_some_and(|hash| !hash.is_empty()),
+                managers: managers_by_strategy
+                    .remove(&strategy_name)
+                    .unwrap_or_default(),
+                viewers: viewers_by_strategy
+                    .remove(&strategy_name)
+                    .unwrap_or_default(),
+                strategy_name,
+                created_by: row.try_get("created_by")?,
+            })
+        })
+        .collect()
+}
+
+pub async fn position_access_view(
+    pool: &PgPool,
+    strategy_name: &str,
+) -> Result<Option<PositionAccessView>> {
+    Ok(list_position_access(pool)
+        .await?
+        .into_iter()
+        .find(|view| view.strategy_name == strategy_name))
+}
+
+pub async fn set_position_publish_token(
+    pool: &PgPool,
+    strategy_name: &str,
+    publish_token_hash: Option<String>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE cta_position_strategies SET publish_token_hash = $2 WHERE strategy_name = $1",
+    )
+    .bind(strategy_name)
+    .bind(publish_token_hash)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to save publish token for {strategy_name}"))?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn set_position_managers(
+    pool: &PgPool,
+    strategy_name: &str,
+    user_ids: &[i64],
+) -> Result<bool> {
+    let unique = user_ids.iter().copied().collect::<BTreeSet<_>>();
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin manager update")?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM cta_position_strategies WHERE strategy_name = $1)",
+    )
+    .bind(strategy_name)
+    .fetch_one(&mut *tx)
+    .await
+    .context("failed to load position strategy")?;
+    if !exists {
+        return Ok(false);
+    }
+    for user_id in &unique {
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM cta_users WHERE user_id = $1 AND disabled = false)",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to load manager user")?;
+        if !valid {
+            bail!("user_ids contains an unknown user: {user_id}");
+        }
+    }
+    sqlx::query("DELETE FROM cta_position_strategy_managers WHERE strategy_name = $1")
+        .bind(strategy_name)
+        .execute(&mut *tx)
+        .await
+        .context("failed to clear position strategy managers")?;
+    for user_id in unique {
+        sqlx::query(
+            "INSERT INTO cta_position_strategy_managers (strategy_name, user_id) VALUES ($1, $2)",
+        )
+        .bind(strategy_name)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to save position strategy manager")?;
+    }
+    tx.commit()
+        .await
+        .context("failed to commit manager update")?;
+    Ok(true)
+}
+
+/// Replaces the viewer list of one strategy. An empty list keeps the strategy
+/// visible to every logged-in user.
+pub async fn set_position_viewers(
+    pool: &PgPool,
+    strategy_name: &str,
+    user_ids: &[i64],
+) -> Result<bool> {
+    let unique = user_ids.iter().copied().collect::<BTreeSet<_>>();
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin viewer update")?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM cta_position_strategies WHERE strategy_name = $1)",
+    )
+    .bind(strategy_name)
+    .fetch_one(&mut *tx)
+    .await
+    .context("failed to load position strategy")?;
+    if !exists {
+        return Ok(false);
+    }
+    for user_id in &unique {
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM cta_users WHERE user_id = $1 AND disabled = false)",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to load viewer user")?;
+        if !valid {
+            bail!("user_ids contains an unknown user: {user_id}");
+        }
+    }
+    sqlx::query("DELETE FROM cta_position_strategy_viewers WHERE strategy_name = $1")
+        .bind(strategy_name)
+        .execute(&mut *tx)
+        .await
+        .context("failed to clear position strategy viewers")?;
+    for user_id in unique {
+        sqlx::query(
+            "INSERT INTO cta_position_strategy_viewers (strategy_name, user_id) VALUES ($1, $2)",
+        )
+        .bind(strategy_name)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to save position strategy viewer")?;
+    }
+    tx.commit()
+        .await
+        .context("failed to commit viewer update")?;
+    Ok(true)
+}
+
 pub async fn upsert_position_strategy(
     pool: &PgPool,
     request: &SavePositionStrategyRequest,
+    created_by_user_id: Option<i64>,
     updated_at_us: i64,
 ) -> Result<PositionStrategy> {
     validate_strategy_name(&request.strategy_name).map_err(|error| anyhow::anyhow!(error))?;
@@ -369,9 +730,9 @@ pub async fn upsert_position_strategy(
     sqlx::query(
         r#"
         INSERT INTO cta_position_strategies (
-            strategy_name, targets, symbol_order_strategy_overrides, updated_at_us
+            strategy_name, targets, symbol_order_strategy_overrides, created_by_user_id, updated_at_us
         )
-        VALUES ($1, $2, $3, $4)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (strategy_name) DO UPDATE SET
             targets = EXCLUDED.targets,
             symbol_order_strategy_overrides = EXCLUDED.symbol_order_strategy_overrides,
@@ -381,6 +742,7 @@ pub async fn upsert_position_strategy(
     .bind(&request.strategy_name)
     .bind(targets)
     .bind(symbol_order_strategy_overrides)
+    .bind(created_by_user_id)
     .bind(updated_at_us)
     .execute(pool)
     .await

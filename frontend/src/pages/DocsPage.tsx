@@ -261,7 +261,8 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'POST',
               path: `${CATALOG_PATH}/position-strategies`,
-              summary: '按 strategy_name upsert，并自动推送到全部活动绑定账户',
+              summary:
+                '按 strategy_name upsert，并自动推送到全部活动绑定账户；管理员/创建者/被授权用户会话或该策略的 X-CTA-Publish-Token 任一即可',
             },
             {
               method: 'DELETE',
@@ -702,6 +703,13 @@ print(json.dumps(request("POST", "catalog/position-strategies", payload), ensure
         </Note>
         <Note>
           脚本只 POST Manager catalog；Redis 与 iceoryx 通知由 Manager 完成。el01 和 jp-meta 互不影响，必须用 --target 选一边。
+        </Note>
+        <Note>
+          推送按策略门控：管理员、策略创建者、被授权用户的会话，或
+          X-CTA-Publish-Token（脚本 --token / MANAGER_PUBLISH_TOKEN）任一满足即可推送。
+          token 可以是该策略自己的 token，也可以是权限管理页维护的全局兜底 token（对所有策略生效）。
+          未设置 token 的策略保持开放推送，兼容旧方式；在权限管理页为该策略设置或重置 token 后开始鉴权。
+          可见性与推送相互独立：策略未配置可见用户时所有登录用户都可见；一旦配置，仅管理员、创建者、可见用户与可推送用户能看到该策略。
         </Note>
       </>
     ),

@@ -217,7 +217,7 @@ impl PositionArchive {
     /// Returns one raw JSON page from the position-update CF without rewriting
     /// individual stored messages.
     pub fn raw_json_page(&self, after: Option<(i64, u32)>, limit: usize) -> Result<Vec<u8>> {
-        self.raw_json_page_for_sources(after, limit, None)
+        self.raw_json_page_for_sources(after, limit, None, None)
     }
 
     pub fn raw_json_page_for_sources(
@@ -225,6 +225,7 @@ impl PositionArchive {
         after: Option<(i64, u32)>,
         limit: usize,
         allowed_source_ids: Option<&BTreeSet<String>>,
+        allowed_strategy_names: Option<&BTreeSet<String>>,
     ) -> Result<Vec<u8>> {
         if limit == 0 {
             bail!("position update page limit must be greater than zero");
@@ -260,6 +261,11 @@ impl PositionArchive {
             }
             let mut message: PositionUpdateMsg = serde_json::from_slice(&value)
                 .context("position update archive contains invalid JSON")?;
+            if let Some(allowed_strategy_names) = allowed_strategy_names
+                && !allowed_strategy_names.contains(&message.strategy.strategy_name)
+            {
+                continue;
+            }
             if let Some(allowed_source_ids) = allowed_source_ids {
                 message
                     .published_accounts

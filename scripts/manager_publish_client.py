@@ -83,10 +83,13 @@ def request_json(
     *,
     method: str = "GET",
     payload: Optional[Dict[str, Any]] = None,
+    token: Optional[str] = None,
     timeout: float = 5.0,
 ) -> Any:
     body = None
     headers = {"Accept": "application/json"}
+    if token:
+        headers["X-CTA-Publish-Token"] = token
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -225,6 +228,11 @@ Manager writes Redis on a reconnecting long connection, confirms the value is
 readable, then notifies exec-pre-trade; the 30s Redis poll remains the fallback
 if notify is lost.
 The optional publish command only republishes one existing binding.
+
+put-position is gated per strategy: an admin/authorized session or the
+strategy's own publish token each suffice. Send the token via --token /
+MANAGER_PUBLISH_TOKEN as X-CTA-Publish-Token; strategies without a configured
+token keep the legacy open push.
 """,
     )
     parser.add_argument(
@@ -236,6 +244,12 @@ The optional publish command only republishes one existing binding.
         "--url",
         help="Manager API base URL. Mutually exclusive with --target. "
         "Also accepted as MANAGER_API_URL.",
+    )
+    parser.add_argument(
+        "--token",
+        help="Strategy publish token sent as X-CTA-Publish-Token. Required "
+        "only when the strategy has a token configured. Also accepted as "
+        "MANAGER_PUBLISH_TOKEN.",
     )
     parser.add_argument("--timeout", type=float, default=5.0)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -299,12 +313,21 @@ def find_position(payload: Any, strategy_name: str) -> Dict[str, Any]:
     raise RuntimeError(f"position strategy was not found: {strategy_name}")
 
 
+def resolve_token(*, token: Optional[str] = None) -> Optional[str]:
+    value = str(token or "").strip() or str(
+        os.environ.get("MANAGER_PUBLISH_TOKEN") or ""
+    ).strip()
+    return value or None
+
+
 def run(args: argparse.Namespace) -> int:
     base_url = resolve_base_url(url=args.url, target=args.target)
+    token = resolve_token(token=args.token)
     if args.command == "get-position":
         response = request_json(
             base_url,
             position_path(),
+            token=token,
             timeout=args.timeout,
         )
         if args.strategy_name:
@@ -315,18 +338,21 @@ def run(args: argparse.Namespace) -> int:
             position_path(),
             method="POST",
             payload=normalize_position_payload(load_json_source(args.json)),
+            token=token,
             timeout=args.timeout,
         )
     elif args.command == "get-bindings":
         response = request_json(
             base_url,
             bindings_path(args.source_id),
+            token=token,
             timeout=args.timeout,
         )
     elif args.command == "get-contract-leverage":
         response = request_json(
             base_url,
             f"{contract_leverage_path(args.source_id)}?symbol={quote(args.symbol)}",
+            token=token,
             timeout=args.timeout,
         )
     elif args.command == "set-contract-leverage":
@@ -338,6 +364,7 @@ def run(args: argparse.Namespace) -> int:
                 "symbol": args.symbol,
                 "contract_leverage": args.contract_leverage,
             },
+            token=token,
             timeout=args.timeout,
         )
     elif args.command == "get-execution-cost":
@@ -356,6 +383,7 @@ def run(args: argparse.Namespace) -> int:
         response = request_json(
             base_url,
             f"catalog/execution-cost{query}",
+            token=token,
             timeout=max(args.timeout, 30.0),
         )
     else:
@@ -363,6 +391,7 @@ def run(args: argparse.Namespace) -> int:
             base_url,
             publish_path(args.source_id, args.binding_name),
             method="POST",
+            token=token,
             timeout=args.timeout,
         )
     print_json(response)

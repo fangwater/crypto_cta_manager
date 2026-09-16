@@ -125,16 +125,7 @@ function LoginPanel({
             </Button>
           </form>
           {!setupRequired && (
-            <button
-              className="mt-5 w-full text-center text-xs text-muted hover:text-brand"
-              type="button"
-              onClick={() => {
-                setMode(mode === 'login' ? 'register' : 'login')
-                setError(null)
-              }}
-            >
-              {mode === 'login' ? '还没有账号？' : '返回登录'}
-            </button>
+            <p className="mt-5 text-center text-xs text-muted">需要账号？请联系管理员创建</p>
           )}
         </CardContent>
       </Card>

@@ -92,6 +92,13 @@ export function listAuthUsers(signal?: AbortSignal) {
   return requestJson<AuthUser[]>('/auth/users', { signal })
 }
 
+export function createAuthUser(username: string, password: string) {
+  return requestJson<AuthUser>('/auth/users', {
+    method: 'POST',
+    body: { username, password },
+  })
+}
+
 export function setAuthUserSources(userId: number, sourceIds: string[]) {
   return requestJson<AuthUser>(`/auth/users/${userId}/sources`, {
     method: 'PUT',
@@ -260,6 +267,76 @@ export function deletePositionStrategy(name: string) {
   return requestJson<void>(`/catalog/position-strategies/${encodeURIComponent(name)}`, {
     method: 'DELETE',
   })
+}
+
+export interface PositionManager {
+  user_id: number
+  username: string
+}
+
+export interface PositionAccess {
+  strategy_name: string
+  created_by: string | null
+  publish_token_set: boolean
+  managers: PositionManager[]
+  /** Empty means the strategy stays visible to every logged-in user. */
+  viewers: PositionManager[]
+}
+
+export function listPositionAccess(signal?: AbortSignal) {
+  return requestJson<PositionAccess[]>('/catalog/position-strategies-access', { signal })
+}
+
+export function setPositionPublishToken(strategyName: string, publishToken: string) {
+  return requestJson<PositionAccess>(
+    `/catalog/position-strategies/${encodeURIComponent(strategyName)}/publish-token`,
+    { method: 'PUT', body: { publish_token: publishToken } },
+  )
+}
+
+export function resetPositionPublishToken(strategyName: string) {
+  return requestJson<{ publish_token: string; access: PositionAccess }>(
+    `/catalog/position-strategies/${encodeURIComponent(strategyName)}/publish-token/reset`,
+    { method: 'POST' },
+  )
+}
+
+export function setPositionManagers(strategyName: string, userIds: number[]) {
+  return requestJson<PositionAccess>(
+    `/catalog/position-strategies/${encodeURIComponent(strategyName)}/managers`,
+    { method: 'PUT', body: { user_ids: userIds } },
+  )
+}
+
+export function setPositionViewers(strategyName: string, userIds: number[]) {
+  return requestJson<PositionAccess>(
+    `/catalog/position-strategies/${encodeURIComponent(strategyName)}/viewers`,
+    { method: 'PUT', body: { user_ids: userIds } },
+  )
+}
+
+export interface PublishToken {
+  token_id: number
+  note: string
+  created_at: string
+}
+
+export function listPublishTokens(signal?: AbortSignal) {
+  return requestJson<PublishToken[]>('/catalog/publish-tokens', { signal })
+}
+
+export function addPublishToken(note: string, publishToken?: string) {
+  return requestJson<PublishToken & { publish_token: string }>(
+    '/catalog/publish-tokens',
+    {
+      method: 'POST',
+      body: publishToken ? { note, publish_token: publishToken } : { note },
+    },
+  )
+}
+
+export function deletePublishToken(tokenId: number) {
+  return requestJson<void>(`/catalog/publish-tokens/${tokenId}`, { method: 'DELETE' })
 }
 
 export async function listOrderStrategies(signal?: AbortSignal) {

@@ -55,6 +55,29 @@ pub struct SetRoleRequest {
     pub role: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub password: String,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PublishTokenView {
+    pub token_id: i64,
+    pub note: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddPublishTokenRequest {
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub publish_token: Option<String>,
+}
+
 fn validate_username(username: &str) -> Result<String> {
     let username = username.trim().to_string();
     if username.len() < 3 || username.len() > 64 {
@@ -191,6 +214,41 @@ pub async fn register(pool: &PgPool, request: RegisterRequest) -> Result<AuthUse
     })
 }
 
+/// Administrator-created account; unlike `register` it never bootstraps the
+/// first admin and accepts an explicit role.
+pub async fn create_user(pool: &PgPool, request: CreateUserRequest) -> Result<UserView> {
+    let role = request.role.as_deref().unwrap_or("user").trim();
+    if !matches!(role, "admin" | "user") {
+        bail!("role must be admin or user");
+    }
+    let username = validate_username(&request.username)?;
+    let password_hash = hash_password(&request.password)?;
+    let user = sqlx::query(
+        "INSERT INTO cta_users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING user_id, username, role",
+    )
+    .bind(&username)
+    .bind(password_hash)
+    .bind(role)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        if error.to_string().contains("cta_users_username_lower_idx") {
+            anyhow::anyhow!("username is already registered")
+        } else {
+            anyhow::anyhow!(error)
+        }
+    })?;
+    user_view(
+        pool,
+        &AuthUser {
+            user_id: user.try_get("user_id")?,
+            username: user.try_get("username")?,
+            role: user.try_get("role")?,
+        },
+    )
+    .await
+}
+
 pub async fn login(pool: &PgPool, request: LoginRequest) -> Result<AuthUser> {
     let username = request.username.trim();
     let row = sqlx::query(
@@ -230,6 +288,35 @@ fn new_session_token() -> String {
 
 fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
+}
+
+/// Per-strategy publish tokens are stored as SHA-256 hex; the plaintext never
+/// persists. An empty or absent stored hash keeps the legacy open push.
+pub fn publish_token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// A freshly generated publish token; shown once to the administrator and only
+/// its hash is stored.
+pub fn generate_publish_token() -> String {
+    new_session_token()
+}
+
+pub fn publish_token_matches(provided: Option<&str>, expected_hash: &str) -> bool {
+    let Some(provided) = provided.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let actual = publish_token_hash(provided);
+    let expected = expected_hash.as_bytes();
+    actual.len() == expected.len()
+        && actual
+            .as_bytes()
+            .iter()
+            .zip(expected)
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
 }
 
 pub async fn create_session(pool: &PgPool, user_id: i64) -> Result<String> {
@@ -391,6 +478,72 @@ pub async fn set_sources(
         role: user.try_get("role")?,
     };
     user_view(pool, &user).await
+}
+
+/// Fallback publish tokens accepted for every position strategy in addition to
+/// that strategy's own token. Only hashes persist.
+pub async fn publish_fallback_token_matches(pool: &PgPool, provided: Option<&str>) -> Result<bool> {
+    let Some(provided) = provided.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(false);
+    };
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM cta_publish_fallback_tokens WHERE token_hash = $1)",
+    )
+    .bind(publish_token_hash(provided))
+    .fetch_one(pool)
+    .await
+    .context("failed to check fallback publish token")
+}
+
+pub async fn list_publish_tokens(pool: &PgPool) -> Result<Vec<PublishTokenView>> {
+    let rows = sqlx::query(
+        "SELECT token_id, note, created_at::text AS created_at FROM cta_publish_fallback_tokens ORDER BY token_id",
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to list fallback publish tokens")?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(PublishTokenView {
+                token_id: row.try_get("token_id")?,
+                note: row.try_get("note")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect()
+}
+
+pub async fn add_publish_token(
+    pool: &PgPool,
+    note: &str,
+    token_hash: String,
+) -> Result<PublishTokenView> {
+    let note = note.trim();
+    if note.len() > 200 {
+        bail!("publish token note must not exceed 200 characters");
+    }
+    let row = sqlx::query(
+        "INSERT INTO cta_publish_fallback_tokens (token_hash, note) VALUES ($1, $2) RETURNING token_id, note, created_at::text AS created_at",
+    )
+    .bind(token_hash)
+    .bind(note)
+    .fetch_one(pool)
+    .await
+    .context("failed to save fallback publish token")?;
+    Ok(PublishTokenView {
+        token_id: row.try_get("token_id")?,
+        note: row.try_get("note")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+pub async fn delete_publish_token(pool: &PgPool, token_id: i64) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM cta_publish_fallback_tokens WHERE token_id = $1")
+        .bind(token_id)
+        .execute(pool)
+        .await
+        .context("failed to delete fallback publish token")?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn set_role(pool: &PgPool, user_id: i64, role: &str) -> Result<UserView> {

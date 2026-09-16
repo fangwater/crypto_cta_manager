@@ -59,6 +59,15 @@ retry_backoff_ms = 1000
 at_mobiles = []
 is_at_all = false
 
+# POST /api/catalog/position-strategies is gated per strategy. Any one of
+# these suffices: an admin session, a session of the strategy's creator or an
+# authorized manager (set on the 权限管理 page), or a publish token sent as the
+# X-CTA-Publish-Token header. Per-strategy tokens and global fallback tokens
+# are stored as SHA-256 hashes in PostgreSQL and managed on the 权限管理 page;
+# a strategy without one keeps the legacy open push so existing publishers
+# keep working until tokens are assigned. Publishers send a token via
+# manager_publish_client.py --token or MANAGER_PUBLISH_TOKEN.
+
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"

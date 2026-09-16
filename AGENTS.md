@@ -164,7 +164,28 @@ from local PostgreSQL snapshots plus later RocksDB fills. It keeps the last good
 report when a refresh fails and must never expose database credentials or write
 to the live Exec RocksDB. `cta_web` also owns a host-global Manager RocksDB,
 default `/home/el01/crypto_cta_manager/db`. This is not an Exec-account store,
-so it must not live under `binance_exec_trade01`. Each accepted
+so it must not live under `binance_exec_trade01`. Position publishes skip the
+browser session flow but are gated per strategy:
+`POST /api/catalog/position-strategies` accepts an admin session, a session of
+the strategy's creator or an authorized manager
+(`cta_position_strategy_managers`), the strategy's publish token sent as
+`X-CTA-Publish-Token`, or a fallback publish token from
+`cta_publish_fallback_tokens` (accepted for every strategy). Tokens are stored
+as SHA-256 hashes in PostgreSQL; a strategy without a token keeps the legacy
+open push so existing publishers keep working until tokens are assigned.
+Strategy visibility is a separate axis from publish authorization: with no
+rows in `cta_position_strategy_viewers` the strategy is visible to every
+logged-in user, and once viewers are assigned only admins, the creator,
+viewers, and publish managers can see it in
+`GET /api/catalog/position-strategies`.
+Admins manage strategy tokens (set, clear, or generate a fresh random one),
+fallback tokens (`/api/catalog/publish-tokens`), viewers, and publish
+managers through
+`/api/catalog/position-strategies-access` and the 权限管理 page. Accounts are
+not self-registered: `/api/auth/register` only bootstraps the very first
+administrator, and afterwards admins create users through
+`POST /api/auth/users`. Each
+accepted
 `POST /api/catalog/position-strategies` is appended as one JSON message in
 column family `position_updates`. The message includes the POST body, each
 active bound account's then-current `shares`, and factual positions read from each
