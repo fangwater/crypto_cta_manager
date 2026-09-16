@@ -382,9 +382,15 @@ pub fn venue_name(value: u8) -> String {
     .to_string()
 }
 
+/// `order_type_code` used by Exec for synthetic fills booked by the internal
+/// position cross between BatchExec strategies sharing one account position.
+/// No exchange order exists for these fills.
+pub(crate) const INTERNAL_CROSS_ORDER_TYPE_CODE: i16 = 2;
+
 fn order_type_name(value: u8) -> String {
     match value {
         1 => "LIMIT",
+        2 => "INTERNAL_CROSS",
         3 => "MARKET",
         4 => "STOP_LOSS",
         5 => "STOP_LOSS_LIMIT",

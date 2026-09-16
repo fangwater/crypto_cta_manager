@@ -8,8 +8,8 @@ use tracing::info;
 
 use crate::config::{AppConfig, FeeRates, SourceConfig};
 use crate::model::{
-    TRADE_UPDATES_CF, TRADE_UPDATES_UNMATCHED_CF, UniformOrderEvent, decode_trade_update,
-    decode_uniform_order, venue_name,
+    INTERNAL_CROSS_ORDER_TYPE_CODE, TRADE_UPDATES_CF, TRADE_UPDATES_UNMATCHED_CF,
+    UniformOrderEvent, decode_trade_update, decode_uniform_order, venue_name,
 };
 use crate::rocks_source;
 use crate::snapshot::{PositionSnapshot, StrategyPositionSnapshot};
@@ -39,6 +39,7 @@ impl NavSourceHistory {
         let rate = match liquidity_role_for_event(event, &self.liquidity_by_order) {
             LiquidityRole::Maker => rates.maker,
             LiquidityRole::Taker | LiquidityRole::Unknown => rates.taker,
+            LiquidityRole::InternalCross => 0.0,
         };
         let fee = event.price * event.amount_update * rate;
         if !fee.is_finite() {
@@ -52,6 +53,7 @@ impl NavSourceHistory {
             LiquidityRole::Maker => "maker",
             LiquidityRole::Taker => "taker",
             LiquidityRole::Unknown => "unclassified",
+            LiquidityRole::InternalCross => "internal_cross",
         }
     }
 }
@@ -308,6 +310,7 @@ enum LiquidityRole {
     Maker,
     Taker,
     Unknown,
+    InternalCross,
 }
 
 type LiquidityOrderKey = (String, i16, i64);
@@ -751,6 +754,7 @@ impl VenueState {
         let fee_rate = match liquidity {
             LiquidityRole::Maker => fee_rates.maker,
             LiquidityRole::Taker | LiquidityRole::Unknown => fee_rates.taker,
+            LiquidityRole::InternalCross => 0.0,
         };
         let fee = notional * fee_rate;
         if !notional.is_finite() || !fee.is_finite() {
@@ -779,7 +783,7 @@ impl VenueState {
                 }
                 self.taker_volume_quote += notional;
             }
-            LiquidityRole::Unknown => {
+            LiquidityRole::Unknown | LiquidityRole::InternalCross => {
                 if counts_as_fill {
                     self.unknown_liquidity_fill_count =
                         self.unknown_liquidity_fill_count.saturating_add(1);
@@ -1201,6 +1205,9 @@ fn liquidity_role_for_event(
     event: &UniformOrderEvent,
     liquidity_by_order: &LiquidityByOrder,
 ) -> LiquidityRole {
+    if event.order_type_code == INTERNAL_CROSS_ORDER_TYPE_CODE {
+        return LiquidityRole::InternalCross;
+    }
     let key = (
         event.symbol.clone(),
         event.venue_code,
@@ -2957,6 +2964,30 @@ mod tests {
         assert_close(report.totals.maker_volume_quote, 100.0);
         assert_close(report.totals.taker_volume_quote, 110.0);
         assert_close(report.totals.estimated_trading_fee_quote, 0.01106);
+    }
+
+    #[test]
+    fn internal_cross_fill_counts_position_with_zero_fee() {
+        let mut source = source("trade01", Some(0.0));
+        source.maker_fee_rate = Some(0.0001);
+        source.taker_fee_rate = Some(0.0005);
+        let mut cross = event(1, "BTCUSDT", 1, 1, 100.0, 0.4);
+        cross.order_type_code = INTERNAL_CROSS_ORDER_TYPE_CODE;
+        cross.order_type = "INTERNAL_CROSS".to_string();
+        let report = estimate_source_events_with_snapshot_and_liquidity(
+            &source,
+            vec![cross],
+            &BTreeMap::new(),
+            None,
+            &LiquidityByOrder::new(),
+        )
+        .unwrap();
+
+        assert_eq!(report.totals.fill_count, 1);
+        assert_eq!(report.totals.unknown_liquidity_fill_count, 1);
+        assert_close(report.totals.unknown_liquidity_volume_quote, 40.0);
+        assert_close(report.totals.estimated_trading_fee_quote, 0.0);
+        assert_close(report.symbols[0].venues[0].net_quantity, 0.4);
     }
 
     #[test]
