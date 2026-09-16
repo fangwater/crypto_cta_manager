@@ -564,6 +564,7 @@ pub async fn persist_poll(
     for event in events {
         insert_event(&mut transaction, source_id, event).await?;
     }
+    upsert_symbol_index(&mut transaction, source_id, events).await?;
     for failure in failures {
         sqlx::query(
             r#"
@@ -630,6 +631,150 @@ pub async fn persist_poll(
         .commit()
         .await
         .with_context(|| format!("failed to commit ingestion for {source_id}"))
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceSymbol {
+    pub source_id: String,
+    pub symbol: String,
+    pub venue_code: i16,
+    pub venue: String,
+    pub first_event_ts_us: Option<i64>,
+    pub first_fill_ts_us: Option<i64>,
+    pub last_fill_ts_us: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+struct SourceSymbolIndex {
+    venue: String,
+    first_event_ts_us: i64,
+    first_fill_ts_us: Option<i64>,
+    last_fill_ts_us: Option<i64>,
+}
+
+async fn upsert_symbol_index(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source_id: &str,
+    events: &[UniformOrderEvent],
+) -> Result<()> {
+    for ((symbol, venue_code), index) in symbol_index_deltas(events) {
+        sqlx::query(
+            r#"
+            INSERT INTO cta_source_symbols (
+                source_id, symbol, venue_code, venue,
+                first_event_ts_us, first_fill_ts_us, last_fill_ts_us, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+            ON CONFLICT (source_id, symbol, venue_code) DO UPDATE SET
+                venue = EXCLUDED.venue,
+                first_event_ts_us = LEAST(
+                    cta_source_symbols.first_event_ts_us, EXCLUDED.first_event_ts_us
+                ),
+                first_fill_ts_us = LEAST(
+                    cta_source_symbols.first_fill_ts_us, EXCLUDED.first_fill_ts_us
+                ),
+                last_fill_ts_us = GREATEST(
+                    cta_source_symbols.last_fill_ts_us, EXCLUDED.last_fill_ts_us
+                ),
+                updated_at = now()
+            "#,
+        )
+        .bind(source_id)
+        .bind(&symbol)
+        .bind(venue_code)
+        .bind(&index.venue)
+        .bind(index.first_event_ts_us)
+        .bind(index.first_fill_ts_us)
+        .bind(index.last_fill_ts_us)
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| format!("failed to index symbol {symbol} for {source_id}"))?;
+    }
+    Ok(())
+}
+
+/// Refresh the durable symbol index from the retained RocksDB event history.
+pub async fn refresh_source_symbol_index(
+    pool: &PgPool,
+    histories: &crate::nav::NavSourceHistories,
+) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to begin symbol index transaction")?;
+    for (source_id, history) in histories {
+        upsert_symbol_index(&mut transaction, source_id, history.events()).await?;
+    }
+    transaction
+        .commit()
+        .await
+        .context("failed to commit source symbol index")
+}
+
+fn symbol_index_deltas(
+    events: &[UniformOrderEvent],
+) -> std::collections::BTreeMap<(String, i16), SourceSymbolIndex> {
+    let mut index = std::collections::BTreeMap::<(String, i16), SourceSymbolIndex>::new();
+    for event in events {
+        if event.symbol.is_empty() {
+            continue;
+        }
+        let entry = index
+            .entry((event.symbol.clone(), event.venue_code))
+            .or_insert_with(|| SourceSymbolIndex {
+                venue: event.venue.clone(),
+                first_event_ts_us: event.event_ts_us,
+                first_fill_ts_us: None,
+                last_fill_ts_us: None,
+            });
+        entry.first_event_ts_us = entry.first_event_ts_us.min(event.event_ts_us);
+        if event.amount_update > 0.0 {
+            let fill_ts_us = crate::nav::fifo_ts_us(event);
+            entry.first_fill_ts_us = Some(
+                entry
+                    .first_fill_ts_us
+                    .map_or(fill_ts_us, |ts| ts.min(fill_ts_us)),
+            );
+            entry.last_fill_ts_us = Some(
+                entry
+                    .last_fill_ts_us
+                    .map_or(fill_ts_us, |ts| ts.max(fill_ts_us)),
+            );
+        }
+    }
+    index
+}
+
+pub async fn load_source_symbols(
+    pool: &PgPool,
+    source_ids: &[String],
+) -> Result<Vec<SourceSymbol>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT source_id, symbol, venue_code, venue,
+               first_event_ts_us, first_fill_ts_us, last_fill_ts_us
+        FROM cta_source_symbols
+        WHERE source_id = ANY($1)
+        ORDER BY source_id, symbol, venue_code
+        "#,
+    )
+    .bind(source_ids)
+    .fetch_all(pool)
+    .await
+    .context("failed to load source symbols")?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(SourceSymbol {
+                source_id: row.try_get("source_id")?,
+                symbol: row.try_get("symbol")?,
+                venue_code: row.try_get("venue_code")?,
+                venue: row.try_get("venue")?,
+                first_event_ts_us: row.try_get("first_event_ts_us")?,
+                first_fill_ts_us: row.try_get("first_fill_ts_us")?,
+                last_fill_ts_us: row.try_get("last_fill_ts_us")?,
+            })
+        })
+        .collect()
 }
 
 pub async fn record_source_error(pool: &PgPool, source_id: &str, error: &str) -> Result<()> {
@@ -786,4 +931,69 @@ fn leg_value<T: Copy>(
 
 fn path_text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(
+        symbol: &str,
+        venue_code: i16,
+        event_ts_us: i64,
+        update_ts_us: i64,
+        amount_update: f64,
+    ) -> UniformOrderEvent {
+        UniformOrderEvent {
+            record_key: format!("{symbol}:{event_ts_us}"),
+            event_ts_us,
+            recv_ts_us: event_ts_us,
+            symbol: symbol.to_string(),
+            create_ts_us: 0,
+            update_ts_us,
+            signal_ts_us: 0,
+            submit_ts_us: 0,
+            local_ts_us: 0,
+            market_ts_us: 0,
+            client_order_id: 0,
+            venue_code,
+            venue: format!("venue-{venue_code}"),
+            order_type_code: 1,
+            order_type: "LIMIT".to_string(),
+            side_code: 1,
+            side: "BUY".to_string(),
+            price: 1.0,
+            price_offset: 0.0,
+            amount_initial: amount_update,
+            amount_update,
+            status_code: 3,
+            status: "FILLED".to_string(),
+            from_key: Vec::new(),
+            from_key_text: String::new(),
+            bbo_spread: String::new(),
+            signal_open: None,
+            signal_hedge: None,
+            wire_payload: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn symbol_index_keeps_earliest_event_and_fill_bounds() {
+        let index = symbol_index_deltas(&[
+            event("BTCUSDT", 1, 10, 12, 1.0),
+            event("BTCUSDT", 1, 5, 0, 0.0),
+            event("BTCUSDT", 1, 8, 7, 2.0),
+            event("ETHUSDT", 1, 3, 0, 0.0),
+        ]);
+
+        let btc = &index[&("BTCUSDT".to_string(), 1)];
+        assert_eq!(btc.first_event_ts_us, 5);
+        assert_eq!(btc.first_fill_ts_us, Some(7));
+        assert_eq!(btc.last_fill_ts_us, Some(12));
+        let eth = &index[&("ETHUSDT".to_string(), 1)];
+        assert_eq!(eth.first_event_ts_us, 3);
+        assert_eq!(eth.first_fill_ts_us, None);
+        assert_eq!(eth.last_fill_ts_us, None);
+        assert_eq!(index.len(), 2);
+    }
 }

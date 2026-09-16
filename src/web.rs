@@ -155,6 +155,12 @@ struct TimelineQuery {
     max_points: Option<usize>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SymbolsQuery {
+    source_ids: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StrategyPnlQuery {
@@ -381,6 +387,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/manager_sdk.py", get(manager_sdk))
         .route("/api/manager_pnl_sdk.py", get(manager_sdk))
         .route("/api/dashboard", get(dashboard))
+        .route("/api/symbols", get(list_symbols))
         .route("/api/timeline", get(timeline))
         .route("/api/account-timeline", get(account_timeline))
         .route("/api/pnl/account", get(account_pnl_arrow))
@@ -496,7 +503,11 @@ async fn auth_middleware(
     let path = request.uri().path();
     if matches!(
         path,
-        "/api/auth/status" | "/api/auth/register" | "/api/auth/login" | "/api/auth/logout"
+        "/api/auth/status"
+            | "/api/auth/register"
+            | "/api/auth/login"
+            | "/api/auth/logout"
+            | "/api/symbols"
     ) || (path == "/api/catalog/position-strategies"
         && request.method() == axum::http::Method::POST)
     {
@@ -751,6 +762,128 @@ async fn dashboard(
         }
     }
     (NO_STORE, Json(dashboard))
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SymbolsResponse {
+    generated_at_us: i64,
+    sources: Vec<SourceSymbolsView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SourceSymbolsView {
+    source_id: String,
+    symbols: Vec<SymbolView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SymbolView {
+    symbol: String,
+    venue_code: i16,
+    venue: Option<String>,
+    first_event_ts_us: Option<i64>,
+    first_fill_ts_us: Option<i64>,
+    last_fill_ts_us: Option<i64>,
+}
+
+async fn list_symbols(
+    State(state): State<WebState>,
+    Query(query): Query<SymbolsQuery>,
+) -> Response {
+    let selected_source_ids = parse_csv(query.source_ids.as_deref(), false);
+    let sources = match resolve_sources(&state.config, &selected_source_ids) {
+        Ok(sources) => sources,
+        Err(message) => return bad_request(message),
+    };
+    let source_ids = sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect::<Vec<_>>();
+    let rows = match postgres::load_source_symbols(&state.pool, &source_ids).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            error!(error = %error, "failed to load source symbols");
+            return internal_error();
+        }
+    };
+    let (snapshots, strategy_snapshots) = {
+        let cache = state.cache.read().await;
+        (
+            Arc::clone(&cache.position_snapshots),
+            Arc::clone(&cache.strategy_position_snapshots),
+        )
+    };
+    (
+        NO_STORE,
+        Json(SymbolsResponse {
+            generated_at_us: unix_now_us(),
+            sources: merge_symbol_rows(&sources, rows, &snapshots, &strategy_snapshots),
+        }),
+    )
+        .into_response()
+}
+
+fn merge_symbol_rows(
+    sources: &[&SourceConfig],
+    rows: Vec<postgres::SourceSymbol>,
+    snapshots: &nav::SourcePositionSnapshots,
+    strategy_snapshots: &nav::SourceStrategyPositionSnapshots,
+) -> Vec<SourceSymbolsView> {
+    let mut by_source = BTreeMap::<String, BTreeMap<(String, i16), SymbolView>>::new();
+    for row in rows {
+        by_source
+            .entry(row.source_id)
+            .or_default()
+            .entry((row.symbol.clone(), row.venue_code))
+            .or_insert(SymbolView {
+                symbol: row.symbol,
+                venue_code: row.venue_code,
+                venue: Some(row.venue),
+                first_event_ts_us: row.first_event_ts_us,
+                first_fill_ts_us: row.first_fill_ts_us,
+                last_fill_ts_us: row.last_fill_ts_us,
+            });
+    }
+    for source in sources {
+        let entries = by_source.entry(source.id.clone()).or_default();
+        let anchor_positions = snapshots
+            .get(&source.id)
+            .map(|snapshot| snapshot.positions.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|position| (position.symbol.as_str(), position.venue_code))
+            .chain(
+                strategy_snapshots
+                    .get(&source.id)
+                    .map(|snapshot| snapshot.positions.as_slice())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|position| (position.symbol.as_str(), position.venue_code)),
+            );
+        for (symbol, venue_code) in anchor_positions {
+            entries
+                .entry((symbol.to_string(), venue_code))
+                .or_insert_with(|| SymbolView {
+                    symbol: symbol.to_string(),
+                    venue_code,
+                    venue: None,
+                    first_event_ts_us: None,
+                    first_fill_ts_us: None,
+                    last_fill_ts_us: None,
+                });
+        }
+    }
+    sources
+        .iter()
+        .map(|source| SourceSymbolsView {
+            source_id: source.id.clone(),
+            symbols: by_source
+                .remove(&source.id)
+                .unwrap_or_default()
+                .into_values()
+                .collect(),
+        })
+        .collect()
 }
 
 async fn manager_publish_client() -> impl IntoResponse {
@@ -3181,6 +3314,9 @@ async fn build_dashboard(
         })
         .await
         .context("CTA dashboard rebuild task failed")??;
+    if let Err(error) = postgres::refresh_source_symbol_index(pool, &histories).await {
+        warn!(error = %error, "failed to refresh source symbol index");
+    }
     let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
 
     Ok(DashboardBuild {
@@ -3534,5 +3670,82 @@ mod tests {
             MANAGER_PUBLISH_CLIENT,
             include_bytes!("../scripts/manager_publish_client.py")
         );
+    }
+
+    #[test]
+    fn symbols_merge_index_rows_with_snapshot_anchors() {
+        let source = crate::config::SourceConfig {
+            id: "binance_exec_trade01".into(),
+            account: "trade01".into(),
+            alias: None,
+            venue: "binance-futures".into(),
+            rocksdb_path: std::path::PathBuf::from("/tmp/missing"),
+            enabled: true,
+            start_ts_us: None,
+            poll_interval_secs: None,
+            estimated_fee_rate: None,
+            maker_fee_rate: None,
+            taker_fee_rate: None,
+            gateway_prefix: None,
+            exec_config_url: None,
+            exec_viz_url: None,
+            ipc_namespace: None,
+            account_ipc_service: None,
+            legacy_share_unit_usdt: None,
+            env_path: None,
+        };
+        let config = crate::config::AppConfig {
+            database: crate::config::DatabaseConfig {
+                url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),
+                max_connections: 1,
+            },
+            ingestion: crate::config::IngestionConfig::default(),
+            order_config: crate::config::OrderConfigSettings::default(),
+            redis: crate::config::RedisSettings::default(),
+            twap: crate::config::TwapConfig::default(),
+            monitor: crate::config::MonitorConfig::default(),
+            sources: vec![source],
+        };
+        let sources = resolve_sources(&config, &[]).unwrap();
+        let rows = vec![postgres::SourceSymbol {
+            source_id: "binance_exec_trade01".into(),
+            symbol: "BTCUSDT".into(),
+            venue_code: 1,
+            venue: "binance-futures".into(),
+            first_event_ts_us: Some(10),
+            first_fill_ts_us: Some(12),
+            last_fill_ts_us: Some(20),
+        }];
+        let mut snapshots = nav::SourcePositionSnapshots::new();
+        snapshots.insert(
+            "binance_exec_trade01".to_string(),
+            crate::snapshot::PositionSnapshot {
+                source_id: "binance_exec_trade01".into(),
+                snapshot_ts_us: 1,
+                positions: vec![crate::snapshot::SnapshotPosition {
+                    symbol: "ETHUSDT".into(),
+                    venue_code: 1,
+                    quantity: 1.0,
+                    reference_price: None,
+                }],
+            },
+        );
+
+        let views = merge_symbol_rows(
+            &sources,
+            rows,
+            &snapshots,
+            &nav::SourceStrategyPositionSnapshots::new(),
+        );
+
+        assert_eq!(views.len(), 1);
+        let symbols = &views[0].symbols;
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0].symbol, "BTCUSDT");
+        assert_eq!(symbols[0].venue.as_deref(), Some("binance-futures"));
+        assert_eq!(symbols[0].first_fill_ts_us, Some(12));
+        assert_eq!(symbols[1].symbol, "ETHUSDT");
+        assert_eq!(symbols[1].venue, None);
+        assert_eq!(symbols[1].first_fill_ts_us, None);
     }
 }

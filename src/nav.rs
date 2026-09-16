@@ -2614,7 +2614,7 @@ fn close_fifo(
     (realized_pnl, quantity)
 }
 
-fn fifo_ts_us(event: &UniformOrderEvent) -> i64 {
+pub(crate) fn fifo_ts_us(event: &UniformOrderEvent) -> i64 {
     if event.update_ts_us > 0 {
         event.update_ts_us
     } else {
