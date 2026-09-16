@@ -278,8 +278,9 @@ export interface PositionAccess {
   strategy_name: string
   created_by: string | null
   publish_token_set: boolean
+  /** True = every logged-in user can see it. False = private to admins, the creator, viewers, and managers. New strategies default to private. */
+  open_visibility: boolean
   managers: PositionManager[]
-  /** Empty means the strategy stays visible to every logged-in user. */
   viewers: PositionManager[]
 }
 
@@ -308,10 +309,14 @@ export function setPositionManagers(strategyName: string, userIds: number[]) {
   )
 }
 
-export function setPositionViewers(strategyName: string, userIds: number[]) {
+export function setPositionViewers(
+  strategyName: string,
+  userIds: number[],
+  openVisibility: boolean,
+) {
   return requestJson<PositionAccess>(
     `/catalog/position-strategies/${encodeURIComponent(strategyName)}/viewers`,
-    { method: 'PUT', body: { user_ids: userIds } },
+    { method: 'PUT', body: { user_ids: userIds, open_visibility: openVisibility } },
   )
 }
 

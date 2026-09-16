@@ -195,7 +195,18 @@ export function AdminPage() {
       : item.viewers.filter((viewer) => viewer.user_id !== target.user_id).map((viewer) => viewer.user_id)
     setSavingStrategy(item.strategy_name)
     try {
-      replaceAccess(await setPositionViewers(item.strategy_name, next))
+      replaceAccess(await setPositionViewers(item.strategy_name, next, item.open_visibility))
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setSavingStrategy(null)
+    }
+  }
+
+  async function toggleOpen(item: PositionAccess, checked: boolean) {
+    setSavingStrategy(item.strategy_name)
+    try {
+      replaceAccess(await setPositionViewers(item.strategy_name, item.viewers.map((viewer) => viewer.user_id), checked))
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -256,13 +267,13 @@ export function AdminPage() {
       <Card className="mt-5">
         <CardHeader><CardTitle>策略权限</CardTitle></CardHeader>
         <CardContent className="space-y-5">
-          <p className="text-xs text-muted">每个仓位策略的可见与推送权限相互独立。可见用户为空时所有登录用户都能看到该策略；勾选任意可见用户后，仅管理员、创建者、可见用户与可推送用户能看到它。推送端：管理员、创建者、可推送用户可通过会话推送，机器推送方发送 X-CTA-Publish-Token；未设置 token 的策略保持开放推送（兼容旧方式）。</p>
+          <p className="text-xs text-muted">每个仓位策略的可见与推送权限相互独立。新建策略默认私有，仅管理员与创建者可见；勾选可见用户后仅管理员、创建者、可见用户与可推送用户能看到它，勾选全员可见则恢复对所有登录用户开放。推送端：管理员、创建者、可推送用户可通过会话推送，机器推送方发送 X-CTA-Publish-Token；未设置 token 的策略保持开放推送（兼容旧方式）。</p>
           {access.map((item) => (
             <div key={item.strategy_name} className="rounded-xl border border-border-soft p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="font-mono text-sm font-medium text-ink">{item.strategy_name}</p>
-                  <p className="text-xs text-muted">创建者 {item.created_by ?? '—'} · {item.publish_token_set ? '已设置推送 token' : '开放推送（未设 token）'} · {item.viewers.length ? '受限可见' : '全员可见'}</p>
+                  <p className="text-xs text-muted">创建者 {item.created_by ?? '—'} · {item.publish_token_set ? '已设置推送 token' : '开放推送（未设 token）'} · {item.open_visibility ? '全员可见' : (item.viewers.length ? '部分用户可见' : '私有')}</p>
                 </div>
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -287,7 +298,10 @@ export function AdminPage() {
               {grantableUsers.length > 0 && (
                 <div className="mt-3 space-y-3">
                   <div>
-                    <p className="mb-1.5 text-xs font-medium text-muted">可见用户（空 = 全员可见）</p>
+                    <div className="mb-1.5 flex items-center gap-3">
+                      <p className="text-xs font-medium text-muted">可见用户（私有策略按人授权）</p>
+                      <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted"><input type="checkbox" checked={item.open_visibility} disabled={savingStrategy === item.strategy_name} onChange={(event) => void toggleOpen(item, event.target.checked)} /><span>全员可见</span></label>
+                    </div>
                     <div className="flex flex-wrap gap-2">
                       {grantableUsers.map((target) => {
                         const checked = item.viewers.some((viewer) => viewer.user_id === target.user_id)

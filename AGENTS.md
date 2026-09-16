@@ -173,11 +173,12 @@ the strategy's creator or an authorized manager
 `cta_publish_fallback_tokens` (accepted for every strategy). Tokens are stored
 as SHA-256 hashes in PostgreSQL; a strategy without a token keeps the legacy
 open push so existing publishers keep working until tokens are assigned.
-Strategy visibility is a separate axis from publish authorization: with no
-rows in `cta_position_strategy_viewers` the strategy is visible to every
-logged-in user, and once viewers are assigned only admins, the creator,
-viewers, and publish managers can see it in
-`GET /api/catalog/position-strategies`.
+Strategy visibility is a separate axis from publish authorization: a new
+strategy is private by default (`open_visibility = false` on
+`cta_position_strategies`) and only admins, the creator, granted viewers
+(`cta_position_strategy_viewers`), and publish managers can see it in
+`GET /api/catalog/position-strategies` and the position-update archive.
+Setting `open_visibility` restores visibility for every logged-in user.
 Admins manage strategy tokens (set, clear, or generate a fresh random one),
 fallback tokens (`/api/catalog/publish-tokens`), viewers, and publish
 managers through

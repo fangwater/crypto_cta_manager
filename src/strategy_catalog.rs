@@ -347,6 +347,10 @@ pub struct PositionAccess {
     pub created_by_user_id: Option<i64>,
     /// SHA-256 hex of the publish token. NULL/empty keeps legacy open pushes.
     pub publish_token_hash: Option<String>,
+    /// When false the strategy is private: only admins, the creator, granted
+    /// viewers, and publish managers can see it. New strategies default to
+    /// private.
+    pub open_visibility: bool,
     pub manager_user_ids: Vec<i64>,
     pub viewer_user_ids: Vec<i64>,
 }
@@ -362,11 +366,12 @@ impl PositionAccess {
         self.created_by_user_id == Some(user_id) || self.manager_user_ids.contains(&user_id)
     }
 
-    /// Viewers are a separate axis from publish managers: with no viewer rows
-    /// the strategy stays visible to every logged-in user; once assigned, only
-    /// the creator, viewers, and managers can see it (admins always see all).
+    /// Viewers are a separate axis from publish managers. A strategy is
+    /// visible to every logged-in user only while `open_visibility` is set;
+    /// otherwise only the creator, viewers, and managers can see it (admins
+    /// always see all).
     pub fn user_can_view(&self, user_id: i64) -> bool {
-        self.viewer_user_ids.is_empty()
+        self.open_visibility
             || self.created_by_user_id == Some(user_id)
             || self.viewer_user_ids.contains(&user_id)
             || self.manager_user_ids.contains(&user_id)
@@ -384,8 +389,10 @@ pub struct PositionAccessView {
     pub strategy_name: String,
     pub created_by: Option<String>,
     pub publish_token_set: bool,
+    /// True means every logged-in user can see the strategy. False keeps it
+    /// private to admins, the creator, viewers, and managers.
+    pub open_visibility: bool,
     pub managers: Vec<PositionManagerView>,
-    /// Empty means the strategy is visible to every logged-in user.
     pub viewers: Vec<PositionManagerView>,
 }
 
@@ -397,6 +404,12 @@ pub struct SavePositionPublishTokenRequest {
 #[derive(Debug, Deserialize)]
 pub struct SavePositionManagersRequest {
     pub user_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SavePositionVisibilityRequest {
+    pub user_ids: Vec<i64>,
+    pub open_visibility: bool,
 }
 
 pub fn validate_publish_token(token: &str) -> Result<(), String> {
@@ -411,7 +424,7 @@ pub async fn load_position_access(
     strategy_name: &str,
 ) -> Result<Option<PositionAccess>> {
     let row = sqlx::query(
-        "SELECT created_by_user_id, publish_token_hash FROM cta_position_strategies WHERE strategy_name = $1",
+        "SELECT created_by_user_id, publish_token_hash, open_visibility FROM cta_position_strategies WHERE strategy_name = $1",
     )
     .bind(strategy_name)
     .fetch_optional(pool)
@@ -437,6 +450,7 @@ pub async fn load_position_access(
     Ok(Some(PositionAccess {
         created_by_user_id: row.try_get("created_by_user_id")?,
         publish_token_hash: row.try_get("publish_token_hash")?,
+        open_visibility: row.try_get("open_visibility")?,
         manager_user_ids,
         viewer_user_ids,
     }))
@@ -448,13 +462,14 @@ pub async fn load_position_access(
 pub struct PositionVisibility {
     pub strategy_name: String,
     pub created_by_user_id: Option<i64>,
+    pub open_visibility: bool,
     pub manager_user_ids: Vec<i64>,
     pub viewer_user_ids: Vec<i64>,
 }
 
 impl PositionVisibility {
     pub fn user_can_view(&self, user_id: i64) -> bool {
-        self.viewer_user_ids.is_empty()
+        self.open_visibility
             || self.created_by_user_id == Some(user_id)
             || self.viewer_user_ids.contains(&user_id)
             || self.manager_user_ids.contains(&user_id)
@@ -464,7 +479,7 @@ impl PositionVisibility {
 pub async fn list_position_visibility(pool: &PgPool) -> Result<Vec<PositionVisibility>> {
     let rows = sqlx::query(
         r#"
-        SELECT p.strategy_name, p.created_by_user_id,
+        SELECT p.strategy_name, p.created_by_user_id, p.open_visibility,
             COALESCE((SELECT array_agg(m.user_id) FROM cta_position_strategy_managers m
                       WHERE m.strategy_name = p.strategy_name), '{}') AS manager_user_ids,
             COALESCE((SELECT array_agg(v.user_id) FROM cta_position_strategy_viewers v
@@ -480,6 +495,7 @@ pub async fn list_position_visibility(pool: &PgPool) -> Result<Vec<PositionVisib
             Ok(PositionVisibility {
                 strategy_name: row.try_get("strategy_name")?,
                 created_by_user_id: row.try_get("created_by_user_id")?,
+                open_visibility: row.try_get("open_visibility")?,
                 manager_user_ids: row.try_get("manager_user_ids")?,
                 viewer_user_ids: row.try_get("viewer_user_ids")?,
             })
@@ -490,7 +506,7 @@ pub async fn list_position_visibility(pool: &PgPool) -> Result<Vec<PositionVisib
 pub async fn list_position_access(pool: &PgPool) -> Result<Vec<PositionAccessView>> {
     let rows = sqlx::query(
         r#"
-        SELECT p.strategy_name, u.username AS created_by, p.publish_token_hash
+        SELECT p.strategy_name, u.username AS created_by, p.publish_token_hash, p.open_visibility
         FROM cta_position_strategies p
         LEFT JOIN cta_users u ON u.user_id = p.created_by_user_id
         ORDER BY p.strategy_name
@@ -552,6 +568,7 @@ pub async fn list_position_access(pool: &PgPool) -> Result<Vec<PositionAccessVie
                 publish_token_set: row
                     .try_get::<Option<String>, _>("publish_token_hash")?
                     .is_some_and(|hash| !hash.is_empty()),
+                open_visibility: row.try_get("open_visibility")?,
                 managers: managers_by_strategy
                     .remove(&strategy_name)
                     .unwrap_or_default(),
@@ -644,12 +661,14 @@ pub async fn set_position_managers(
     Ok(true)
 }
 
-/// Replaces the viewer list of one strategy. An empty list keeps the strategy
-/// visible to every logged-in user.
-pub async fn set_position_viewers(
+/// Replaces the visibility of one strategy in a single transaction: the
+/// `open_visibility` flag decides whether every logged-in user can see it, and
+/// the viewer list grants individual users while it stays private.
+pub async fn set_position_visibility(
     pool: &PgPool,
     strategy_name: &str,
     user_ids: &[i64],
+    open_visibility: bool,
 ) -> Result<bool> {
     let unique = user_ids.iter().copied().collect::<BTreeSet<_>>();
     let mut tx = pool
@@ -678,6 +697,12 @@ pub async fn set_position_viewers(
             bail!("user_ids contains an unknown user: {user_id}");
         }
     }
+    sqlx::query("UPDATE cta_position_strategies SET open_visibility = $2 WHERE strategy_name = $1")
+        .bind(strategy_name)
+        .bind(open_visibility)
+        .execute(&mut *tx)
+        .await
+        .context("failed to save position strategy visibility")?;
     sqlx::query("DELETE FROM cta_position_strategy_viewers WHERE strategy_name = $1")
         .bind(strategy_name)
         .execute(&mut *tx)

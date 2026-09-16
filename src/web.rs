@@ -1952,9 +1952,9 @@ async fn save_order_parameters(
     Ok((NO_STORE, Json(saved)).into_response())
 }
 
-/// Admins see every strategy. Other users see a strategy when it has no
-/// viewer grants (legacy open visibility), or when they are its creator, a
-/// viewer, or a publish manager.
+/// Admins see every strategy. Other users see a strategy while it keeps open
+/// visibility, or when they are its creator, a viewer, or a publish manager.
+/// New strategies are private by default.
 async fn list_position_strategies(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
@@ -2137,14 +2137,22 @@ async fn save_position_managers(
     }
 }
 
-/// Replaces the strategy's viewer list. An empty `user_ids` restores open
-/// visibility for every logged-in user.
+/// Replaces the strategy's visibility in one call: `open_visibility` decides
+/// whether every logged-in user can see it, `user_ids` grants individual
+/// viewers while it stays private.
 async fn save_position_viewers(
     State(state): State<WebState>,
     Path(name): Path<String>,
-    Json(request): Json<strategy_catalog::SavePositionManagersRequest>,
+    Json(request): Json<strategy_catalog::SavePositionVisibilityRequest>,
 ) -> Result<Response, ApiError> {
-    match strategy_catalog::set_position_viewers(&state.pool, &name, &request.user_ids).await {
+    match strategy_catalog::set_position_visibility(
+        &state.pool,
+        &name,
+        &request.user_ids,
+        request.open_visibility,
+    )
+    .await
+    {
         Ok(true) => {}
         Ok(false) => return Ok(not_found("position strategy was not found")),
         Err(error) => return Ok(catalog_error(error)),
@@ -4133,6 +4141,7 @@ mod tests {
         let open = crate::strategy_catalog::PositionAccess {
             created_by_user_id: None,
             publish_token_hash: None,
+            open_visibility: true,
             manager_user_ids: vec![],
             viewer_user_ids: vec![],
         };
@@ -4140,9 +4149,18 @@ mod tests {
         assert!(!open.user_can_publish(7));
         assert!(open.user_can_view(99));
 
+        let private = crate::strategy_catalog::PositionAccess {
+            created_by_user_id: Some(3),
+            open_visibility: false,
+            ..open.clone()
+        };
+        assert!(private.user_can_view(3));
+        assert!(!private.user_can_view(99));
+
         let protected = crate::strategy_catalog::PositionAccess {
             created_by_user_id: Some(3),
             publish_token_hash: Some(auth::publish_token_hash("s3cret-token")),
+            open_visibility: false,
             manager_user_ids: vec![7],
             viewer_user_ids: vec![11],
         };
