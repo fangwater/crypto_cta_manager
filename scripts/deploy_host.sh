@@ -6,7 +6,7 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET=""
 SKIP_BUILD=0
-NODE_BIN="${CTA_NODE_BIN:-/home/u171/fanghaizhou/preprocess/.tools/node/bin}"
+NODE_BIN="${CTA_NODE_BIN:-}"
 
 usage() {
     cat <<'EOF'
