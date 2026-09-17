@@ -326,10 +326,20 @@ PostgreSQL on `15432`, or a second user Nginx. `binance_exec_trade01`
 stays enabled so catalog/publish can target the reserved Exec Config on
 `127.0.0.1:18161`; a missing persist_manager directory is an empty NAV
 source. `trade02`/`trade03`/`trade04` prefixes and loopback ports are
-reserved and stay disabled until those Exec accounts exist. Do not
-regenerate the whole 4191 site from `nginx_locations.txt`; that file is
-incomplete relative to the live conf (for example `/ops-api/`). Add CTA
-routes through `deploy/jp_meta/crypto-cta-nginx-snippet.conf`. Manager binaries, config, frontend webroot, Nginx
+reserved and stay disabled until those Exec accounts exist. The 4191 site
+(`sites-available/crypto_proxy_4191.conf`) is regenerated whole from
+`/home/ubuntu/nginx_locations.txt` by mkt_signal's `setup_nginx_4191.sh`;
+that mapping is the single source of truth for every route on the gateway.
+CTA contributes exactly one row via the `# BEGIN/END managed: crypto cta
+manager` block: `/manager/ external:/etc/nginx/snippets/crypto_cta_manager.conf`,
+which emits an `include` of the snippet. The snippet
+(`deploy/jp_meta/crypto-cta-nginx-snippet.conf`, installed by
+`scripts/install_jp_meta_nginx.sh`) owns every `/manager`, `/cta-api`, and
+`/exec_tradeNN` location including the SPA `try_files` fallback and the
+`auth_request` gates. Never add plain proxy or static rows for those paths
+to the mapping: they duplicate snippet locations and drop the auth gates,
+and a `/manager/api/` row defeats the generator's `/manager` rewrite guard.
+Manager binaries, config, frontend webroot, Nginx
 prefix, and the Manager RocksDB live in that tree and must not live under an
 Exec account such as `binance_exec_trade01`. The Nginx service is the single
 loopback gateway and must not replace, restart, or reconfigure the existing

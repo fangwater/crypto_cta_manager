@@ -245,5 +245,10 @@ fi
 EOF
 fi
 
+if [[ $TARGET == jp-meta ]]; then
+    echo "refreshing jp-meta 4191 nginx snippet + mapping"
+    "$ROOT/scripts/install_jp_meta_nginx.sh" --ssh "$SSH_HOST"
+fi
+
 echo "deployed Manager to ${TARGET} (${REMOTE_ROOT}, ${RELEASE})"
 echo "host toml was not overwritten; compare config/cta-manager.toml.template if needed"
