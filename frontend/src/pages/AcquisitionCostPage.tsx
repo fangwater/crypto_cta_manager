@@ -70,6 +70,12 @@ export function AcquisitionCostPage() {
     return () => controller.abort()
   }, [])
 
+  useEffect(() => {
+    if (scope !== 'all' && dashboard && !(dashboard.accounts ?? []).some((account) => account.enabled && account.source_id === scope)) {
+      setScope('all')
+    }
+  }, [dashboard, scope])
+
   const query = useCallback(
     async (requestedPage = 1) => {
       const startMs = fromDatetimeLocal(startInput)
@@ -152,7 +158,7 @@ export function AcquisitionCostPage() {
             账户
             <Select value={scope} onChange={(event) => setScope(event.target.value)}>
               <option value="all">全部账户</option>
-              {(dashboard?.accounts ?? []).map((account) => (
+              {(dashboard?.accounts ?? []).filter((account) => account.enabled).map((account) => (
                 <option key={account.source_id} value={account.source_id}>{account.account}</option>
               ))}
             </Select>

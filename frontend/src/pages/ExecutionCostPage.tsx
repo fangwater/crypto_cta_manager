@@ -90,7 +90,14 @@ export function ExecutionCostPage() {
     return () => controller.abort()
   }, [])
 
-  const accounts = dashboard?.accounts ?? []
+  const accounts = (dashboard?.accounts ?? []).filter((account) => account.enabled)
+
+  useEffect(() => {
+    if (dashboard && scope !== 'all' && !accounts.some((account) => account.source_id === scope)) {
+      setScope('all')
+    }
+  }, [accounts, dashboard, scope])
+
   const query = useCallback(
     async (requestedPage = 1, signal?: AbortSignal) => {
       const startMs = fromDatetimeLocal(startInput)
