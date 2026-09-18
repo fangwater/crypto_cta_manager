@@ -2245,6 +2245,16 @@ async fn save_position_grants(
                 "administrator permission required to change open visibility",
             ));
         }
+        // Managers keep implicit configure regardless of the grant list; a
+        // grant-based configure holder must keep their own grant or they
+        // would lock themselves out.
+        let keeps_configure = access.manager_user_ids.contains(&user.user_id)
+            || request.grants.iter().any(|grant| {
+                grant.user_id == user.user_id && grant.access_level.trim() == "configure"
+            });
+        if !keeps_configure {
+            return Ok(forbidden("you cannot remove your own configure grant"));
+        }
     }
     match strategy_catalog::set_position_grants(
         &state.pool,
@@ -2401,11 +2411,22 @@ async fn list_account_grants(
 
 /// Replaces all grants on the account. The PUT middleware already requires
 /// the source's configure grant, so delegated managers reach this handler.
+/// A non-admin manager must keep their own configure grant, otherwise they
+/// would lock themselves out of the account they manage.
 async fn save_account_grants(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Json(request): Json<auth::SetSourceGrantsRequest>,
 ) -> Result<Response, ApiError> {
+    if !user.is_admin()
+        && !request
+            .grants
+            .iter()
+            .any(|grant| grant.user_id == user.user_id && grant.access_level.trim() == "configure")
+    {
+        return Ok(forbidden("you cannot remove your own configure grant"));
+    }
     let configured = state
         .config
         .sources

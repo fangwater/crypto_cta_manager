@@ -296,7 +296,11 @@ export function AdminPage() {
     )
   }
 
-  const grantableUsers = users.filter((target) => target.role !== 'admin')
+  // Hide the current user: admins manage other users' grants directly, and
+  // delegated managers must not downgrade themselves out of a resource.
+  const grantableUsers = users.filter(
+    (target) => target.role !== 'admin' && target.user_id !== user.user_id,
+  )
 
   return (
     <AppShell active="admin" title="权限管理" subtitle={isAdmin ? '用户、账户与策略权限' : '授权管理'} icon={Shield}>
