@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -55,15 +55,10 @@ impl MonitorIssue {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct QuoteState {
-    quote_ts_us: i64,
-    received_ts_us: i64,
-}
-
 #[derive(Debug, Default)]
 struct MarketFeedState {
-    latest: BTreeMap<(String, String), QuoteState>,
+    /// Latest local receive time per (venue, symbol).
+    latest: BTreeMap<(String, String), i64>,
     last_any_by_venue: BTreeMap<String, i64>,
 }
 
@@ -97,20 +92,26 @@ impl MarketFeed {
         feed
     }
 
-    fn quote(&self, venue: &str, symbol: &str) -> Option<QuoteState> {
-        self.state.read().ok().and_then(|state| {
-            state
-                .latest
-                .get(&(venue.to_string(), symbol.to_string()))
-                .copied()
-        })
-    }
-
     fn last_any(&self, venue: &str) -> Option<i64> {
         self.state
             .read()
             .ok()
             .and_then(|state| state.last_any_by_venue.get(venue).copied())
+    }
+
+    /// Latest local receive time across the watched symbols on one venue.
+    fn latest_received(&self, venue: &str, symbols: &[String]) -> Option<i64> {
+        self.state.read().ok().and_then(|state| {
+            symbols
+                .iter()
+                .filter_map(|symbol| {
+                    state
+                        .latest
+                        .get(&(venue.to_string(), symbol.clone()))
+                        .copied()
+                })
+                .max()
+        })
     }
 }
 
@@ -167,13 +168,9 @@ fn run_market_subscription(venue: &str, state: &Arc<RwLock<MarketFeedState>>) ->
                 };
                 let received_ts_us = unix_time_us();
                 if let Ok(mut guard) = state.write() {
-                    guard.latest.insert(
-                        (venue.to_string(), quote.symbol),
-                        QuoteState {
-                            quote_ts_us: quote.ts_us,
-                            received_ts_us,
-                        },
-                    );
+                    guard
+                        .latest
+                        .insert((venue.to_string(), quote.symbol), received_ts_us);
                     guard
                         .last_any_by_venue
                         .insert(venue.to_string(), received_ts_us);
@@ -306,6 +303,8 @@ fn check_market(config: &AppConfig, market: &MarketFeed, now_us: i64) -> Vec<Mon
         .iter()
         .map(|symbol| normalize_symbol(symbol))
         .filter(|symbol| !symbol.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
     let stale_us = seconds_to_us(config.monitor.market_stale_secs);
     let mut issues = Vec::new();
@@ -327,23 +326,21 @@ fn check_market(config: &AppConfig, market: &MarketFeed, now_us: i64) -> Vec<Mon
             }
             continue;
         }
-        for symbol in &symbols {
-            let quote = market.quote(venue, symbol);
-            let stale = quote.is_none_or(|quote| {
-                now_us.saturating_sub(quote.received_ts_us) > stale_us
-                    || now_us.saturating_sub(quote.quote_ts_us) > stale_us
-            });
-            if stale {
-                issues.push(MonitorIssue::new(
-                    "market",
-                    &format!("{venue}:{symbol}"),
-                    "global",
-                    format!(
-                        "行情 BBO {venue}/{symbol} 已超过 {} 秒没有新消息",
-                        config.monitor.market_stale_secs
-                    ),
-                ));
-            }
+        // Single liveness check across the watched symbols: any fresh BBO from
+        // the watched set means the feed is healthy, regardless of which
+        // symbol delivered it.
+        let latest = market.latest_received(venue, &symbols);
+        if latest.is_none_or(|received| now_us.saturating_sub(received) > stale_us) {
+            issues.push(MonitorIssue::new(
+                "market",
+                &format!("{venue}:bbo"),
+                "global",
+                format!(
+                    "行情故障: {venue} 监控币对({})已超过 {} 秒没有新 BBO",
+                    symbols.join("/"),
+                    config.monitor.market_stale_secs
+                ),
+            ));
         }
     }
     issues
@@ -576,6 +573,10 @@ fn check_position(
     }
 
     let mut account_qty_by_symbol = HashMap::<&str, f64>::new();
+    let mut configured_sum = HashMap::<&str, f64>::new();
+    let mut inflight_sum = HashMap::<&str, f64>::new();
+    let mut symbols_missing_fields = HashSet::<&str>::new();
+    let mut symbol_last_update = HashMap::<&str, i64>::new();
     for row in &snapshot.rows {
         if let Some(account_qty) = row.account_position_qty {
             if let Some(previous) = account_qty_by_symbol.get(row.symbol.as_str())
@@ -591,7 +592,65 @@ fn check_position(
                 account_qty_by_symbol.insert(row.symbol.as_str(), account_qty);
             }
         }
+        // Configured position per symbol is the sum of strategy targets. A row
+        // that finished at the exchange minimum keeps a residual delta forever,
+        // so its achieved current qty counts as its configured position.
+        let effective_target =
+            if row.execution_complete && row.completion_reason == "exchange_minimum" {
+                row.current_qty
+            } else {
+                row.target_qty
+            };
+        match effective_target {
+            Some(qty) => *configured_sum.entry(row.symbol.as_str()).or_insert(0.0) += qty,
+            None => {
+                symbols_missing_fields.insert(row.symbol.as_str());
+            }
+        }
+        *inflight_sum.entry(row.symbol.as_str()).or_insert(0.0) +=
+            row.pending_qty.unwrap_or(0.0) + row.live_order_qty.unwrap_or(0.0);
+        symbol_last_update
+            .entry(row.symbol.as_str())
+            .and_modify(|ts| *ts = (*ts).max(row.source_updated_at_ms))
+            .or_insert(row.source_updated_at_ms);
         check_execution_row(source, monitor, row, now_ms, &mut issues);
+    }
+
+    // Configured position vs account aggregation: alert only when the gap has
+    // no live order quantity working on it and the symbol has been quiet past
+    // the execution grace window, i.e. the execution is stuck.
+    let grace_ms = monitor.execution_grace_secs as i64 * 1_000;
+    for (symbol, account_qty) in &account_qty_by_symbol {
+        if symbols_missing_fields.contains(symbol) {
+            continue;
+        }
+        let Some(configured) = configured_sum.get(symbol) else {
+            continue;
+        };
+        let scale = configured.abs().max(account_qty.abs()).max(1.0);
+        let tolerance = monitor.position_tolerance * scale;
+        let gap = configured - account_qty;
+        if gap.abs() <= tolerance {
+            continue;
+        }
+        let inflight = inflight_sum.get(symbol).copied().unwrap_or(0.0);
+        if inflight.abs() > tolerance {
+            continue;
+        }
+        let settling = symbol_last_update
+            .get(symbol)
+            .is_some_and(|ts| *ts > 0 && now_ms.saturating_sub(*ts) <= grace_ms);
+        if settling {
+            continue;
+        }
+        issues.push(MonitorIssue::new(
+            "position",
+            &format!("stuck:{symbol}"),
+            &source.id,
+            format!(
+                "{symbol} 配置仓位 {configured:.12} 与账户仓位 {account_qty:.12} 不一致且无挂单执行"
+            ),
+        ));
     }
     issues
 }
@@ -765,11 +824,16 @@ impl PendingNotice {
     }
 }
 
+/// Minimum gap between repeated alerts for the same unresolved issue.
+const MIN_REPEAT_ALERT_SECS: u64 = 30;
+
 #[derive(Debug, Default)]
 struct AlertState {
     active: bool,
     last_sent: Option<Instant>,
     recovery_pending: bool,
+    /// Message of the last alert sent, reused for the recovery notice.
+    message: String,
 }
 
 #[derive(Debug, Default)]
@@ -788,7 +852,7 @@ impl AlertTracker {
             .iter()
             .map(|issue| issue.key.as_str())
             .collect::<HashSet<_>>();
-        let repeat = Duration::from_secs(repeat_alert_secs.max(1));
+        let repeat = Duration::from_secs(repeat_alert_secs.max(MIN_REPEAT_ALERT_SECS));
         let mut pending = Vec::new();
         for issue in issues {
             let state = self.states.entry(issue.key.clone()).or_default();
@@ -809,9 +873,14 @@ impl AlertTracker {
         for (key, state) in &mut self.states {
             if state.active && !current_keys.contains(key.as_str()) && state.last_sent.is_some() {
                 if !state.recovery_pending {
+                    let detail = if state.message.is_empty() {
+                        key.clone()
+                    } else {
+                        state.message.clone()
+                    };
                     pending.push(PendingNotice {
                         key: key.clone(),
-                        message: format!("问题已恢复: {key}"),
+                        message: format!("问题已恢复: {detail}"),
                         recovery: true,
                     });
                 }
@@ -827,10 +896,12 @@ impl AlertTracker {
                 state.active = false;
                 state.last_sent = None;
                 state.recovery_pending = false;
+                state.message.clear();
             } else {
                 state.active = true;
                 state.last_sent = Some(now);
                 state.recovery_pending = false;
+                state.message = notice.message.clone();
             }
         }
     }
@@ -1098,6 +1169,213 @@ mod tests {
     fn signed_url_without_secret_is_unchanged() {
         let url = Url::parse("https://example.test/hook?access_token=x").unwrap();
         assert_eq!(signed_url(&url, None).unwrap(), url);
+    }
+
+    fn market_test_config(symbols: &[&str]) -> AppConfig {
+        AppConfig {
+            database: crate::config::DatabaseConfig {
+                url_env: "TEST_DATABASE_URL".to_string(),
+                max_connections: 1,
+            },
+            ingestion: Default::default(),
+            order_config: Default::default(),
+            redis: Default::default(),
+            twap: Default::default(),
+            monitor: MonitorConfig {
+                market_stale_secs: 5,
+                market_symbols: symbols.iter().map(|s| s.to_string()).collect(),
+                ..MonitorConfig::default()
+            },
+            sources: vec![test_source("binance-futures")],
+        }
+    }
+
+    fn test_source(venue: &str) -> SourceConfig {
+        SourceConfig {
+            id: "src".to_string(),
+            account: "src".to_string(),
+            alias: None,
+            venue: venue.to_string(),
+            rocksdb_path: std::path::PathBuf::from("/tmp/nonexistent"),
+            enabled: true,
+            start_ts_us: None,
+            poll_interval_secs: None,
+            estimated_fee_rate: None,
+            maker_fee_rate: None,
+            taker_fee_rate: None,
+            gateway_prefix: None,
+            exec_config_url: None,
+            exec_viz_url: None,
+            ipc_namespace: None,
+            account_ipc_service: None,
+            legacy_share_unit_usdt: None,
+            env_path: None,
+        }
+    }
+
+    fn insert_quote(feed: &MarketFeed, venue: &str, symbol: &str, received_ts_us: i64) {
+        feed.state
+            .write()
+            .unwrap()
+            .latest
+            .insert((venue.to_string(), symbol.to_string()), received_ts_us);
+    }
+
+    #[test]
+    fn market_check_alerts_only_when_no_watched_symbol_is_fresh() {
+        let venue = "binance-futures";
+        let config = market_test_config(&["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]);
+        let feed = MarketFeed::default();
+        let now = unix_time_us();
+
+        // No BBO received at all -> market failure issue.
+        let issues = check_market(&config, &feed, now);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "market:binance-futures:bbo:global");
+
+        // Fresh BBO on a symbol outside the watched set still alerts.
+        insert_quote(&feed, venue, "DOGEUSDT", now);
+        assert_eq!(check_market(&config, &feed, now).len(), 1);
+
+        // One fresh watched symbol is enough to clear the failure.
+        insert_quote(&feed, venue, "ETHUSDT", now);
+        assert!(check_market(&config, &feed, now).is_empty());
+
+        // The only watched quote goes stale -> alert again.
+        insert_quote(&feed, venue, "ETHUSDT", now - 6_000_000);
+        assert_eq!(check_market(&config, &feed, now).len(), 1);
+    }
+
+    #[test]
+    fn repeat_alert_interval_has_thirty_second_floor() {
+        let issue = MonitorIssue::new("market", "v:bbo", "global", "m");
+        let mut tracker = AlertTracker::default();
+        let start = Instant::now();
+        let notices = tracker.pending(std::slice::from_ref(&issue), start, 1);
+        tracker.mark_sent(&notices, start);
+        assert!(
+            tracker
+                .pending(
+                    std::slice::from_ref(&issue),
+                    start + Duration::from_secs(5),
+                    1
+                )
+                .is_empty()
+        );
+        assert_eq!(
+            tracker
+                .pending(
+                    std::slice::from_ref(&issue),
+                    start + Duration::from_secs(31),
+                    1
+                )
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn recovery_notice_reuses_alert_message() {
+        let issue = MonitorIssue::new("market", "v:bbo", "global", "行情故障: test");
+        let mut tracker = AlertTracker::default();
+        let start = Instant::now();
+        let notices = tracker.pending(std::slice::from_ref(&issue), start, 30);
+        tracker.mark_sent(&notices, start);
+        let recovery = tracker.pending(&[], start + Duration::from_secs(1), 30);
+        assert_eq!(recovery.len(), 1);
+        assert_eq!(recovery[0].message, "问题已恢复: 行情故障: test");
+    }
+
+    fn position_row(
+        strategy: &str,
+        symbol: &str,
+        current: f64,
+        target: f64,
+        pending: f64,
+        live: f64,
+        account: Option<f64>,
+        updated_ms: i64,
+    ) -> ExecStateRowSnapshot {
+        ExecStateRowSnapshot {
+            strategy_name: strategy.to_string(),
+            symbol: symbol.to_string(),
+            source_updated_at_ms: updated_ms,
+            current_qty: Some(current),
+            target_qty: Some(target),
+            pending_qty: Some(pending),
+            live_order_qty: Some(live),
+            estimated_completion_ts_ms: updated_ms + 3_600_000,
+            execution_complete: false,
+            completion_reason: String::new(),
+            account_position_qty: account,
+        }
+    }
+
+    #[test]
+    fn position_check_alerts_only_when_configured_gap_is_stuck() {
+        let source = test_source("binance-futures");
+        let monitor = MonitorConfig::default();
+        let now_us = unix_time_us();
+        let now_ms = now_us / 1_000;
+        let old_ms = now_ms - (monitor.execution_grace_secs as i64 + 10) * 1_000;
+        // Configured position for the symbol: 0.5 + (-0.2) = 0.3.
+        let snapshot = |account: f64| ExecStateSnapshot {
+            source_id: source.id.clone(),
+            snapshot_ts_ms: now_ms,
+            position_ready: true,
+            rows: vec![
+                position_row(
+                    "cta_a",
+                    "BTCUSDT",
+                    0.5,
+                    0.5,
+                    0.0,
+                    0.0,
+                    Some(account),
+                    old_ms,
+                ),
+                position_row(
+                    "cta_b",
+                    "BTCUSDT",
+                    -0.2,
+                    -0.2,
+                    0.0,
+                    0.0,
+                    Some(account),
+                    old_ms,
+                ),
+            ],
+        };
+
+        // Configured 0.3 == account 0.3 -> consistent.
+        let issues = check_position(&source, &monitor, &snapshot(0.3), now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
+
+        // Configured 0.3 vs account 0.4, quiet and no live qty -> stuck.
+        let issues = check_position(&source, &monitor, &snapshot(0.4), now_us);
+        assert!(issues.iter().any(|issue| issue.key.contains("stuck")));
+
+        // Live order qty covering the gap means it is still executing.
+        let mut executing = snapshot(0.2);
+        executing.rows[0].current_qty = Some(0.4);
+        executing.rows[0].live_order_qty = Some(0.1);
+        let issues = check_position(&source, &monitor, &executing, now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
+
+        // A strategy row updated inside the grace window is still settling.
+        let mut settling = snapshot(0.4);
+        settling.rows[0].source_updated_at_ms = now_ms;
+        let issues = check_position(&source, &monitor, &settling, now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
+
+        // A residual delta left by an exchange_minimum completion is tolerated:
+        // effective configured = 0.29 + (-0.2) = 0.09 == account.
+        let mut minimum = snapshot(0.09);
+        minimum.rows[0].current_qty = Some(0.29);
+        minimum.rows[0].execution_complete = true;
+        minimum.rows[0].completion_reason = "exchange_minimum".to_string();
+        let issues = check_position(&source, &monitor, &minimum, now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
     }
 
     #[test]

@@ -50,7 +50,6 @@ case "$TARGET" in
         REMOTE_ROOT="/home/el01/crypto_cta_manager"
         DEPLOY_DIR="$ROOT/deploy/crypto_cta_manager"
         UNIT_NAME="crypto-cta-manager-web.service"
-        MONITOR_UNIT_NAME="crypto-cta-manager-monitor.service"
         EXPECTED_USER="el01"
         RESTART_NGINX=1
         ;;
@@ -59,7 +58,6 @@ case "$TARGET" in
         REMOTE_ROOT="/home/ubuntu/crypto_cta_manager"
         DEPLOY_DIR="$ROOT/deploy/jp_meta"
         UNIT_NAME="crypto-cta-manager-web.service"
-        MONITOR_UNIT_NAME="crypto-cta-manager-monitor.service"
         EXPECTED_USER="ubuntu"
         RESTART_NGINX=0
         ;;
@@ -124,7 +122,8 @@ require_local_file "$LOCAL_RELEASE_DIR/nav_strategy_snapshot"
 require_local_file "$ROOT/frontend/dist/index.html"
 require_local_file "$DEPLOY_DIR/cta-manager.toml"
 require_local_file "$DEPLOY_DIR/crypto-cta-manager-web.service"
-require_local_file "$DEPLOY_DIR/crypto-cta-manager-monitor.service"
+require_local_file "$ROOT/scripts/start_monitor.sh"
+require_local_file "$ROOT/scripts/stop_monitor.sh"
 require_local_file "$ROOT/scripts/manager_publish_client.py"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -181,7 +180,8 @@ scp -q \
     "$DEPLOY_DIR/crypto-cta-manager-web.service" \
     "${SSH_HOST}:${REMOTE_ROOT}/"
 scp -q \
-    "$DEPLOY_DIR/crypto-cta-manager-monitor.service" \
+    "$ROOT/scripts/start_monitor.sh" \
+    "$ROOT/scripts/stop_monitor.sh" \
     "${SSH_HOST}:${REMOTE_ROOT}/"
 if [[ $TARGET == el01 ]]; then
     scp -q "$DEPLOY_DIR/nginx.conf" "${SSH_HOST}:${REMOTE_ROOT}/nginx/nginx.conf.next"
@@ -219,12 +219,27 @@ sha256sum -c '.deploy-final-${STAMP}.sha256'
 rm -f '.deploy-stage-${STAMP}.sha256' '.deploy-final-${STAMP}.sha256'
 install -d -m 0700 "\$HOME/.config/systemd/user"
 install -m 0644 crypto-cta-manager-web.service "\$HOME/.config/systemd/user/${UNIT_NAME}"
-install -m 0644 crypto-cta-manager-monitor.service "\$HOME/.config/systemd/user/${MONITOR_UNIT_NAME}"
 systemctl --user daemon-reload
 systemctl --user restart '${UNIT_NAME}'
 systemctl --user --quiet is-active '${UNIT_NAME}'
-if systemctl --user --quiet is-active '${MONITOR_UNIT_NAME}'; then
-    systemctl --user restart '${MONITOR_UNIT_NAME}'
+# The monitor runs under pmdaemon, not systemd. Retire a stale systemd unit
+# and remember whether monitoring was live so it can be restarted below.
+chmod 0755 start_monitor.sh stop_monitor.sh
+MONITOR_WAS_RUNNING=0
+if systemctl --user --quiet is-active crypto-cta-manager-monitor.service 2>/dev/null; then
+    MONITOR_WAS_RUNNING=1
+fi
+systemctl --user disable --now crypto-cta-manager-monitor.service >/dev/null 2>&1 || true
+rm -f "\$HOME/.config/systemd/user/crypto-cta-manager-monitor.service"
+PMDAEMON="\$(command -v pmdaemon || true)"
+if [[ -z "\$PMDAEMON" && -x "\$HOME/.local/bin/pmdaemon" ]]; then
+    PMDAEMON="\$HOME/.local/bin/pmdaemon"
+fi
+if [[ -z "\$PMDAEMON" && -x /usr/local/bin/pmdaemon ]]; then
+    PMDAEMON=/usr/local/bin/pmdaemon
+fi
+if [[ \$MONITOR_WAS_RUNNING -eq 1 ]] || { [[ -n "\$PMDAEMON" ]] && "\$PMDAEMON" info cta_monitor >/dev/null 2>&1; }; then
+    ./start_monitor.sh
 fi
 EOF
 

@@ -35,7 +35,7 @@ cargo build --release
 The standalone `cta_monitor` binary is the DingTalk health monitor for CTA
 market data, order flow, and position execution. Keep it independent from
 `cta_web` and the ingestion worker; build and deploy it as its own binary and
-systemd user service:
+pmdaemon process:
 
 ```bash
 cargo check --bin cta_monitor
@@ -61,9 +61,10 @@ the host credential file. Each channel retries failed sends with exponential
 backoff and keeps the issue pending until that channel succeeds. The monitor
 sends on issue transitions, repeats unresolved issues at `repeat_alert_secs`,
 and sends a recovery notice; it must not send one message on every poll. Use
-`--once --dry-run` before enabling the user service. The deployment unit is
-`crypto-cta-manager-monitor.service`; installing it must not start or restart
-trading, Viz, Config, Nginx, or `cta_web` services.
+`--once --dry-run` before enabling the process. It runs as the pmdaemon
+process `cta_monitor`, registered by `scripts/start_monitor.sh` /
+`stop_monitor.sh` in the Manager remote root; registering or restarting it
+must not start or restart trading, Viz, Config, Nginx, or `cta_web` services.
 
 Run `cargo fmt` before committing Rust changes. Prefer focused tests while
 iterating, then run the full crate tests when changing database schemas,

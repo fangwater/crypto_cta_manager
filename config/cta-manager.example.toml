@@ -36,16 +36,17 @@ compact_interval_secs = 3600
 # credential environment, never in TOML.
 enabled = false
 poll_interval_secs = 10
-repeat_alert_secs = 1800
-market_stale_secs = 10
+repeat_alert_secs = 30
+market_stale_secs = 5
 order_stale_secs = 120
 position_stale_secs = 30
 execution_grace_secs = 30
 recent_order_records = 2000
 position_tolerance = 0.00000001
-# Empty means check that the venue has any fresh BBO. Set symbols to require
-# freshness for particular instruments, for example ["BTCUSDT", "ETHUSDT"].
-market_symbols = []
+# Watched symbols for the market liveness check: one alert fires when none of
+# these symbols delivered a new BBO within market_stale_secs. Empty means check
+# that the venue feed has any fresh BBO at all. Defaults to the sk traded pairs.
+market_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 
 [monitor.dingtalk]
 market_webhook_url_env = "CTA_DINGTALK_MARKET_WEBHOOK_URL"

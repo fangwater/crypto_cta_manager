@@ -96,7 +96,8 @@ cta_monitor --config /home/el01/crypto_cta_manager/config/cta-manager.toml \
 ```
 
 After reviewing the dry-run output, set `monitor.enabled = true` and start the
-independent `crypto-cta-manager-monitor.service`. Each channel retries failed
+independent monitor under pmdaemon with `scripts/start_monitor.sh`. Each
+channel retries failed
 webhook requests with exponential backoff. Notifications are sent on state
 transitions, repeated at `repeat_alert_secs`, and followed by a recovery notice;
 the monitor does not send every poll.

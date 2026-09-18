@@ -202,14 +202,19 @@ impl Default for MonitorConfig {
         Self {
             enabled: false,
             poll_interval_secs: 10,
-            repeat_alert_secs: 1_800,
-            market_stale_secs: 10,
+            repeat_alert_secs: 30,
+            market_stale_secs: 5,
             order_stale_secs: 120,
             position_stale_secs: 30,
             execution_grace_secs: 30,
             recent_order_records: 2_000,
             position_tolerance: 1e-8,
-            market_symbols: Vec::new(),
+            market_symbols: vec![
+                "BTCUSDT".to_string(),
+                "ETHUSDT".to_string(),
+                "SOLUSDT".to_string(),
+                "XRPUSDT".to_string(),
+            ],
             dingtalk: DingTalkConfig::default(),
         }
     }
@@ -925,7 +930,9 @@ mod tests {
         assert_eq!(config.sources[0].id, "binance_exec_trade01");
         assert_eq!(config.sources[0].display_name(), "rpc_hf_cta");
         assert!(config.sources[0].enabled);
-        assert!(config.sources[1..].iter().all(|source| !source.enabled));
+        assert_eq!(config.sources[1].id, "binance_exec_trade02");
+        assert!(config.sources[1].enabled);
+        assert!(config.sources[2..].iter().all(|source| !source.enabled));
         assert_eq!(
             config.twap.rocksdb_path.as_os_str(),
             "/home/ubuntu/crypto_cta_manager/db"

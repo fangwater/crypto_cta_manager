@@ -31,14 +31,16 @@ compact_interval_secs = 3600
 # The process is independently deployed by systemd.
 enabled = false
 poll_interval_secs = 10
-repeat_alert_secs = 1800
-market_stale_secs = 10
+repeat_alert_secs = 30
+market_stale_secs = 5
 order_stale_secs = 120
 position_stale_secs = 30
 execution_grace_secs = 30
 recent_order_records = 2000
 position_tolerance = 0.00000001
-market_symbols = []
+# sk traded pairs: alert when none of them delivered a new BBO within
+# market_stale_secs. Empty means check the venue feed for any fresh BBO.
+market_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 
 [monitor.dingtalk]
 market_webhook_url_env = "CTA_DINGTALK_MARKET_WEBHOOK_URL"
