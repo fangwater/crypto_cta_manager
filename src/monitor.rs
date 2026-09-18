@@ -210,7 +210,7 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
         }
     }
     let senders = (!dry_run)
-        .then(|| DingTalkSenders::from_config(&config.monitor.dingtalk))
+        .then(|| DingTalkSenders::from_config(&config.monitor.dingtalk, &config.monitor.host_tag))
         .transpose()?;
     let mut tracker = AlertTracker::default();
     let poll_interval = Duration::from_secs(config.monitor.poll_interval_secs);
@@ -346,8 +346,7 @@ fn check_market(config: &AppConfig, market: &MarketFeed, now_us: i64) -> Vec<Mon
                 &format!("{venue}:bbo"),
                 "global",
                 format!(
-                    "行情故障: {venue} 监控币对({})已超过 {} 秒没有新 BBO",
-                    symbols.join("/"),
+                    "行情故障: {venue} 已超过 {} 秒没有新 BBO",
                     config.monitor.market_stale_secs
                 ),
             ));
@@ -962,7 +961,7 @@ struct DingTalkSenders {
 }
 
 impl DingTalkSenders {
-    fn from_config(config: &DingTalkConfig) -> Result<Self> {
+    fn from_config(config: &DingTalkConfig, host_tag: &str) -> Result<Self> {
         Ok(Self {
             market: DingTalkSender::from_env(
                 &config.market_webhook_url_env,
@@ -970,6 +969,7 @@ impl DingTalkSenders {
                 config.request_timeout_secs,
                 config.at_mobiles.clone(),
                 config.is_at_all,
+                host_tag,
             )?,
             order: DingTalkSender::from_env(
                 &config.order_webhook_url_env,
@@ -977,6 +977,7 @@ impl DingTalkSenders {
                 config.request_timeout_secs,
                 config.at_mobiles.clone(),
                 config.is_at_all,
+                host_tag,
             )?,
         })
     }
@@ -988,6 +989,7 @@ struct DingTalkSender {
     secret: Option<String>,
     at_mobiles: Vec<String>,
     is_at_all: bool,
+    host_tag: String,
 }
 
 impl DingTalkSender {
@@ -997,6 +999,7 @@ impl DingTalkSender {
         request_timeout_secs: u64,
         at_mobiles: Vec<String>,
         is_at_all: bool,
+        host_tag: &str,
     ) -> Result<Self> {
         let webhook_env = webhook_env.trim();
         let webhook = env::var(webhook_env).with_context(|| {
@@ -1024,6 +1027,7 @@ impl DingTalkSender {
             secret,
             at_mobiles,
             is_at_all,
+            host_tag: host_tag.trim().to_string(),
         })
     }
 
@@ -1055,7 +1059,11 @@ impl DingTalkSender {
     }
 
     async fn send_once(&self, notices: &[PendingNotice]) -> Result<()> {
-        let mut content = String::from("[crypto_cta_manager] CTA 运行监控\n");
+        let mut content = if self.host_tag.is_empty() {
+            String::from("[crypto_cta_manager] CTA 运行监控\n")
+        } else {
+            format!("[{}][crypto_cta_manager] CTA 运行监控\n", self.host_tag)
+        };
         for notice in notices.iter().take(30) {
             let prefix = if notice.recovery {
                 "[恢复]"

@@ -94,6 +94,8 @@ pub struct MonitorConfig {
     pub position_residual_usdt: f64,
     /// Empty means monitor any symbol seen on the configured venue feed.
     pub market_symbols: Vec<String>,
+    /// Host label prepended to every DingTalk alert, such as "[el01]".
+    pub host_tag: String,
     pub dingtalk: DingTalkConfig,
 }
 
@@ -219,6 +221,7 @@ impl Default for MonitorConfig {
                 "SOLUSDT".to_string(),
                 "XRPUSDT".to_string(),
             ],
+            host_tag: String::new(),
             dingtalk: DingTalkConfig::default(),
         }
     }

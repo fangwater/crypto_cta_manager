@@ -40,6 +40,7 @@ execution_grace_secs = 30
 recent_order_records = 2000
 position_tolerance = 0.00000001
 position_residual_usdt = 50
+host_tag = "jp-meta"
 # sk traded pairs: alert when none of them delivered a new BBO within
 # market_stale_secs. Empty means check the venue feed for any fresh BBO.
 market_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
