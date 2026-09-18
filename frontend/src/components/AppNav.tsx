@@ -23,7 +23,7 @@ export function AppNav({ active }: { active: AppNavId }) {
   return (
     <div className="flex items-center gap-2">
       <nav className="hidden items-center gap-1 rounded-xl border border-border bg-canvas/80 p-1 md:flex">
-        {links.filter((link) => link.id !== 'admin' || user.role === 'admin').map((link) => {
+        {links.map((link) => {
         const Icon = link.icon
         const isActive = active === link.id
         return (

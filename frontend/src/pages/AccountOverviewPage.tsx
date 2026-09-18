@@ -97,6 +97,7 @@ export function AccountOverviewPage() {
     () => dashboard?.report.sources.find((source) => source.source_id === sourceId),
     [dashboard, sourceId],
   )
+  const canConfigure = account?.access_level === 'configure'
   const knownLiquidityVolume =
     (report?.maker_volume_quote ?? 0) + (report?.taker_volume_quote ?? 0)
   const makerRatio = knownLiquidityVolume > 0
@@ -161,12 +162,14 @@ export function AccountOverviewPage() {
                     Exec Viz
                   </ActionButton>
                 )}
-                <ActionButton
-                  href={routes.configBindings(sourceId)}
-                  icon={<PencilLine size={15} />}
-                >
-                  编辑启用
-                </ActionButton>
+                {canConfigure && (
+                  <ActionButton
+                    href={routes.configBindings(sourceId)}
+                    icon={<PencilLine size={15} />}
+                  >
+                    编辑启用
+                  </ActionButton>
+                )}
               </div>
             }
           />
@@ -191,7 +194,7 @@ export function AccountOverviewPage() {
                       value={makerFeeRateInput}
                       onChange={(event) => setMakerFeeRateInput(event.target.value)}
                       placeholder="-0.00005"
-                      disabled={saving}
+                      disabled={saving || !canConfigure}
                     />
                   </Label>
                   <Label className="min-w-[12rem] flex-1">
@@ -201,7 +204,7 @@ export function AccountOverviewPage() {
                       value={takerFeeRateInput}
                       onChange={(event) => setTakerFeeRateInput(event.target.value)}
                       placeholder="0.000146"
-                      disabled={saving}
+                      disabled={saving || !canConfigure}
                     />
                   </Label>
                   <Label className="min-w-[12rem] flex-1">
@@ -211,13 +214,13 @@ export function AccountOverviewPage() {
                       value={theoreticalTwapFeeRateInput}
                       onChange={(event) => setTheoreticalTwapFeeRateInput(event.target.value)}
                       placeholder="0.000048"
-                      disabled={saving}
+                      disabled={saving || !canConfigure}
                     />
                   </Label>
                   <Button
                     type="button"
                     size="sm"
-                    disabled={saving}
+                    disabled={saving || !canConfigure}
                     onClick={() =>
                       void withWrite(async () => {
                         const maker = Number(makerFeeRateInput.trim())
@@ -285,6 +288,7 @@ export function AccountOverviewPage() {
                   contractLeverage={contractLeverage}
                   queriedLeverage={queriedContractLeverage}
                   saving={saving}
+                  readOnly={!canConfigure}
                   onSymbolChange={(value) => {
                     setContractSymbol(value)
                     setQueriedContractLeverage(null)

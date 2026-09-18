@@ -4,7 +4,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, postgres::PgPool};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
 
@@ -13,11 +13,25 @@ const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 const PASSWORD_ITERATIONS: u32 = 120_000;
 
 #[derive(Clone, Debug, Serialize)]
+pub struct SourceGrantView {
+    pub source_id: String,
+    pub access_level: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct UserView {
     pub user_id: i64,
     pub username: String,
     pub role: String,
-    pub source_ids: Vec<String>,
+    pub source_grants: Vec<SourceGrantView>,
+}
+
+/// Source grants grouped by tier: `view` contains every account the user may
+/// read (view plus configure), `configure` only the writable subset.
+#[derive(Clone, Debug, Default)]
+pub struct SourceAccess {
+    pub view: BTreeSet<String>,
+    pub configure: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -46,8 +60,14 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SourceGrantInput {
+    pub source_id: String,
+    pub access_level: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SetSourcesRequest {
-    pub source_ids: Vec<String>,
+    pub grants: Vec<SourceGrantInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,41 +392,68 @@ pub async fn delete_session(pool: &PgPool, token: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_access_level(access_level: &str) -> Result<&str> {
+    match access_level {
+        "view" | "configure" => Ok(access_level),
+        _ => bail!("access_level must be view or configure"),
+    }
+}
+
 pub async fn user_view(pool: &PgPool, user: &AuthUser) -> Result<UserView> {
-    let source_ids = sqlx::query_scalar::<_, String>(
-        "SELECT source_id FROM cta_user_source_permissions WHERE user_id = $1 ORDER BY source_id",
+    let rows = sqlx::query(
+        "SELECT source_id, access_level FROM cta_user_source_permissions WHERE user_id = $1 ORDER BY source_id",
     )
     .bind(user.user_id)
     .fetch_all(pool)
     .await
     .context("failed to load user source permissions")?;
+    let source_grants = rows
+        .into_iter()
+        .map(|row| {
+            Ok(SourceGrantView {
+                source_id: row.try_get("source_id")?,
+                access_level: row.try_get("access_level")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok(UserView {
         user_id: user.user_id,
         username: user.username.clone(),
         role: user.role.clone(),
-        source_ids,
+        source_grants,
     })
 }
 
-pub async fn allowed_source_ids(
+pub async fn allowed_source_access(
     pool: &PgPool,
     user: &AuthUser,
     configured_source_ids: &BTreeSet<String>,
-) -> Result<BTreeSet<String>> {
+) -> Result<SourceAccess> {
     if user.is_admin() {
-        return Ok(configured_source_ids.clone());
+        return Ok(SourceAccess {
+            view: configured_source_ids.clone(),
+            configure: configured_source_ids.clone(),
+        });
     }
-    let ids = sqlx::query_scalar::<_, String>(
-        "SELECT source_id FROM cta_user_source_permissions WHERE user_id = $1",
+    let rows = sqlx::query(
+        "SELECT source_id, access_level FROM cta_user_source_permissions WHERE user_id = $1",
     )
     .bind(user.user_id)
     .fetch_all(pool)
     .await
     .context("failed to load authorized source ids")?;
-    Ok(ids
-        .into_iter()
-        .filter(|source_id| configured_source_ids.contains(source_id))
-        .collect())
+    let mut access = SourceAccess::default();
+    for row in rows {
+        let source_id: String = row.try_get("source_id")?;
+        if !configured_source_ids.contains(&source_id) {
+            continue;
+        }
+        access.view.insert(source_id.clone());
+        if row.try_get::<String, _>("access_level")? == "configure" {
+            access.configure.insert(source_id);
+        }
+    }
+    Ok(access)
 }
 
 pub async fn list_users(pool: &PgPool) -> Result<Vec<UserView>> {
@@ -431,18 +478,22 @@ pub async fn list_users(pool: &PgPool) -> Result<Vec<UserView>> {
 pub async fn set_sources(
     pool: &PgPool,
     user_id: i64,
-    source_ids: &[String],
+    grants: &[SourceGrantInput],
     configured_source_ids: &BTreeSet<String>,
 ) -> Result<UserView> {
-    let unique = source_ids
+    let unique = grants
         .iter()
-        .map(|id| id.trim())
-        .collect::<BTreeSet<_>>();
-    if unique
-        .iter()
-        .any(|id| id.is_empty() || !configured_source_ids.contains(*id))
-    {
-        bail!("source_ids contains an unknown source");
+        .map(|grant| {
+            let source_id = grant.source_id.trim().to_string();
+            let access_level = grant.access_level.trim().to_string();
+            (source_id, access_level)
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (source_id, access_level) in &unique {
+        if source_id.is_empty() || !configured_source_ids.contains(source_id) {
+            bail!("grants contains an unknown source");
+        }
+        validate_access_level(access_level)?;
     }
     let mut tx = pool
         .begin()
@@ -461,13 +512,16 @@ pub async fn set_sources(
         .execute(&mut *tx)
         .await
         .context("failed to clear user source permissions")?;
-    for source_id in unique {
-        sqlx::query("INSERT INTO cta_user_source_permissions (user_id, source_id) VALUES ($1, $2)")
-            .bind(user_id)
-            .bind(source_id)
-            .execute(&mut *tx)
-            .await
-            .context("failed to save user source permission")?;
+    for (source_id, access_level) in unique {
+        sqlx::query(
+            "INSERT INTO cta_user_source_permissions (user_id, source_id, access_level) VALUES ($1, $2, $3)",
+        )
+        .bind(user_id)
+        .bind(source_id)
+        .bind(access_level)
+        .execute(&mut *tx)
+        .await
+        .context("failed to save user source permission")?;
     }
     tx.commit()
         .await

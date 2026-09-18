@@ -1,7 +1,8 @@
 import { LoaderCircle, Save, Trash2 } from 'lucide-react'
-import { useState } from 'react'
-import { deletePositionStrategy, savePositionStrategy } from '../../api'
+import { useEffect, useState } from 'react'
+import { deletePositionStrategy, listPositionAccess, savePositionStrategy } from '../../api'
 import { ConfigShell } from '../../components/ConfigShell'
+import { useAuth } from '../../components/AuthGate'
 import { StrategyPicker } from '../../components/StrategyPicker'
 import { SymbolOrderStrategyOverridesEditor } from '../../components/SymbolOrderStrategyOverridesEditor'
 import { TargetPositionsEditor } from '../../components/TargetPositionsEditor'
@@ -13,9 +14,23 @@ import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { emptyPosition } from '../../lib/strategyDefaults'
 
 export function PositionStrategyPage() {
+  const { user } = useAuth()
+  const isAdmin = user.role === 'admin'
   const { positions, orders, loading, error, reloadCatalog } = useStrategyCatalog()
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [selectedPosition, setSelectedPosition] = useState(emptyPosition)
+  const [configurable, setConfigurable] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    const controller = new AbortController()
+    listPositionAccess(controller.signal)
+      .then((access) => setConfigurable(new Set(access.map((item) => item.strategy_name))))
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
+
+  // Configure grant (or admin) can save targets; view-only users read only.
+  const canEdit = isAdmin || configurable.has(selectedPosition.strategy_name)
 
   return (
     <ConfigShell
@@ -45,6 +60,7 @@ export function PositionStrategyPage() {
               if (item) setSelectedPosition(item)
             }}
             onCreate={() => setSelectedPosition(emptyPosition())}
+            allowCreate={isAdmin}
             renderMeta={(name) => {
               const item = positions.find((entry) => entry.strategy_name === name)
               if (!item) return ''
@@ -116,10 +132,13 @@ export function PositionStrategyPage() {
                   }
                 />
                 <div className="flex flex-wrap gap-2">
-                  <Button type="submit" variant="primary" disabled={saving}>
+                  <Button type="submit" variant="primary" disabled={saving || !canEdit}>
                     <Save size={15} /> 保存
                   </Button>
-                  {selectedPosition.strategy_name && (
+                  {!canEdit && (
+                    <p className="self-center text-xs text-muted">仅查看：需要该策略的可配置权限才能保存</p>
+                  )}
+                  {isAdmin && selectedPosition.strategy_name && (
                     <Button
                       type="button"
                       variant="danger"

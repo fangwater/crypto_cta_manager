@@ -95,6 +95,8 @@ export interface DashboardAccount {
   enabled: boolean
   gateway_prefix: string | null
   configurable: boolean
+  /** Current session's grant on this account. Undefined only in stale payloads. */
+  access_level?: 'view' | 'configure' | null
   account_pnl_start_ts_us?: number | null
   strategy_pnl_start_ts_us?: number | null
   live_equity_usdt?: number | null

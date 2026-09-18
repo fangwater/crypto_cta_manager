@@ -32,11 +32,16 @@ interface RequestOptions {
   body?: unknown
 }
 
+export interface SourceGrant {
+  source_id: string
+  access_level: 'view' | 'configure'
+}
+
 export interface AuthUser {
   user_id: number
   username: string
   role: 'admin' | 'user'
-  source_ids: string[]
+  source_grants: SourceGrant[]
 }
 
 export interface AuthStatus {
@@ -99,10 +104,10 @@ export function createAuthUser(username: string, password: string) {
   })
 }
 
-export function setAuthUserSources(userId: number, sourceIds: string[]) {
+export function setAuthUserSources(userId: number, grants: SourceGrant[]) {
   return requestJson<AuthUser>(`/auth/users/${userId}/sources`, {
     method: 'PUT',
-    body: { source_ids: sourceIds },
+    body: { grants },
   })
 }
 
@@ -274,14 +279,20 @@ export interface PositionManager {
   username: string
 }
 
+export interface PositionGrant {
+  user_id: number
+  username: string
+  access_level: 'view' | 'configure'
+}
+
 export interface PositionAccess {
   strategy_name: string
   created_by: string | null
   publish_token_set: boolean
-  /** True = every logged-in user can see it. False = private to admins, the creator, viewers, and managers. New strategies default to private. */
+  /** True = every logged-in user can see it. False = private to admins, the creator, granted users, and managers. New strategies default to private. */
   open_visibility: boolean
   managers: PositionManager[]
-  viewers: PositionManager[]
+  grants: PositionGrant[]
 }
 
 export function listPositionAccess(signal?: AbortSignal) {
@@ -309,14 +320,14 @@ export function setPositionManagers(strategyName: string, userIds: number[]) {
   )
 }
 
-export function setPositionViewers(
+export function setPositionGrants(
   strategyName: string,
-  userIds: number[],
+  grants: Array<{ user_id: number; access_level: 'view' | 'configure' }>,
   openVisibility: boolean,
 ) {
   return requestJson<PositionAccess>(
-    `/catalog/position-strategies/${encodeURIComponent(strategyName)}/viewers`,
-    { method: 'PUT', body: { user_ids: userIds, open_visibility: openVisibility } },
+    `/catalog/position-strategies/${encodeURIComponent(strategyName)}/grants`,
+    { method: 'PUT', body: { grants, open_visibility: openVisibility } },
   )
 }
 

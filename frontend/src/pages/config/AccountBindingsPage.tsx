@@ -5,6 +5,7 @@ import {
   getAccountContractLeverage,
   getAccountStudio,
   getDashboard,
+  listPositionAccess,
   publishAccountBinding,
   saveAccountBinding,
   saveAccountContractLeverage,
@@ -30,6 +31,7 @@ export function AccountBindingsPage() {
     useStrategyCatalog()
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
+  const [bindableStrategies, setBindableStrategies] = useState<Set<string>>(new Set())
   const [studio, setStudio] = useState<AccountStudio | null>(null)
   const [shareDrafts, setShareDrafts] = useState<Record<string, string>>({})
   const [sourceId, setSourceId] = useState(initialSource)
@@ -43,7 +45,10 @@ export function AccountBindingsPage() {
   const [error, setError] = useState<string | null>(null)
 
   const accounts = useMemo(
-    () => (dashboard?.accounts ?? []).filter((account) => account.enabled && account.configurable),
+    () =>
+      (dashboard?.accounts ?? []).filter(
+        (account) => account.enabled && account.configurable && account.access_level === 'configure',
+      ),
     [dashboard],
   )
 
@@ -52,9 +57,14 @@ export function AccountBindingsPage() {
     [studio],
   )
 
+  // New bindings require the strategy's configure grant; the access list is
+  // already filtered to configurable strategies for non-admin sessions.
   const availablePositions = useMemo(
-    () => positions.filter((item) => !boundNames.has(item.strategy_name)),
-    [boundNames, positions],
+    () =>
+      positions.filter(
+        (item) => !boundNames.has(item.strategy_name) && bindableStrategies.has(item.strategy_name),
+      ),
+    [boundNames, positions, bindableStrategies],
   )
   const parsedNewShares = Number(newShares)
   const validNewShares =
@@ -62,9 +72,10 @@ export function AccountBindingsPage() {
 
   useEffect(() => {
     const controller = new AbortController()
-    getDashboard(controller.signal)
-      .then((snapshot) => {
+    Promise.all([getDashboard(controller.signal), listPositionAccess(controller.signal)])
+      .then(([snapshot, access]) => {
         setDashboard(snapshot)
+        setBindableStrategies(new Set(access.map((item) => item.strategy_name)))
         setError(null)
       })
       .catch((reason: unknown) => {

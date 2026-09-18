@@ -1,6 +1,7 @@
 import { LoaderCircle, Save, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { deleteOrderStrategy, saveOrderStrategy } from '../../api'
+import { useAuth } from '../../components/AuthGate'
 import { ConfigShell } from '../../components/ConfigShell'
 import { OrderParametersForm } from '../../components/OrderParametersForm'
 import { StrategyPicker } from '../../components/StrategyPicker'
@@ -14,6 +15,8 @@ import { DEFAULT_ORDER_STRATEGY_NAME, orderParameterMeta } from '../../lib/order
 import { emptyOrder } from '../../lib/strategyDefaults'
 
 export function OrderStrategyPage() {
+  const { user } = useAuth()
+  const isAdmin = user.role === 'admin'
   const { orders, loading, error, reloadCatalog } = useStrategyCatalog()
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [selectedOrder, setSelectedOrder] = useState(emptyOrder)
@@ -46,6 +49,7 @@ export function OrderStrategyPage() {
               if (item) setSelectedOrder(item)
             }}
             onCreate={() => setSelectedOrder(emptyOrder())}
+            allowCreate={isAdmin}
             renderMeta={(name) => {
               const item = orders.find((entry) => entry.strategy_name === name)
               if (!item) return ''
@@ -89,10 +93,13 @@ export function OrderStrategyPage() {
                   onChange={(order_parameters) => setSelectedOrder({ ...selectedOrder, order_parameters })}
                 />
                 <div className="flex flex-wrap gap-2">
-                  <Button type="submit" variant="primary" disabled={saving}>
+                  <Button type="submit" variant="primary" disabled={saving || !isAdmin}>
                     <Save size={15} /> 保存
                   </Button>
-                  {selectedOrder.strategy_name && (
+                  {!isAdmin && (
+                    <p className="self-center text-xs text-muted">执行参数模板由管理员维护</p>
+                  )}
+                  {isAdmin && selectedOrder.strategy_name && (
                     <Button
                       type="button"
                       variant="danger"

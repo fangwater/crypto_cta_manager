@@ -66,6 +66,9 @@ pub struct DashboardAccount {
     pub enabled: bool,
     pub gateway_prefix: Option<String>,
     pub configurable: bool,
+    /// Current session's grant on this account: "view" or "configure".
+    /// Annotated per request after the shared snapshot is filtered.
+    pub access_level: Option<&'static str>,
     /// Account-level PnL starts from the immutable account snapshot when present.
     pub account_pnl_start_ts_us: Option<i64>,
     /// Strategy PnL starts from a later immutable allocation anchor when present.
@@ -259,6 +262,11 @@ struct AuthSessionResponse {
 #[derive(Clone, Debug)]
 struct VisibleSources(BTreeSet<String>);
 
+/// Sources the session user may write: the 'configure' subset of the visible
+/// grants.
+#[derive(Clone, Debug)]
+struct ConfigurableSources(BTreeSet<String>);
+
 const POSITION_STRATEGY_PUBLISH_PATH: &str = "/api/catalog/position-strategies";
 const PUBLISH_TOKEN_HEADER: &str = "x-cta-publish-token";
 const MAX_PUBLISH_BODY_BYTES: usize = 1 << 20;
@@ -439,8 +447,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             put(save_position_managers),
         )
         .route(
-            "/api/catalog/position-strategies/{name}/viewers",
-            put(save_position_viewers),
+            "/api/catalog/position-strategies/{name}/grants",
+            put(save_position_grants),
         )
         .route(
             "/api/catalog/publish-tokens",
@@ -569,25 +577,33 @@ async fn auth_middleware(
         *request.method(),
         axum::http::Method::GET | axum::http::Method::HEAD
     );
-    // A source grant is both visibility and account-configuration authority.
-    // Global catalog/access mutations remain admin-only, except position target
-    // publishes handled above by their creator/manager/token-specific gate.
-    let allowed =
-        match auth::allowed_source_ids(&auth_state.pool, &user, &auth_state.configured_source_ids)
-            .await
-        {
-            Ok(allowed) => allowed,
-            Err(error) => {
-                error!(error = ?error, "failed to resolve source permissions");
-                return internal_error();
-            }
-        };
-    if let Some(message) = request_permission_error(user.is_admin(), read_only, source_id, &allowed)
+    // Account grants are tiered: 'view' reads the account, 'configure' also
+    // writes it. Global catalog/access mutations remain admin-only, except
+    // delegated strategy grant edits and position target publishes handled by
+    // their own gates.
+    let access = match auth::allowed_source_access(
+        &auth_state.pool,
+        &user,
+        &auth_state.configured_source_ids,
+    )
+    .await
+    {
+        Ok(access) => access,
+        Err(error) => {
+            error!(error = ?error, "failed to resolve source permissions");
+            return internal_error();
+        }
+    };
+    if let Some(message) =
+        request_permission_error(user.is_admin(), read_only, source_id, path, &access)
     {
         return forbidden(message);
     }
     request.extensions_mut().insert(user);
-    request.extensions_mut().insert(VisibleSources(allowed));
+    request.extensions_mut().insert(VisibleSources(access.view));
+    request
+        .extensions_mut()
+        .insert(ConfigurableSources(access.configure));
     next.run(request).await
 }
 
@@ -595,18 +611,30 @@ fn request_permission_error(
     is_admin: bool,
     read_only: bool,
     source_id: Option<&str>,
-    allowed_source_ids: &BTreeSet<String>,
+    path: &str,
+    access: &auth::SourceAccess,
 ) -> Option<&'static str> {
     if is_admin {
         return None;
     }
-    if !read_only && source_id.is_none() {
-        return Some("administrator permission required");
-    }
-    if source_id.is_some_and(|source_id| !allowed_source_ids.contains(source_id)) {
+    if source_id.is_some_and(|source_id| !access.view.contains(source_id)) {
         return Some("you are not authorized to view or configure this account");
     }
-    None
+    if read_only {
+        return None;
+    }
+    if let Some(source_id) = source_id {
+        if !access.configure.contains(source_id) {
+            return Some("you are not authorized to configure this account");
+        }
+        return None;
+    }
+    // Delegated grant edits reach their own strategy-level check in the
+    // handler; every other account-less write stays administrator-only.
+    if path.starts_with("/api/catalog/position-strategies/") && path.ends_with("/grants") {
+        return None;
+    }
+    Some("administrator permission required")
 }
 
 /// Position publishes arrive from machine publishers without a session, so the
@@ -666,7 +694,7 @@ async fn gate_position_publish(
 
     let mut allowed = session_user.as_ref().is_some_and(AuthUser::is_admin);
     if !allowed && let (Some(user), Some(access)) = (&session_user, &access) {
-        allowed = access.user_can_publish(user.user_id);
+        allowed = access.user_can_publish(user.user_id) || access.user_can_configure(user.user_id);
     }
 
     if !allowed {
@@ -674,7 +702,9 @@ async fn gate_position_publish(
             .and_then(|access| access.publish_token_hash)
             .filter(|hash| !hash.is_empty());
         allowed = match required_hash {
-            None => true,
+            // The legacy open push only applies to machine publishers without
+            // a session; a logged-in user still needs a strategy role.
+            None => session_user.is_none(),
             Some(hash) => {
                 let provided = parts
                     .headers
@@ -845,8 +875,8 @@ async fn auth_verify(
             .iter()
             .map(|source| source.id.clone())
             .collect();
-        let allowed = auth::allowed_source_ids(&state.pool, &user, &configured).await?;
-        if !allowed.contains(source_id) {
+        let access = auth::allowed_source_access(&state.pool, &user, &configured).await?;
+        if !access.view.contains(source_id) {
             return Ok(forbidden("you are not authorized to view this account"));
         }
     }
@@ -857,10 +887,15 @@ async fn auth_users(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
 ) -> Result<Response, ApiError> {
+    let mut users = auth::list_users(&state.pool).await?;
+    // Grant managers pick grantees from the user list too, but only admins may
+    // see each user's account grants.
     if !user.is_admin() {
-        return Ok(forbidden("administrator permission required"));
+        for target in &mut users {
+            target.source_grants.clear();
+        }
     }
-    Ok((NO_STORE, Json(auth::list_users(&state.pool).await?)).into_response())
+    Ok((NO_STORE, Json(users)).into_response())
 }
 
 async fn auth_create_user(
@@ -892,7 +927,7 @@ async fn auth_user_sources(
         .iter()
         .map(|source| source.id.clone())
         .collect();
-    match auth::set_sources(&state.pool, user_id, &request.source_ids, &configured).await {
+    match auth::set_sources(&state.pool, user_id, &request.grants, &configured).await {
         Ok(view) => Ok((NO_STORE, Json(view)).into_response()),
         Err(error) => Ok(bad_request(error.to_string())),
     }
@@ -930,11 +965,19 @@ async fn load_request_user(
 async fn dashboard(
     State(state): State<WebState>,
     Extension(visible): Extension<VisibleSources>,
+    Extension(configurable): Extension<ConfigurableSources>,
 ) -> impl IntoResponse {
     let mut dashboard = state.cache.read().await.dashboard.clone();
     dashboard
         .accounts
         .retain(|account| visible.0.contains(&account.source_id));
+    for account in &mut dashboard.accounts {
+        account.access_level = Some(if configurable.0.contains(&account.source_id) {
+            "configure"
+        } else {
+            "view"
+        });
+    }
     dashboard.report = nav::restrict_report(&dashboard.report, &visible.0);
     let now_ms = unix_now_ms();
     for account in &mut dashboard.accounts {
@@ -1807,7 +1850,6 @@ async fn order_config_auth() -> Response {
 
 async fn order_config_strategies(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let source = match resolve_order_config_source(&state.config, &source_id) {
@@ -1819,39 +1861,25 @@ async fn order_config_strategies(
         .list_strategies(source.exec_config_url.as_deref().unwrap_or_default())
         .await
     {
-        Ok(mut strategies) => {
-            if !user.is_admin() {
-                let visible = visible_account_binding_names(&state.pool, &user, &source_id).await?;
-                strategies.retain(|strategy| visible.contains(strategy));
-            }
-            Ok((
-                NO_STORE,
-                Json(StrategyListResponse {
-                    source_id,
-                    strategies,
-                }),
-            )
-                .into_response())
-        }
+        Ok(strategies) => Ok((
+            NO_STORE,
+            Json(StrategyListResponse {
+                source_id,
+                strategies,
+            }),
+        )
+            .into_response()),
         Err(error) => Ok(exec_config_error_response(&error)),
     }
 }
 
 async fn order_config_strategy(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Query(query): Query<StrategyQuery>,
 ) -> Result<Response, ApiError> {
     if let Err(message) = validate_strategy_name(&query.name) {
         return Ok(bad_request(message));
-    }
-    if !user.is_admin()
-        && !user_can_configure_binding(&state.pool, &user, &source_id, &query.name).await?
-    {
-        return Ok(forbidden(
-            "strategy visibility permission required for this account binding",
-        ));
     }
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
@@ -1873,7 +1901,6 @@ async fn order_config_strategy(
 
 async fn save_order_parameters(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     Json(request): Json<SaveOrderParametersRequest>,
@@ -1894,13 +1921,17 @@ async fn save_order_parameters(
     if let Err(message) = request.order_parameters.validate() {
         return Ok(bad_request(message));
     }
-    if !user.is_admin()
-        && !user_can_configure_binding(&state.pool, &user, &source_id, &request.strategy_name)
-            .await?
+    // Execution parameters may only be written for a strategy that is already
+    // bound on this account; binding it in the first place is the gated step.
+    match strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.strategy_name)
+        .await?
     {
-        return Ok(forbidden(
-            "strategy visibility permission required for this account binding",
-        ));
+        Some(_) => {}
+        None => {
+            return Ok(bad_request(
+                "strategy is not bound on this account".to_string(),
+            ));
+        }
     }
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
@@ -1996,8 +2027,8 @@ async fn save_order_parameters(
 }
 
 /// Admins see every strategy. Other users see a strategy while it keeps open
-/// visibility, or when they are its creator, a viewer, or a publish manager.
-/// New strategies are private by default.
+/// visibility, or when they are its creator, a grant holder, or a publish
+/// manager. New strategies are private by default.
 async fn list_position_strategies(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
@@ -2097,14 +2128,19 @@ async fn list_position_access(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
 ) -> Result<Response, ApiError> {
+    let mut access = strategy_catalog::list_position_access(&state.pool).await?;
     if !user.is_admin() {
-        return Ok(forbidden("administrator permission required"));
+        // Grant managers only see the strategies they may configure; admins
+        // see every strategy.
+        let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
+        access.retain(|view| {
+            visibility
+                .iter()
+                .find(|entry| entry.strategy_name == view.strategy_name)
+                .is_some_and(|entry| entry.user_can_configure(user.user_id))
+        });
     }
-    Ok((
-        NO_STORE,
-        Json(strategy_catalog::list_position_access(&state.pool).await?),
-    )
-        .into_response())
+    Ok((NO_STORE, Json(access)).into_response())
 }
 
 async fn save_position_publish_token(
@@ -2180,18 +2216,36 @@ async fn save_position_managers(
     }
 }
 
-/// Replaces the strategy's visibility in one call: `open_visibility` decides
-/// whether every logged-in user can see it, `user_ids` grants individual
-/// viewers while it stays private.
-async fn save_position_viewers(
+/// Replaces the strategy's per-user grants in one call. Admins may also flip
+/// `open_visibility`; delegated grant managers (anyone holding the strategy's
+/// configure grant) may edit the grant list but cannot change
+/// `open_visibility`.
+async fn save_position_grants(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
-    Json(request): Json<strategy_catalog::SavePositionVisibilityRequest>,
+    Json(request): Json<strategy_catalog::SavePositionGrantsRequest>,
 ) -> Result<Response, ApiError> {
-    match strategy_catalog::set_position_visibility(
+    let access = match strategy_catalog::load_position_access(&state.pool, &name).await? {
+        Some(access) => access,
+        None => return Ok(not_found("position strategy was not found")),
+    };
+    if !user.is_admin() {
+        if !access.user_can_manage_grants(user.user_id) {
+            return Ok(forbidden(
+                "strategy configure permission required to manage grants",
+            ));
+        }
+        if request.open_visibility != access.open_visibility {
+            return Ok(forbidden(
+                "administrator permission required to change open visibility",
+            ));
+        }
+    }
+    match strategy_catalog::set_position_grants(
         &state.pool,
         &name,
-        &request.user_ids,
+        &request.grants,
         request.open_visibility,
     )
     .await
@@ -2313,13 +2367,12 @@ fn live_equity_status(snapshot_ts_ms: i64, now_ms: i64) -> &'static str {
 
 async fn get_account_studio(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
 ) -> Result<Response, ApiError> {
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
-    match load_visible_account_studio(&state.pool, &user, &source_id).await {
+    match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
         Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
         Err(error) => Ok(catalog_error(error)),
     }
@@ -2327,7 +2380,6 @@ async fn get_account_studio(
 
 async fn save_account_estimated_fee_rate(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Json(request): Json<SaveEstimatedFeeRateRequest>,
 ) -> Result<Response, ApiError> {
@@ -2350,7 +2402,7 @@ async fn save_account_estimated_fee_rate(
                 error!(source_id, error = %error, "dashboard refresh after fee update failed");
                 return Ok(catalog_error(error));
             }
-            match load_visible_account_studio(&state.pool, &user, &source_id).await {
+            match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
                 Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
                 Err(error) => Ok(catalog_error(error)),
             }
@@ -2369,7 +2421,6 @@ async fn save_account_estimated_fee_rate(
 
 async fn save_account_fee_rates(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Json(request): Json<SaveFeeRatesRequest>,
 ) -> Result<Response, ApiError> {
@@ -2407,7 +2458,7 @@ async fn save_account_fee_rates(
                 error!(source_id, error = %error, "dashboard refresh after fee update failed");
                 return Ok(catalog_error(error));
             }
-            match load_visible_account_studio(&state.pool, &user, &source_id).await {
+            match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
                 Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
                 Err(error) => Ok(catalog_error(error)),
             }
@@ -2638,7 +2689,20 @@ async fn save_account_binding(
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
-    if !user.is_admin()
+    let existing =
+        strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.binding_name)
+            .await?;
+    if let Some((position, _, _, _)) = &existing {
+        // An existing binding may be edited (order strategy, shares) or
+        // deleted, but it cannot be re-pointed at another position strategy;
+        // delete it and create a fresh binding for that.
+        if position.strategy_name != request.position_strategy_name {
+            return Ok(bad_request(
+                "an existing binding cannot change its position strategy; delete it first"
+                    .to_string(),
+            ));
+        }
+    } else if !user.is_admin()
         && !user_can_configure_position_strategy(
             &state.pool,
             &user,
@@ -2647,19 +2711,7 @@ async fn save_account_binding(
         .await?
     {
         return Ok(forbidden(
-            "strategy visibility permission required for this position strategy",
-        ));
-    }
-    if !user.is_admin()
-        && let Some((position, _, _, _)) =
-            strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.binding_name)
-                .await?
-        && position.strategy_name != request.position_strategy_name
-        && !user_can_configure_position_strategy(&state.pool, &user, &position.strategy_name)
-            .await?
-    {
-        return Ok(forbidden(
-            "strategy visibility permission required for the existing account binding",
+            "strategy configure permission required to bind this position strategy",
         ));
     }
     let updated_at_us = unix_now_us();
@@ -2674,7 +2726,6 @@ async fn save_account_binding(
         Ok(studio) => studio,
         Err(error) => return Ok(catalog_error(error)),
     };
-    let studio = restrict_account_studio(&state.pool, &user, studio).await?;
     if request.shares == 0.0
         && let Err(failure) =
             stop_binding(&state, &source_id, &request.binding_name, updated_at_us).await
@@ -2686,19 +2737,11 @@ async fn save_account_binding(
 
 async fn save_account_binding_shares(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Path((source_id, binding_name)): Path<(String, String)>,
     Json(request): Json<SaveBindingSharesRequest>,
 ) -> Result<Response, ApiError> {
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
-    }
-    if !user.is_admin()
-        && !user_can_configure_binding(&state.pool, &user, &source_id, &binding_name).await?
-    {
-        return Ok(forbidden(
-            "strategy visibility permission required for this account binding",
-        ));
     }
     let updated_at_us = unix_now_us();
     let studio = match strategy_catalog::save_binding_shares(
@@ -2713,7 +2756,6 @@ async fn save_account_binding_shares(
         Ok(studio) => studio,
         Err(error) => return Ok(catalog_error(error)),
     };
-    let studio = restrict_account_studio(&state.pool, &user, studio).await?;
     if request.shares > 0.0 {
         return Ok((NO_STORE, Json(studio)).into_response());
     }
@@ -2726,16 +2768,8 @@ async fn save_account_binding_shares(
 
 async fn delete_account_binding(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    if !user.is_admin()
-        && !user_can_configure_binding(&state.pool, &user, &source_id, &binding_name).await?
-    {
-        return Ok(forbidden(
-            "strategy visibility permission required for this account binding",
-        ));
-    }
     match strategy_catalog::delete_binding(&state.pool, &source_id, &binding_name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("binding was not found")),
@@ -2745,16 +2779,8 @@ async fn delete_account_binding(
 
 async fn publish_account_binding(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    if !user.is_admin()
-        && !user_can_configure_binding(&state.pool, &user, &source_id, &binding_name).await?
-    {
-        return Ok(forbidden(
-            "strategy visibility permission required for this account binding",
-        ));
-    }
     let shares = strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name)
         .await?
         .map(|loaded| loaded.3);
@@ -2833,69 +2859,9 @@ async fn publish_bound_accounts(
     publishes
 }
 
-async fn user_can_configure_binding(
-    pool: &PgPool,
-    user: &AuthUser,
-    source_id: &str,
-    binding_name: &str,
-) -> Result<bool, ApiError> {
-    let Some((position, _, _, _)) =
-        strategy_catalog::load_binding_parts(pool, source_id, binding_name).await?
-    else {
-        return Ok(false);
-    };
-    user_can_configure_position_strategy(pool, user, &position.strategy_name).await
-}
-
-async fn load_visible_account_studio(
-    pool: &PgPool,
-    user: &AuthUser,
-    source_id: &str,
-) -> Result<strategy_catalog::AccountStudio> {
-    let studio = strategy_catalog::load_account_studio(pool, source_id).await?;
-    restrict_account_studio(pool, user, studio).await
-}
-
-async fn restrict_account_studio(
-    pool: &PgPool,
-    user: &AuthUser,
-    mut studio: strategy_catalog::AccountStudio,
-) -> Result<strategy_catalog::AccountStudio> {
-    if user.is_admin() {
-        return Ok(studio);
-    }
-    let visible = strategy_catalog::list_position_visibility(pool)
-        .await?
-        .into_iter()
-        .filter(|strategy| strategy.user_can_view(user.user_id))
-        .map(|strategy| strategy.strategy_name)
-        .collect::<BTreeSet<_>>();
-    retain_visible_account_bindings(&mut studio, &visible);
-    Ok(studio)
-}
-
-fn retain_visible_account_bindings(
-    studio: &mut strategy_catalog::AccountStudio,
-    visible_strategy_names: &BTreeSet<String>,
-) {
-    studio
-        .bindings
-        .retain(|binding| visible_strategy_names.contains(&binding.position_strategy_name));
-}
-
-async fn visible_account_binding_names(
-    pool: &PgPool,
-    user: &AuthUser,
-    source_id: &str,
-) -> Result<BTreeSet<String>> {
-    Ok(load_visible_account_studio(pool, user, source_id)
-        .await?
-        .bindings
-        .into_iter()
-        .map(|binding| binding.binding_name)
-        .collect())
-}
-
+/// A user may newly bind a position strategy only when they hold its
+/// configure grant (or publish-manage it); existing bindings stay editable
+/// with just the account-level configure grant checked by the middleware.
 async fn user_can_configure_position_strategy(
     pool: &PgPool,
     user: &AuthUser,
@@ -2904,7 +2870,7 @@ async fn user_can_configure_position_strategy(
     let Some(access) = strategy_catalog::load_position_access(pool, strategy_name).await? else {
         return Ok(false);
     };
-    Ok(access.user_can_view(user.user_id))
+    Ok(access.user_can_configure(user.user_id))
 }
 
 struct PublishFailure {
@@ -3848,6 +3814,7 @@ async fn build_dashboard(
                 enabled: source.enabled,
                 gateway_prefix: source.gateway_prefix.clone(),
                 configurable: source.exec_config_url.is_some(),
+                access_level: None,
                 account_pnl_start_ts_us,
                 strategy_pnl_start_ts_us,
                 live_equity_usdt: live.as_ref().map(|snapshot| snapshot.equity_usdt),
@@ -4314,7 +4281,7 @@ mod tests {
             publish_token_hash: None,
             open_visibility: true,
             manager_user_ids: vec![],
-            viewer_user_ids: vec![],
+            grants: BTreeMap::new(),
         };
         assert!(!open.token_required());
         assert!(!open.user_can_publish(7));
@@ -4333,7 +4300,7 @@ mod tests {
             publish_token_hash: Some(auth::publish_token_hash("s3cret-token")),
             open_visibility: false,
             manager_user_ids: vec![7],
-            viewer_user_ids: vec![11],
+            grants: BTreeMap::from([(11, "view".to_string()), (12, "configure".to_string())]),
         };
         assert!(protected.token_required());
         assert!(protected.user_can_publish(3));
@@ -4343,6 +4310,13 @@ mod tests {
         assert!(protected.user_can_view(7));
         assert!(protected.user_can_view(11));
         assert!(!protected.user_can_view(8));
+        // Managers and configure grantees can bind the strategy and manage its
+        // grants; view grantees and the bare creator cannot.
+        assert!(protected.user_can_configure(7));
+        assert!(protected.user_can_configure(12));
+        assert!(protected.user_can_manage_grants(12));
+        assert!(!protected.user_can_configure(11));
+        assert!(!protected.user_can_configure(3));
         assert!(auth::publish_token_matches(
             Some("s3cret-token"),
             protected.publish_token_hash.as_deref().unwrap()
@@ -4359,55 +4333,78 @@ mod tests {
 
     #[test]
     fn source_grants_allow_only_their_account_mutations() {
-        let allowed = BTreeSet::from(["binance_exec_trade01".to_string()]);
-        assert_eq!(request_permission_error(false, true, None, &allowed), None);
+        let access = auth::SourceAccess {
+            view: BTreeSet::from([
+                "binance_exec_trade01".to_string(),
+                "binance_exec_trade02".to_string(),
+            ]),
+            configure: BTreeSet::from(["binance_exec_trade01".to_string()]),
+        };
+        let grants_path = "/api/catalog/position-strategies/sk/grants";
+        let account_path = "/api/catalog/accounts/binance_exec_trade01/bindings";
+        // Reads need the view tier; writes need the configure tier.
         assert_eq!(
-            request_permission_error(false, false, Some("binance_exec_trade01"), &allowed),
+            request_permission_error(false, true, None, "/api/timeline", &access),
             None
         );
         assert_eq!(
-            request_permission_error(false, false, Some("binance_exec_trade02"), &allowed),
-            Some("you are not authorized to view or configure this account")
+            request_permission_error(
+                false,
+                true,
+                Some("binance_exec_trade02"),
+                account_path,
+                &access
+            ),
+            None
         );
         assert_eq!(
-            request_permission_error(false, false, None, &allowed),
+            request_permission_error(
+                false,
+                false,
+                Some("binance_exec_trade01"),
+                account_path,
+                &access
+            ),
+            None
+        );
+        assert_eq!(
+            request_permission_error(
+                false,
+                false,
+                Some("binance_exec_trade02"),
+                account_path,
+                &access
+            ),
+            Some("you are not authorized to configure this account")
+        );
+        assert_eq!(
+            request_permission_error(
+                false,
+                true,
+                Some("binance_exec_trade03"),
+                "/api/order-config/binance_exec_trade03/strategies",
+                &access
+            ),
+            Some("you are not authorized to view or configure this account")
+        );
+        // Delegated grant edits pass through to their own strategy-level check.
+        assert_eq!(
+            request_permission_error(false, false, None, grants_path, &access),
+            None
+        );
+        assert_eq!(
+            request_permission_error(false, false, None, "/api/auth/users", &access),
             Some("administrator permission required")
         );
         assert_eq!(
-            request_permission_error(true, false, Some("binance_exec_trade02"), &allowed),
+            request_permission_error(
+                true,
+                false,
+                Some("binance_exec_trade03"),
+                account_path,
+                &access
+            ),
             None
         );
-    }
-
-    #[test]
-    fn account_studio_only_keeps_bindings_for_visible_strategies() {
-        let mut studio = crate::strategy_catalog::AccountStudio {
-            source_id: "binance_exec_trade06".to_string(),
-            estimated_fee_rate: 0.0004,
-            maker_fee_rate: 0.0002,
-            taker_fee_rate: 0.0004,
-            theoretical_twap_fee_rate: 0.0004,
-            bindings: vec![
-                crate::strategy_catalog::AccountBinding {
-                    source_id: "binance_exec_trade06".to_string(),
-                    binding_name: "sk_strategy".to_string(),
-                    position_strategy_name: "sk_strategy".to_string(),
-                    order_strategy_name: "default_order".to_string(),
-                    shares: 1.0,
-                    updated_at_us: 1,
-                },
-                crate::strategy_catalog::AccountBinding {
-                    source_id: "binance_exec_trade06".to_string(),
-                    binding_name: "prc_strategy".to_string(),
-                    position_strategy_name: "prc_strategy".to_string(),
-                    order_strategy_name: "default_order".to_string(),
-                    shares: 1.0,
-                    updated_at_us: 1,
-                },
-            ],
-        };
-        retain_visible_account_bindings(&mut studio, &BTreeSet::from(["sk_strategy".to_string()]));
-        assert_eq!(studio.bindings.len(), 1);
-        assert_eq!(studio.bindings[0].binding_name, "sk_strategy");
     }
 }

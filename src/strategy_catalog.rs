@@ -348,11 +348,12 @@ pub struct PositionAccess {
     /// SHA-256 hex of the publish token. NULL/empty keeps legacy open pushes.
     pub publish_token_hash: Option<String>,
     /// When false the strategy is private: only admins, the creator, granted
-    /// viewers, and publish managers can see it. New strategies default to
+    /// users, and publish managers can see it. New strategies default to
     /// private.
     pub open_visibility: bool,
     pub manager_user_ids: Vec<i64>,
-    pub viewer_user_ids: Vec<i64>,
+    /// Per-user grants: "view" or "configure" (configure implies view).
+    pub grants: BTreeMap<i64, String>,
 }
 
 impl PositionAccess {
@@ -366,15 +367,33 @@ impl PositionAccess {
         self.created_by_user_id == Some(user_id) || self.manager_user_ids.contains(&user_id)
     }
 
-    /// Viewers are a separate axis from publish managers. A strategy is
+    /// Grants are a separate axis from publish managers. A strategy is
     /// visible to every logged-in user only while `open_visibility` is set;
-    /// otherwise only the creator, viewers, and managers can see it (admins
-    /// always see all).
+    /// otherwise only the creator, granted users, and managers can see it
+    /// (admins always see all).
     pub fn user_can_view(&self, user_id: i64) -> bool {
         self.open_visibility
             || self.created_by_user_id == Some(user_id)
-            || self.viewer_user_ids.contains(&user_id)
+            || self.grants.contains_key(&user_id)
             || self.manager_user_ids.contains(&user_id)
+    }
+
+    /// Configure authorizes binding this strategy to an account and editing
+    /// its targets. Managers hold it implicitly; the creator does not, so a
+    /// freshly created private strategy still needs an explicit configure
+    /// grant before anyone can bind it.
+    pub fn user_can_configure(&self, user_id: i64) -> bool {
+        self.manager_user_ids.contains(&user_id)
+            || self
+                .grants
+                .get(&user_id)
+                .is_some_and(|level| level == "configure")
+    }
+
+    /// Configure holders also manage this strategy's view/configure grants,
+    /// which is how a strategy owner delegates access to other users.
+    pub fn user_can_manage_grants(&self, user_id: i64) -> bool {
+        self.user_can_configure(user_id)
     }
 }
 
@@ -385,15 +404,22 @@ pub struct PositionManagerView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PositionGrantView {
+    pub user_id: i64,
+    pub username: String,
+    pub access_level: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PositionAccessView {
     pub strategy_name: String,
     pub created_by: Option<String>,
     pub publish_token_set: bool,
     /// True means every logged-in user can see the strategy. False keeps it
-    /// private to admins, the creator, viewers, and managers.
+    /// private to admins, the creator, granted users, and managers.
     pub open_visibility: bool,
     pub managers: Vec<PositionManagerView>,
-    pub viewers: Vec<PositionManagerView>,
+    pub grants: Vec<PositionGrantView>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,8 +433,14 @@ pub struct SavePositionManagersRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SavePositionVisibilityRequest {
-    pub user_ids: Vec<i64>,
+pub struct PositionGrantInput {
+    pub user_id: i64,
+    pub access_level: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SavePositionGrantsRequest {
+    pub grants: Vec<PositionGrantInput>,
     pub open_visibility: bool,
 }
 
@@ -440,19 +472,26 @@ pub async fn load_position_access(
     .fetch_all(pool)
     .await
     .context("failed to load position strategy managers")?;
-    let viewer_user_ids = sqlx::query_scalar::<_, i64>(
-        "SELECT user_id FROM cta_position_strategy_viewers WHERE strategy_name = $1",
+    let grant_rows = sqlx::query(
+        "SELECT user_id, access_level FROM cta_position_strategy_grants WHERE strategy_name = $1",
     )
     .bind(strategy_name)
     .fetch_all(pool)
     .await
-    .context("failed to load position strategy viewers")?;
+    .context("failed to load position strategy grants")?;
+    let mut grants = BTreeMap::new();
+    for grant_row in grant_rows {
+        grants.insert(
+            grant_row.try_get::<i64, _>("user_id")?,
+            grant_row.try_get::<String, _>("access_level")?,
+        );
+    }
     Ok(Some(PositionAccess {
         created_by_user_id: row.try_get("created_by_user_id")?,
         publish_token_hash: row.try_get("publish_token_hash")?,
         open_visibility: row.try_get("open_visibility")?,
         manager_user_ids,
-        viewer_user_ids,
+        grants,
     }))
 }
 
@@ -464,15 +503,24 @@ pub struct PositionVisibility {
     pub created_by_user_id: Option<i64>,
     pub open_visibility: bool,
     pub manager_user_ids: Vec<i64>,
-    pub viewer_user_ids: Vec<i64>,
+    /// Per-user grants: "view" or "configure" (configure implies view).
+    pub grants: BTreeMap<i64, String>,
 }
 
 impl PositionVisibility {
     pub fn user_can_view(&self, user_id: i64) -> bool {
         self.open_visibility
             || self.created_by_user_id == Some(user_id)
-            || self.viewer_user_ids.contains(&user_id)
+            || self.grants.contains_key(&user_id)
             || self.manager_user_ids.contains(&user_id)
+    }
+
+    pub fn user_can_configure(&self, user_id: i64) -> bool {
+        self.manager_user_ids.contains(&user_id)
+            || self
+                .grants
+                .get(&user_id)
+                .is_some_and(|level| level == "configure")
     }
 }
 
@@ -481,23 +529,38 @@ pub async fn list_position_visibility(pool: &PgPool) -> Result<Vec<PositionVisib
         r#"
         SELECT p.strategy_name, p.created_by_user_id, p.open_visibility,
             COALESCE((SELECT array_agg(m.user_id) FROM cta_position_strategy_managers m
-                      WHERE m.strategy_name = p.strategy_name), '{}') AS manager_user_ids,
-            COALESCE((SELECT array_agg(v.user_id) FROM cta_position_strategy_viewers v
-                      WHERE v.strategy_name = p.strategy_name), '{}') AS viewer_user_ids
+                      WHERE m.strategy_name = p.strategy_name), '{}') AS manager_user_ids
         FROM cta_position_strategies p
         "#,
     )
     .fetch_all(pool)
     .await
     .context("failed to list position strategy visibility")?;
+    let grant_rows = sqlx::query(
+        "SELECT strategy_name, user_id, access_level FROM cta_position_strategy_grants",
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to list position strategy grants")?;
+    let mut grants_by_strategy: std::collections::HashMap<String, BTreeMap<i64, String>> =
+        std::collections::HashMap::new();
+    for row in grant_rows {
+        grants_by_strategy
+            .entry(row.try_get("strategy_name")?)
+            .or_default()
+            .insert(row.try_get("user_id")?, row.try_get("access_level")?);
+    }
     rows.into_iter()
         .map(|row| {
+            let strategy_name: String = row.try_get("strategy_name")?;
             Ok(PositionVisibility {
-                strategy_name: row.try_get("strategy_name")?,
+                grants: grants_by_strategy
+                    .remove(&strategy_name)
+                    .unwrap_or_default(),
+                strategy_name,
                 created_by_user_id: row.try_get("created_by_user_id")?,
                 open_visibility: row.try_get("open_visibility")?,
                 manager_user_ids: row.try_get("manager_user_ids")?,
-                viewer_user_ids: row.try_get("viewer_user_ids")?,
             })
         })
         .collect()
@@ -527,18 +590,18 @@ pub async fn list_position_access(pool: &PgPool) -> Result<Vec<PositionAccessVie
     .fetch_all(pool)
     .await
     .context("failed to list position strategy managers")?;
-    let viewer_rows = sqlx::query(
+    let grant_rows = sqlx::query(
         r#"
-        SELECT v.strategy_name, v.user_id, u.username
-        FROM cta_position_strategy_viewers v
-        JOIN cta_users u ON u.user_id = v.user_id
+        SELECT g.strategy_name, g.user_id, u.username, g.access_level
+        FROM cta_position_strategy_grants g
+        JOIN cta_users u ON u.user_id = g.user_id
         WHERE u.disabled = false
         ORDER BY u.username
         "#,
     )
     .fetch_all(pool)
     .await
-    .context("failed to list position strategy viewers")?;
+    .context("failed to list position strategy grants")?;
     let mut managers_by_strategy: std::collections::HashMap<String, Vec<PositionManagerView>> =
         std::collections::HashMap::new();
     for row in manager_rows {
@@ -550,15 +613,16 @@ pub async fn list_position_access(pool: &PgPool) -> Result<Vec<PositionAccessVie
                 username: row.try_get("username")?,
             });
     }
-    let mut viewers_by_strategy: std::collections::HashMap<String, Vec<PositionManagerView>> =
+    let mut grants_by_strategy: std::collections::HashMap<String, Vec<PositionGrantView>> =
         std::collections::HashMap::new();
-    for row in viewer_rows {
-        viewers_by_strategy
+    for row in grant_rows {
+        grants_by_strategy
             .entry(row.try_get("strategy_name")?)
             .or_default()
-            .push(PositionManagerView {
+            .push(PositionGrantView {
                 user_id: row.try_get("user_id")?,
                 username: row.try_get("username")?,
+                access_level: row.try_get("access_level")?,
             });
     }
     rows.into_iter()
@@ -572,7 +636,7 @@ pub async fn list_position_access(pool: &PgPool) -> Result<Vec<PositionAccessVie
                 managers: managers_by_strategy
                     .remove(&strategy_name)
                     .unwrap_or_default(),
-                viewers: viewers_by_strategy
+                grants: grants_by_strategy
                     .remove(&strategy_name)
                     .unwrap_or_default(),
                 strategy_name,
@@ -661,20 +725,22 @@ pub async fn set_position_managers(
     Ok(true)
 }
 
-/// Replaces the visibility of one strategy in a single transaction: the
+/// Replaces the access of one strategy in a single transaction: the
 /// `open_visibility` flag decides whether every logged-in user can see it, and
-/// the viewer list grants individual users while it stays private.
-pub async fn set_position_visibility(
+/// the grant list assigns each user a view or configure level while it stays
+/// private.
+pub async fn set_position_grants(
     pool: &PgPool,
     strategy_name: &str,
-    user_ids: &[i64],
+    grants: &[PositionGrantInput],
     open_visibility: bool,
 ) -> Result<bool> {
-    let unique = user_ids.iter().copied().collect::<BTreeSet<_>>();
-    let mut tx = pool
-        .begin()
-        .await
-        .context("failed to begin viewer update")?;
+    let mut unique: BTreeMap<i64, String> = BTreeMap::new();
+    for grant in grants {
+        let access_level = crate::auth::validate_access_level(grant.access_level.trim())?;
+        unique.insert(grant.user_id, access_level.to_string());
+    }
+    let mut tx = pool.begin().await.context("failed to begin grant update")?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM cta_position_strategies WHERE strategy_name = $1)",
     )
@@ -685,16 +751,16 @@ pub async fn set_position_visibility(
     if !exists {
         return Ok(false);
     }
-    for user_id in &unique {
+    for user_id in unique.keys() {
         let valid: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM cta_users WHERE user_id = $1 AND disabled = false)",
         )
         .bind(user_id)
         .fetch_one(&mut *tx)
         .await
-        .context("failed to load viewer user")?;
+        .context("failed to load grant user")?;
         if !valid {
-            bail!("user_ids contains an unknown user: {user_id}");
+            bail!("grants contains an unknown user: {user_id}");
         }
     }
     sqlx::query("UPDATE cta_position_strategies SET open_visibility = $2 WHERE strategy_name = $1")
@@ -703,24 +769,23 @@ pub async fn set_position_visibility(
         .execute(&mut *tx)
         .await
         .context("failed to save position strategy visibility")?;
-    sqlx::query("DELETE FROM cta_position_strategy_viewers WHERE strategy_name = $1")
+    sqlx::query("DELETE FROM cta_position_strategy_grants WHERE strategy_name = $1")
         .bind(strategy_name)
         .execute(&mut *tx)
         .await
-        .context("failed to clear position strategy viewers")?;
-    for user_id in unique {
+        .context("failed to clear position strategy grants")?;
+    for (user_id, access_level) in unique {
         sqlx::query(
-            "INSERT INTO cta_position_strategy_viewers (strategy_name, user_id) VALUES ($1, $2)",
+            "INSERT INTO cta_position_strategy_grants (strategy_name, user_id, access_level) VALUES ($1, $2, $3)",
         )
         .bind(strategy_name)
         .bind(user_id)
+        .bind(access_level)
         .execute(&mut *tx)
         .await
-        .context("failed to save position strategy viewer")?;
+        .context("failed to save position strategy grant")?;
     }
-    tx.commit()
-        .await
-        .context("failed to commit viewer update")?;
+    tx.commit().await.context("failed to commit grant update")?;
     Ok(true)
 }
 

@@ -8,6 +8,7 @@ export function ContractLeverageToolbar({
   contractLeverage,
   queriedLeverage,
   saving,
+  readOnly = false,
   onSymbolChange,
   onContractLeverageChange,
   onQuery,
@@ -17,6 +18,7 @@ export function ContractLeverageToolbar({
   contractLeverage: string
   queriedLeverage?: string | null
   saving?: boolean
+  readOnly?: boolean
   onSymbolChange: (value: string) => void
   onContractLeverageChange: (value: string) => void
   onQuery: () => void
@@ -43,13 +45,14 @@ export function ContractLeverageToolbar({
         <Input
           value={contractLeverage}
           inputMode="numeric"
+          disabled={readOnly}
           onChange={(event) => onContractLeverageChange(event.target.value)}
         />
       </label>
       <Button type="button" variant="secondary" disabled={saving} onClick={onQuery}>
         查询
       </Button>
-      <Button type="submit" variant="primary" disabled={saving}>
+      <Button type="submit" variant="primary" disabled={saving || readOnly}>
         设置
       </Button>
       {queriedLeverage ? (
