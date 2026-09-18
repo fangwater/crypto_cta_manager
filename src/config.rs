@@ -89,6 +89,9 @@ pub struct MonitorConfig {
     /// Maximum recent records read from each Exec RocksDB column family per poll.
     pub recent_order_records: usize,
     pub position_tolerance: f64,
+    /// Unfinished or mismatched position value below this USDT amount is
+    /// treated as ignorable dust instead of an alert.
+    pub position_residual_usdt: f64,
     /// Empty means monitor any symbol seen on the configured venue feed.
     pub market_symbols: Vec<String>,
     pub dingtalk: DingTalkConfig,
@@ -209,6 +212,7 @@ impl Default for MonitorConfig {
             execution_grace_secs: 30,
             recent_order_records: 2_000,
             position_tolerance: 1e-8,
+            position_residual_usdt: 50.0,
             market_symbols: vec![
                 "BTCUSDT".to_string(),
                 "ETHUSDT".to_string(),
@@ -285,6 +289,11 @@ impl AppConfig {
         }
         if !self.monitor.position_tolerance.is_finite() || self.monitor.position_tolerance < 0.0 {
             bail!("monitor.position_tolerance must be finite and non-negative");
+        }
+        if !self.monitor.position_residual_usdt.is_finite()
+            || self.monitor.position_residual_usdt < 0.0
+        {
+            bail!("monitor.position_residual_usdt must be finite and non-negative");
         }
         if self.monitor.dingtalk.request_timeout_secs == 0 {
             bail!("monitor.dingtalk.request_timeout_secs must be greater than zero");

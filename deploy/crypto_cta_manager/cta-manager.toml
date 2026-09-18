@@ -28,7 +28,7 @@ compact_interval_secs = 3600
 
 [monitor]
 # Enable only after both webhook URLs are installed in the host EnvironmentFile.
-# The process is independently deployed by systemd.
+# The process is independently deployed by pmdaemon.
 enabled = false
 poll_interval_secs = 10
 repeat_alert_secs = 30
@@ -38,6 +38,7 @@ position_stale_secs = 30
 execution_grace_secs = 30
 recent_order_records = 2000
 position_tolerance = 0.00000001
+position_residual_usdt = 50
 # sk traded pairs: alert when none of them delivered a new BBO within
 # market_stale_secs. Empty means check the venue feed for any fresh BBO.
 market_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]

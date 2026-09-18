@@ -54,6 +54,7 @@ pub struct ExecStateRowSnapshot {
     pub symbol: String,
     pub source_updated_at_ms: i64,
     pub current_qty: Option<f64>,
+    pub current_usdt: Option<f64>,
     pub target_qty: Option<f64>,
     pub pending_qty: Option<f64>,
     pub live_order_qty: Option<f64>,
@@ -251,6 +252,7 @@ fn extract_exec_state_from_decoded(source_id: &str, snapshot: &VizSnapshot) -> E
                 symbol: normalize_symbol(&row.symbol),
                 source_updated_at_ms: row.source_updated_at_ms,
                 current_qty: row.current_qty.filter(|value| value.is_finite()),
+                current_usdt: row.current_usdt.filter(|value| value.is_finite()),
                 target_qty: row.target_qty.filter(|value| value.is_finite()),
                 pending_qty: row.pending_qty.filter(|value| value.is_finite()),
                 live_order_qty: row.live_order_qty.filter(|value| value.is_finite()),
@@ -569,6 +571,7 @@ mod tests {
                         "symbol": "BTC-USDT",
                         "source_updated_at_ms": 990,
                         "current_qty": 0.5,
+                        "current_usdt": 32500.0,
                         "target_qty": 0.8,
                         "pending_qty": 0.2,
                         "live_order_qty": 0.1,
@@ -584,6 +587,7 @@ mod tests {
         assert!(state.position_ready);
         assert_eq!(state.rows.len(), 1);
         assert_eq!(state.rows[0].symbol, "BTCUSDT");
+        assert_eq!(state.rows[0].current_usdt, Some(32_500.0));
         assert_eq!(state.rows[0].target_qty, Some(0.8));
         assert_eq!(state.rows[0].pending_qty, Some(0.2));
         assert_eq!(state.rows[0].live_order_qty, Some(0.1));

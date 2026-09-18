@@ -199,6 +199,16 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
         .collect::<Vec<_>>();
     let market = MarketFeed::spawn(venues);
     let viz = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
+    // Give the BBO subscription one stale window to deliver before judging
+    // freshness; the first poll would otherwise always report a market outage.
+    let market_warmup = Duration::from_secs(config.monitor.market_stale_secs);
+    tokio::select! {
+        _ = tokio::time::sleep(market_warmup) => {}
+        result = tokio::signal::ctrl_c() => {
+            result.context("failed to wait for shutdown signal")?;
+            return Ok(());
+        }
+    }
     let senders = (!dry_run)
         .then(|| DingTalkSenders::from_config(&config.monitor.dingtalk))
         .transpose()?;
@@ -577,6 +587,8 @@ fn check_position(
     let mut inflight_sum = HashMap::<&str, f64>::new();
     let mut symbols_missing_fields = HashSet::<&str>::new();
     let mut symbol_last_update = HashMap::<&str, i64>::new();
+    let mut usdt_value_by_symbol = HashMap::<&str, f64>::new();
+    let mut valued_qty_by_symbol = HashMap::<&str, f64>::new();
     for row in &snapshot.rows {
         if let Some(account_qty) = row.account_position_qty {
             if let Some(previous) = account_qty_by_symbol.get(row.symbol.as_str())
@@ -609,6 +621,15 @@ fn check_position(
         }
         *inflight_sum.entry(row.symbol.as_str()).or_insert(0.0) +=
             row.pending_qty.unwrap_or(0.0) + row.live_order_qty.unwrap_or(0.0);
+        // Rows with both qty and USDT value price the symbol's position gaps.
+        if let (Some(qty), Some(usdt)) = (row.current_qty, row.current_usdt) {
+            *usdt_value_by_symbol
+                .entry(row.symbol.as_str())
+                .or_insert(0.0) += usdt.abs();
+            *valued_qty_by_symbol
+                .entry(row.symbol.as_str())
+                .or_insert(0.0) += qty.abs();
+        }
         symbol_last_update
             .entry(row.symbol.as_str())
             .and_modify(|ts| *ts = (*ts).max(row.source_updated_at_ms))
@@ -633,6 +654,14 @@ fn check_position(
         if gap.abs() <= tolerance {
             continue;
         }
+        // Dust-valued gaps are residuals, not stuck executions.
+        let implied_price = valued_qty_by_symbol
+            .get(symbol)
+            .filter(|qty| **qty > f64::EPSILON)
+            .map(|qty| usdt_value_by_symbol.get(symbol).copied().unwrap_or(0.0) / *qty);
+        if implied_price.is_some_and(|price| gap.abs() * price <= monitor.position_residual_usdt) {
+            continue;
+        }
         let inflight = inflight_sum.get(symbol).copied().unwrap_or(0.0);
         if inflight.abs() > tolerance {
             continue;
@@ -655,6 +684,15 @@ fn check_position(
     issues
 }
 
+/// Implied mark price of a position row: |current_usdt / current_qty|.
+fn implied_usdt_price(current_qty: f64, current_usdt: Option<f64>) -> Option<f64> {
+    let usdt = current_usdt?;
+    if current_qty.abs() <= f64::EPSILON || !usdt.is_finite() {
+        return None;
+    }
+    Some((usdt / current_qty).abs())
+}
+
 fn check_execution_row(
     source: &SourceConfig,
     monitor: &MonitorConfig,
@@ -672,13 +710,19 @@ fn check_execution_row(
     let live_order_qty = row.live_order_qty.unwrap_or(0.0);
     let delta_qty = target_qty - current_qty;
     let ledger_error = delta_qty - pending_qty - live_order_qty;
+    // A quantity gap worth less than the USDT residual threshold is dust and
+    // never actionable; suppress every quantity-based row check for it.
+    let dust_qty = |qty: f64| {
+        implied_usdt_price(current_qty, row.current_usdt)
+            .is_some_and(|price| qty.abs() * price <= monitor.position_residual_usdt)
+    };
     let scale = target_qty
         .abs()
         .max(current_qty.abs())
         .max(pending_qty.abs())
         .max(live_order_qty.abs())
         .max(1.0);
-    if ledger_error.abs() > monitor.position_tolerance * scale {
+    if ledger_error.abs() > monitor.position_tolerance * scale && !dust_qty(ledger_error) {
         issues.push(MonitorIssue::new(
             "position",
             &format!("ledger:{}:{}", row.strategy_name, row.symbol),
@@ -694,7 +738,10 @@ fn check_execution_row(
 
     let tolerance = monitor.position_tolerance * scale;
     if row.execution_complete {
-        if delta_qty.abs() > tolerance && row.completion_reason != "exchange_minimum" {
+        if delta_qty.abs() > tolerance
+            && row.completion_reason != "exchange_minimum"
+            && !dust_qty(delta_qty)
+        {
             issues.push(MonitorIssue::new(
                 "position",
                 &format!("incomplete:{}:{}", row.strategy_name, row.symbol),
@@ -712,6 +759,7 @@ fn check_execution_row(
             && now_ms.saturating_sub(row.source_updated_at_ms)
                 > monitor.execution_grace_secs as i64 * 1_000
             && delta_qty.abs() > tolerance
+            && !dust_qty(delta_qty)
         {
             issues.push(MonitorIssue::new(
                 "position",
@@ -732,6 +780,7 @@ fn check_execution_row(
         if row.source_updated_at_ms > 0
             && now_ms.saturating_sub(row.source_updated_at_ms)
                 > monitor.execution_grace_secs as i64 * 1_000
+            && !dust_qty(delta_qty)
         {
             issues.push(MonitorIssue::new(
                 "position",
@@ -743,7 +792,7 @@ fn check_execution_row(
                 ),
             ));
         }
-    } else if now_ms > completion_deadline {
+    } else if now_ms > completion_deadline && !dust_qty(delta_qty) {
         issues.push(MonitorIssue::new(
             "position",
             &format!("stalled:{}:{}", row.strategy_name, row.symbol),
@@ -1301,6 +1350,7 @@ mod tests {
             symbol: symbol.to_string(),
             source_updated_at_ms: updated_ms,
             current_qty: Some(current),
+            current_usdt: None,
             target_qty: Some(target),
             pending_qty: Some(pending),
             live_order_qty: Some(live),
@@ -1376,6 +1426,72 @@ mod tests {
         minimum.rows[0].completion_reason = "exchange_minimum".to_string();
         let issues = check_position(&source, &monitor, &minimum, now_us);
         assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
+    }
+
+    #[test]
+    fn position_check_suppresses_dust_residuals() {
+        let source = test_source("binance-futures");
+        let monitor = MonitorConfig::default();
+        let now_us = unix_time_us();
+        let now_ms = now_us / 1_000;
+        let old_ms = now_ms - (monitor.execution_grace_secs as i64 + 10) * 1_000;
+        let snapshot = |rows: Vec<ExecStateRowSnapshot>| ExecStateSnapshot {
+            source_id: source.id.clone(),
+            snapshot_ts_ms: now_ms,
+            position_ready: true,
+            rows,
+        };
+
+        // Completed at target_tolerance with a sub-50 USDT leftover -> quiet.
+        let mut dust = snapshot(vec![position_row(
+            "cta_a",
+            "DOGEUSDT",
+            100.0,
+            101.0,
+            0.0,
+            0.0,
+            Some(100.0),
+            old_ms,
+        )]);
+        dust.rows[0].current_usdt = Some(10.0); // implied price 0.1 USDT
+        dust.rows[0].execution_complete = true;
+        dust.rows[0].completion_reason = "target_tolerance".to_string();
+        let issues = check_position(&source, &monitor, &dust, now_us);
+        assert!(
+            issues
+                .iter()
+                .all(|issue| !issue.key.starts_with("position:"))
+        );
+
+        // Same quantity gap priced far above the residual threshold -> alert.
+        let mut costly = dust.clone();
+        costly.rows[0].current_usdt = Some(10_000_000.0); // implied 100k USDT
+        let issues = check_position(&source, &monitor, &costly, now_us);
+        assert!(issues.iter().any(|issue| issue.key.contains("incomplete")));
+
+        // No USDT value to price the gap -> conservative, still alerts.
+        let mut unpriced = dust.clone();
+        unpriced.rows[0].current_usdt = None;
+        let issues = check_position(&source, &monitor, &unpriced, now_us);
+        assert!(issues.iter().any(|issue| issue.key.contains("incomplete")));
+
+        // Stuck aggregation gap valued below the threshold -> quiet.
+        let mut stuck = snapshot(vec![position_row(
+            "cta_a",
+            "DOGEUSDT",
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            Some(150.0),
+            old_ms,
+        )]);
+        stuck.rows[0].current_usdt = Some(10.0); // gap 50 qty x 0.1 = 5 USDT
+        let issues = check_position(&source, &monitor, &stuck, now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
+        stuck.rows[0].current_usdt = Some(100_000.0); // gap 50 qty x 1000 = 50k USDT
+        let issues = check_position(&source, &monitor, &stuck, now_us);
+        assert!(issues.iter().any(|issue| issue.key.contains("stuck")));
     }
 
     #[test]

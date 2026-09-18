@@ -43,6 +43,9 @@ position_stale_secs = 30
 execution_grace_secs = 30
 recent_order_records = 2000
 position_tolerance = 0.00000001
+# Unfinished or mismatched position value below this USDT amount is dust and
+# does not alert.
+position_residual_usdt = 50
 # Watched symbols for the market liveness check: one alert fires when none of
 # these symbols delivered a new BBO within market_stale_secs. Empty means check
 # that the venue feed has any fresh BBO at all. Defaults to the sk traded pairs.
