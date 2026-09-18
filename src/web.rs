@@ -564,12 +564,14 @@ async fn auth_middleware(
         },
         None => return unauthorized("login required"),
     };
-    if request.method() != axum::http::Method::GET
-        && request.method() != axum::http::Method::HEAD
-        && !user.is_admin()
-    {
-        return forbidden("administrator permission required");
-    }
+    let source_id = source_id_from_path(path);
+    let read_only = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    );
+    // A source grant is both visibility and account-configuration authority.
+    // Global catalog/access mutations remain admin-only, except position target
+    // publishes handled above by their creator/manager/token-specific gate.
     let allowed =
         match auth::allowed_source_ids(&auth_state.pool, &user, &auth_state.configured_source_ids)
             .await
@@ -580,14 +582,31 @@ async fn auth_middleware(
                 return internal_error();
             }
         };
-    if let Some(source_id) = source_id_from_path(path)
-        && !allowed.contains(source_id)
+    if let Some(message) = request_permission_error(user.is_admin(), read_only, source_id, &allowed)
     {
-        return forbidden("you are not authorized to view this account");
+        return forbidden(message);
     }
     request.extensions_mut().insert(user);
     request.extensions_mut().insert(VisibleSources(allowed));
     next.run(request).await
+}
+
+fn request_permission_error(
+    is_admin: bool,
+    read_only: bool,
+    source_id: Option<&str>,
+    allowed_source_ids: &BTreeSet<String>,
+) -> Option<&'static str> {
+    if is_admin {
+        return None;
+    }
+    if !read_only && source_id.is_none() {
+        return Some("administrator permission required");
+    }
+    if source_id.is_some_and(|source_id| !allowed_source_ids.contains(source_id)) {
+        return Some("you are not authorized to view or configure this account");
+    }
+    None
 }
 
 /// Position publishes arrive from machine publishers without a session, so the
@@ -1788,40 +1807,55 @@ async fn order_config_auth() -> Response {
 
 async fn order_config_strategies(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
-        Err(response) => return response,
+        Err(response) => return Ok(response),
     };
     match state
         .exec_config
         .list_strategies(source.exec_config_url.as_deref().unwrap_or_default())
         .await
     {
-        Ok(strategies) => (
-            NO_STORE,
-            Json(StrategyListResponse {
-                source_id,
-                strategies,
-            }),
-        )
-            .into_response(),
-        Err(error) => exec_config_error_response(&error),
+        Ok(mut strategies) => {
+            if !user.is_admin() {
+                let visible = visible_account_binding_names(&state.pool, &user, &source_id).await?;
+                strategies.retain(|strategy| visible.contains(strategy));
+            }
+            Ok((
+                NO_STORE,
+                Json(StrategyListResponse {
+                    source_id,
+                    strategies,
+                }),
+            )
+                .into_response())
+        }
+        Err(error) => Ok(exec_config_error_response(&error)),
     }
 }
 
 async fn order_config_strategy(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Query(query): Query<StrategyQuery>,
-) -> Response {
+) -> Result<Response, ApiError> {
     if let Err(message) = validate_strategy_name(&query.name) {
-        return bad_request(message);
+        return Ok(bad_request(message));
+    }
+    if !user.is_admin()
+        && !user_can_configure_binding(&state.pool, &user, &source_id, &query.name).await?
+    {
+        return Ok(forbidden(
+            "strategy visibility permission required for this account binding",
+        ));
     }
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
-        Err(response) => return response,
+        Err(response) => return Ok(response),
     };
     match state
         .exec_config
@@ -1832,13 +1866,14 @@ async fn order_config_strategy(
         )
         .await
     {
-        Ok(strategy) => (NO_STORE, Json(strategy)).into_response(),
-        Err(error) => exec_config_error_response(&error),
+        Ok(strategy) => Ok((NO_STORE, Json(strategy)).into_response()),
+        Err(error) => Ok(exec_config_error_response(&error)),
     }
 }
 
 async fn save_order_parameters(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     Json(request): Json<SaveOrderParametersRequest>,
@@ -1858,6 +1893,14 @@ async fn save_order_parameters(
     }
     if let Err(message) = request.order_parameters.validate() {
         return Ok(bad_request(message));
+    }
+    if !user.is_admin()
+        && !user_can_configure_binding(&state.pool, &user, &source_id, &request.strategy_name)
+            .await?
+    {
+        return Ok(forbidden(
+            "strategy visibility permission required for this account binding",
+        ));
     }
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
@@ -2270,12 +2313,13 @@ fn live_equity_status(snapshot_ts_ms: i64, now_ms: i64) -> &'static str {
 
 async fn get_account_studio(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
 ) -> Result<Response, ApiError> {
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
-    match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
+    match load_visible_account_studio(&state.pool, &user, &source_id).await {
         Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
         Err(error) => Ok(catalog_error(error)),
     }
@@ -2283,6 +2327,7 @@ async fn get_account_studio(
 
 async fn save_account_estimated_fee_rate(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Json(request): Json<SaveEstimatedFeeRateRequest>,
 ) -> Result<Response, ApiError> {
@@ -2305,7 +2350,7 @@ async fn save_account_estimated_fee_rate(
                 error!(source_id, error = %error, "dashboard refresh after fee update failed");
                 return Ok(catalog_error(error));
             }
-            match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
+            match load_visible_account_studio(&state.pool, &user, &source_id).await {
                 Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
                 Err(error) => Ok(catalog_error(error)),
             }
@@ -2324,6 +2369,7 @@ async fn save_account_estimated_fee_rate(
 
 async fn save_account_fee_rates(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Json(request): Json<SaveFeeRatesRequest>,
 ) -> Result<Response, ApiError> {
@@ -2361,7 +2407,7 @@ async fn save_account_fee_rates(
                 error!(source_id, error = %error, "dashboard refresh after fee update failed");
                 return Ok(catalog_error(error));
             }
-            match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
+            match load_visible_account_studio(&state.pool, &user, &source_id).await {
                 Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
                 Err(error) => Ok(catalog_error(error)),
             }
@@ -2585,11 +2631,36 @@ async fn save_account_symbol_contract_leverage(
 
 async fn save_account_binding(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Json(request): Json<SaveBindingRequest>,
 ) -> Result<Response, ApiError> {
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
+    }
+    if !user.is_admin()
+        && !user_can_configure_position_strategy(
+            &state.pool,
+            &user,
+            &request.position_strategy_name,
+        )
+        .await?
+    {
+        return Ok(forbidden(
+            "strategy visibility permission required for this position strategy",
+        ));
+    }
+    if !user.is_admin()
+        && let Some((position, _, _, _)) =
+            strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.binding_name)
+                .await?
+        && position.strategy_name != request.position_strategy_name
+        && !user_can_configure_position_strategy(&state.pool, &user, &position.strategy_name)
+            .await?
+    {
+        return Ok(forbidden(
+            "strategy visibility permission required for the existing account binding",
+        ));
     }
     let updated_at_us = unix_now_us();
     let studio = match strategy_catalog::save_binding(
@@ -2603,6 +2674,7 @@ async fn save_account_binding(
         Ok(studio) => studio,
         Err(error) => return Ok(catalog_error(error)),
     };
+    let studio = restrict_account_studio(&state.pool, &user, studio).await?;
     if request.shares == 0.0
         && let Err(failure) =
             stop_binding(&state, &source_id, &request.binding_name, updated_at_us).await
@@ -2614,11 +2686,19 @@ async fn save_account_binding(
 
 async fn save_account_binding_shares(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path((source_id, binding_name)): Path<(String, String)>,
     Json(request): Json<SaveBindingSharesRequest>,
 ) -> Result<Response, ApiError> {
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
+    }
+    if !user.is_admin()
+        && !user_can_configure_binding(&state.pool, &user, &source_id, &binding_name).await?
+    {
+        return Ok(forbidden(
+            "strategy visibility permission required for this account binding",
+        ));
     }
     let updated_at_us = unix_now_us();
     let studio = match strategy_catalog::save_binding_shares(
@@ -2633,6 +2713,7 @@ async fn save_account_binding_shares(
         Ok(studio) => studio,
         Err(error) => return Ok(catalog_error(error)),
     };
+    let studio = restrict_account_studio(&state.pool, &user, studio).await?;
     if request.shares > 0.0 {
         return Ok((NO_STORE, Json(studio)).into_response());
     }
@@ -2645,8 +2726,16 @@ async fn save_account_binding_shares(
 
 async fn delete_account_binding(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
+    if !user.is_admin()
+        && !user_can_configure_binding(&state.pool, &user, &source_id, &binding_name).await?
+    {
+        return Ok(forbidden(
+            "strategy visibility permission required for this account binding",
+        ));
+    }
     match strategy_catalog::delete_binding(&state.pool, &source_id, &binding_name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("binding was not found")),
@@ -2656,8 +2745,16 @@ async fn delete_account_binding(
 
 async fn publish_account_binding(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
+    if !user.is_admin()
+        && !user_can_configure_binding(&state.pool, &user, &source_id, &binding_name).await?
+    {
+        return Ok(forbidden(
+            "strategy visibility permission required for this account binding",
+        ));
+    }
     let shares = strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name)
         .await?
         .map(|loaded| loaded.3);
@@ -2734,6 +2831,80 @@ async fn publish_bound_accounts(
         }
     }
     publishes
+}
+
+async fn user_can_configure_binding(
+    pool: &PgPool,
+    user: &AuthUser,
+    source_id: &str,
+    binding_name: &str,
+) -> Result<bool, ApiError> {
+    let Some((position, _, _, _)) =
+        strategy_catalog::load_binding_parts(pool, source_id, binding_name).await?
+    else {
+        return Ok(false);
+    };
+    user_can_configure_position_strategy(pool, user, &position.strategy_name).await
+}
+
+async fn load_visible_account_studio(
+    pool: &PgPool,
+    user: &AuthUser,
+    source_id: &str,
+) -> Result<strategy_catalog::AccountStudio> {
+    let studio = strategy_catalog::load_account_studio(pool, source_id).await?;
+    restrict_account_studio(pool, user, studio).await
+}
+
+async fn restrict_account_studio(
+    pool: &PgPool,
+    user: &AuthUser,
+    mut studio: strategy_catalog::AccountStudio,
+) -> Result<strategy_catalog::AccountStudio> {
+    if user.is_admin() {
+        return Ok(studio);
+    }
+    let visible = strategy_catalog::list_position_visibility(pool)
+        .await?
+        .into_iter()
+        .filter(|strategy| strategy.user_can_view(user.user_id))
+        .map(|strategy| strategy.strategy_name)
+        .collect::<BTreeSet<_>>();
+    retain_visible_account_bindings(&mut studio, &visible);
+    Ok(studio)
+}
+
+fn retain_visible_account_bindings(
+    studio: &mut strategy_catalog::AccountStudio,
+    visible_strategy_names: &BTreeSet<String>,
+) {
+    studio
+        .bindings
+        .retain(|binding| visible_strategy_names.contains(&binding.position_strategy_name));
+}
+
+async fn visible_account_binding_names(
+    pool: &PgPool,
+    user: &AuthUser,
+    source_id: &str,
+) -> Result<BTreeSet<String>> {
+    Ok(load_visible_account_studio(pool, user, source_id)
+        .await?
+        .bindings
+        .into_iter()
+        .map(|binding| binding.binding_name)
+        .collect())
+}
+
+async fn user_can_configure_position_strategy(
+    pool: &PgPool,
+    user: &AuthUser,
+    strategy_name: &str,
+) -> Result<bool, ApiError> {
+    let Some(access) = strategy_catalog::load_position_access(pool, strategy_name).await? else {
+        return Ok(false);
+    };
+    Ok(access.user_can_view(user.user_id))
 }
 
 struct PublishFailure {
@@ -4184,5 +4355,59 @@ mod tests {
             None,
             protected.publish_token_hash.as_deref().unwrap()
         ));
+    }
+
+    #[test]
+    fn source_grants_allow_only_their_account_mutations() {
+        let allowed = BTreeSet::from(["binance_exec_trade01".to_string()]);
+        assert_eq!(request_permission_error(false, true, None, &allowed), None);
+        assert_eq!(
+            request_permission_error(false, false, Some("binance_exec_trade01"), &allowed),
+            None
+        );
+        assert_eq!(
+            request_permission_error(false, false, Some("binance_exec_trade02"), &allowed),
+            Some("you are not authorized to view or configure this account")
+        );
+        assert_eq!(
+            request_permission_error(false, false, None, &allowed),
+            Some("administrator permission required")
+        );
+        assert_eq!(
+            request_permission_error(true, false, Some("binance_exec_trade02"), &allowed),
+            None
+        );
+    }
+
+    #[test]
+    fn account_studio_only_keeps_bindings_for_visible_strategies() {
+        let mut studio = crate::strategy_catalog::AccountStudio {
+            source_id: "binance_exec_trade06".to_string(),
+            estimated_fee_rate: 0.0004,
+            maker_fee_rate: 0.0002,
+            taker_fee_rate: 0.0004,
+            theoretical_twap_fee_rate: 0.0004,
+            bindings: vec![
+                crate::strategy_catalog::AccountBinding {
+                    source_id: "binance_exec_trade06".to_string(),
+                    binding_name: "sk_strategy".to_string(),
+                    position_strategy_name: "sk_strategy".to_string(),
+                    order_strategy_name: "default_order".to_string(),
+                    shares: 1.0,
+                    updated_at_us: 1,
+                },
+                crate::strategy_catalog::AccountBinding {
+                    source_id: "binance_exec_trade06".to_string(),
+                    binding_name: "prc_strategy".to_string(),
+                    position_strategy_name: "prc_strategy".to_string(),
+                    order_strategy_name: "default_order".to_string(),
+                    shares: 1.0,
+                    updated_at_us: 1,
+                },
+            ],
+        };
+        retain_visible_account_bindings(&mut studio, &BTreeSet::from(["sk_strategy".to_string()]));
+        assert_eq!(studio.bindings.len(), 1);
+        assert_eq!(studio.bindings[0].binding_name, "sk_strategy");
     }
 }

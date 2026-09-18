@@ -218,7 +218,7 @@ export function AdminPage() {
 
   return (
     <AppShell active="admin" title="权限管理" subtitle="用户、账户与策略权限" icon={Shield}>
-      <PageIntro eyebrow="Access Control" title="账户权限" description="管理员为普通用户选择可见账户；未授权账户不会出现在总览、净值、成本或账户详情中。用户不可自助注册，仅管理员可创建账号。" />
+      <PageIntro eyebrow="Access Control" title="账户权限" description="管理员为普通用户选择可查看和配置的账户；用户可修改授权账户中自己可见策略的绑定、份数及执行参数，也可维护该账户的费率与合约杠杆。未授权账户不会显示且不可写入。" />
       {error && <Alert tone="error" className="mb-4">{error}</Alert>}
       <Card>
         <CardHeader><CardTitle>已注册用户</CardTitle></CardHeader>
