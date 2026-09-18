@@ -71,6 +71,24 @@ pub struct SetSourcesRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SourceGranteeInput {
+    pub user_id: i64,
+    pub access_level: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSourceGrantsRequest {
+    pub grants: Vec<SourceGranteeInput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceGranteeView {
+    pub user_id: i64,
+    pub username: String,
+    pub access_level: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SetRoleRequest {
     pub role: String,
 }
@@ -532,6 +550,86 @@ pub async fn set_sources(
         role: user.try_get("role")?,
     };
     user_view(pool, &user).await
+}
+
+/// Grants on one account, listed with usernames for the permissions page.
+pub async fn list_source_grants(pool: &PgPool, source_id: &str) -> Result<Vec<SourceGranteeView>> {
+    let rows = sqlx::query(
+        "SELECT p.user_id, u.username, p.access_level FROM cta_user_source_permissions p JOIN cta_users u ON u.user_id = p.user_id WHERE p.source_id = $1 AND u.disabled = false ORDER BY u.username",
+    )
+    .bind(source_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to list account grants")?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(SourceGranteeView {
+                user_id: row.try_get("user_id")?,
+                username: row.try_get("username")?,
+                access_level: row.try_get("access_level")?,
+            })
+        })
+        .collect()
+}
+
+/// Replaces every grant on one account. The caller (admin or the account's
+/// configure holder) manages the full list, including other configure
+/// holders.
+pub async fn set_source_grants(
+    pool: &PgPool,
+    source_id: &str,
+    grants: &[SourceGranteeInput],
+    configured_source_ids: &BTreeSet<String>,
+) -> Result<Vec<SourceGranteeView>> {
+    if !configured_source_ids.contains(source_id) {
+        bail!("unknown source");
+    }
+    let unique = grants
+        .iter()
+        .map(|grant| {
+            let access_level = grant.access_level.trim().to_string();
+            Ok((grant.user_id, access_level))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    for access_level in unique.values() {
+        validate_access_level(access_level)?;
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin account grant update")?;
+    for user_id in unique.keys() {
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM cta_users WHERE user_id = $1 AND disabled = false)",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to load grant user")?;
+        if !valid {
+            bail!("grants contains an unknown user: {user_id}");
+        }
+    }
+    sqlx::query("DELETE FROM cta_user_source_permissions WHERE source_id = $1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to clear account grants")?;
+    for (user_id, access_level) in unique {
+        sqlx::query(
+            "INSERT INTO cta_user_source_permissions (user_id, source_id, access_level) VALUES ($1, $2, $3)",
+        )
+        .bind(user_id)
+        .bind(source_id)
+        .bind(access_level)
+        .execute(&mut *tx)
+        .await
+        .context("failed to save account grant")?;
+    }
+    tx.commit()
+        .await
+        .context("failed to commit account grant update")?;
+    list_source_grants(pool, source_id).await
 }
 
 /// Fallback publish tokens accepted for every position strategy in addition to

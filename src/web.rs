@@ -468,6 +468,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .route("/api/catalog/accounts/{source_id}", get(get_account_studio))
         .route(
+            "/api/catalog/accounts/{source_id}/grants",
+            get(list_account_grants).put(save_account_grants),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/estimated-fee-rate",
             put(save_account_estimated_fee_rate),
         )
@@ -2375,6 +2379,42 @@ async fn get_account_studio(
     match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
         Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
         Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+/// Grant lists are managed by admins and by the account's configure
+/// holders; a view-only grant does not expose who else is authorized.
+async fn list_account_grants(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Extension(configurable): Extension<ConfigurableSources>,
+    Path(source_id): Path<String>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() && !configurable.0.contains(&source_id) {
+        return Ok(forbidden(
+            "account configure permission required to view grants",
+        ));
+    }
+    let grants = auth::list_source_grants(&state.pool, &source_id).await?;
+    Ok((NO_STORE, Json(grants)).into_response())
+}
+
+/// Replaces all grants on the account. The PUT middleware already requires
+/// the source's configure grant, so delegated managers reach this handler.
+async fn save_account_grants(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Json(request): Json<auth::SetSourceGrantsRequest>,
+) -> Result<Response, ApiError> {
+    let configured = state
+        .config
+        .sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect();
+    match auth::set_source_grants(&state.pool, &source_id, &request.grants, &configured).await {
+        Ok(grants) => Ok((NO_STORE, Json(grants)).into_response()),
+        Err(error) => Ok(bad_request(error.to_string())),
     }
 }
 

@@ -4,15 +4,18 @@ import {
   addPublishToken,
   createAuthUser,
   deletePublishToken,
+  listAccountGrants,
   listAuthUsers,
   listPositionAccess,
   listPublishTokens,
   resetPositionPublishToken,
+  setAccountGrants as saveAccountGrantsApi,
   setAuthUserRole,
   setAuthUserSources,
   setPositionManagers,
   setPositionGrants,
   setPositionPublishToken,
+  type AccountGrant,
   type AuthUser,
   type PositionAccess,
   type PublishToken,
@@ -70,7 +73,10 @@ export function AdminPage() {
   const { user } = useAuth()
   const isAdmin = user.role === 'admin'
   const [users, setUsers] = useState<AuthUser[]>([])
-  const [sources, setSources] = useState<Array<{ source_id: string; account: string }>>([])
+  const [sources, setSources] = useState<
+    Array<{ source_id: string; account: string; access_level?: 'view' | 'configure' | null }>
+  >([])
+  const [accountGrants, setAccountGrants] = useState<Record<string, AccountGrant[]>>({})
   const [access, setAccess] = useState<PositionAccess[]>([])
   const [fallbackTokens, setFallbackTokens] = useState<PublishToken[]>([])
   const [tokenDrafts, setTokenDrafts] = useState<Record<string, string>>({})
@@ -82,6 +88,7 @@ export function AdminPage() {
   const [revealedFallback, setRevealedFallback] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState<number | null>(null)
+  const [savingAccount, setSavingAccount] = useState<string | null>(null)
   const [savingStrategy, setSavingStrategy] = useState<string | null>(null)
   const [savingFallback, setSavingFallback] = useState(false)
   const [creatingUser, setCreatingUser] = useState(false)
@@ -91,19 +98,27 @@ export function AdminPage() {
     const jobs: Array<Promise<void>> = [
       listAuthUsers(controller.signal).then(setUsers),
       listPositionAccess(controller.signal).then(setAccess),
+      getDashboard(controller.signal).then(async (dashboard) => {
+        const accounts = (dashboard.accounts ?? []).map((account) => ({
+          source_id: account.source_id,
+          account: account.account,
+          access_level: account.access_level,
+        }))
+        setSources(accounts)
+        // Configure holders manage their accounts' grant lists too.
+        const entries = await Promise.all(
+          accounts
+            .filter((account) => account.access_level === 'configure')
+            .map(async (account) => [
+              account.source_id,
+              await listAccountGrants(account.source_id, controller.signal),
+            ] as const),
+        )
+        setAccountGrants(Object.fromEntries(entries))
+      }),
     ]
     if (isAdmin) {
-      jobs.push(
-        getDashboard(controller.signal).then((dashboard) =>
-          setSources(
-            (dashboard.accounts ?? []).map((account) => ({
-              source_id: account.source_id,
-              account: account.account,
-            })),
-          ),
-        ),
-        listPublishTokens(controller.signal).then(setFallbackTokens),
-      )
+      jobs.push(listPublishTokens(controller.signal).then(setFallbackTokens))
     }
     Promise.all(jobs).catch((reason: unknown) => {
       if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -139,6 +154,22 @@ export function AdminPage() {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setSaving(null)
+    }
+  }
+
+  async function saveAccountGrantLevel(sourceId: string, target: AuthUser, level: AccessLevel | 'none') {
+    const grants = (accountGrants[sourceId] ?? [])
+      .filter((grant) => grant.user_id !== target.user_id)
+      .map((grant) => ({ user_id: grant.user_id, access_level: grant.access_level }))
+    if (level !== 'none') grants.push({ user_id: target.user_id, access_level: level })
+    setSavingAccount(sourceId)
+    try {
+      const updated = await saveAccountGrantsApi(sourceId, grants)
+      setAccountGrants((current) => ({ ...current, [sourceId]: updated }))
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setSavingAccount(null)
     }
   }
 
@@ -268,13 +299,13 @@ export function AdminPage() {
   const grantableUsers = users.filter((target) => target.role !== 'admin')
 
   return (
-    <AppShell active="admin" title="权限管理" subtitle={isAdmin ? '用户、账户与策略权限' : '策略授权'} icon={Shield}>
+    <AppShell active="admin" title="权限管理" subtitle={isAdmin ? '用户、账户与策略权限' : '授权管理'} icon={Shield}>
       <PageIntro
         eyebrow="Access Control"
-        title={isAdmin ? '账户权限' : '策略权限'}
+        title={isAdmin ? '账户权限' : '授权管理'}
         description={isAdmin
           ? '账户授权分三档：无权限（不显示）、仅查看（可读账户与绑定）、可配置（可编辑绑定、份数、执行参数、费率与杠杆）。策略授权独立于账户：可见即可在目录与已绑定账户中看到该策略，可配置才允许新建绑定并管理该策略的授权。已存在的绑定由账户可配置权限管理，不再重复校验策略权限。'
-          : '你持有以下策略的可配置权限，可以为其他用户分配可见或可配置权限。全员可见、推送 token 与推送用户仍由管理员维护。'}
+          : '你持有可配置权限的账户和策略都可以继续授权给其他用户：账户的可配置授权允许对方读写该账户绑定与费率，策略的可配置授权允许对方新建绑定并继续授权。全员可见、推送 token、推送用户与新建策略仍由管理员维护。'}
       />
       {error && <Alert tone="error" className="mb-4">{error}</Alert>}
       {isAdmin && (
@@ -329,6 +360,38 @@ export function AdminPage() {
               </div>
             ))}
             {!users.length && <p className="text-sm text-muted">暂无用户</p>}
+          </CardContent>
+        </Card>
+      )}
+      {!isAdmin && (
+        <Card className="mt-5">
+          <CardHeader><CardTitle>账户权限</CardTitle></CardHeader>
+          <CardContent className="space-y-5">
+            <p className="text-xs text-muted">你持有以下账户的可配置权限，可以为其他用户分配查看或可配置权限。查看即可读取账户与绑定，可配置允许对方编辑绑定、份数、执行参数、费率与杠杆。</p>
+            {sources.filter((source) => source.access_level === 'configure').map((source) => (
+              <div key={source.source_id} className="rounded-xl border border-border-soft p-4">
+                <p className="text-sm font-medium text-ink">{source.account} <span className="font-mono text-[10px] text-subtle">{source.source_id}</span></p>
+                <div className="mt-3 space-y-2">
+                  {grantableUsers.map((target) => {
+                    const level = (accountGrants[source.source_id] ?? []).find((grant) => grant.user_id === target.user_id)?.access_level ?? 'none'
+                    return (
+                      <div key={target.user_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-soft px-3 py-2">
+                        <span className="text-xs text-ink">{target.username}</span>
+                        <LevelPicker
+                          value={level}
+                          disabled={savingAccount === source.source_id}
+                          onChange={(next) => void saveAccountGrantLevel(source.source_id, target, next)}
+                        />
+                      </div>
+                    )
+                  })}
+                  {!grantableUsers.length && <p className="text-xs text-muted">暂无可授权的普通用户</p>}
+                </div>
+              </div>
+            ))}
+            {!sources.some((source) => source.access_level === 'configure') && (
+              <p className="text-sm text-muted">你暂无可管理授权的账户</p>
+            )}
           </CardContent>
         </Card>
       )}

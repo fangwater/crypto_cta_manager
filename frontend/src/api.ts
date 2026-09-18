@@ -111,6 +111,29 @@ export function setAuthUserSources(userId: number, grants: SourceGrant[]) {
   })
 }
 
+export interface AccountGrant {
+  user_id: number
+  username: string
+  access_level: 'view' | 'configure'
+}
+
+export function listAccountGrants(sourceId: string, signal?: AbortSignal) {
+  return requestJson<AccountGrant[]>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/grants`,
+    { signal },
+  )
+}
+
+export function setAccountGrants(
+  sourceId: string,
+  grants: Array<{ user_id: number; access_level: 'view' | 'configure' }>,
+) {
+  return requestJson<AccountGrant[]>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/grants`,
+    { method: 'PUT', body: { grants } },
+  )
+}
+
 export function setAuthUserRole(userId: number, role: 'admin' | 'user') {
   return requestJson<AuthUser>(`/auth/users/${userId}/role`, {
     method: 'PUT',
