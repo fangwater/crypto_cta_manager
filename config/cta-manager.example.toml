@@ -53,6 +53,15 @@ host_tag = "el01"
 # these symbols delivered a new BBO within market_stale_secs. Empty means check
 # that the venue feed has any fresh BBO at all. Defaults to the sk traded pairs.
 market_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+# Heartbeat proof-of-life pushes per channel, aligned to Shanghai wall-clock
+# hour boundaries. Zero disables the heartbeat for that channel.
+market_heartbeat_hours = 3
+order_heartbeat_hours = 4
+# Shanghai-time quiet window [start, end) that suppresses heartbeat pushes; a
+# start later than the end wraps past midnight and equal bounds disable it.
+# Fault alerts are never suppressed.
+heartbeat_quiet_start_hour = 0
+heartbeat_quiet_end_hour = 6
 
 [monitor.dingtalk]
 market_webhook_url_env = "CTA_DINGTALK_MARKET_WEBHOOK_URL"

@@ -17,20 +17,15 @@ use tracing::{info, warn};
 
 use crate::config::{AppConfig, DingTalkConfig, MonitorConfig, SourceConfig};
 use crate::model::{
-    ORDER_UPDATES_CF, ORDER_UPDATES_UNMATCHED_CF, TRADE_UPDATES_CF, TRADE_UPDATES_UNMATCHED_CF,
-    UniformOrderEvent, decode_order_update, decode_trade_update, decode_uniform_order,
+    ORDER_UPDATES_CF, TRADE_UPDATES_CF, UniformOrderEvent, decode_order_update,
+    decode_trade_update, decode_uniform_order,
 };
+use crate::redis_runtime::RedisRuntime;
 use crate::rocks_source::{RawRocksRecord, read_latest_column_families};
 use crate::twap::parse_ask_bid_spread;
-use crate::viz_snapshot::{ExecStateRowSnapshot, ExecStateSnapshot, VizSnapshotClient};
+use crate::viz_snapshot::{ExecStateSnapshot, VizSnapshotClient};
 
-const RECENT_COLUMN_FAMILIES: [&str; 5] = [
-    "uniform_orders",
-    ORDER_UPDATES_CF,
-    TRADE_UPDATES_CF,
-    ORDER_UPDATES_UNMATCHED_CF,
-    TRADE_UPDATES_UNMATCHED_CF,
-];
+const RECENT_COLUMN_FAMILIES: [&str; 3] = ["uniform_orders", ORDER_UPDATES_CF, TRADE_UPDATES_CF];
 const MARKET_PAYLOAD_BYTES: usize = 128;
 const MARKET_HISTORY_SIZE: usize = 100;
 const MARKET_MAX_SUBSCRIBERS: usize = 64;
@@ -42,6 +37,8 @@ pub struct MonitorIssue {
     pub source_id: String,
     pub category: String,
     pub message: String,
+    /// Delay the first notification while a transient condition settles.
+    pub initial_delay_secs: u64,
 }
 
 impl MonitorIssue {
@@ -51,8 +48,40 @@ impl MonitorIssue {
             source_id: source_id.to_string(),
             category: category.to_string(),
             message: message.into(),
+            initial_delay_secs: 0,
         }
     }
+
+    fn with_initial_delay(mut self, seconds: u64) -> Self {
+        self.initial_delay_secs = seconds;
+        self
+    }
+}
+
+/// Issue scoped to one configured source; the account alias is prepended to
+/// the message so pushed alerts identify which account produced them.
+fn issue(
+    category: &str,
+    scope: &str,
+    source: &SourceConfig,
+    message: impl Into<String>,
+) -> MonitorIssue {
+    let label = source
+        .alias
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let account = source.account.trim();
+            (!account.is_empty()).then_some(account)
+        })
+        .unwrap_or(source.id.as_str());
+    MonitorIssue::new(
+        category,
+        scope,
+        &source.id,
+        format!("[{label}] {}", message.into()),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -199,6 +228,8 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
         .collect::<Vec<_>>();
     let market = MarketFeed::spawn(venues);
     let viz = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
+    let redis = RedisRuntime::connect(config.redis.clone())?;
+    redis.spawn_keepalive();
     // Give the BBO subscription one stale window to deliver before judging
     // freshness; the first poll would otherwise always report a market outage.
     let market_warmup = Duration::from_secs(config.monitor.market_stale_secs);
@@ -213,10 +244,20 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
         .then(|| DingTalkSenders::from_config(&config.monitor.dingtalk, &config.monitor.host_tag))
         .transpose()?;
     let mut tracker = AlertTracker::default();
+    let mut heartbeat = [
+        (
+            NoticeChannel::Market,
+            HeartbeatSchedule::new(config.monitor.market_heartbeat_hours, shanghai_now_secs()),
+        ),
+        (
+            NoticeChannel::Order,
+            HeartbeatSchedule::new(config.monitor.order_heartbeat_hours, shanghai_now_secs()),
+        ),
+    ];
     let poll_interval = Duration::from_secs(config.monitor.poll_interval_secs);
 
     loop {
-        let issues = check_once(&config, &enabled_sources, &market, &viz).await;
+        let issues = check_once(&config, &enabled_sources, &market, &viz, &redis).await;
         if dry_run {
             print_dry_run(&issues);
         } else {
@@ -252,6 +293,37 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
                         ),
                     }
                 }
+                let shanghai_secs = shanghai_now_secs();
+                let quiet = in_quiet_window(
+                    shanghai_hour_of_day(shanghai_secs),
+                    config.monitor.heartbeat_quiet_start_hour,
+                    config.monitor.heartbeat_quiet_end_hour,
+                );
+                for (channel, schedule) in &mut heartbeat {
+                    if !schedule.due(shanghai_secs, quiet) {
+                        continue;
+                    }
+                    let sender = match channel {
+                        NoticeChannel::Market => &senders.market,
+                        NoticeChannel::Order => &senders.order,
+                    };
+                    let message = heartbeat_message(*channel, tracker.active_count(*channel));
+                    match sender
+                        .send_heartbeat(
+                            &message,
+                            config.monitor.dingtalk.retry_attempts,
+                            config.monitor.dingtalk.retry_backoff_ms,
+                        )
+                        .await
+                    {
+                        Ok(()) => info!(channel = channel.as_str(), "CTA monitor heartbeat sent"),
+                        Err(error) => warn!(
+                            channel = channel.as_str(),
+                            error = %error,
+                            "CTA monitor DingTalk heartbeat failed after retries"
+                        ),
+                    }
+                }
             }
         }
 
@@ -274,6 +346,7 @@ async fn check_once(
     sources: &[SourceConfig],
     market: &MarketFeed,
     viz: &VizSnapshotClient,
+    redis: &RedisRuntime,
 ) -> Vec<MonitorIssue> {
     let now_us = unix_time_us();
     let mut issues = check_market(config, market, now_us);
@@ -282,7 +355,8 @@ async fn check_once(
         let source = source.clone();
         let monitor = config.monitor.clone();
         let viz = viz.clone();
-        tasks.spawn(async move { check_source(source, monitor, viz, now_us).await });
+        let redis = redis.clone();
+        tasks.spawn(async move { check_source(source, monitor, viz, redis, now_us).await });
     }
     while let Some(result) = tasks.join_next().await {
         match result {
@@ -359,6 +433,7 @@ async fn check_source(
     source: SourceConfig,
     monitor: MonitorConfig,
     viz: VizSnapshotClient,
+    redis: RedisRuntime,
     now_us: i64,
 ) -> Vec<MonitorIssue> {
     let mut issues = Vec::new();
@@ -372,29 +447,29 @@ async fn check_source(
     {
         Ok(Ok(records)) => records,
         Ok(Err(error)) => {
-            issues.push(MonitorIssue::new(
+            issues.push(issue(
                 "orders",
                 "rocksdb",
-                &source_id,
+                &source,
                 format!("订单 RocksDB 只读检查失败: {error:#}"),
             ));
             BTreeMap::new()
         }
         Err(error) => {
-            issues.push(MonitorIssue::new(
+            issues.push(issue(
                 "orders",
                 "rocksdb-worker",
-                &source_id,
+                &source,
                 format!("订单 RocksDB 检查任务失败: {error}"),
             ));
             BTreeMap::new()
         }
     };
     if !records.contains_key("uniform_orders") {
-        issues.push(MonitorIssue::new(
+        issues.push(issue(
             "orders",
             "uniform-orders-cf",
-            &source_id,
+            &source,
             "订单 RocksDB 缺少 uniform_orders column family",
         ));
     } else {
@@ -402,21 +477,44 @@ async fn check_source(
     }
 
     match source.exec_viz_origin() {
-        None => issues.push(MonitorIssue::new(
+        None => issues.push(issue(
             "position",
             "endpoint",
-            &source_id,
+            &source,
             "未配置 Exec Viz snapshot 地址，无法确认仓位执行状态",
         )),
-        Some(origin) => match viz.load_exec_state(&source_id, origin).await {
-            Ok(snapshot) => issues.extend(check_position(&source, &monitor, &snapshot, now_us)),
-            Err(error) => issues.push(MonitorIssue::new(
-                "position",
-                "snapshot",
-                &source_id,
-                format!("Exec Viz snapshot 读取失败: {error:#}"),
-            )),
-        },
+        Some(origin) => {
+            // Configured positions come from the Redis BatchExec ledger; a
+            // failed read must skip the account comparison, not compare
+            // against an empty map.
+            let configured = match redis.load_batch_exec_targets(&source).await {
+                Ok(targets) => Some(targets),
+                Err(error) => {
+                    issues.push(issue(
+                        "position",
+                        "redis-targets",
+                        &source,
+                        format!("Redis 配置仓位读取失败，无法核对账户仓位: {error:#}"),
+                    ));
+                    None
+                }
+            };
+            match viz.load_exec_state(&source_id, origin).await {
+                Ok(snapshot) => issues.extend(check_position(
+                    &source,
+                    &monitor,
+                    &snapshot,
+                    configured.as_ref(),
+                    now_us,
+                )),
+                Err(error) => issues.push(issue(
+                    "position",
+                    "snapshot",
+                    &source,
+                    format!("Exec Viz snapshot 读取失败: {error:#}"),
+                )),
+            }
+        }
     }
     issues
 }
@@ -477,10 +575,10 @@ fn check_orders(
         }
     }
     if decode_failures > 0 {
-        issues.push(MonitorIssue::new(
+        issues.push(issue(
             "orders",
             "decode",
-            &source.id,
+            source,
             format!("订单事件最近窗口有 {decode_failures} 条无法解码记录"),
         ));
     }
@@ -490,10 +588,10 @@ fn check_orders(
             continue;
         }
         if event.status.starts_with("UNKNOWN(") {
-            issues.push(MonitorIssue::new(
+            issues.push(issue(
                 "orders",
                 &format!("unknown-status:{}", event.client_order_id),
-                &source.id,
+                source,
                 format!(
                     "订单 {} {} 状态无法识别: {}",
                     event.client_order_id, event.symbol, event.status
@@ -506,10 +604,10 @@ fn check_orders(
             .unwrap_or(event.event_ts_us);
         let age_us = now_us.saturating_sub(activity);
         if age_us > seconds_to_us(monitor.order_stale_secs) {
-            issues.push(MonitorIssue::new(
+            issues.push(issue(
                 "orders",
                 &format!("stale:{}", event.client_order_id),
-                &source.id,
+                source,
                 format!(
                     "订单 {} {} 处于 {} 状态，最近活动已停止约 {} 秒",
                     event.client_order_id,
@@ -521,26 +619,6 @@ fn check_orders(
         }
     }
 
-    let unmatched_cutoff = now_us.saturating_sub(seconds_to_us(monitor.order_stale_secs));
-    for column_family in [ORDER_UPDATES_UNMATCHED_CF, TRADE_UPDATES_UNMATCHED_CF] {
-        let recent = records
-            .get(column_family)
-            .into_iter()
-            .flatten()
-            .filter_map(|record| record_timestamp(&record.key))
-            .any(|timestamp| timestamp >= unmatched_cutoff);
-        if recent {
-            issues.push(MonitorIssue::new(
-                "orders",
-                column_family,
-                &source.id,
-                format!(
-                    "最近 {} 秒出现无法匹配的 {column_family} 记录",
-                    monitor.order_stale_secs
-                ),
-            ));
-        }
-    }
     issues
 }
 
@@ -548,24 +626,25 @@ fn check_position(
     source: &SourceConfig,
     monitor: &MonitorConfig,
     snapshot: &ExecStateSnapshot,
+    configured: Option<&BTreeMap<String, f64>>,
     now_us: i64,
 ) -> Vec<MonitorIssue> {
     let mut issues = Vec::new();
     if snapshot.source_id != source.id {
-        issues.push(MonitorIssue::new(
+        issues.push(issue(
             "position",
             "source-id",
-            &source.id,
+            source,
             format!("Exec Viz snapshot source_id 不匹配: {}", snapshot.source_id),
         ));
     }
     let now_ms = now_us / 1_000;
     let age_ms = now_ms.saturating_sub(snapshot.snapshot_ts_ms);
     if snapshot.snapshot_ts_ms <= 0 || age_ms > monitor.position_stale_secs as i64 * 1_000 {
-        issues.push(MonitorIssue::new(
+        issues.push(issue(
             "position",
             "stale",
-            &source.id,
+            source,
             format!(
                 "Exec pre-trade 仓位快照已超过 {} 秒没有更新",
                 monitor.position_stale_secs
@@ -573,18 +652,16 @@ fn check_position(
         ));
     }
     if !snapshot.position_ready {
-        issues.push(MonitorIssue::new(
+        issues.push(issue(
             "position",
             "not-ready",
-            &source.id,
+            source,
             "Exec pre-trade position_ready=false，仓位尚未准备好",
         ));
     }
 
     let mut account_qty_by_symbol = HashMap::<&str, f64>::new();
-    let mut configured_sum = HashMap::<&str, f64>::new();
     let mut inflight_sum = HashMap::<&str, f64>::new();
-    let mut symbols_missing_fields = HashSet::<&str>::new();
     let mut symbol_last_update = HashMap::<&str, i64>::new();
     let mut usdt_value_by_symbol = HashMap::<&str, f64>::new();
     let mut valued_qty_by_symbol = HashMap::<&str, f64>::new();
@@ -593,29 +670,14 @@ fn check_position(
             if let Some(previous) = account_qty_by_symbol.get(row.symbol.as_str())
                 && (*previous - account_qty).abs() > monitor.position_tolerance
             {
-                issues.push(MonitorIssue::new(
+                issues.push(issue(
                     "position",
                     &format!("account-qty:{}", row.symbol),
-                    &source.id,
+                    source,
                     format!("{} 的快照行包含不一致的 account_position_qty", row.symbol),
                 ));
             } else {
                 account_qty_by_symbol.insert(row.symbol.as_str(), account_qty);
-            }
-        }
-        // Configured position per symbol is the sum of strategy targets. A row
-        // that finished at the exchange minimum keeps a residual delta forever,
-        // so its achieved current qty counts as its configured position.
-        let effective_target =
-            if row.execution_complete && row.completion_reason == "exchange_minimum" {
-                row.current_qty
-            } else {
-                row.target_qty
-            };
-        match effective_target {
-            Some(qty) => *configured_sum.entry(row.symbol.as_str()).or_insert(0.0) += qty,
-            None => {
-                symbols_missing_fields.insert(row.symbol.as_str());
             }
         }
         *inflight_sum.entry(row.symbol.as_str()).or_insert(0.0) +=
@@ -633,175 +695,75 @@ fn check_position(
             .entry(row.symbol.as_str())
             .and_modify(|ts| *ts = (*ts).max(row.source_updated_at_ms))
             .or_insert(row.source_updated_at_ms);
-        check_execution_row(source, monitor, row, now_ms, &mut issues);
     }
 
-    // Configured position vs account aggregation: alert only when the gap has
-    // no live order quantity working on it and the symbol has been quiet past
-    // the execution grace window, i.e. the execution is stuck.
+    // Configured positions (Redis BatchExec targets) vs the factual account
+    // position (Exec Viz): alert only when the gap has no live order quantity
+    // working on it and the symbol has been quiet past the execution grace
+    // window. None means the Redis read failed and the check is skipped.
     let grace_ms = monitor.execution_grace_secs as i64 * 1_000;
-    for (symbol, account_qty) in &account_qty_by_symbol {
-        if symbols_missing_fields.contains(symbol) {
-            continue;
+    if let Some(configured) = configured {
+        let mut symbols = BTreeSet::new();
+        symbols.extend(account_qty_by_symbol.keys().copied());
+        symbols.extend(
+            configured
+                .iter()
+                .filter(|(_, qty)| qty.abs() > monitor.position_tolerance)
+                .map(|(symbol, _)| symbol.as_str()),
+        );
+        for symbol in symbols {
+            let configured_qty = configured.get(symbol).copied().unwrap_or(0.0);
+            let Some(account_qty) = account_qty_by_symbol.get(symbol).copied() else {
+                issues.push(
+                    issue(
+                        "position",
+                        &format!("account-missing:{symbol}"),
+                        source,
+                        format!(
+                            "{symbol} Redis 已配置仓位 {configured_qty:.12}，但 Exec Viz 快照暂未提供账户仓位"
+                        ),
+                    )
+                    .with_initial_delay(monitor.execution_grace_secs),
+                );
+                continue;
+            };
+            let scale = configured_qty.abs().max(account_qty.abs()).max(1.0);
+            let tolerance = monitor.position_tolerance * scale;
+            let gap = configured_qty - account_qty;
+            if gap.abs() <= tolerance {
+                continue;
+            }
+            // Dust-valued gaps are residuals, not mismatches.
+            let implied_price = valued_qty_by_symbol
+                .get(symbol)
+                .filter(|qty| **qty > f64::EPSILON)
+                .map(|qty| usdt_value_by_symbol.get(symbol).copied().unwrap_or(0.0) / *qty);
+            if implied_price
+                .is_some_and(|price| gap.abs() * price <= monitor.position_residual_usdt)
+            {
+                continue;
+            }
+            let inflight = inflight_sum.get(symbol).copied().unwrap_or(0.0);
+            if inflight.abs() > tolerance {
+                continue;
+            }
+            let settling = symbol_last_update
+                .get(symbol)
+                .is_some_and(|ts| *ts > 0 && now_ms.saturating_sub(*ts) <= grace_ms);
+            if settling {
+                continue;
+            }
+            issues.push(issue(
+                "position",
+                &format!("account:{symbol}"),
+                source,
+                format!(
+                    "{symbol} 配置仓位 {configured_qty:.12} 与账户仓位 {account_qty:.12} 不一致且无挂单执行"
+                ),
+            ));
         }
-        let Some(configured) = configured_sum.get(symbol) else {
-            continue;
-        };
-        let scale = configured.abs().max(account_qty.abs()).max(1.0);
-        let tolerance = monitor.position_tolerance * scale;
-        let gap = configured - account_qty;
-        if gap.abs() <= tolerance {
-            continue;
-        }
-        // Dust-valued gaps are residuals, not stuck executions.
-        let implied_price = valued_qty_by_symbol
-            .get(symbol)
-            .filter(|qty| **qty > f64::EPSILON)
-            .map(|qty| usdt_value_by_symbol.get(symbol).copied().unwrap_or(0.0) / *qty);
-        if implied_price.is_some_and(|price| gap.abs() * price <= monitor.position_residual_usdt) {
-            continue;
-        }
-        let inflight = inflight_sum.get(symbol).copied().unwrap_or(0.0);
-        if inflight.abs() > tolerance {
-            continue;
-        }
-        let settling = symbol_last_update
-            .get(symbol)
-            .is_some_and(|ts| *ts > 0 && now_ms.saturating_sub(*ts) <= grace_ms);
-        if settling {
-            continue;
-        }
-        issues.push(MonitorIssue::new(
-            "position",
-            &format!("stuck:{symbol}"),
-            &source.id,
-            format!(
-                "{symbol} 配置仓位 {configured:.12} 与账户仓位 {account_qty:.12} 不一致且无挂单执行"
-            ),
-        ));
     }
     issues
-}
-
-/// Implied mark price of a position row: |current_usdt / current_qty|.
-fn implied_usdt_price(current_qty: f64, current_usdt: Option<f64>) -> Option<f64> {
-    let usdt = current_usdt?;
-    if current_qty.abs() <= f64::EPSILON || !usdt.is_finite() {
-        return None;
-    }
-    Some((usdt / current_qty).abs())
-}
-
-fn check_execution_row(
-    source: &SourceConfig,
-    monitor: &MonitorConfig,
-    row: &ExecStateRowSnapshot,
-    now_ms: i64,
-    issues: &mut Vec<MonitorIssue>,
-) {
-    let Some(current_qty) = row.current_qty else {
-        return;
-    };
-    let Some(target_qty) = row.target_qty else {
-        return;
-    };
-    let pending_qty = row.pending_qty.unwrap_or(0.0);
-    let live_order_qty = row.live_order_qty.unwrap_or(0.0);
-    let delta_qty = target_qty - current_qty;
-    let ledger_error = delta_qty - pending_qty - live_order_qty;
-    // A quantity gap worth less than the USDT residual threshold is dust and
-    // never actionable; suppress every quantity-based row check for it.
-    let dust_qty = |qty: f64| {
-        implied_usdt_price(current_qty, row.current_usdt)
-            .is_some_and(|price| qty.abs() * price <= monitor.position_residual_usdt)
-    };
-    let scale = target_qty
-        .abs()
-        .max(current_qty.abs())
-        .max(pending_qty.abs())
-        .max(live_order_qty.abs())
-        .max(1.0);
-    if ledger_error.abs() > monitor.position_tolerance * scale && !dust_qty(ledger_error) {
-        issues.push(MonitorIssue::new(
-            "position",
-            &format!("ledger:{}:{}", row.strategy_name, row.symbol),
-            &source.id,
-            format!(
-                "{} {} 的执行数量不守恒: target-current={delta_qty:.12}, pending+live={:.12}",
-                row.strategy_name,
-                row.symbol,
-                pending_qty + live_order_qty
-            ),
-        ));
-    }
-
-    let tolerance = monitor.position_tolerance * scale;
-    if row.execution_complete {
-        if delta_qty.abs() > tolerance
-            && row.completion_reason != "exchange_minimum"
-            && !dust_qty(delta_qty)
-        {
-            issues.push(MonitorIssue::new(
-                "position",
-                &format!("incomplete:{}:{}", row.strategy_name, row.symbol),
-                &source.id,
-                format!(
-                    "{} {} 标记 execution_complete，但 target/current 仍相差 {delta_qty:.12}",
-                    row.strategy_name, row.symbol
-                ),
-            ));
-        }
-        return;
-    }
-    if pending_qty.abs() <= tolerance && live_order_qty.abs() <= tolerance {
-        if row.source_updated_at_ms > 0
-            && now_ms.saturating_sub(row.source_updated_at_ms)
-                > monitor.execution_grace_secs as i64 * 1_000
-            && delta_qty.abs() > tolerance
-            && !dust_qty(delta_qty)
-        {
-            issues.push(MonitorIssue::new(
-                "position",
-                &format!("no-progress:{}:{}", row.strategy_name, row.symbol),
-                &source.id,
-                format!(
-                    "{} {} 尚未完成，但没有 pending/live order，剩余数量 {delta_qty:.12}",
-                    row.strategy_name, row.symbol
-                ),
-            ));
-        }
-        return;
-    }
-    let completion_deadline = row
-        .estimated_completion_ts_ms
-        .saturating_add(monitor.execution_grace_secs as i64 * 1_000);
-    if row.estimated_completion_ts_ms <= 0 {
-        if row.source_updated_at_ms > 0
-            && now_ms.saturating_sub(row.source_updated_at_ms)
-                > monitor.execution_grace_secs as i64 * 1_000
-            && !dust_qty(delta_qty)
-        {
-            issues.push(MonitorIssue::new(
-                "position",
-                &format!("missing-eta:{}:{}", row.strategy_name, row.symbol),
-                &source.id,
-                format!(
-                    "{} {} 有未完成 pending/live order，但没有有效 estimated_completion_ts_ms",
-                    row.strategy_name, row.symbol
-                ),
-            ));
-        }
-    } else if now_ms > completion_deadline && !dust_qty(delta_qty) {
-        issues.push(MonitorIssue::new(
-            "position",
-            &format!("stalled:{}:{}", row.strategy_name, row.symbol),
-            &source.id,
-            format!(
-                "{} {} 超过预计完成时间仍未完成，pending={pending_qty:.12}, live={live_order_qty:.12}",
-                row.strategy_name, row.symbol
-            ),
-        ));
-    }
 }
 
 fn is_terminal_order_status(status: &str) -> bool {
@@ -809,10 +771,6 @@ fn is_terminal_order_status(status: &str) -> bool {
         status,
         "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH"
     )
-}
-
-fn record_timestamp(key: &[u8]) -> Option<i64> {
-    std::str::from_utf8(key).ok()?.parse().ok()
 }
 
 fn normalize_symbol(raw: &str) -> String {
@@ -862,13 +820,17 @@ impl NoticeChannel {
     }
 }
 
+fn channel_for_key(key: &str) -> NoticeChannel {
+    if key.starts_with("market:") {
+        NoticeChannel::Market
+    } else {
+        NoticeChannel::Order
+    }
+}
+
 impl PendingNotice {
     fn channel(&self) -> NoticeChannel {
-        if self.key.starts_with("market:") {
-            NoticeChannel::Market
-        } else {
-            NoticeChannel::Order
-        }
+        channel_for_key(&self.key)
     }
 }
 
@@ -878,6 +840,8 @@ const MIN_REPEAT_ALERT_SECS: u64 = 30;
 #[derive(Debug, Default)]
 struct AlertState {
     active: bool,
+    visible: bool,
+    first_seen: Option<Instant>,
     last_sent: Option<Instant>,
     recovery_pending: bool,
     /// Message of the last alert sent, reused for the recovery notice.
@@ -904,12 +868,20 @@ impl AlertTracker {
         let mut pending = Vec::new();
         for issue in issues {
             let state = self.states.entry(issue.key.clone()).or_default();
-            let due = !state.active
-                || state
-                    .last_sent
-                    .is_none_or(|last_sent| now.duration_since(last_sent) >= repeat);
+            if !state.active {
+                state.first_seen = Some(now);
+            }
             state.active = true;
             state.recovery_pending = false;
+            state.visible = state.first_seen.is_none_or(|first_seen| {
+                now.duration_since(first_seen) >= Duration::from_secs(issue.initial_delay_secs)
+            });
+            if !state.visible {
+                continue;
+            }
+            let due = state
+                .last_sent
+                .is_none_or(|last_sent| now.duration_since(last_sent) >= repeat);
             if due {
                 pending.push(PendingNotice {
                     key: issue.key.clone(),
@@ -919,19 +891,24 @@ impl AlertTracker {
             }
         }
         for (key, state) in &mut self.states {
-            if state.active && !current_keys.contains(key.as_str()) && state.last_sent.is_some() {
-                if !state.recovery_pending {
-                    let detail = if state.message.is_empty() {
-                        key.clone()
-                    } else {
-                        state.message.clone()
-                    };
-                    pending.push(PendingNotice {
-                        key: key.clone(),
-                        message: format!("问题已恢复: {detail}"),
-                        recovery: true,
-                    });
-                }
+            if !state.active || current_keys.contains(key.as_str()) {
+                continue;
+            }
+            if state.last_sent.is_none() {
+                *state = AlertState::default();
+                continue;
+            }
+            if !state.recovery_pending {
+                let detail = if state.message.is_empty() {
+                    key.clone()
+                } else {
+                    state.message.clone()
+                };
+                pending.push(PendingNotice {
+                    key: key.clone(),
+                    message: format!("问题已恢复: {detail}"),
+                    recovery: true,
+                });
             }
         }
         pending
@@ -942,6 +919,8 @@ impl AlertTracker {
             let state = self.states.entry(notice.key.clone()).or_default();
             if notice.recovery {
                 state.active = false;
+                state.visible = false;
+                state.first_seen = None;
                 state.last_sent = None;
                 state.recovery_pending = false;
                 state.message.clear();
@@ -952,6 +931,99 @@ impl AlertTracker {
                 state.message = notice.message.clone();
             }
         }
+    }
+
+    /// Issues currently unresolved on one DingTalk channel.
+    fn active_count(&self, channel: NoticeChannel) -> usize {
+        self.states
+            .iter()
+            .filter(|(key, state)| state.active && state.visible && channel_for_key(key) == channel)
+            .count()
+    }
+}
+
+/// Fixed UTC+8 offset for Shanghai wall-clock time; China has no DST.
+const SHANGHAI_OFFSET_SECS: i64 = 8 * 3_600;
+
+/// Current Unix time shifted into the Shanghai zone.
+fn shanghai_now_secs() -> i64 {
+    shanghai_secs(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+            .unwrap_or_default(),
+    )
+}
+
+fn shanghai_secs(unix_secs: i64) -> i64 {
+    unix_secs + SHANGHAI_OFFSET_SECS
+}
+
+fn shanghai_hour_of_day(shanghai_secs: i64) -> u32 {
+    (shanghai_secs.rem_euclid(86_400) / 3_600) as u32
+}
+
+/// Shanghai-hour quiet window [start, end); a wrapped range covers an
+/// overnight window and equal bounds disable it.
+fn in_quiet_window(hour: u32, start: u32, end: u32) -> bool {
+    if start == end {
+        return false;
+    }
+    if start < end {
+        hour >= start && hour < end
+    } else {
+        hour >= start || hour < end
+    }
+}
+
+fn heartbeat_slot(shanghai_secs: i64, interval_hours: u64) -> u64 {
+    if interval_hours == 0 {
+        return 0;
+    }
+    (shanghai_secs.div_euclid(3_600).max(0) as u64) / interval_hours
+}
+
+/// One channel's heartbeat cadence aligned to Shanghai wall-clock slots.
+struct HeartbeatSchedule {
+    interval_hours: u64,
+    /// Slot index already handled. Initialized to the current slot so a
+    /// (re)start never back-fills a beat mid-slot.
+    last_slot: u64,
+}
+
+impl HeartbeatSchedule {
+    fn new(interval_hours: u64, shanghai_secs: i64) -> Self {
+        Self {
+            interval_hours,
+            last_slot: heartbeat_slot(shanghai_secs, interval_hours),
+        }
+    }
+
+    /// True once when a new heartbeat slot opens. The slot is consumed even in
+    /// the quiet window or after a failed send so heartbeats stay aligned and
+    /// never retry-storm; the next beat lands on the next boundary.
+    fn due(&mut self, shanghai_secs: i64, quiet: bool) -> bool {
+        if self.interval_hours == 0 {
+            return false;
+        }
+        let slot = heartbeat_slot(shanghai_secs, self.interval_hours);
+        if slot == self.last_slot {
+            return false;
+        }
+        self.last_slot = slot;
+        !quiet
+    }
+}
+
+fn heartbeat_message(channel: NoticeChannel, active_issues: usize) -> String {
+    let label = match channel {
+        NoticeChannel::Market => "行情监控",
+        NoticeChannel::Order => "交易监控",
+    };
+    if active_issues == 0 {
+        format!("{label}运行正常，无未恢复告警")
+    } else {
+        format!("{label}运行中，{active_issues} 条告警未恢复")
     }
 }
 
@@ -1037,33 +1109,46 @@ impl DingTalkSender {
         retry_attempts: u32,
         retry_backoff_ms: u64,
     ) -> Result<()> {
-        let attempts = retry_attempts.max(1);
-        let mut last_error = None;
-        for attempt in 0..attempts {
-            match self.send_once(notices).await {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    last_error = Some(format!("{error:#}"));
-                    if attempt + 1 < attempts {
-                        let shift = attempt.min(5);
-                        let backoff = retry_backoff_ms.saturating_mul(1_u64 << shift).min(30_000);
-                        tokio::time::sleep(Duration::from_millis(backoff)).await;
-                    }
-                }
-            }
-        }
-        bail!(
-            "DingTalk webhook failed after {attempts} attempts: {}",
-            last_error.unwrap_or_else(|| "unknown error".to_string())
+        self.post_with_retry(
+            self.notice_content(notices),
+            retry_attempts,
+            retry_backoff_ms,
         )
+        .await
     }
 
-    async fn send_once(&self, notices: &[PendingNotice]) -> Result<()> {
-        let mut content = if self.host_tag.is_empty() {
+    async fn send_heartbeat(
+        &self,
+        message: &str,
+        retry_attempts: u32,
+        retry_backoff_ms: u64,
+    ) -> Result<()> {
+        self.post_with_retry(
+            self.heartbeat_content(message),
+            retry_attempts,
+            retry_backoff_ms,
+        )
+        .await
+    }
+
+    fn heartbeat_content(&self, message: &str) -> String {
+        let mut content = self.header();
+        content.push_str("[心跳] ");
+        content.push_str(message);
+        content.push('\n');
+        content
+    }
+
+    fn header(&self) -> String {
+        if self.host_tag.is_empty() {
             String::from("[crypto_cta_manager] CTA 运行监控\n")
         } else {
             format!("[{}][crypto_cta_manager] CTA 运行监控\n", self.host_tag)
-        };
+        }
+    }
+
+    fn notice_content(&self, notices: &[PendingNotice]) -> String {
+        let mut content = self.header();
         for notice in notices.iter().take(30) {
             let prefix = if notice.recovery {
                 "[恢复]"
@@ -1082,9 +1167,42 @@ impl DingTalkSender {
             content.truncate(3_980);
             content.push_str("...\n");
         }
+        content
+    }
+
+    async fn post_with_retry(
+        &self,
+        content: String,
+        retry_attempts: u32,
+        retry_backoff_ms: u64,
+    ) -> Result<()> {
+        let attempts = retry_attempts.max(1);
+        let mut last_error = None;
+        for attempt in 0..attempts {
+            match self.post(&content).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = Some(format!("{error:#}"));
+                    if attempt + 1 < attempts {
+                        let shift = attempt.min(5);
+                        let backoff = retry_backoff_ms.saturating_mul(1_u64 << shift).min(30_000);
+                        tokio::time::sleep(Duration::from_millis(backoff)).await;
+                    }
+                }
+            }
+        }
+        bail!(
+            "DingTalk webhook failed after {attempts} attempts: {}",
+            last_error.unwrap_or_else(|| "unknown error".to_string())
+        )
+    }
+
+    async fn post(&self, content: &str) -> Result<()> {
         let payload = DingTalkPayload {
             msg_type: "text",
-            text: DingTalkText { content },
+            text: DingTalkText {
+                content: content.to_string(),
+            },
             at: DingTalkAt {
                 at_mobiles: &self.at_mobiles,
                 is_at_all: self.is_at_all,
@@ -1178,6 +1296,7 @@ fn print_dry_run(issues: &[MonitorIssue]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::viz_snapshot::ExecStateRowSnapshot;
 
     #[test]
     fn signed_url_preserves_webhook_and_adds_signature_parameters() {
@@ -1343,6 +1462,62 @@ mod tests {
         assert_eq!(recovery[0].message, "问题已恢复: 行情故障: test");
     }
 
+    #[test]
+    fn delayed_issue_disappears_without_alert_or_recovery() {
+        let issue = MonitorIssue::new("position", "account-missing:GUSDT", "trade06", "missing")
+            .with_initial_delay(30);
+        let mut tracker = AlertTracker::default();
+        let start = Instant::now();
+
+        assert!(
+            tracker
+                .pending(std::slice::from_ref(&issue), start, 30)
+                .is_empty()
+        );
+        assert_eq!(tracker.active_count(NoticeChannel::Order), 0);
+        assert!(
+            tracker
+                .pending(&[], start + Duration::from_secs(10), 30)
+                .is_empty()
+        );
+        assert_eq!(tracker.active_count(NoticeChannel::Order), 0);
+    }
+
+    #[test]
+    fn delayed_issue_alerts_after_grace_and_then_recovers() {
+        let issue = MonitorIssue::new("position", "account-missing:GUSDT", "trade06", "missing")
+            .with_initial_delay(30);
+        let mut tracker = AlertTracker::default();
+        let start = Instant::now();
+
+        assert!(
+            tracker
+                .pending(std::slice::from_ref(&issue), start, 30)
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .pending(
+                    std::slice::from_ref(&issue),
+                    start + Duration::from_secs(29),
+                    30,
+                )
+                .is_empty()
+        );
+        let notices = tracker.pending(
+            std::slice::from_ref(&issue),
+            start + Duration::from_secs(30),
+            30,
+        );
+        assert_eq!(notices.len(), 1);
+        tracker.mark_sent(&notices, start + Duration::from_secs(30));
+        assert_eq!(tracker.active_count(NoticeChannel::Order), 1);
+
+        let recovery = tracker.pending(&[], start + Duration::from_secs(31), 30);
+        assert_eq!(recovery.len(), 1);
+        assert!(recovery[0].recovery);
+    }
+
     fn position_row(
         strategy: &str,
         symbol: &str,
@@ -1376,7 +1551,8 @@ mod tests {
         let now_us = unix_time_us();
         let now_ms = now_us / 1_000;
         let old_ms = now_ms - (monitor.execution_grace_secs as i64 + 10) * 1_000;
-        // Configured position for the symbol: 0.5 + (-0.2) = 0.3.
+        // Configured position comes from the Redis BatchExec targets.
+        let configured = BTreeMap::from([("BTCUSDT".to_string(), 0.3)]);
         let snapshot = |account: f64| ExecStateSnapshot {
             source_id: source.id.clone(),
             snapshot_ts_ms: now_ms,
@@ -1406,34 +1582,59 @@ mod tests {
         };
 
         // Configured 0.3 == account 0.3 -> consistent.
-        let issues = check_position(&source, &monitor, &snapshot(0.3), now_us);
-        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
+        let issues = check_position(&source, &monitor, &snapshot(0.3), Some(&configured), now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
 
-        // Configured 0.3 vs account 0.4, quiet and no live qty -> stuck.
-        let issues = check_position(&source, &monitor, &snapshot(0.4), now_us);
-        assert!(issues.iter().any(|issue| issue.key.contains("stuck")));
+        // Configured 0.3 vs account 0.4, quiet and no live qty -> mismatch.
+        let issues = check_position(&source, &monitor, &snapshot(0.4), Some(&configured), now_us);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.key.contains("account:BTCUSDT"))
+        );
 
         // Live order qty covering the gap means it is still executing.
         let mut executing = snapshot(0.2);
         executing.rows[0].current_qty = Some(0.4);
         executing.rows[0].live_order_qty = Some(0.1);
-        let issues = check_position(&source, &monitor, &executing, now_us);
-        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
+        let issues = check_position(&source, &monitor, &executing, Some(&configured), now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
 
         // A strategy row updated inside the grace window is still settling.
         let mut settling = snapshot(0.4);
         settling.rows[0].source_updated_at_ms = now_ms;
-        let issues = check_position(&source, &monitor, &settling, now_us);
-        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
+        let issues = check_position(&source, &monitor, &settling, Some(&configured), now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
 
-        // A residual delta left by an exchange_minimum completion is tolerated:
-        // effective configured = 0.29 + (-0.2) = 0.09 == account.
-        let mut minimum = snapshot(0.09);
-        minimum.rows[0].current_qty = Some(0.29);
-        minimum.rows[0].execution_complete = true;
-        minimum.rows[0].completion_reason = "exchange_minimum".to_string();
-        let issues = check_position(&source, &monitor, &minimum, now_us);
-        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
+        // A failed Redis read skips the comparison instead of alerting on an
+        // empty configured map.
+        let issues = check_position(&source, &monitor, &snapshot(0.4), None, now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
+
+        // A configured symbol absent from the Viz snapshot is unknown rather
+        // than a factual zero, and receives an initial grace period.
+        let missing = BTreeMap::from([("SOLUSDT".to_string(), 5.0)]);
+        let issues = check_position(&source, &monitor, &snapshot(0.3), Some(&missing), now_us);
+        let issue = issues
+            .iter()
+            .find(|issue| issue.key.contains("account-missing:SOLUSDT"))
+            .expect("missing account row should be reported separately");
+        assert_eq!(issue.initial_delay_secs, monitor.execution_grace_secs);
+        assert!(!issue.message.contains("账户仓位 0.000000000000"));
+
+        // An explicit zero from Viz remains factual and alerts as a mismatch.
+        let zero_issues =
+            check_position(&source, &monitor, &snapshot(0.0), Some(&configured), now_us);
+        assert!(
+            zero_issues
+                .iter()
+                .any(|issue| issue.key.contains("account:BTCUSDT"))
+        );
+        assert!(
+            zero_issues
+                .iter()
+                .all(|issue| !issue.key.contains("account-missing:BTCUSDT"))
+        );
     }
 
     #[test]
@@ -1450,56 +1651,39 @@ mod tests {
             rows,
         };
 
-        // Completed at target_tolerance with a sub-50 USDT leftover -> quiet.
-        let mut dust = snapshot(vec![position_row(
+        // Configured-vs-account gap valued below the residual threshold -> quiet.
+        let configured = BTreeMap::from([("DOGEUSDT".to_string(), 150.0)]);
+        let mut mismatch = snapshot(vec![position_row(
             "cta_a",
             "DOGEUSDT",
             100.0,
-            101.0,
+            100.0,
             0.0,
             0.0,
             Some(100.0),
             old_ms,
         )]);
-        dust.rows[0].current_usdt = Some(10.0); // implied price 0.1 USDT
-        dust.rows[0].execution_complete = true;
-        dust.rows[0].completion_reason = "target_tolerance".to_string();
-        let issues = check_position(&source, &monitor, &dust, now_us);
+        mismatch.rows[0].current_usdt = Some(10.0); // gap 50 qty x 0.1 = 5 USDT
+        let issues = check_position(&source, &monitor, &mismatch, Some(&configured), now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
+
+        // Same gap priced far above the residual threshold -> alert.
+        mismatch.rows[0].current_usdt = Some(100_000.0); // gap 50 qty x 1000 = 50k USDT
+        let issues = check_position(&source, &monitor, &mismatch, Some(&configured), now_us);
         assert!(
             issues
                 .iter()
-                .all(|issue| !issue.key.starts_with("position:"))
+                .any(|issue| issue.key.contains("account:DOGEUSDT"))
         );
 
-        // Same quantity gap priced far above the residual threshold -> alert.
-        let mut costly = dust.clone();
-        costly.rows[0].current_usdt = Some(10_000_000.0); // implied 100k USDT
-        let issues = check_position(&source, &monitor, &costly, now_us);
-        assert!(issues.iter().any(|issue| issue.key.contains("incomplete")));
-
         // No USDT value to price the gap -> conservative, still alerts.
-        let mut unpriced = dust.clone();
-        unpriced.rows[0].current_usdt = None;
-        let issues = check_position(&source, &monitor, &unpriced, now_us);
-        assert!(issues.iter().any(|issue| issue.key.contains("incomplete")));
-
-        // Stuck aggregation gap valued below the threshold -> quiet.
-        let mut stuck = snapshot(vec![position_row(
-            "cta_a",
-            "DOGEUSDT",
-            100.0,
-            100.0,
-            0.0,
-            0.0,
-            Some(150.0),
-            old_ms,
-        )]);
-        stuck.rows[0].current_usdt = Some(10.0); // gap 50 qty x 0.1 = 5 USDT
-        let issues = check_position(&source, &monitor, &stuck, now_us);
-        assert!(issues.iter().all(|issue| !issue.key.contains("stuck")));
-        stuck.rows[0].current_usdt = Some(100_000.0); // gap 50 qty x 1000 = 50k USDT
-        let issues = check_position(&source, &monitor, &stuck, now_us);
-        assert!(issues.iter().any(|issue| issue.key.contains("stuck")));
+        mismatch.rows[0].current_usdt = None;
+        let issues = check_position(&source, &monitor, &mismatch, Some(&configured), now_us);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.key.contains("account:DOGEUSDT"))
+        );
     }
 
     #[test]
@@ -1533,5 +1717,99 @@ mod tests {
         let value = serde_json::to_value(payload).unwrap();
         assert_eq!(value["msgtype"], serde_json::json!("text"));
         assert_eq!(value["at"]["isAtAll"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn shanghai_time_uses_fixed_utc8() {
+        // The Unix epoch was 08:00 in Shanghai; 16:00 UTC is midnight there.
+        assert_eq!(shanghai_hour_of_day(shanghai_secs(0)), 8);
+        assert_eq!(shanghai_hour_of_day(shanghai_secs(16 * 3_600)), 0);
+        assert_eq!(shanghai_hour_of_day(shanghai_secs(86_400 + 3_600)), 9);
+    }
+
+    #[test]
+    fn quiet_window_covers_hours_and_wraps_overnight() {
+        assert!(in_quiet_window(0, 0, 6));
+        assert!(in_quiet_window(5, 0, 6));
+        assert!(!in_quiet_window(6, 0, 6));
+        assert!(!in_quiet_window(23, 0, 6));
+        // A wrapped window such as 22:00-06:00 spans midnight.
+        assert!(in_quiet_window(23, 22, 6));
+        assert!(in_quiet_window(3, 22, 6));
+        assert!(!in_quiet_window(12, 22, 6));
+        // Equal bounds disable the window entirely.
+        assert!((0..24).all(|hour| !in_quiet_window(hour, 6, 6)));
+    }
+
+    #[test]
+    fn heartbeat_fires_once_per_slot_and_consumes_quiet_slots() {
+        let day = 86_400 * 20_000;
+        // 3h cadence, started mid-slot: no beat until the next boundary.
+        let mut schedule = HeartbeatSchedule::new(3, day + 9 * 3_600 + 30 * 60);
+        assert!(!schedule.due(day + 10 * 3_600, false));
+        assert!(!schedule.due(day + 11 * 3_600 + 59 * 60, false));
+        // The 12:00 boundary fires exactly once.
+        assert!(schedule.due(day + 12 * 3_600, false));
+        assert!(!schedule.due(day + 12 * 3_600 + 1, false));
+
+        // A boundary inside the quiet window is consumed silently; the first
+        // boundary after dawn still fires on schedule.
+        let mut schedule = HeartbeatSchedule::new(3, day + 21 * 3_600);
+        assert!(!schedule.due(day + 24 * 3_600, true)); // 00:00, quiet
+        assert!(!schedule.due(day + 27 * 3_600, true)); // 03:00, quiet
+        assert!(schedule.due(day + 30 * 3_600, false)); // 06:00, fires
+
+        // Zero interval disables the heartbeat.
+        let mut off = HeartbeatSchedule::new(0, day);
+        assert!(!off.due(day + 5 * 86_400, false));
+    }
+
+    #[test]
+    fn heartbeat_message_reports_channel_status() {
+        assert_eq!(
+            heartbeat_message(NoticeChannel::Market, 0),
+            "行情监控运行正常，无未恢复告警"
+        );
+        assert_eq!(
+            heartbeat_message(NoticeChannel::Order, 2),
+            "交易监控运行中，2 条告警未恢复"
+        );
+    }
+
+    #[test]
+    fn source_issues_carry_the_account_alias() {
+        let mut source = test_source("binance-futures");
+        source.id = "binance_exec_trade03".to_string();
+        source.account = "trade03".to_string();
+        // The alias is the operator-facing label.
+        source.alias = Some("p1prcp1".to_string());
+        let entry = issue("position", "account:BTCUSDT", &source, "m");
+        assert_eq!(entry.key, "position:account:BTCUSDT:binance_exec_trade03");
+        assert_eq!(entry.message, "[p1prcp1] m");
+        // A missing or blank alias falls back to account, then to source id.
+        source.alias = Some(" ".to_string());
+        let entry = issue("position", "scope", &source, "m");
+        assert_eq!(entry.message, "[trade03] m");
+        source.alias = None;
+        source.account = " ".to_string();
+        let entry = issue("position", "scope", &source, "m");
+        assert_eq!(entry.message, "[binance_exec_trade03] m");
+    }
+
+    #[test]
+    fn heartbeat_content_uses_heartbeat_prefix_and_host_tag() {
+        let sender = DingTalkSender {
+            client: Client::new(),
+            webhook_url: Url::parse("https://example.test/hook").unwrap(),
+            secret: None,
+            at_mobiles: Vec::new(),
+            is_at_all: false,
+            host_tag: "el01".to_string(),
+        };
+        let content = sender.heartbeat_content("行情监控运行正常，无未恢复告警");
+        assert_eq!(
+            content,
+            "[el01][crypto_cta_manager] CTA 运行监控\n[心跳] 行情监控运行正常，无未恢复告警\n"
+        );
     }
 }

@@ -226,6 +226,75 @@ impl RedisRuntime {
         }
     }
 
+    /// Sum configured `batch_exec:{strategy}.targets[symbol].qty` across the
+    /// strategies listed in `batch_exec:strategy_names` for one source. Used by
+    /// the monitor to compare configured positions against the factual account
+    /// position.
+    pub async fn load_batch_exec_targets(
+        &self,
+        source: &SourceConfig,
+    ) -> Result<BTreeMap<String, f64>> {
+        let prefix = format!("{}:{}:batch_exec:", source.id, source.venue);
+        let index_key = format!("{prefix}strategy_names");
+        let timeout = Duration::from_secs(self.request_timeout_secs().await);
+        let loaded = {
+            let mut inner = self.inner.lock().await;
+            let connection = inner.connection().await?;
+            tokio::time::timeout(timeout, async {
+                let names = decode_strategy_names(
+                    connection.get::<_, Option<String>>(&index_key).await?,
+                    "strategy index",
+                )?;
+                let mut totals = BTreeMap::<String, f64>::new();
+                for name in &names {
+                    let config_key = format!("{prefix}{name}");
+                    let raw = connection
+                        .get::<_, Option<String>>(&config_key)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("BatchExec strategy config missing in Redis: {name}")
+                        })?;
+                    let stored: serde_json::Value =
+                        serde_json::from_str(&raw).with_context(|| {
+                            format!("BatchExec Redis config is not valid JSON: {name}")
+                        })?;
+                    let Some(targets) = stored.get("targets").and_then(|value| value.as_object())
+                    else {
+                        continue;
+                    };
+                    for (symbol, target) in targets {
+                        let Some(qty) = target
+                            .get("qty")
+                            .and_then(serde_json::Value::as_f64)
+                            .filter(|qty| qty.is_finite())
+                        else {
+                            continue;
+                        };
+                        *totals.entry(symbol.clone()).or_insert(0.0) += qty;
+                    }
+                }
+                Ok(totals)
+            })
+            .await
+        };
+        match loaded {
+            Ok(Ok(totals)) => Ok(totals),
+            Ok(Err(error)) => {
+                if is_redis_transport_error(&error) {
+                    self.mark_broken().await;
+                }
+                Err(error)
+            }
+            Err(_) => {
+                self.mark_broken().await;
+                bail!(
+                    "Redis request timed out after {}s",
+                    self.request_timeout_secs().await
+                )
+            }
+        }
+    }
+
     pub async fn publish_market_rules(
         &self,
         source: &SourceConfig,

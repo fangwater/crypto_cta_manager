@@ -44,6 +44,12 @@ host_tag = "jp-meta"
 # sk traded pairs: alert when none of them delivered a new BBO within
 # market_stale_secs. Empty means check the venue feed for any fresh BBO.
 market_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+# Heartbeat pushes per channel aligned to Shanghai wall-clock boundaries;
+# heartbeats are suppressed 00:00-06:00 Shanghai time. Fault alerts still send.
+market_heartbeat_hours = 3
+order_heartbeat_hours = 4
+heartbeat_quiet_start_hour = 0
+heartbeat_quiet_end_hour = 6
 
 [monitor.dingtalk]
 market_webhook_url_env = "CTA_DINGTALK_MARKET_WEBHOOK_URL"

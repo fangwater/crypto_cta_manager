@@ -60,7 +60,12 @@ webhook. Never commit or print a webhook URL, access token, signing secret, or
 the host credential file. Each channel retries failed sends with exponential
 backoff and keeps the issue pending until that channel succeeds. The monitor
 sends on issue transitions, repeats unresolved issues at `repeat_alert_secs`,
-and sends a recovery notice; it must not send one message on every poll. Use
+and sends a recovery notice; it must not send one message on every poll. Each
+channel also pushes a `[心跳]` proof-of-life message every
+`market_heartbeat_hours`/`order_heartbeat_hours` aligned to Shanghai wall-clock
+hour boundaries; heartbeats are suppressed inside the Shanghai-time quiet
+window [`heartbeat_quiet_start_hour`, `heartbeat_quiet_end_hour`) while fault
+alerts still send. Use
 `--once --dry-run` before enabling the process. It runs as the pmdaemon
 process `cta_monitor`, registered by `scripts/start_monitor.sh` /
 `stop_monitor.sh` in the Manager remote root; registering or restarting it

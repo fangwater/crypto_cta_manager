@@ -96,6 +96,18 @@ pub struct MonitorConfig {
     pub market_symbols: Vec<String>,
     /// Host label prepended to every DingTalk alert, such as "[el01]".
     pub host_tag: String,
+    /// Hours between market-channel heartbeat pushes aligned to Shanghai
+    /// wall-clock boundaries. Zero disables the heartbeat.
+    pub market_heartbeat_hours: u64,
+    /// Hours between order-channel heartbeat pushes aligned to Shanghai
+    /// wall-clock boundaries. Zero disables the heartbeat.
+    pub order_heartbeat_hours: u64,
+    /// Shanghai-time quiet window suppressing heartbeat pushes,
+    /// [heartbeat_quiet_start_hour, heartbeat_quiet_end_hour). A start later
+    /// than the end wraps past midnight; equal bounds disable the window.
+    /// Fault alerts are never suppressed.
+    pub heartbeat_quiet_start_hour: u32,
+    pub heartbeat_quiet_end_hour: u32,
     pub dingtalk: DingTalkConfig,
 }
 
@@ -222,6 +234,10 @@ impl Default for MonitorConfig {
                 "XRPUSDT".to_string(),
             ],
             host_tag: String::new(),
+            market_heartbeat_hours: 3,
+            order_heartbeat_hours: 4,
+            heartbeat_quiet_start_hour: 0,
+            heartbeat_quiet_end_hour: 6,
             dingtalk: DingTalkConfig::default(),
         }
     }
@@ -297,6 +313,17 @@ impl AppConfig {
             || self.monitor.position_residual_usdt < 0.0
         {
             bail!("monitor.position_residual_usdt must be finite and non-negative");
+        }
+        if self.monitor.market_heartbeat_hours > 24 {
+            bail!("monitor.market_heartbeat_hours must be between 0 and 24");
+        }
+        if self.monitor.order_heartbeat_hours > 24 {
+            bail!("monitor.order_heartbeat_hours must be between 0 and 24");
+        }
+        if self.monitor.heartbeat_quiet_start_hour >= 24
+            || self.monitor.heartbeat_quiet_end_hour >= 24
+        {
+            bail!("monitor heartbeat quiet hours must be between 0 and 23");
         }
         if self.monitor.dingtalk.request_timeout_secs == 0 {
             bail!("monitor.dingtalk.request_timeout_secs must be greater than zero");
