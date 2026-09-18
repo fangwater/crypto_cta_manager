@@ -213,11 +213,15 @@ nav_strategy_snapshot \
 
 `SYSTEM_POSITION_CLOSE` and any other non-strategy remainder are never
 invented into a CTA strategy. The command records their account reconciliation
-quantity as `__unallocated__`. After the anchor, a system-close fill consumes
-the oldest opposite strategy lot in that source, symbol, and venue; only an
-unmatched remainder remains `__unallocated__`. The account NAV and the sum of
-strategy NAV therefore use the same anchor. Earlier account history is excluded
-from the rebased strategy NAV rather than being assigned without evidence.
+quantity as `__unallocated__`. After the anchor, `__unallocated__` is the
+derived residual: for each symbol and venue it owns the account position and
+NAV that the named strategy ledgers do not explain, matching how Exec assigns
+the same remainder to `SYSTEM_POSITION_CLOSE`. System-close fills stay
+unattributed, so they move the residual directly instead of consuming named
+strategy lots, and the strategy rows always sum back to the account NAV. The
+account NAV and the sum of strategy NAV therefore use the same anchor. Earlier
+account history is excluded from the rebased strategy NAV rather than being
+assigned without evidence.
 
 For a controlled manual import, provide every nonzero strategy lot with a
 single common mark for each symbol and venue:

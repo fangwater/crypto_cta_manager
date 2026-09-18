@@ -286,7 +286,10 @@ strategy, symbol, and venue, but mark every strategy bucket with the latest
 account-level fill for the same symbol and venue so strategy NAV remains
 additive to account NAV. Account-level PostgreSQL snapshots have no historical
 strategy allocation, so expose them as `__initial_position__` instead of
-assigning them to a CTA strategy. Keep `system_position_close` separate. The
+assigning them to a CTA strategy. When a strategy-allocation snapshot is
+active, `system_position_close` fills update only the account ledger and
+`__unallocated__` is derived as the account residual after the named strategy
+ledgers; never consume a named strategy lot for a system-close fill. The
 browser must provide portfolio, per-symbol, and per-strategy curves plus a
 strategy PnL table.
 
