@@ -652,10 +652,10 @@ struct SourceSymbolIndex {
     last_fill_ts_us: Option<i64>,
 }
 
-async fn upsert_symbol_index(
+async fn upsert_symbol_index<'a>(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     source_id: &str,
-    events: &[UniformOrderEvent],
+    events: impl IntoIterator<Item = &'a UniformOrderEvent>,
 ) -> Result<()> {
     for ((symbol, venue_code), index) in symbol_index_deltas(events) {
         sqlx::query(
@@ -711,8 +711,8 @@ pub async fn refresh_source_symbol_index(
         .context("failed to commit source symbol index")
 }
 
-fn symbol_index_deltas(
-    events: &[UniformOrderEvent],
+fn symbol_index_deltas<'a>(
+    events: impl IntoIterator<Item = &'a UniformOrderEvent>,
 ) -> std::collections::BTreeMap<(String, i16), SourceSymbolIndex> {
     let mut index = std::collections::BTreeMap::<(String, i16), SourceSymbolIndex>::new();
     for event in events {

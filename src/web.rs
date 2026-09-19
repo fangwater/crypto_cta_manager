@@ -135,6 +135,7 @@ struct DashboardBuild {
 #[derive(Clone)]
 struct WebState {
     cache: Arc<RwLock<CacheState>>,
+    nav_history_store: Arc<std::sync::Mutex<nav::NavHistoryStore>>,
     config: Arc<AppConfig>,
     pool: PgPool,
     exec_config: ExecConfigClient,
@@ -351,7 +352,15 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         Arc::clone(&position_archive),
         Arc::clone(&twap),
     );
-    let first_build = build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await?;
+    let nav_history_store = Arc::new(std::sync::Mutex::new(nav::NavHistoryStore::default()));
+    let first_build = build_dashboard(
+        &config,
+        &pool,
+        refresh_interval_secs,
+        &live_equity,
+        &nav_history_store,
+    )
+    .await?;
     let cache = Arc::new(RwLock::new(CacheState {
         last_attempt_at_us: first_build.dashboard.generated_at_us,
         dashboard: first_build.dashboard,
@@ -365,12 +374,14 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let refresh_config = config.clone();
     let refresh_pool = pool.clone();
     let refresh_live = live_equity.clone();
+    let refresh_nav_store = Arc::clone(&nav_history_store);
     tokio::spawn(async move {
         refresh_loop(
             refresh_config,
             refresh_pool,
             refresh_cache,
             refresh_live,
+            refresh_nav_store,
             refresh_interval_secs,
         )
         .await;
@@ -505,6 +516,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .with_state(WebState {
             cache,
+            nav_history_store,
             config: Arc::new(config),
             pool: pool.clone(),
             exec_config,
@@ -2545,6 +2557,7 @@ async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
         &state.pool,
         state.refresh_interval_secs,
         &state.live_equity,
+        &state.nav_history_store,
     )
     .await?;
     let mut cache = state.cache.write().await;
@@ -3795,6 +3808,7 @@ async fn refresh_loop(
     pool: PgPool,
     cache: Arc<RwLock<CacheState>>,
     live_equity: LiveEquityHub,
+    nav_history_store: Arc<std::sync::Mutex<nav::NavHistoryStore>>,
     refresh_interval_secs: u64,
 ) {
     let period = Duration::from_secs(refresh_interval_secs);
@@ -3804,7 +3818,15 @@ async fn refresh_loop(
     loop {
         interval.tick().await;
         let attempted_at_us = unix_now_us();
-        match build_dashboard(&config, &pool, refresh_interval_secs, &live_equity).await {
+        match build_dashboard(
+            &config,
+            &pool,
+            refresh_interval_secs,
+            &live_equity,
+            &nav_history_store,
+        )
+        .await
+        {
             Ok(build) => {
                 info!(
                     source_count = build.dashboard.report.source_count,
@@ -3835,6 +3857,7 @@ async fn build_dashboard(
     pool: &PgPool,
     refresh_interval_secs: u64,
     live_equity: &LiveEquityHub,
+    nav_history_store: &Arc<std::sync::Mutex<nav::NavHistoryStore>>,
 ) -> Result<DashboardBuild> {
     let started = Instant::now();
     let now_ms = unix_now_ms();
@@ -3886,9 +3909,15 @@ async fn build_dashboard(
         })
         .collect();
 
+    let nav_history_store = Arc::clone(nav_history_store);
     let (report, histories, snapshots, strategy_snapshots) =
         tokio::task::spawn_blocking(move || {
-            let histories = nav::load_nav_source_histories(&nav_config, &[])?;
+            let histories = {
+                let mut store = nav_history_store
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                store.refresh(&nav_config)?
+            };
             let report = nav::rebuild_nav_from_histories_with_strategy_snapshots(
                 &nav_config,
                 &[],

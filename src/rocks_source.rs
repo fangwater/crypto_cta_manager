@@ -96,6 +96,59 @@ pub fn read_available_column_families(
     Ok(result)
 }
 
+#[derive(Debug)]
+pub struct ColumnFamilyScan {
+    pub records: Vec<RawRocksRecord>,
+    /// The newest key observed during the scan; `None` when the column family
+    /// yielded no records.
+    pub last_key: Option<Vec<u8>>,
+}
+
+/// Read records from each available requested column family in one read-only
+/// RocksDB open, starting at the optional inclusive start key for each column
+/// family (`None` scans from the beginning). The live persist_manager remains
+/// writable by Exec.
+pub fn read_column_families_from(
+    path: &Path,
+    requests: &[(String, Option<Vec<u8>>)],
+) -> Result<BTreeMap<String, ColumnFamilyScan>> {
+    if !path.is_dir() {
+        bail!("RocksDB path is not a directory: {}", path.display());
+    }
+
+    let options = read_only_options();
+    let column_families = DB::list_cf(&options, path)
+        .with_context(|| format!("failed to list column families in {}", path.display()))?;
+    let db = DB::open_cf_for_read_only(&options, path, column_families.clone(), false)
+        .with_context(|| format!("failed to open RocksDB {} read-only", path.display()))?;
+    let mut result = BTreeMap::new();
+    for (requested, start_key) in requests {
+        if !column_families.iter().any(|name| name == requested) {
+            continue;
+        }
+        let column_family = db
+            .cf_handle(requested)
+            .with_context(|| format!("{requested} column family disappeared after open"))?;
+        let mode = match start_key {
+            Some(start_key) => IteratorMode::From(start_key.as_slice(), Direction::Forward),
+            None => IteratorMode::Start,
+        };
+        let mut records = Vec::new();
+        let mut last_key = None;
+        for item in db.iterator_cf(column_family, mode) {
+            let (key, value) =
+                item.with_context(|| format!("failed while iterating {requested}"))?;
+            last_key = Some(key.to_vec());
+            records.push(RawRocksRecord {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            });
+        }
+        result.insert(requested.clone(), ColumnFamilyScan { records, last_key });
+    }
+    Ok(result)
+}
+
 /// Read the newest records from each available requested column family in one
 /// read-only RocksDB open. The live persist_manager remains writable by Exec.
 pub fn read_latest_column_families(
@@ -188,7 +241,7 @@ pub fn read_uniform_orders(
     Ok(records)
 }
 
-fn format_time_key(ts_us: i64) -> String {
+pub(crate) fn format_time_key(ts_us: i64) -> String {
     format!("{ts_us:020}")
 }
 

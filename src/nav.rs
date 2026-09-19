@@ -19,14 +19,14 @@ pub type SourceMarkOverrides = BTreeMap<String, VenueMarkOverrides>;
 pub type SourcePositionSnapshots = BTreeMap<String, PositionSnapshot>;
 pub type SourceStrategyPositionSnapshots = BTreeMap<String, StrategyPositionSnapshot>;
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct NavSourceHistory {
-    events: Vec<UniformOrderEvent>,
+    events: im::Vector<UniformOrderEvent>,
     liquidity_by_order: LiquidityByOrder,
 }
 
 impl NavSourceHistory {
-    pub(crate) fn events(&self) -> &[UniformOrderEvent] {
+    pub(crate) fn events(&self) -> &im::Vector<UniformOrderEvent> {
         &self.events
     }
 
@@ -314,7 +314,7 @@ enum LiquidityRole {
 }
 
 type LiquidityOrderKey = (String, i16, i64);
-type LiquidityByOrder = BTreeMap<LiquidityOrderKey, LiquidityRole>;
+type LiquidityByOrder = im::OrdMap<LiquidityOrderKey, LiquidityRole>;
 
 #[derive(Clone, Debug)]
 struct PreparedFill {
@@ -1101,6 +1101,15 @@ fn decode_liquidity_by_order(
     records: BTreeMap<String, Vec<rocks_source::RawRocksRecord>>,
 ) -> Result<LiquidityByOrder> {
     let mut roles = LiquidityByOrder::new();
+    merge_liquidity_records(&mut roles, source, records)?;
+    Ok(roles)
+}
+
+fn merge_liquidity_records(
+    roles: &mut LiquidityByOrder,
+    source: &SourceConfig,
+    records: BTreeMap<String, Vec<rocks_source::RawRocksRecord>>,
+) -> Result<()> {
     for (column_family, records) in records {
         for record in records {
             let event = decode_trade_update(&record.key, &record.value).with_context(|| {
@@ -1120,17 +1129,19 @@ fn decode_liquidity_by_order(
             } else {
                 LiquidityRole::Taker
             };
-            roles
-                .entry(key)
-                .and_modify(|role| {
+            match roles.get_mut(&key) {
+                Some(role) => {
                     if *role != observed {
                         *role = LiquidityRole::Unknown;
                     }
-                })
-                .or_insert(observed);
+                }
+                None => {
+                    roles.insert(key, observed);
+                }
+            }
         }
     }
-    Ok(roles)
+    Ok(())
 }
 
 fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
@@ -1180,7 +1191,7 @@ fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
         "loaded NAV source history"
     );
     Ok(NavSourceHistory {
-        events,
+        events: events.into_iter().collect(),
         liquidity_by_order,
     })
 }
@@ -1199,14 +1210,209 @@ pub fn load_nav_source_histories(
             load_source_history(source)
                 .with_context(|| format!("failed to read source {} RocksDB", source.id))?
         } else {
-            NavSourceHistory {
-                events: Vec::new(),
-                liquidity_by_order: LiquidityByOrder::new(),
-            }
+            NavSourceHistory::default()
         };
         histories.insert(source.id.clone(), history);
     }
     Ok(histories)
+}
+
+/// How far behind the per-column-family checkpoint each incremental scan
+/// restarts, so records committed slightly out of key order are still read.
+const NAV_HISTORY_SCAN_OVERLAP_US: i64 = 300 * 1_000_000;
+const NAV_HISTORY_COLUMN_FAMILIES: &[&str] = &[
+    crate::model::UNIFORM_ORDERS_CF,
+    TRADE_UPDATES_CF,
+    TRADE_UPDATES_UNMATCHED_CF,
+];
+
+#[derive(Debug, Default)]
+struct ColumnFamilyCheckpoint {
+    /// Newest key timestamp observed in this column family.
+    last_record_ts_us: Option<i64>,
+    /// Keys already merged into the cached history, bounded to the overlap
+    /// window behind `last_record_ts_us` so deduplication stays cheap.
+    seen_keys: BTreeSet<Vec<u8>>,
+}
+
+impl ColumnFamilyCheckpoint {
+    fn scan_start_key(&self) -> Option<Vec<u8>> {
+        self.last_record_ts_us.map(|last| {
+            rocks_source::format_time_key(last - NAV_HISTORY_SCAN_OVERLAP_US).into_bytes()
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct IncrementalSourceHistory {
+    /// Contents of the RocksDB IDENTITY file this history was built from; a
+    /// changed identity means the database was recreated and must be rescanned.
+    db_identity: Option<Vec<u8>>,
+    checkpoints: BTreeMap<String, ColumnFamilyCheckpoint>,
+    history: NavSourceHistory,
+}
+
+/// Incremental NAV history cache. Each refresh opens every enabled source
+/// RocksDB read-only and scans only records appended after the previous
+/// per-column-family checkpoint, instead of rescanning full histories. The
+/// cached `NavSourceHistory` uses persistent collections, so publishing the
+/// refreshed snapshot is a cheap clone.
+#[derive(Debug, Default)]
+pub struct NavHistoryStore {
+    sources: BTreeMap<String, IncrementalSourceHistory>,
+}
+
+impl NavHistoryStore {
+    pub fn refresh(&mut self, config: &AppConfig) -> Result<NavSourceHistories> {
+        let selected_sources = select_sources(config, &[])?;
+        let selected_ids = selected_sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect::<BTreeSet<_>>();
+        self.sources
+            .retain(|source_id, _| selected_ids.contains(source_id));
+
+        let mut histories = NavSourceHistories::new();
+        for source in selected_sources {
+            // Match load_nav_source_histories: a source without an initialized
+            // RocksDB contributes an empty history, and its cache is dropped so
+            // a later database starts from a clean scan.
+            if !source.rocksdb_path.join("CURRENT").is_file() {
+                self.sources.remove(&source.id);
+                histories.insert(source.id.clone(), NavSourceHistory::default());
+                continue;
+            }
+            let state = self.sources.entry(source.id.clone()).or_default();
+            state
+                .refresh_source(source)
+                .with_context(|| format!("failed to read source {} RocksDB", source.id))?;
+            histories.insert(source.id.clone(), state.history.clone());
+        }
+        Ok(histories)
+    }
+}
+
+impl IncrementalSourceHistory {
+    fn refresh_source(&mut self, source: &SourceConfig) -> Result<()> {
+        let path = source.rocksdb_path.as_path();
+        let identity = std::fs::read(path.join("IDENTITY")).ok();
+        if identity.is_some() && self.db_identity.is_some() && self.db_identity != identity {
+            info!(
+                source_id = source.id,
+                "source RocksDB identity changed; rebuilding NAV history"
+            );
+            *self = IncrementalSourceHistory::default();
+        }
+
+        let refresh_started = Instant::now();
+        let requests = NAV_HISTORY_COLUMN_FAMILIES
+            .iter()
+            .map(|name| {
+                let start = self
+                    .checkpoints
+                    .get(*name)
+                    .and_then(ColumnFamilyCheckpoint::scan_start_key);
+                (name.to_string(), start)
+            })
+            .collect::<Vec<_>>();
+        let scans = rocks_source::read_column_families_from(path, &requests)?;
+        if !scans.contains_key(crate::model::UNIFORM_ORDERS_CF) {
+            bail!(
+                "RocksDB {} has no {} column family",
+                source.rocksdb_path.display(),
+                crate::model::UNIFORM_ORDERS_CF
+            );
+        }
+
+        // Decode into local buffers first; checkpoints and history are only
+        // updated after every scan and decode succeeds.
+        let mut new_events = Vec::new();
+        let mut new_trade_records: BTreeMap<String, Vec<rocks_source::RawRocksRecord>> =
+            BTreeMap::new();
+        let mut scanned: BTreeMap<String, (BTreeSet<Vec<u8>>, Option<i64>)> = BTreeMap::new();
+        let mut scanned_record_count = 0usize;
+        for (column_family, scan) in scans {
+            let seen = self
+                .checkpoints
+                .get(&column_family)
+                .map(|checkpoint| &checkpoint.seen_keys);
+            let mut scanned_keys = BTreeSet::new();
+            for record in scan.records {
+                scanned_record_count += 1;
+                scanned_keys.insert(record.key.clone());
+                if seen.is_some_and(|seen| seen.contains(&record.key)) {
+                    continue;
+                }
+                if column_family == crate::model::UNIFORM_ORDERS_CF {
+                    new_events.push(
+                        decode_uniform_order(&record.key, &record.value).with_context(|| {
+                            format!(
+                                "source {} contains an undecodable uniform order at key {:?}",
+                                source.id,
+                                String::from_utf8_lossy(&record.key)
+                            )
+                        })?,
+                    );
+                } else {
+                    new_trade_records
+                        .entry(column_family.clone())
+                        .or_default()
+                        .push(record);
+                }
+            }
+            let last_ts = scan
+                .last_key
+                .as_deref()
+                .map(parse_record_key_ts)
+                .transpose()?;
+            scanned.insert(column_family, (scanned_keys, last_ts));
+        }
+
+        merge_liquidity_records(
+            &mut self.history.liquidity_by_order,
+            source,
+            new_trade_records,
+        )?;
+        let out_of_order = self
+            .history
+            .events
+            .last()
+            .zip(new_events.first())
+            .is_some_and(|(last, first)| first.record_key < last.record_key);
+        for event in new_events {
+            self.history.events.push_back(event);
+        }
+        if out_of_order {
+            self.history
+                .events
+                .sort_by(|left, right| left.record_key.cmp(&right.record_key));
+        }
+        for (column_family, (scanned_keys, last_ts)) in scanned {
+            let checkpoint = self.checkpoints.entry(column_family).or_default();
+            checkpoint.seen_keys.extend(scanned_keys);
+            if let Some(last_ts) = last_ts {
+                checkpoint.last_record_ts_us = Some(last_ts);
+                let bound = rocks_source::format_time_key(last_ts - NAV_HISTORY_SCAN_OVERLAP_US)
+                    .into_bytes();
+                checkpoint.seen_keys = checkpoint.seen_keys.split_off(&bound);
+            }
+        }
+        self.db_identity = identity;
+        info!(
+            source_id = source.id,
+            scanned_record_count,
+            cached_event_count = self.history.events.len(),
+            refresh_ms = refresh_started.elapsed().as_millis(),
+            "refreshed NAV source history"
+        );
+        Ok(())
+    }
+}
+
+fn parse_record_key_ts(key: &[u8]) -> Result<i64> {
+    let key = std::str::from_utf8(key).context("record key is not UTF-8")?;
+    key.parse::<i64>()
+        .with_context(|| format!("record key {key:?} is not a timestamp"))
 }
 
 pub fn estimate_source_events(
@@ -2819,19 +3025,23 @@ mod tests {
         event
     }
 
-    fn write_events(path: &std::path::Path, events: &[UniformOrderEvent]) {
+    fn open_uniform_orders_db(path: &std::path::Path) -> DB {
         let mut options = Options::default();
         options.create_if_missing(true);
         options.create_missing_column_families(true);
-        let db = DB::open_cf_descriptors(
+        DB::open_cf_descriptors(
             &options,
             path,
-            vec![ColumnFamilyDescriptor::new(
-                UNIFORM_ORDERS_CF,
-                Options::default(),
-            )],
+            vec![
+                ColumnFamilyDescriptor::new("default", Options::default()),
+                ColumnFamilyDescriptor::new(UNIFORM_ORDERS_CF, Options::default()),
+            ],
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn write_events(path: &std::path::Path, events: &[UniformOrderEvent]) {
+        let db = open_uniform_orders_db(path);
         let column_family = db.cf_handle(UNIFORM_ORDERS_CF).unwrap();
         for event in events {
             db.put_cf(
@@ -2841,6 +3051,13 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    fn write_raw_uniform_record(path: &std::path::Path, record_key: &str, payload: &[u8]) {
+        let db = open_uniform_orders_db(path);
+        let column_family = db.cf_handle(UNIFORM_ORDERS_CF).unwrap();
+        db.put_cf(column_family, record_key.as_bytes(), payload)
+            .unwrap();
     }
 
     fn app_config(sources: Vec<SourceConfig>) -> AppConfig {
@@ -2935,10 +3152,12 @@ mod tests {
             event(1, "BTCUSDT", 1, 1, 100.0, 1.0),
             event(2, "BTCUSDT", 1, 2, 110.0, 1.0),
         ];
-        let liquidity = LiquidityByOrder::from([
+        let liquidity: LiquidityByOrder = [
             (("BTCUSDT".to_string(), 1, 1), LiquidityRole::Maker),
             (("BTCUSDT".to_string(), 1, 2), LiquidityRole::Taker),
-        ]);
+        ]
+        .into_iter()
+        .collect();
         let report = estimate_source_events_with_snapshot_and_liquidity(
             &source,
             events,
@@ -3303,7 +3522,9 @@ mod tests {
                     strategy_event_at(2, 2, "BTCUSDT", 1, 1, 105.0, 1.0, strategy_b),
                     strategy_event_at(3, 3, "BTCUSDT", 1, 1, 100.0, 1.0, strategy_a),
                     strategy_event_at(4, 4, "BTCUSDT", 1, 1, 120.0, 1.0, strategy_b),
-                ],
+                ]
+                .into_iter()
+                .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
             },
         )]);
@@ -3413,7 +3634,9 @@ mod tests {
                 events: vec![
                     strategy_event_at(1, 1, "BTCUSDT", 1, 1, 100.0, 1.0, strategy),
                     strategy_event_at(20, 20, "BTCUSDT", 1, 2, 120.0, 1.0, "system_position_close"),
-                ],
+                ]
+                .into_iter()
+                .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
             },
         )]);
@@ -3506,7 +3729,9 @@ mod tests {
                     110.0,
                     1.0,
                     "system_position_close",
-                )],
+                )]
+                .into_iter()
+                .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
             },
         )]);
@@ -3573,7 +3798,9 @@ mod tests {
                     1.1,
                     50.0,
                     "system_position_close",
-                )],
+                )]
+                .into_iter()
+                .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
             },
         )]);
@@ -3635,7 +3862,9 @@ mod tests {
                     110.0,
                     8.0,
                     "system_position_close",
-                )],
+                )]
+                .into_iter()
+                .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
             },
         )]);
@@ -3696,7 +3925,9 @@ mod tests {
                 events: vec![
                     strategy_event_at(15, 15, "BTCUSDT", 1, 1, 110.0, 8.0, "system_position_close"),
                     strategy_event_at(16, 16, "BTCUSDT", 1, 1, 105.0, 5.0, "cta_a"),
-                ],
+                ]
+                .into_iter()
+                .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
             },
         )]);
@@ -4063,5 +4294,125 @@ mod tests {
         assert_eq!(report.source_count, 1);
         assert_close(report.aggregate.totals.nav_change_before_fee_quote, 10.0);
         assert_close(report.aggregate.totals.nav_change_after_fee_quote, 9.79);
+    }
+
+    fn history_event_timestamps(history: &NavSourceHistory) -> Vec<i64> {
+        history
+            .events
+            .iter()
+            .map(|event| event.record_key.parse::<i64>().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn nav_history_store_merges_only_new_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = app_config(vec![source_at("trade01", temp.path(), 0.0)]);
+        write_events(
+            temp.path(),
+            &[
+                event(100, "BTCUSDT", 1, 1, 100.0, 1.0),
+                event(300, "BTCUSDT", 1, 1, 300.0, 1.0),
+            ],
+        );
+        let mut store = NavHistoryStore::default();
+
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(history_event_timestamps(&histories["trade01"]), [100, 300]);
+
+        // A refresh without new writes must not duplicate events.
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(history_event_timestamps(&histories["trade01"]), [100, 300]);
+
+        // Keys committed inside the overlap window and past it are merged in
+        // key order without re-reading already merged records.
+        write_events(
+            temp.path(),
+            &[
+                event(200, "BTCUSDT", 1, 1, 200.0, 1.0),
+                event(400, "BTCUSDT", 1, 1, 400.0, 1.0),
+            ],
+        );
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(
+            history_event_timestamps(&histories["trade01"]),
+            [100, 200, 300, 400]
+        );
+
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(
+            history_event_timestamps(&histories["trade01"]),
+            [100, 200, 300, 400]
+        );
+    }
+
+    #[test]
+    fn nav_history_store_rescans_a_recreated_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = app_config(vec![source_at("trade01", temp.path(), 0.0)]);
+        write_events(temp.path(), &[event(1, "BTCUSDT", 1, 1, 100.0, 1.0)]);
+        let mut store = NavHistoryStore::default();
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(history_event_timestamps(&histories["trade01"]), [1]);
+
+        std::fs::remove_dir_all(temp.path()).unwrap();
+        write_events(
+            temp.path(),
+            &[
+                event(5, "BTCUSDT", 1, 1, 500.0, 1.0),
+                event(6, "BTCUSDT", 1, 1, 600.0, 1.0),
+            ],
+        );
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(history_event_timestamps(&histories["trade01"]), [5, 6]);
+    }
+
+    #[test]
+    fn nav_history_store_picks_up_a_database_created_later() {
+        let temp = tempfile::tempdir().unwrap();
+        let absent = temp.path().join("absent_persist");
+        let config = app_config(vec![source_at("trade01", &absent, 0.0)]);
+        let mut store = NavHistoryStore::default();
+        let histories = store.refresh(&config).unwrap();
+        assert!(histories["trade01"].events.is_empty());
+
+        write_events(&absent, &[event(1, "BTCUSDT", 1, 1, 100.0, 1.0)]);
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(history_event_timestamps(&histories["trade01"]), [1]);
+    }
+
+    #[test]
+    fn nav_history_store_keeps_checkpoints_after_a_failed_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = app_config(vec![source_at("trade01", temp.path(), 0.0)]);
+        write_events(temp.path(), &[event(1, "BTCUSDT", 1, 1, 100.0, 1.0)]);
+        let mut store = NavHistoryStore::default();
+        store.refresh(&config).unwrap();
+
+        let repaired = event(2, "BTCUSDT", 1, 1, 101.0, 1.0);
+        write_raw_uniform_record(temp.path(), &repaired.record_key, b"not-a-record");
+        assert!(store.refresh(&config).is_err());
+
+        write_raw_uniform_record(temp.path(), &repaired.record_key, &encode_event(&repaired));
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(history_event_timestamps(&histories["trade01"]), [1, 2]);
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(history_event_timestamps(&histories["trade01"]), [1, 2]);
+    }
+
+    #[test]
+    fn nav_history_store_keeps_other_sources_when_one_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let absent = temp.path().join("absent_persist");
+        let config = app_config(vec![
+            source_at("trade01", temp.path(), 0.0),
+            source_at("trade02", &absent, 0.0),
+        ]);
+        write_events(temp.path(), &[event(1, "BTCUSDT", 1, 1, 100.0, 1.0)]);
+        let mut store = NavHistoryStore::default();
+
+        let histories = store.refresh(&config).unwrap();
+        assert_eq!(history_event_timestamps(&histories["trade01"]), [1]);
+        assert!(histories["trade02"].events.is_empty());
     }
 }
