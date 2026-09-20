@@ -5,8 +5,33 @@ import {
   makerPriceAnchorOptions,
   orderParameterMeta,
 } from '../lib/orderParametersMeta'
-import type { OrderParameters } from '../types'
+import type { ChaseParameters, OrderParameters, PovParameters } from '../types'
 import { formatDuration, maxEstimatedExecutionMs } from '../lib/executionTiming'
+
+const algorithmOptions = [
+  { value: 'batch', label: 'Batch' },
+  { value: 'pov', label: 'POV' },
+  { value: 'chase', label: 'Chase' },
+] as const
+
+const povFields = [
+  ['participation_rate', '参与率', '0.01', '0.000001'],
+  ['max_batch_usdt', '单次释放上限 (USDT)', '1', '0.01'],
+  ['max_carry_usdt', '累计额度上限 (USDT)', '1', '0.01'],
+  ['volume_stale_ms', '成交量有效期 (ms)', '1', '1'],
+  ['quote_stale_ms', '盘口有效期 (ms)', '1', '1'],
+  ['duration_ms', '执行期限 (ms)', '1000', '1'],
+] as const satisfies ReadonlyArray<[keyof PovParameters, string, string, string]>
+
+const chaseFields = [
+  ['single_order_usdt', '单笔名义金额 (USDT)', '1', '0.01'],
+  ['max_open_usdt', '最大在途金额 (USDT)', '1', '0.01'],
+  ['maker_recenter_trigger_bps', '追价触发 (bps)', '0.1', '0'],
+  ['maker_amend_cooldown_ms', '改单冷却 (ms)', '1', '0'],
+  ['maker_timeout_ms', 'Maker 超时 (ms)', '1', '1'],
+  ['target_tolerance_usdt', '目标容差 (USDT)', '1', '0'],
+  ['bbo_max_age_ms', '盘口有效期 (ms)', '1', '1'],
+] as const satisfies ReadonlyArray<[keyof ChaseParameters, string, string, string]>
 
 export function OrderParametersForm({
   value,
@@ -15,68 +40,169 @@ export function OrderParametersForm({
   value: OrderParameters
   onChange: (value: OrderParameters) => void
 }) {
+  const updatePov = (field: keyof PovParameters, next: number | string | null) => {
+    onChange({ ...value, pov: { ...value.pov, [field]: next } })
+  }
+  const updateChase = (field: keyof ChaseParameters, next: number) => {
+    onChange({ ...value, chase: { ...value.chase, [field]: next } })
+  }
+
   return (
-    <div className="grid gap-4">
-      <div className="grid gap-4 sm:grid-cols-2">
-        {ORDER_PARAMETER_FIELDS.map((field) => {
-          const meta = orderParameterMeta[field]
-          return (
-            <Label key={field}>
-              {meta.label}
-              <Input
-                type="number"
-                step={meta.step}
-                min={meta.min}
-                value={value[field]}
-                onChange={(event) =>
-                  onChange({
-                    ...value,
-                    [field]: Number(event.target.value),
-                  })
-                }
-              />
-              <FieldHint>{meta.hint}</FieldHint>
-            </Label>
-          )
-        })}
-      </div>
+    <div className="grid gap-5">
       <Label>
-        {orderParameterMeta.maker_price_anchor.label}
+        执行算法
         <Select
-          value={value.maker_price_anchor}
+          value={value.algorithm}
           onChange={(event) =>
             onChange({
               ...value,
-              maker_price_anchor: event.target.value as OrderParameters['maker_price_anchor'],
+              algorithm: event.target.value as OrderParameters['algorithm'],
             })
           }
         >
-          {makerPriceAnchorOptions.map((option) => (
+          {algorithmOptions.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
         </Select>
         <FieldHint>
-          {orderParameterMeta.maker_price_anchor.hint}{' '}
-          {
-            makerPriceAnchorOptions.find((option) => option.value === value.maker_price_anchor)
-              ?.hint
-          }
+          Batch 按批次推进；POV 按公开成交量释放；Chase 在己方一档挂单并原地改单追价。
         </FieldHint>
       </Label>
-      <div className="flex items-start gap-3 border-l-2 border-brand px-3 py-2 text-sm text-muted">
-        <Timer className="mt-0.5 shrink-0 text-brand" size={17} />
-        <div>
-          <div className="font-medium text-ink">
-            最大预估执行时间 {formatDuration(maxEstimatedExecutionMs(value))}
+
+      {value.algorithm !== 'chase' ? (
+        <>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {ORDER_PARAMETER_FIELDS.map((field) => {
+              const meta = orderParameterMeta[field]
+              return (
+                <Label key={field}>
+                  {meta.label}
+                  <Input
+                    type="number"
+                    step={meta.step}
+                    min={meta.min}
+                    value={value[field]}
+                    onChange={(event) =>
+                      onChange({ ...value, [field]: Number(event.target.value) })
+                    }
+                  />
+                  <FieldHint>{meta.hint}</FieldHint>
+                </Label>
+              )
+            })}
           </div>
-          <div className="mt-1 text-xs leading-5">
-            按 {value.max_batch || 0} 批、每批间隔 {value.batch_interval_ms || 0} ms，以及
-            每批最多 {Math.max(1, (value.max_maker_requotes || 0) + 1)} 轮 maker 等待估算；不含行情等待、撤单确认和网络延迟。
+          <Label>
+            {orderParameterMeta.maker_price_anchor.label}
+            <Select
+              value={value.maker_price_anchor}
+              onChange={(event) =>
+                onChange({
+                  ...value,
+                  maker_price_anchor: event.target
+                    .value as OrderParameters['maker_price_anchor'],
+                })
+              }
+            >
+              {makerPriceAnchorOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </Select>
+            <FieldHint>
+              {orderParameterMeta.maker_price_anchor.hint}{' '}
+              {
+                makerPriceAnchorOptions.find(
+                  (option) => option.value === value.maker_price_anchor,
+                )?.hint
+              }
+            </FieldHint>
+          </Label>
+        </>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {chaseFields.map(([field, label, step, min]) => (
+            <Label key={field}>
+              {label}
+              <Input
+                type="number"
+                step={step}
+                min={min}
+                value={value.chase[field]}
+                onChange={(event) => updateChase(field, Number(event.target.value))}
+              />
+            </Label>
+          ))}
+        </div>
+      )}
+
+      {value.algorithm === 'pov' && (
+        <section className="border-t border-border pt-5">
+          <div className="mb-4 text-sm font-semibold text-ink">POV 参数</div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {povFields.map(([field, label, step, min]) => (
+              <Label key={field}>
+                {label}
+                <Input
+                  type="number"
+                  step={step}
+                  min={min}
+                  value={String(value.pov[field])}
+                  onChange={(event) => updatePov(field, Number(event.target.value))}
+                />
+              </Label>
+            ))}
+            <Label>
+              流动性模式
+              <Select
+                value={value.pov.liquidity}
+                onChange={(event) => updatePov('liquidity', event.target.value)}
+              >
+                <option value="maker_only">Maker Only</option>
+                <option value="maker_then_taker">Maker Then Taker</option>
+                <option value="taker_only">Taker Only</option>
+              </Select>
+            </Label>
+            <Label>
+              限价
+              <Input
+                type="number"
+                step="0.00000001"
+                min="0"
+                value={value.pov.limit_price ?? ''}
+                placeholder="不限制"
+                onChange={(event) =>
+                  updatePov(
+                    'limit_price',
+                    event.target.value.trim() === '' ? null : Number(event.target.value),
+                  )
+                }
+              />
+              <FieldHint>仅 Maker Only 可设置；买入为价格上限，卖出为价格下限。</FieldHint>
+            </Label>
+          </div>
+        </section>
+      )}
+
+      {value.algorithm !== 'chase' && (
+        <div className="flex items-start gap-3 border-l-2 border-brand px-3 py-2 text-sm text-muted">
+          <Timer className="mt-0.5 shrink-0 text-brand" size={17} />
+          <div>
+            <div className="font-medium text-ink">
+              {value.algorithm === 'pov'
+                ? `POV 最长执行 ${formatDuration(value.pov.duration_ms)}`
+                : `最大预估执行时间 ${formatDuration(maxEstimatedExecutionMs(value))}`}
+            </div>
+            <div className="mt-1 text-xs leading-5">
+              {value.algorithm === 'pov'
+                ? '到期后撤销工作单并保留未完成目标，不会强制扫单。'
+                : `按 ${value.max_batch || 0} 批、每批间隔 ${value.batch_interval_ms || 0} ms，以及每批最多 ${Math.max(1, (value.max_maker_requotes || 0) + 1)} 轮 maker 等待估算。`}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }

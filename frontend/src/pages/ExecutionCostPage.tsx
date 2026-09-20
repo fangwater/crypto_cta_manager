@@ -200,7 +200,8 @@ export function ExecutionCostPage() {
           <CardDescription>
             到达价取更新时最近且未过期的已完成 5 秒 mid；TWAP 从该时点切连续 1 分钟 bucket（每分钟用
             5 秒 mid 平均）。成交来自 Exec RocksDB 的
-            <code className="mx-1">batch_exec:&lt;strategy&gt;</code>
+            <code className="mx-1">batch_exec:&lt;strategy&gt;</code> 或
+            <code className="mx-1">chase_exec:&lt;strategy&gt;</code>
             归属。只统计归档时带有 published_accounts 与 shares 的仓位更新。
           </CardDescription>
         </CardHeader>

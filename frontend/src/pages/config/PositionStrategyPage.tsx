@@ -20,6 +20,7 @@ export function PositionStrategyPage() {
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [selectedPosition, setSelectedPosition] = useState(emptyPosition)
   const [configurable, setConfigurable] = useState<Set<string>>(new Set())
+  const [experimentalToken, setExperimentalToken] = useState('')
 
   useEffect(() => {
     const controller = new AbortController()
@@ -31,6 +32,18 @@ export function PositionStrategyPage() {
 
   // Configure grant (or admin) can save targets; view-only users read only.
   const canEdit = isAdmin || configurable.has(selectedPosition.strategy_name)
+  const originalPosition = positions.find(
+    (item) => item.strategy_name === selectedPosition.strategy_name,
+  )
+  const requiresExperimentalToken = Object.entries(
+    selectedPosition.symbol_order_strategy_overrides,
+  ).some(([symbol, orderStrategyName]) => {
+    if (originalPosition?.symbol_order_strategy_overrides[symbol] === orderStrategyName) return false
+    return orders.some(
+      (order) =>
+        order.strategy_name === orderStrategyName && order.order_parameters.algorithm !== 'batch',
+    )
+  })
 
   return (
     <ConfigShell
@@ -57,9 +70,15 @@ export function PositionStrategyPage() {
             selectedName={selectedPosition.strategy_name}
             onSelect={(name) => {
               const item = positions.find((entry) => entry.strategy_name === name)
-              if (item) setSelectedPosition(item)
+              if (item) {
+                setSelectedPosition(item)
+                setExperimentalToken('')
+              }
             }}
-            onCreate={() => setSelectedPosition(emptyPosition())}
+            onCreate={() => {
+              setSelectedPosition(emptyPosition())
+              setExperimentalToken('')
+            }}
             allowCreate={isAdmin}
             renderMeta={(name) => {
               const item = positions.find((entry) => entry.strategy_name === name)
@@ -80,11 +99,15 @@ export function PositionStrategyPage() {
                 onSubmit={(event) => {
                   event.preventDefault()
                   void withWrite(async () => {
-                    const saved = await savePositionStrategy({
-                      ...selectedPosition,
-                      targets: selectedPosition.targets,
-                    })
+                    const saved = await savePositionStrategy(
+                      {
+                        ...selectedPosition,
+                        targets: selectedPosition.targets,
+                      },
+                      experimentalToken,
+                    )
                     setSelectedPosition(saved)
+                    setExperimentalToken('')
                     await reloadCatalog()
                     const published = saved.publishes?.length ?? 0
                     return published > 0
@@ -131,6 +154,19 @@ export function PositionStrategyPage() {
                     setSelectedPosition({ ...selectedPosition, symbol_order_strategy_overrides })
                   }
                 />
+                {requiresExperimentalToken && (
+                  <Label>
+                    实验算法 Token
+                    <Input
+                      type="password"
+                      autoComplete="off"
+                      value={experimentalToken}
+                      onChange={(event) => setExperimentalToken(event.target.value)}
+                      required
+                    />
+                    <FieldHint>新增 POV 或 Chase 的 Symbol 覆盖时必须提供。</FieldHint>
+                  </Label>
+                )}
                 <div className="flex flex-wrap gap-2">
                   <Button type="submit" variant="primary" disabled={saving || !canEdit}>
                     <Save size={15} /> 保存

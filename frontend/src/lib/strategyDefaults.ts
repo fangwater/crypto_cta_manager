@@ -2,6 +2,26 @@ import type { CatalogOrderStrategy, OrderParameters, PositionStrategy } from '..
 import { DEFAULT_ORDER_STRATEGY_NAME } from './orderParametersMeta'
 
 export const DEFAULT_ORDER: OrderParameters = {
+  algorithm: 'batch',
+  pov: {
+    participation_rate: 0.1,
+    max_batch_usdt: 300,
+    max_carry_usdt: 600,
+    volume_stale_ms: 5000,
+    quote_stale_ms: 1000,
+    duration_ms: 3600000,
+    liquidity: 'maker_then_taker',
+    limit_price: null,
+  },
+  chase: {
+    single_order_usdt: 100,
+    max_open_usdt: 200,
+    maker_recenter_trigger_bps: 3,
+    maker_amend_cooldown_ms: 0,
+    maker_timeout_ms: 60000,
+    target_tolerance_usdt: 10,
+    bbo_max_age_ms: 2000,
+  },
   single_order_usdt: 100,
   orders_per_batch: 3,
   max_batch: 20,

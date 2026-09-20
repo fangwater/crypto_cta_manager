@@ -7,7 +7,8 @@ use sqlx::postgres::PgPool;
 
 use crate::config::{FeeRates, validate_fee_rates};
 use crate::order_config::{
-    OrderParameters, TargetPosition, validate_exec_symbol, validate_strategy_name,
+    ExecutionAlgorithm, OrderParameters, TargetPosition, validate_exec_symbol,
+    validate_strategy_name,
 };
 
 pub const DEFAULT_CONTRACT_LEVERAGE: i32 = 5;
@@ -857,7 +858,8 @@ pub async fn delete_position_strategy(pool: &PgPool, strategy_name: &str) -> Res
 pub async fn list_order_strategies(pool: &PgPool) -> Result<Vec<OrderStrategy>> {
     let rows = sqlx::query(
         r#"
-        SELECT strategy_name, single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
+        SELECT strategy_name, algorithm, pov, chase,
+               single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
                tick_spacing, batch_interval_ms, maker_timeout_ms, max_maker_requotes,
                target_tolerance_usdt, updated_at_us
         FROM cta_order_strategies
@@ -880,15 +882,23 @@ pub async fn upsert_order_strategy(
         .order_parameters
         .validate()
         .map_err(|error| anyhow::anyhow!(error))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin order strategy save")?;
     sqlx::query(
         r#"
         INSERT INTO cta_order_strategies (
-            strategy_name, single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
+            strategy_name, algorithm, pov, chase,
+            single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
             tick_spacing, batch_interval_ms, maker_timeout_ms, max_maker_requotes,
             target_tolerance_usdt, updated_at_us
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT (strategy_name) DO UPDATE SET
+            algorithm = EXCLUDED.algorithm,
+            pov = EXCLUDED.pov,
+            chase = EXCLUDED.chase,
             single_order_usdt = EXCLUDED.single_order_usdt,
             orders_per_batch = EXCLUDED.orders_per_batch,
             max_batch = EXCLUDED.max_batch,
@@ -902,6 +912,9 @@ pub async fn upsert_order_strategy(
         "#,
     )
     .bind(&request.strategy_name)
+    .bind(request.order_parameters.algorithm.as_str())
+    .bind(serde_json::to_value(&request.order_parameters.pov)?)
+    .bind(serde_json::to_value(&request.order_parameters.chase)?)
     .bind(request.order_parameters.single_order_usdt)
     .bind(i32::try_from(request.order_parameters.orders_per_batch)?)
     .bind(i32::try_from(request.order_parameters.max_batch)?)
@@ -912,9 +925,12 @@ pub async fn upsert_order_strategy(
     .bind(i32::try_from(request.order_parameters.max_maker_requotes)?)
     .bind(request.order_parameters.target_tolerance_usdt)
     .bind(updated_at_us)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .with_context(|| format!("failed to save order strategy {}", request.strategy_name))?;
+    tx.commit()
+        .await
+        .context("failed to commit order strategy save")?;
     Ok(OrderStrategy {
         strategy_name: request.strategy_name.clone(),
         order_parameters: request.order_parameters.clone(),
@@ -1168,6 +1184,9 @@ pub async fn load_binding_parts(
             p.symbol_order_strategy_overrides,
             p.updated_at_us AS position_updated_at_us,
             o.strategy_name AS order_name,
+            o.algorithm,
+            o.pov,
+            o.chase,
             o.single_order_usdt,
             o.orders_per_batch,
             o.max_batch,
@@ -1207,17 +1226,7 @@ pub async fn load_binding_parts(
         position,
         OrderStrategy {
             strategy_name: row.try_get("order_name")?,
-            order_parameters: OrderParameters {
-                single_order_usdt: row.try_get("single_order_usdt")?,
-                orders_per_batch: u32::try_from(row.try_get::<i32, _>("orders_per_batch")?)?,
-                max_batch: u32::try_from(row.try_get::<i32, _>("max_batch")?)?,
-                maker_price_anchor: row.try_get("maker_price_anchor")?,
-                tick_spacing: u32::try_from(row.try_get::<i32, _>("tick_spacing")?)?,
-                batch_interval_ms: u32::try_from(row.try_get::<i32, _>("batch_interval_ms")?)?,
-                maker_timeout_ms: u32::try_from(row.try_get::<i32, _>("maker_timeout_ms")?)?,
-                max_maker_requotes: u32::try_from(row.try_get::<i32, _>("max_maker_requotes")?)?,
-                target_tolerance_usdt: row.try_get("target_tolerance_usdt")?,
-            },
+            order_parameters: decode_order_parameters(&row)?,
             updated_at_us: row.try_get("order_updated_at_us")?,
         },
         symbol_order_parameters,
@@ -1295,19 +1304,38 @@ fn decode_position_row(row: sqlx::postgres::PgRow) -> Result<PositionStrategy> {
 fn decode_order_row(row: sqlx::postgres::PgRow) -> Result<OrderStrategy> {
     Ok(OrderStrategy {
         strategy_name: row.try_get("strategy_name")?,
-        order_parameters: OrderParameters {
-            single_order_usdt: row.try_get("single_order_usdt")?,
-            orders_per_batch: u32::try_from(row.try_get::<i32, _>("orders_per_batch")?)?,
-            max_batch: u32::try_from(row.try_get::<i32, _>("max_batch")?)?,
-            maker_price_anchor: row.try_get("maker_price_anchor")?,
-            tick_spacing: u32::try_from(row.try_get::<i32, _>("tick_spacing")?)?,
-            batch_interval_ms: u32::try_from(row.try_get::<i32, _>("batch_interval_ms")?)?,
-            maker_timeout_ms: u32::try_from(row.try_get::<i32, _>("maker_timeout_ms")?)?,
-            max_maker_requotes: u32::try_from(row.try_get::<i32, _>("max_maker_requotes")?)?,
-            target_tolerance_usdt: row.try_get("target_tolerance_usdt")?,
-        },
+        order_parameters: decode_order_parameters(&row)?,
         updated_at_us: row.try_get("updated_at_us")?,
     })
+}
+
+fn decode_order_parameters(row: &sqlx::postgres::PgRow) -> Result<OrderParameters> {
+    let algorithm = parse_execution_algorithm(&row.try_get::<String, _>("algorithm")?)?;
+    let parameters = OrderParameters {
+        algorithm,
+        pov: serde_json::from_value(row.try_get("pov")?)?,
+        chase: serde_json::from_value(row.try_get("chase")?)?,
+        single_order_usdt: row.try_get("single_order_usdt")?,
+        orders_per_batch: u32::try_from(row.try_get::<i32, _>("orders_per_batch")?)?,
+        max_batch: u32::try_from(row.try_get::<i32, _>("max_batch")?)?,
+        maker_price_anchor: row.try_get("maker_price_anchor")?,
+        tick_spacing: u32::try_from(row.try_get::<i32, _>("tick_spacing")?)?,
+        batch_interval_ms: u32::try_from(row.try_get::<i32, _>("batch_interval_ms")?)?,
+        maker_timeout_ms: u32::try_from(row.try_get::<i32, _>("maker_timeout_ms")?)?,
+        max_maker_requotes: u32::try_from(row.try_get::<i32, _>("max_maker_requotes")?)?,
+        target_tolerance_usdt: row.try_get("target_tolerance_usdt")?,
+    };
+    parameters.validate().map_err(anyhow::Error::msg)?;
+    Ok(parameters)
+}
+
+fn parse_execution_algorithm(value: &str) -> Result<ExecutionAlgorithm> {
+    match value {
+        "batch" => Ok(ExecutionAlgorithm::Batch),
+        "pov" => Ok(ExecutionAlgorithm::Pov),
+        "chase" => Ok(ExecutionAlgorithm::Chase),
+        value => bail!("unknown order strategy algorithm: {value}"),
+    }
 }
 
 #[cfg(test)]

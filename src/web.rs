@@ -28,8 +28,8 @@ use crate::auth::{self, AuthUser};
 use crate::config::{AppConfig, FeeRates, SourceConfig};
 use crate::manager_db::ManagerDb;
 use crate::order_config::{
-    ExecConfigClient, ExecConfigError, OrderStrategyView, SaveOrderParametersRequest,
-    validate_strategy_name,
+    ExecConfigClient, ExecConfigError, ExecutionAlgorithm, ExecutionFamily, OrderStrategyView,
+    SaveOrderParametersRequest, validate_strategy_name,
 };
 use crate::position_archive::PositionArchive;
 use crate::redis_runtime::RedisRuntime;
@@ -48,6 +48,56 @@ const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish
 const MANAGER_PNL_SDK: &[u8] = include_bytes!("../scripts/manager_pnl_sdk.py");
 const DEFAULT_POSITION_UPDATE_PAGE_SIZE: usize = 100;
 const MAX_POSITION_UPDATE_PAGE_SIZE: usize = 1_000;
+const EXPERIMENTAL_ALGORITHM_TOKEN_HEADER: &str = "x-experimental-algorithm-token";
+const EXPERIMENTAL_ALGORITHM_TOKEN: &str = "testtest";
+
+fn require_experimental_algorithm_token(
+    headers: &HeaderMap,
+    required: bool,
+) -> std::result::Result<(), &'static str> {
+    if !required {
+        return Ok(());
+    }
+    let valid = headers
+        .get(EXPERIMENTAL_ALGORITHM_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == EXPERIMENTAL_ALGORITHM_TOKEN);
+    valid
+        .then_some(())
+        .ok_or("valid experimental algorithm token required for POV or Chase")
+}
+
+fn changed_override_uses_experimental_algorithm(
+    request: &SavePositionStrategyRequest,
+    previous: Option<&strategy_catalog::PositionStrategy>,
+    order_strategies: &[strategy_catalog::OrderStrategy],
+) -> bool {
+    request
+        .symbol_order_strategy_overrides
+        .iter()
+        .any(|(symbol, order_strategy_name)| {
+            let unchanged = previous
+                .and_then(|strategy| strategy.symbol_order_strategy_overrides.get(symbol))
+                .is_some_and(|current| current == order_strategy_name);
+            !unchanged
+                && order_strategies.iter().any(|strategy| {
+                    strategy.strategy_name == *order_strategy_name
+                        && strategy.order_parameters.algorithm.is_experimental()
+                })
+        })
+}
+
+fn experimental_binding_change_requires_token(
+    selected_algorithm: Option<ExecutionAlgorithm>,
+    selected_order_name: &str,
+    current_order_name: Option<&str>,
+    current_shares: Option<f64>,
+    requested_shares: f64,
+) -> bool {
+    selected_algorithm.is_some_and(ExecutionAlgorithm::is_experimental)
+        && (current_order_name != Some(selected_order_name)
+            || (current_shares == Some(0.0) && requested_shares > 0.0))
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DashboardSnapshot {
@@ -1872,20 +1922,30 @@ async fn order_config_strategies(
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
-    match state
-        .exec_config
-        .list_strategies(source.exec_config_url.as_deref().unwrap_or_default())
-        .await
-    {
-        Ok(strategies) => Ok((
-            NO_STORE,
-            Json(StrategyListResponse {
-                source_id,
-                strategies,
-            }),
-        )
-            .into_response()),
-        Err(error) => Ok(exec_config_error_response(&error)),
+    let base_url = source.exec_config_url.as_deref().unwrap_or_default();
+    let (batch, chase) = tokio::join!(
+        state
+            .exec_config
+            .list_strategies(base_url, ExecutionFamily::BatchExec),
+        state
+            .exec_config
+            .list_strategies(base_url, ExecutionFamily::ChaseExec),
+    );
+    match (batch, chase) {
+        (Ok(mut strategies), Ok(chase)) => {
+            strategies.extend(chase);
+            strategies.sort();
+            strategies.dedup();
+            Ok((
+                NO_STORE,
+                Json(StrategyListResponse {
+                    source_id,
+                    strategies,
+                }),
+            )
+                .into_response())
+        }
+        (Err(error), _) | (_, Err(error)) => Ok(exec_config_error_response(&error)),
     }
 }
 
@@ -1901,12 +1961,18 @@ async fn order_config_strategy(
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
+    let algorithm =
+        match strategy_catalog::load_binding_parts(&state.pool, &source_id, &query.name).await? {
+            Some((_, order, _, _)) => order.order_parameters.algorithm,
+            None => return Ok(not_found("strategy binding was not found")),
+        };
     match state
         .exec_config
         .load_strategy(
             &source_id,
             source.exec_config_url.as_deref().unwrap_or_default(),
             &query.name,
+            algorithm,
         )
         .await
     {
@@ -1919,6 +1985,7 @@ async fn save_order_parameters(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<SaveOrderParametersRequest>,
 ) -> Result<Response, ApiError> {
     if let Err(message) = validate_strategy_name(&request.strategy_name) {
@@ -1937,17 +2004,29 @@ async fn save_order_parameters(
     if let Err(message) = request.order_parameters.validate() {
         return Ok(bad_request(message));
     }
+    if let Err(message) = require_experimental_algorithm_token(
+        &headers,
+        request.order_parameters.algorithm.is_experimental(),
+    ) {
+        return Ok(forbidden(message));
+    }
     // Execution parameters may only be written for a strategy that is already
     // bound on this account; binding it in the first place is the gated step.
-    match strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.strategy_name)
-        .await?
-    {
-        Some(_) => {}
-        None => {
-            return Ok(bad_request(
-                "strategy is not bound on this account".to_string(),
-            ));
-        }
+    let bound_algorithm =
+        match strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.strategy_name)
+            .await?
+        {
+            Some((_, order, _, _)) => order.order_parameters.algorithm,
+            None => {
+                return Ok(bad_request(
+                    "strategy is not bound on this account".to_string(),
+                ));
+            }
+        };
+    if request.order_parameters.algorithm.family() != bound_algorithm.family() {
+        return Ok(bad_request(
+            "order parameter update cannot change the binding execution family".to_string(),
+        ));
     }
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
@@ -1956,7 +2035,12 @@ async fn save_order_parameters(
     let exec_config_url = source.exec_config_url.as_deref().unwrap_or_default();
     let previous = match state
         .exec_config
-        .load_strategy(&source_id, exec_config_url, &request.strategy_name)
+        .load_strategy(
+            &source_id,
+            exec_config_url,
+            &request.strategy_name,
+            bound_algorithm,
+        )
         .await
     {
         Ok(previous) => previous,
@@ -2065,8 +2149,20 @@ async fn list_position_strategies(
 async fn save_position_strategy(
     State(state): State<WebState>,
     user: Option<Extension<AuthUser>>,
+    headers: HeaderMap,
     Json(request): Json<SavePositionStrategyRequest>,
 ) -> Result<Response, ApiError> {
+    let position_strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
+    let previous = position_strategies
+        .iter()
+        .find(|strategy| strategy.strategy_name == request.strategy_name);
+    let order_strategies = strategy_catalog::list_order_strategies(&state.pool).await?;
+    if let Err(message) = require_experimental_algorithm_token(
+        &headers,
+        changed_override_uses_experimental_algorithm(&request, previous, &order_strategies),
+    ) {
+        return Ok(forbidden(message));
+    }
     let created_by = user.map(|Extension(user)| user.user_id);
     match strategy_catalog::upsert_position_strategy(
         &state.pool,
@@ -2360,8 +2456,15 @@ async fn list_order_strategies(State(state): State<WebState>) -> Result<Response
 
 async fn save_order_strategy(
     State(state): State<WebState>,
+    headers: HeaderMap,
     Json(request): Json<SaveOrderStrategyRequest>,
 ) -> Result<Response, ApiError> {
+    if let Err(message) = require_experimental_algorithm_token(
+        &headers,
+        request.order_parameters.algorithm.is_experimental(),
+    ) {
+        return Ok(forbidden(message));
+    }
     match strategy_catalog::upsert_order_strategy(&state.pool, &request, unix_now_us()).await {
         Ok(saved) => Ok((NO_STORE, Json(saved)).into_response()),
         Err(error) => Ok(catalog_error(error)),
@@ -2758,6 +2861,7 @@ async fn save_account_binding(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<SaveBindingRequest>,
 ) -> Result<Response, ApiError> {
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
@@ -2766,6 +2870,24 @@ async fn save_account_binding(
     let existing =
         strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.binding_name)
             .await?;
+    let selected_order = strategy_catalog::list_order_strategies(&state.pool)
+        .await?
+        .into_iter()
+        .find(|strategy| strategy.strategy_name == request.order_strategy_name);
+    let enables_experimental = experimental_binding_change_requires_token(
+        selected_order
+            .as_ref()
+            .map(|strategy| strategy.order_parameters.algorithm),
+        &request.order_strategy_name,
+        existing
+            .as_ref()
+            .map(|(_, order, _, _)| order.strategy_name.as_str()),
+        existing.as_ref().map(|(_, _, _, shares)| *shares),
+        request.shares,
+    );
+    if let Err(message) = require_experimental_algorithm_token(&headers, enables_experimental) {
+        return Ok(forbidden(message));
+    }
     if let Some((position, _, _, _)) = &existing {
         // An existing binding may be edited (order strategy, shares) or
         // deleted, but it cannot be re-pointed at another position strategy;
@@ -2812,10 +2934,25 @@ async fn save_account_binding(
 async fn save_account_binding_shares(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(request): Json<SaveBindingSharesRequest>,
 ) -> Result<Response, ApiError> {
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
+    }
+    let existing =
+        strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name).await?;
+    let enables_experimental = existing.as_ref().is_some_and(|(_, order, _, shares)| {
+        experimental_binding_change_requires_token(
+            Some(order.order_parameters.algorithm),
+            &order.strategy_name,
+            Some(&order.strategy_name),
+            Some(*shares),
+            request.shares,
+        )
+    });
+    if let Err(message) = require_experimental_algorithm_token(&headers, enables_experimental) {
+        return Ok(forbidden(message));
     }
     let updated_at_us = unix_now_us();
     let studio = match strategy_catalog::save_binding_shares(
@@ -3039,23 +3176,13 @@ async fn publish_binding(
         });
     };
     let targets = strategy_catalog::scale_targets(&position.targets, shares);
-    let symbol_overrides = symbol_order_parameters
-        .into_iter()
-        .filter_map(|(symbol, selected)| {
-            let override_parameters = crate::order_config::OrderParameterOverrides::from_templates(
-                &order.order_parameters,
-                &selected,
-            );
-            (!override_parameters.is_empty()).then_some((symbol, override_parameters))
-        })
-        .collect();
     let published = state
         .redis_runtime
         .publish_strategy(
             source,
             binding_name,
             &order.order_parameters,
-            &symbol_overrides,
+            &symbol_order_parameters,
             &targets,
         )
         .await
@@ -3063,6 +3190,8 @@ async fn publish_binding(
             let message = error.to_string();
             let status = if message.contains("reserved")
                 || message.contains("removal already requested")
+                || message.contains("already claimed")
+                || message.contains("still present")
                 || message.contains("must be")
                 || message.contains("invalid")
             {
@@ -3212,6 +3341,7 @@ async fn load_factual_position(
 fn catalog_error(error: anyhow::Error) -> Response {
     let message = error.to_string();
     let status = if message.contains("exceeds")
+        || message.contains("cannot")
         || message.contains("unknown")
         || message.contains("invalid")
         || message.contains("must be")
@@ -3998,6 +4128,100 @@ mod tests {
     #[test]
     fn unix_timestamp_is_positive_microseconds() {
         assert!(unix_now_us() > 1_000_000_000_000_000);
+    }
+
+    #[test]
+    fn experimental_algorithm_token_is_exact_and_only_required_on_gated_changes() {
+        let mut headers = HeaderMap::new();
+        assert!(require_experimental_algorithm_token(&headers, false).is_ok());
+        assert!(require_experimental_algorithm_token(&headers, true).is_err());
+
+        headers.insert(
+            EXPERIMENTAL_ALGORITHM_TOKEN_HEADER,
+            HeaderValue::from_static("wrong"),
+        );
+        assert!(require_experimental_algorithm_token(&headers, true).is_err());
+        headers.insert(
+            EXPERIMENTAL_ALGORITHM_TOKEN_HEADER,
+            HeaderValue::from_static(EXPERIMENTAL_ALGORITHM_TOKEN),
+        );
+        assert!(require_experimental_algorithm_token(&headers, true).is_ok());
+    }
+
+    #[test]
+    fn only_new_experimental_symbol_overrides_require_the_token() {
+        let request = SavePositionStrategyRequest {
+            strategy_name: "cta_alpha".to_string(),
+            targets: BTreeMap::from([(
+                "BTCUSDT".to_string(),
+                crate::order_config::TargetPosition::new(1.0, 0).unwrap(),
+            )]),
+            symbol_order_strategy_overrides: BTreeMap::from([(
+                "BTCUSDT".to_string(),
+                "pov_order".to_string(),
+            )]),
+        };
+        let mut pov_parameters = crate::order_config::OrderParameters::default();
+        pov_parameters.algorithm = crate::order_config::ExecutionAlgorithm::Pov;
+        let orders = vec![strategy_catalog::OrderStrategy {
+            strategy_name: "pov_order".to_string(),
+            order_parameters: pov_parameters,
+            updated_at_us: 1,
+        }];
+
+        assert!(changed_override_uses_experimental_algorithm(
+            &request, None, &orders
+        ));
+        let previous = strategy_catalog::PositionStrategy {
+            strategy_name: request.strategy_name.clone(),
+            targets: request.targets.clone(),
+            symbol_order_strategy_overrides: request.symbol_order_strategy_overrides.clone(),
+            updated_at_us: 1,
+        };
+        assert!(!changed_override_uses_experimental_algorithm(
+            &request,
+            Some(&previous),
+            &orders
+        ));
+    }
+
+    #[test]
+    fn experimental_binding_gate_covers_select_and_reenable_only() {
+        assert!(experimental_binding_change_requires_token(
+            Some(ExecutionAlgorithm::Pov),
+            "pov_order",
+            None,
+            None,
+            1.0,
+        ));
+        assert!(experimental_binding_change_requires_token(
+            Some(ExecutionAlgorithm::Chase),
+            "chase_order",
+            Some("batch_order"),
+            Some(1.0),
+            1.0,
+        ));
+        assert!(experimental_binding_change_requires_token(
+            Some(ExecutionAlgorithm::Pov),
+            "pov_order",
+            Some("pov_order"),
+            Some(0.0),
+            1.0,
+        ));
+        assert!(!experimental_binding_change_requires_token(
+            Some(ExecutionAlgorithm::Pov),
+            "pov_order",
+            Some("pov_order"),
+            Some(1.0),
+            0.0,
+        ));
+        assert!(!experimental_binding_change_requires_token(
+            Some(ExecutionAlgorithm::Batch),
+            "batch_order",
+            Some("pov_order"),
+            Some(1.0),
+            1.0,
+        ));
     }
 
     #[test]

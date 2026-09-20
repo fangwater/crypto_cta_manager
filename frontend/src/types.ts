@@ -104,6 +104,9 @@ export interface DashboardAccount {
 }
 
 export interface OrderParameters {
+  algorithm: 'batch' | 'pov' | 'chase'
+  pov: PovParameters
+  chase: ChaseParameters
   single_order_usdt: number
   orders_per_batch: number
   max_batch: number
@@ -115,7 +118,30 @@ export interface OrderParameters {
   target_tolerance_usdt: number
 }
 
+export interface PovParameters {
+  participation_rate: number
+  max_batch_usdt: number
+  max_carry_usdt: number
+  volume_stale_ms: number
+  quote_stale_ms: number
+  duration_ms: number
+  liquidity: 'maker_only' | 'taker_only' | 'maker_then_taker'
+  limit_price: number | null
+}
+
+export interface ChaseParameters {
+  single_order_usdt: number
+  max_open_usdt: number
+  maker_recenter_trigger_bps: number
+  maker_amend_cooldown_ms: number
+  maker_timeout_ms: number
+  target_tolerance_usdt: number
+  bbo_max_age_ms: number
+}
+
 export interface OrderParameterOverrides {
+  algorithm?: 'batch' | 'pov'
+  pov?: PovParameters
   single_order_usdt?: number
   orders_per_batch?: number
   max_batch?: number
@@ -131,7 +157,7 @@ export interface OrderStrategyView {
   source_id: string
   strategy_name: string
   order_parameters: OrderParameters
-  symbol_overrides: Record<string, OrderParameterOverrides>
+  symbol_overrides: Record<string, OrderParameterOverrides | Partial<ChaseParameters>>
   updated_at_us: number | null
   target_count: number
   nonzero_target_count: number

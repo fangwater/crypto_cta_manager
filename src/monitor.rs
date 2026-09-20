@@ -484,10 +484,10 @@ async fn check_source(
             "未配置 Exec Viz snapshot 地址，无法确认仓位执行状态",
         )),
         Some(origin) => {
-            // Configured positions come from the Redis BatchExec ledger; a
+            // Configured positions come from the Redis Exec ledgers; a
             // failed read must skip the account comparison, not compare
             // against an empty map.
-            let configured = match redis.load_batch_exec_targets(&source).await {
+            let configured = match redis.load_exec_targets(&source).await {
                 Ok(targets) => Some(targets),
                 Err(error) => {
                     issues.push(issue(
@@ -1554,7 +1554,7 @@ mod tests {
         let now_us = unix_time_us();
         let now_ms = now_us / 1_000;
         let old_ms = now_ms - (monitor.execution_grace_secs as i64 + 10) * 1_000;
-        // Configured position comes from the Redis BatchExec targets.
+        // Configured position comes from the Redis Exec targets.
         let configured = BTreeMap::from([("BTCUSDT".to_string(), 0.3)]);
         let snapshot = |account: f64| ExecStateSnapshot {
             source_id: source.id.clone(),

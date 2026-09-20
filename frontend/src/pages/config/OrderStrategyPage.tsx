@@ -20,6 +20,8 @@ export function OrderStrategyPage() {
   const { orders, loading, error, reloadCatalog } = useStrategyCatalog()
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [selectedOrder, setSelectedOrder] = useState(emptyOrder)
+  const [experimentalToken, setExperimentalToken] = useState('')
+  const isExperimental = selectedOrder.order_parameters.algorithm !== 'batch'
 
   return (
     <ConfigShell
@@ -46,14 +48,24 @@ export function OrderStrategyPage() {
             selectedName={selectedOrder.strategy_name}
             onSelect={(name) => {
               const item = orders.find((entry) => entry.strategy_name === name)
-              if (item) setSelectedOrder(item)
+              if (item) {
+                setSelectedOrder(item)
+                setExperimentalToken('')
+              }
             }}
-            onCreate={() => setSelectedOrder(emptyOrder())}
+            onCreate={() => {
+              setSelectedOrder(emptyOrder())
+              setExperimentalToken('')
+            }}
             allowCreate={isAdmin}
             renderMeta={(name) => {
               const item = orders.find((entry) => entry.strategy_name === name)
               if (!item) return ''
-              return `${orderParameterMeta.single_order_usdt.label} ${item.order_parameters.single_order_usdt} USDT`
+              const algorithm = item.order_parameters.algorithm.toUpperCase()
+              const singleOrder = item.order_parameters.algorithm === 'chase'
+                ? item.order_parameters.chase.single_order_usdt
+                : item.order_parameters.single_order_usdt
+              return `${algorithm} · ${orderParameterMeta.single_order_usdt.label} ${singleOrder} USDT`
             }}
           />
 
@@ -71,8 +83,9 @@ export function OrderStrategyPage() {
                 onSubmit={(event) => {
                   event.preventDefault()
                   void withWrite(async () => {
-                    const saved = await saveOrderStrategy(selectedOrder)
+                    const saved = await saveOrderStrategy(selectedOrder, experimentalToken)
                     setSelectedOrder(saved)
+                    setExperimentalToken('')
                     await reloadCatalog()
                   })
                 }}
@@ -92,6 +105,19 @@ export function OrderStrategyPage() {
                   value={selectedOrder.order_parameters}
                   onChange={(order_parameters) => setSelectedOrder({ ...selectedOrder, order_parameters })}
                 />
+                {isExperimental && (
+                  <Label>
+                    实验算法 Token
+                    <Input
+                      type="password"
+                      autoComplete="off"
+                      value={experimentalToken}
+                      onChange={(event) => setExperimentalToken(event.target.value)}
+                      required
+                    />
+                    <FieldHint>保存 POV 或 Chase 参数时必须提供。</FieldHint>
+                  </Label>
+                )}
                 <div className="flex flex-wrap gap-2">
                   <Button type="submit" variant="primary" disabled={saving || !isAdmin}>
                     <Save size={15} /> 保存

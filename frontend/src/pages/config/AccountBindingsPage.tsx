@@ -41,6 +41,7 @@ export function AccountBindingsPage() {
   const [newPosition, setNewPosition] = useState('')
   const [newOrder, setNewOrder] = useState('')
   const [newShares, setNewShares] = useState('1')
+  const [experimentalToken, setExperimentalToken] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -142,6 +143,7 @@ export function AccountBindingsPage() {
       positionStrategyName,
       orderStrategyName,
       shares,
+      experimentalToken,
     )
     applyStudio(next)
     await reloadCatalog()
@@ -174,7 +176,7 @@ export function AccountBindingsPage() {
       ) : (
         <div className="space-y-6">
           <Card>
-            <CardContent className="pt-5">
+            <CardContent className="grid gap-4 pt-5 md:grid-cols-2">
               <Label className="max-w-xl">
                 账户
                 <Select
@@ -191,6 +193,16 @@ export function AccountBindingsPage() {
                     </option>
                   ))}
                 </Select>
+              </Label>
+              <Label className="max-w-xl">
+                实验算法 Token
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value={experimentalToken}
+                  onChange={(event) => setExperimentalToken(event.target.value)}
+                />
+                <FieldHint>首次启用、切换或重新启用 POV/Chase 时使用。</FieldHint>
               </Label>
             </CardContent>
           </Card>
@@ -261,6 +273,7 @@ export function AccountBindingsPage() {
                       await bindExecution(newPosition, newOrder, parsedNewShares)
                       setNewPosition('')
                       setNewShares('1')
+                      setExperimentalToken('')
                     })
                   }}
                 >
@@ -280,7 +293,7 @@ export function AccountBindingsPage() {
                     <Select value={newOrder} onChange={(event) => setNewOrder(event.target.value)}>
                       {orders.map((item) => (
                         <option key={item.strategy_name} value={item.strategy_name}>
-                          {item.strategy_name}
+                          {item.strategy_name} ({item.order_parameters.algorithm.toUpperCase()})
                         </option>
                       ))}
                     </Select>
@@ -358,12 +371,13 @@ export function AccountBindingsPage() {
                                 event.target.value,
                                 binding.shares,
                               )
+                              setExperimentalToken('')
                             })
                           }
                         >
                           {orders.map((item) => (
                             <option key={item.strategy_name} value={item.strategy_name}>
-                              {item.strategy_name}
+                              {item.strategy_name} ({item.order_parameters.algorithm.toUpperCase()})
                             </option>
                           ))}
                         </Select>
@@ -392,8 +406,10 @@ export function AccountBindingsPage() {
                                 sourceId,
                                 binding.binding_name,
                                 parsedShares,
+                                experimentalToken,
                               )
                               applyStudio(next)
+                              setExperimentalToken('')
                               return parsedShares === 0
                                 ? `已停止 ${binding.binding_name}；零目标已发送，后续仓位更新将跳过此账户绑定`
                                 : `已将 ${binding.binding_name} 设为 ${parsedShares} 份；下次仓位更新或手动重推生效`

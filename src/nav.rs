@@ -62,6 +62,7 @@ pub type NavSourceHistories = BTreeMap<String, NavSourceHistory>;
 
 const NAV_TICK_INTERVAL_US: i64 = 15 * 60 * 1_000_000;
 const BATCH_EXEC_FROM_KEY_PREFIX: &str = "batch_exec:";
+const CHASE_EXEC_FROM_KEY_PREFIX: &str = "chase_exec:";
 const INITIAL_POSITION_STRATEGY: &str = "__initial_position__";
 const UNALLOCATED_STRATEGY: &str = "__unallocated__";
 const UNATTRIBUTED_STRATEGY: &str = "__unattributed__";
@@ -2653,7 +2654,10 @@ fn next_timeline_tick(ts_us: i64, interval_us: i64) -> i64 {
 }
 
 pub fn strategy_from_from_key(from_key: &str) -> String {
-    let Some(strategy) = from_key.strip_prefix(BATCH_EXEC_FROM_KEY_PREFIX) else {
+    let Some(strategy) = from_key
+        .strip_prefix(BATCH_EXEC_FROM_KEY_PREFIX)
+        .or_else(|| from_key.strip_prefix(CHASE_EXEC_FROM_KEY_PREFIX))
+    else {
         return UNATTRIBUTED_STRATEGY.to_string();
     };
     let valid = !strategy.is_empty()
@@ -4012,11 +4016,12 @@ mod tests {
     }
 
     #[test]
-    fn strategy_from_key_accepts_only_stable_batch_exec_names() {
+    fn strategy_from_key_accepts_stable_exec_family_names() {
         assert_eq!(
             strategy_from_from_key("batch_exec:CTA_SK_C40V6PosT1_LXY_filter_Position"),
             "CTA_SK_C40V6PosT1_LXY_filter_Position"
         );
+        assert_eq!(strategy_from_from_key("chase_exec:alpha"), "alpha");
         assert_eq!(
             strategy_from_from_key("batch_exec:system_position_close"),
             "system_position_close"

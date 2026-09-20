@@ -25,6 +25,25 @@ set +a
 
 The default URL variable is `CRYPTO_CTA_LOCAL_DATABASE_URL`.
 
+The Manager order-strategy catalog supports `batch`, `pov`, and `chase`
+templates. Batch and POV publish to the source-scoped `batch_exec:*` namespace;
+Chase publishes its strict configuration to `chase_exec:*`. Per-symbol order
+templates may switch between Batch and POV, but they cannot cross into Chase
+inside one binding because the two execution families keep independent
+position ledgers. A published binding can switch between the two families:
+Manager records an `exec_switch:*` request, Exec freezes the old target, cancels
+and reconciles every working child, transfers the binding's net position into
+the destination ledger, and only then activates the new algorithm. The exchange
+position is not flattened. Another strategy in the old family may not retain
+the same account-symbol while the destination family takes ownership.
+
+POV and Chase are experimental algorithms. Saving either algorithm, selecting
+one for a binding or symbol override, and re-enabling a stopped experimental
+binding requires the HTTP header `X-Experimental-Algorithm-Token: testtest`.
+Stopping an experimental binding and switching it back to Batch remain
+available without the token. The browser sends this header from its password
+input and never stores the token in PostgreSQL or Redis.
+
 ## Login and account permissions
 
 `cta_web` protects all Manager APIs with an HttpOnly session cookie. On a new
@@ -124,7 +143,9 @@ uses the same signed filled quantity for both paths: actual slippage is
 `filled × (VWAP − twap_mid)`. Positive values mean worse execution for both
 buys and sells. Estimated maker/taker fees are reported separately and never
 included in these price metrics. Fills come from that account's Exec
-`uniform_orders` and are attributed with `batch_exec:<strategy_name>`. Only
+`uniform_orders` and are attributed with `batch_exec:<strategy_name>` or
+`chase_exec:<strategy_name>`; both prefixes map to the same stable Manager
+binding name. Only
 messages that archived `published_accounts` (with each account's `shares`) are
 included. The browser page is `/manager/execution-cost/`.
 
@@ -286,7 +307,8 @@ rebuilds quantity FIFO from the later RocksDB fills once per minute, and keeps
 serving the last good report if a later refresh fails.
 
 The timeline can display the selected account as a portfolio, by symbol, or by
-the strategy suffix in `batch_exec:<strategy_name>`. Before an allocation
+the strategy suffix in either `batch_exec:<strategy_name>` or
+`chase_exec:<strategy_name>`. Before an allocation
 anchor, account-level initial snapshot positions remain unallocated because they
 do not contain historical strategy ownership. Once an immutable strategy
 allocation anchor exists, it replaces the older account anchor for that source.

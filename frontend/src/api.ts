@@ -30,6 +30,7 @@ interface RequestOptions {
   signal?: AbortSignal
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   body?: unknown
+  headers?: Record<string, string>
 }
 
 export interface SourceGrant {
@@ -52,6 +53,7 @@ export interface AuthStatus {
 
 async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' }
+  Object.assign(headers, options.headers)
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
   const response = await fetch(API_BASE + path, {
     method: options.method ?? 'GET',
@@ -247,6 +249,7 @@ export function saveOrderParameters(
   strategyName: string,
   expectedUpdatedAtUs: number,
   orderParameters: OrderParameters,
+  experimentalAlgorithmToken?: string,
 ) {
   return requestJson<OrderStrategyView>(
     `/order-config/${encodeURIComponent(sourceId)}/order-parameters`,
@@ -257,6 +260,9 @@ export function saveOrderParameters(
         expected_updated_at_us: expectedUpdatedAtUs,
         order_parameters: orderParameters,
       },
+      headers: experimentalAlgorithmToken
+        ? { 'X-Experimental-Algorithm-Token': experimentalAlgorithmToken }
+        : undefined,
     },
   )
 }
@@ -276,7 +282,10 @@ export async function listPositionStrategies(signal?: AbortSignal) {
   return strategies.map(decodePositionStrategy)
 }
 
-export async function savePositionStrategy(body: PositionStrategy) {
+export async function savePositionStrategy(
+  body: PositionStrategy,
+  experimentalAlgorithmToken?: string,
+) {
   const saved = await requestJson<SavedPositionStrategy>('/catalog/position-strategies', {
     method: 'POST',
     body: {
@@ -284,6 +293,9 @@ export async function savePositionStrategy(body: PositionStrategy) {
       targets: body.targets,
       symbol_order_strategy_overrides: body.symbol_order_strategy_overrides,
     },
+    headers: experimentalAlgorithmToken
+      ? { 'X-Experimental-Algorithm-Token': experimentalAlgorithmToken }
+      : undefined,
   })
   return {
     ...decodePositionStrategy(saved),
@@ -383,13 +395,16 @@ export async function listOrderStrategies(signal?: AbortSignal) {
   return strategies
 }
 
-export function saveOrderStrategy(body: CatalogOrderStrategy) {
+export function saveOrderStrategy(body: CatalogOrderStrategy, experimentalAlgorithmToken?: string) {
   return requestJson<CatalogOrderStrategy>('/catalog/order-strategies', {
     method: 'POST',
     body: {
       strategy_name: body.strategy_name,
       order_parameters: body.order_parameters,
     },
+    headers: experimentalAlgorithmToken
+      ? { 'X-Experimental-Algorithm-Token': experimentalAlgorithmToken }
+      : undefined,
   })
 }
 
@@ -461,6 +476,7 @@ export function saveAccountBinding(
   positionStrategyName: string,
   orderStrategyName: string,
   shares = 1,
+  experimentalAlgorithmToken?: string,
 ) {
   return requestJson<AccountStudio>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings`,
@@ -472,16 +488,27 @@ export function saveAccountBinding(
         order_strategy_name: orderStrategyName,
         shares,
       },
+      headers: experimentalAlgorithmToken
+        ? { 'X-Experimental-Algorithm-Token': experimentalAlgorithmToken }
+        : undefined,
     },
   )
 }
 
-export function saveBindingShares(sourceId: string, bindingName: string, shares: number) {
+export function saveBindingShares(
+  sourceId: string,
+  bindingName: string,
+  shares: number,
+  experimentalAlgorithmToken?: string,
+) {
   return requestJson<AccountStudio>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings/${encodeURIComponent(bindingName)}/shares`,
     {
       method: 'PUT',
       body: { shares },
+      headers: experimentalAlgorithmToken
+        ? { 'X-Experimental-Algorithm-Token': experimentalAlgorithmToken }
+        : undefined,
     },
   )
 }

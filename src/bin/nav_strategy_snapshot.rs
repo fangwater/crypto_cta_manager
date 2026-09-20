@@ -475,6 +475,7 @@ fn direct_strategy_name(value: &str) -> Option<String> {
 fn is_system_close_from_key(from_key: &str) -> bool {
     from_key
         .strip_prefix("batch_exec:")
+        .or_else(|| from_key.strip_prefix("chase_exec:"))
         .is_some_and(|name| name.eq_ignore_ascii_case("SYSTEM_POSITION_CLOSE"))
 }
 
@@ -482,6 +483,7 @@ fn strategy_from_fill(event: &UniformOrderEvent) -> String {
     event
         .from_key_text
         .strip_prefix("batch_exec:")
+        .or_else(|| event.from_key_text.strip_prefix("chase_exec:"))
         .and_then(direct_strategy_name)
         .unwrap_or_else(|| UNATTRIBUTED_STRATEGY.to_string())
 }
@@ -509,7 +511,7 @@ fn rebalance_unallocated(
 /// Replay net strategy quantities forward from an anchor. System-close fills
 /// move only `__unallocated__`, matching the residual ledger that
 /// `SYSTEM_POSITION_CLOSE` trades on the Exec side; named strategy quantities
-/// change only through their own `batch_exec:<strategy>` fills.
+/// change only through their own Exec-family attributed fills.
 fn replay_strategy_quantities(
     initial: &BTreeMap<StrategySymbol, f64>,
     fill_events: &[&UniformOrderEvent],
@@ -841,6 +843,16 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn chase_fills_use_the_stable_strategy_name() {
+        let mut event = fill(100, Some("cta_a"), 1, 1.0, 100.0);
+        event.from_key_text = "chase_exec:cta_a".to_string();
+        assert_eq!(strategy_from_fill(&event), "cta_a");
+
+        event.from_key_text = "chase_exec:SYSTEM_POSITION_CLOSE".to_string();
+        assert!(is_system_close_from_key(&event.from_key_text));
     }
 
     #[test]

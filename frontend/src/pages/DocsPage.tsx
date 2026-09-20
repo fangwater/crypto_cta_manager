@@ -349,7 +349,7 @@ function buildChapters(gateway: string): Chapter[] {
           价格用 Manager 自己的 5 秒 mid 条。假设窗口内均匀执行：从这次 POST
           时刻起切连续 1 分钟，每分钟对其中 5 秒 mid 等权平均（满分钟 12 根），
           再对这几个 1 分钟 mid 平均。5 分钟窗口就是 5 个 1 分钟 mid。成交只认
-          from_key_text 为 batch_exec:&lt;strategy_name&gt; 的 uniform_orders。
+          from_key_text 为 batch_exec:&lt;strategy_name&gt; 或 chase_exec:&lt;strategy_name&gt; 的 uniform_orders。
           窗口从这次 POST 开始，遇到同策略下一次更新提前结束。只统计归档里带有
           published_accounts（含当时 shares）的消息；份数以该条消息为准，不用当前目录回填。
         </Note>
@@ -413,6 +413,7 @@ function buildChapters(gateway: string): Chapter[] {
         <CodeBlock label="POST body">{`{
   "strategy_name": "default_order",
   "order_parameters": {
+    "algorithm": "batch",
     "single_order_usdt": 100.0,
     "orders_per_batch": 3,
     "max_batch": 20,
@@ -428,7 +429,9 @@ function buildChapters(gateway: string): Chapter[] {
           下单策略是可复用的完整模板。账户 binding 选择默认模板；仓位策略可以通过
           symbol_order_strategy_overrides 为特定 symbol 选择另一条命名模板。max_batch 限制一次
           目标更新的预估批次数；Exec 按目标激活时的 mark price 计算动态单笔金额，并取该值与
-          single_order_usdt 的较大者。
+          single_order_usdt 的较大者。algorithm 可选 batch、pov、chase；POV 和 Chase
+          参数在选择对应算法后由表单保存为完整配置。POV 和 Chase 属于实验算法，相关写请求必须携带
+          <code>X-Experimental-Algorithm-Token: testtest</code>；浏览器页面通过密码输入框发送该请求头。
         </Note>
       </>
     ),
@@ -532,6 +535,14 @@ curl --noproxy '*' -sS -X PUT \\
   "order_strategy_name": "default_order",
   "shares": 1
 }`}</CodeBlock>
+        <Note>
+          正数份数的绑定可以直接更换 Batch/POV 与 Chase。手动发布后，Exec 先冻结旧算法并撤销该
+          binding 的全部活动子单，等撤单和迟到成交完成对账，再把该 binding 的净仓分配转入新算法
+          账本并启动新算法；交易所仓位不会先平掉。同一账户同一 symbol 若还有其他策略留在旧算法族，
+          Manager 会拒绝切换。
+          首次选择或重新启用 POV/Chase 时需要 <code>X-Experimental-Algorithm-Token: testtest</code>。
+          停止策略或切回 Batch 不需要该 token。
+        </Note>
       </>
     ),
   },
@@ -632,6 +643,7 @@ curl --noproxy '*' -sS -X PUT \\
           ['200', '成功'],
           ['202', '删除已受理'],
           ['400', '字段缺失、策略不存在、份数为负数或非有限数、合约杠杆缺 symbol'],
+          ['403', '缺少权限，或 POV/Chase 实验算法 token 无效'],
           ['404', '路径不存在或缺少账户前缀'],
           ['409', '参数乐观锁冲突'],
           ['502', '交易所/env.sh 不可用，或 Exec Config 不可达'],
