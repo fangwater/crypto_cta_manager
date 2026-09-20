@@ -753,14 +753,17 @@ fn check_position(
             if settling {
                 continue;
             }
-            issues.push(issue(
-                "position",
-                &format!("account:{symbol}"),
-                source,
-                format!(
-                    "{symbol} 配置仓位 {configured_qty:.12} 与账户仓位 {account_qty:.12} 不一致且无挂单执行"
-                ),
-            ));
+            issues.push(
+                issue(
+                    "position",
+                    &format!("account:{symbol}"),
+                    source,
+                    format!(
+                        "{symbol} 配置仓位 {configured_qty:.12} 与账户仓位 {account_qty:.12} 不一致且无挂单执行"
+                    ),
+                )
+                .with_initial_delay(monitor.execution_grace_secs),
+            );
         }
     }
     issues
@@ -1586,12 +1589,14 @@ mod tests {
         assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
 
         // Configured 0.3 vs account 0.4, quiet and no live qty -> mismatch.
+        // The alert waits out the execution grace window before notifying so a
+        // just-published Redis target propagating to the snapshot stays silent.
         let issues = check_position(&source, &monitor, &snapshot(0.4), Some(&configured), now_us);
-        assert!(
-            issues
-                .iter()
-                .any(|issue| issue.key.contains("account:BTCUSDT"))
-        );
+        let gap_issue = issues
+            .iter()
+            .find(|issue| issue.key.contains("account:BTCUSDT"))
+            .expect("stuck gap should be reported");
+        assert_eq!(gap_issue.initial_delay_secs, monitor.execution_grace_secs);
 
         // Live order qty covering the gap means it is still executing.
         let mut executing = snapshot(0.2);
