@@ -431,7 +431,7 @@ function buildChapters(gateway: string): Chapter[] {
           目标更新的预估批次数；Exec 按目标激活时的 mark price 计算动态单笔金额，并取该值与
           single_order_usdt 的较大者。algorithm 可选 batch、pov、chase；POV 和 Chase
           参数在选择对应算法后由表单保存为完整配置。POV 和 Chase 属于实验算法，相关写请求必须携带
-          <code>X-Experimental-Algorithm-Token: testtest</code>；浏览器页面通过密码输入框发送该请求头。
+          <code>X-Experimental-Algorithm-Token</code>；浏览器页面通过密码输入框发送该请求头。
         </Note>
       </>
     ),
@@ -540,7 +540,7 @@ curl --noproxy '*' -sS -X PUT \\
           binding 的全部活动子单，等撤单和迟到成交完成对账，再把该 binding 的净仓分配转入新算法
           账本并启动新算法；交易所仓位不会先平掉。同一账户同一 symbol 若还有其他策略留在旧算法族，
           Manager 会拒绝切换。
-          首次选择或重新启用 POV/Chase 时需要 <code>X-Experimental-Algorithm-Token: testtest</code>。
+          首次选择或重新启用 POV/Chase 时需要 <code>X-Experimental-Algorithm-Token</code>。
           停止策略或切回 Batch 不需要该 token。
         </Note>
       </>
