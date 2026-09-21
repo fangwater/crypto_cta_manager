@@ -136,9 +136,8 @@ pub struct ChaseParameters {
     pub max_open_usdt: f64,
     pub maker_recenter_trigger_bps: f64,
     pub maker_amend_cooldown_ms: u32,
-    pub maker_timeout_ms: u32,
+    pub maker_timeout_sec: u32,
     pub target_tolerance_usdt: f64,
-    pub bbo_max_age_ms: u32,
 }
 
 impl Default for ChaseParameters {
@@ -146,11 +145,10 @@ impl Default for ChaseParameters {
         Self {
             single_order_usdt: 100.0,
             max_open_usdt: 200.0,
-            maker_recenter_trigger_bps: 3.0,
+            maker_recenter_trigger_bps: 5.0,
             maker_amend_cooldown_ms: 0,
-            maker_timeout_ms: 60_000,
+            maker_timeout_sec: 120,
             target_tolerance_usdt: 10.0,
-            bbo_max_age_ms: 2_000,
         }
     }
 }
@@ -170,8 +168,8 @@ impl ChaseParameters {
                 "chase.maker_recenter_trigger_bps must be finite and nonnegative".to_string(),
             );
         }
-        if self.maker_timeout_ms == 0 || self.bbo_max_age_ms == 0 {
-            return Err("chase timeouts must be greater than zero".to_string());
+        if self.maker_timeout_sec == 0 {
+            return Err("chase.maker_timeout_sec must be greater than zero".to_string());
         }
         if !self.target_tolerance_usdt.is_finite() || self.target_tolerance_usdt < 0.0 {
             return Err("chase.target_tolerance_usdt must be finite and nonnegative".to_string());
@@ -365,11 +363,9 @@ pub struct ChaseParameterOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maker_amend_cooldown_ms: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maker_timeout_ms: Option<u32>,
+    pub maker_timeout_sec: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_tolerance_usdt: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bbo_max_age_ms: Option<u32>,
 }
 
 impl ChaseParameterOverrides {
@@ -378,9 +374,8 @@ impl ChaseParameterOverrides {
             && self.max_open_usdt.is_none()
             && self.maker_recenter_trigger_bps.is_none()
             && self.maker_amend_cooldown_ms.is_none()
-            && self.maker_timeout_ms.is_none()
+            && self.maker_timeout_sec.is_none()
             && self.target_tolerance_usdt.is_none()
-            && self.bbo_max_age_ms.is_none()
     }
 
     pub fn from_templates(defaults: &ChaseParameters, selected: &ChaseParameters) -> Self {
@@ -395,13 +390,11 @@ impl ChaseParameterOverrides {
             maker_amend_cooldown_ms: (selected.maker_amend_cooldown_ms
                 != defaults.maker_amend_cooldown_ms)
                 .then_some(selected.maker_amend_cooldown_ms),
-            maker_timeout_ms: (selected.maker_timeout_ms != defaults.maker_timeout_ms)
-                .then_some(selected.maker_timeout_ms),
+            maker_timeout_sec: (selected.maker_timeout_sec != defaults.maker_timeout_sec)
+                .then_some(selected.maker_timeout_sec),
             target_tolerance_usdt: (selected.target_tolerance_usdt
                 != defaults.target_tolerance_usdt)
                 .then_some(selected.target_tolerance_usdt),
-            bbo_max_age_ms: (selected.bbo_max_age_ms != defaults.bbo_max_age_ms)
-                .then_some(selected.bbo_max_age_ms),
         }
     }
 }

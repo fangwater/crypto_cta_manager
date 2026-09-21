@@ -56,13 +56,25 @@ struct StoredChaseExecConfig<'a> {
     max_open_usdt: f64,
     maker_recenter_trigger_bps: f64,
     maker_amend_cooldown_ms: u32,
-    maker_timeout_ms: u32,
+    maker_timeout_sec: u32,
     target_tolerance_usdt: f64,
-    bbo_max_age_ms: u32,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     symbol_overrides: &'a BTreeMap<String, ChaseParameterOverrides>,
     targets: &'a BTreeMap<String, TargetPosition>,
     updated_at_us: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExecStrategyTargetState {
+    pub(crate) family: String,
+    pub(crate) updated_at_us: i64,
+    pub(crate) targets: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ExecTargetSnapshot {
+    pub(crate) aggregate_targets: BTreeMap<String, f64>,
+    pub(crate) strategies: BTreeMap<String, ExecStrategyTargetState>,
 }
 
 #[derive(Clone)]
@@ -285,9 +297,8 @@ impl RedisRuntime {
                             .chase
                             .maker_recenter_trigger_bps,
                         maker_amend_cooldown_ms: order_parameters.chase.maker_amend_cooldown_ms,
-                        maker_timeout_ms: order_parameters.chase.maker_timeout_ms,
+                        maker_timeout_sec: order_parameters.chase.maker_timeout_sec,
                         target_tolerance_usdt: order_parameters.chase.target_tolerance_usdt,
-                        bbo_max_age_ms: order_parameters.chase.bbo_max_age_ms,
                         symbol_overrides: &chase_symbol_overrides,
                         targets,
                         updated_at_us,
@@ -482,14 +493,18 @@ impl RedisRuntime {
         }
     }
 
-    /// Sum configured Exec targets from both execution families for one source.
-    pub async fn load_exec_targets(&self, source: &SourceConfig) -> Result<BTreeMap<String, f64>> {
+    /// Load both the account aggregate and the per-strategy versions that Exec
+    /// must acknowledge in its Viz state.
+    pub(crate) async fn load_exec_target_snapshot(
+        &self,
+        source: &SourceConfig,
+    ) -> Result<ExecTargetSnapshot> {
         let timeout = Duration::from_secs(self.request_timeout_secs().await);
         let loaded = {
             let mut inner = self.inner.lock().await;
             let connection = inner.connection().await?;
             tokio::time::timeout(timeout, async {
-                let mut totals = BTreeMap::<String, f64>::new();
+                let mut snapshot = ExecTargetSnapshot::default();
                 for family in [ExecutionFamily::BatchExec, ExecutionFamily::ChaseExec] {
                     let prefix = format!(
                         "{}:{}:{}:",
@@ -520,29 +535,30 @@ impl RedisRuntime {
                                     family.redis_namespace()
                                 )
                             })?;
-                        let Some(targets) =
-                            stored.get("targets").and_then(|value| value.as_object())
-                        else {
-                            continue;
-                        };
-                        for (symbol, target) in targets {
-                            let Some(qty) = target
-                                .get("qty")
-                                .and_then(serde_json::Value::as_f64)
-                                .filter(|qty| qty.is_finite())
-                            else {
-                                continue;
-                            };
-                            *totals.entry(symbol.clone()).or_insert(0.0) += qty;
+                        let strategy = decode_exec_strategy_target_state(
+                            family.redis_namespace(),
+                            name,
+                            &stored,
+                        )?;
+                        for (symbol, qty) in &strategy.targets {
+                            *snapshot
+                                .aggregate_targets
+                                .entry(symbol.clone())
+                                .or_insert(0.0) += qty;
+                        }
+                        if snapshot.strategies.insert(name.clone(), strategy).is_some() {
+                            bail!(
+                                "Exec strategy is indexed by multiple execution families: {name}"
+                            );
                         }
                     }
                 }
-                Ok(totals)
+                Ok(snapshot)
             })
             .await
         };
         match loaded {
-            Ok(Ok(totals)) => Ok(totals),
+            Ok(Ok(snapshot)) => Ok(snapshot),
             Ok(Err(error)) => {
                 if is_redis_transport_error(&error) {
                     self.mark_broken().await;
@@ -621,6 +637,43 @@ impl RedisRuntime {
         let mut inner = self.inner.lock().await;
         inner.connection = None;
     }
+}
+
+fn decode_exec_strategy_target_state(
+    family: &str,
+    strategy_name: &str,
+    stored: &serde_json::Value,
+) -> Result<ExecStrategyTargetState> {
+    let updated_at_us = stored
+        .get("updated_at_us")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value > 0)
+        .with_context(|| {
+            format!("{family} Redis config has invalid updated_at_us: {strategy_name}")
+        })?;
+    let raw_targets = stored
+        .get("targets")
+        .and_then(serde_json::Value::as_object)
+        .with_context(|| format!("{family} Redis config has invalid targets: {strategy_name}"))?;
+    let mut targets = BTreeMap::new();
+    for (symbol, target) in raw_targets {
+        validate_exec_symbol(symbol).map_err(anyhow::Error::msg)?;
+        let qty = target
+            .as_f64()
+            .or_else(|| target.get("qty").and_then(serde_json::Value::as_f64))
+            .filter(|value| value.is_finite())
+            .with_context(|| {
+                format!(
+                    "{family} Redis config has invalid target quantity: {strategy_name}/{symbol}"
+                )
+            })?;
+        targets.insert(symbol.clone(), qty);
+    }
+    Ok(ExecStrategyTargetState {
+        family: family.to_string(),
+        updated_at_us,
+        targets,
+    })
 }
 
 async fn ensure_no_opposite_family_claims(
@@ -970,9 +1023,8 @@ mod tests {
             max_open_usdt: parameters.chase.max_open_usdt,
             maker_recenter_trigger_bps: parameters.chase.maker_recenter_trigger_bps,
             maker_amend_cooldown_ms: parameters.chase.maker_amend_cooldown_ms,
-            maker_timeout_ms: parameters.chase.maker_timeout_ms,
+            maker_timeout_sec: parameters.chase.maker_timeout_sec,
             target_tolerance_usdt: parameters.chase.target_tolerance_usdt,
-            bbo_max_age_ms: parameters.chase.bbo_max_age_ms,
             symbol_overrides: &overrides,
             targets: &targets,
             updated_at_us: 1,
@@ -985,6 +1037,32 @@ mod tests {
         );
         assert!(payload.get("algorithm").is_none());
         assert!(payload.get("maker_price_anchor").is_none());
+    }
+
+    #[test]
+    fn monitor_target_state_decodes_structured_and_legacy_targets() {
+        let stored = serde_json::json!({
+            "updated_at_us": 123_456,
+            "targets": {
+                "BTCUSDT": {"qty": 0.25, "signal": 1},
+                "ETHUSDT": -2.0
+            }
+        });
+        let decoded = decode_exec_strategy_target_state("batch_exec", "cta_a", &stored).unwrap();
+        assert_eq!(decoded.family, "batch_exec");
+        assert_eq!(decoded.updated_at_us, 123_456);
+        assert_eq!(decoded.targets["BTCUSDT"], 0.25);
+        assert_eq!(decoded.targets["ETHUSDT"], -2.0);
+    }
+
+    #[test]
+    fn monitor_target_state_requires_a_publish_version() {
+        let stored = serde_json::json!({
+            "targets": {"BTCUSDT": {"qty": 0.25, "signal": 0}}
+        });
+        let error = decode_exec_strategy_target_state("batch_exec", "cta_a", &stored)
+            .expect_err("missing updated_at_us must make application verification fail");
+        assert!(error.to_string().contains("updated_at_us"));
     }
 
     #[test]

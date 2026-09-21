@@ -12,9 +12,8 @@ export function OrderParametersView({ value }: { value: OrderParameters }) {
       { label: '最大在途金额', value: `${value.chase.max_open_usdt} USDT` },
       { label: '追价触发', value: `${value.chase.maker_recenter_trigger_bps} bps` },
       { label: '改单冷却', value: `${value.chase.maker_amend_cooldown_ms} ms` },
-      { label: 'Maker 超时', value: `${value.chase.maker_timeout_ms} ms` },
+      { label: 'Maker 超时', value: `${value.chase.maker_timeout_sec} s` },
       { label: '目标容差', value: `${value.chase.target_tolerance_usdt} USDT` },
-      { label: '盘口有效期', value: `${value.chase.bbo_max_age_ms} ms` },
     ]
     return <ParameterRows rows={chaseRows} />
   }

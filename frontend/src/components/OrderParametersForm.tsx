@@ -28,9 +28,8 @@ const chaseFields = [
   ['max_open_usdt', '最大在途金额 (USDT)', '1', '0.01'],
   ['maker_recenter_trigger_bps', '追价触发 (bps)', '0.1', '0'],
   ['maker_amend_cooldown_ms', '改单冷却 (ms)', '1', '0'],
-  ['maker_timeout_ms', 'Maker 超时 (ms)', '1', '1'],
+  ['maker_timeout_sec', 'Maker 超时 (s)', '1', '1'],
   ['target_tolerance_usdt', '目标容差 (USDT)', '1', '0'],
-  ['bbo_max_age_ms', '盘口有效期 (ms)', '1', '1'],
 ] as const satisfies ReadonlyArray<[keyof ChaseParameters, string, string, string]>
 
 export function OrderParametersForm({

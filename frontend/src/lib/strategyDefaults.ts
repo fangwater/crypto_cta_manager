@@ -16,11 +16,10 @@ export const DEFAULT_ORDER: OrderParameters = {
   chase: {
     single_order_usdt: 100,
     max_open_usdt: 200,
-    maker_recenter_trigger_bps: 3,
+    maker_recenter_trigger_bps: 5,
     maker_amend_cooldown_ms: 0,
-    maker_timeout_ms: 60000,
+    maker_timeout_sec: 120,
     target_tolerance_usdt: 10,
-    bbo_max_age_ms: 2000,
   },
   single_order_usdt: 100,
   orders_per_batch: 3,

@@ -20,7 +20,7 @@ use crate::model::{
     ORDER_UPDATES_CF, TRADE_UPDATES_CF, UniformOrderEvent, decode_order_update,
     decode_trade_update, decode_uniform_order,
 };
-use crate::redis_runtime::RedisRuntime;
+use crate::redis_runtime::{ExecTargetSnapshot, RedisRuntime};
 use crate::rocks_source::{RawRocksRecord, read_latest_column_families};
 use crate::twap::parse_ask_bid_spread;
 use crate::viz_snapshot::{ExecStateSnapshot, VizSnapshotClient};
@@ -487,8 +487,8 @@ async fn check_source(
             // Configured positions come from the Redis Exec ledgers; a
             // failed read must skip the account comparison, not compare
             // against an empty map.
-            let configured = match redis.load_exec_targets(&source).await {
-                Ok(targets) => Some(targets),
+            let configured = match redis.load_exec_target_snapshot(&source).await {
+                Ok(snapshot) => Some(snapshot),
                 Err(error) => {
                     issues.push(issue(
                         "position",
@@ -626,7 +626,7 @@ fn check_position(
     source: &SourceConfig,
     monitor: &MonitorConfig,
     snapshot: &ExecStateSnapshot,
-    configured: Option<&BTreeMap<String, f64>>,
+    configured: Option<&ExecTargetSnapshot>,
     now_us: i64,
 ) -> Vec<MonitorIssue> {
     let mut issues = Vec::new();
@@ -640,7 +640,9 @@ fn check_position(
     }
     let now_ms = now_us / 1_000;
     let age_ms = now_ms.saturating_sub(snapshot.snapshot_ts_ms);
-    if snapshot.snapshot_ts_ms <= 0 || age_ms > monitor.position_stale_secs as i64 * 1_000 {
+    let snapshot_fresh =
+        snapshot.snapshot_ts_ms > 0 && age_ms <= monitor.position_stale_secs as i64 * 1_000;
+    if !snapshot_fresh {
         issues.push(issue(
             "position",
             "stale",
@@ -661,7 +663,8 @@ fn check_position(
     }
 
     let mut account_qty_by_symbol = HashMap::<&str, f64>::new();
-    let mut inflight_sum = HashMap::<&str, f64>::new();
+    let mut live_order_abs_by_symbol = HashMap::<&str, f64>::new();
+    let mut accepted_residual_by_symbol = HashMap::<&str, f64>::new();
     let mut symbol_last_update = HashMap::<&str, i64>::new();
     let mut usdt_value_by_symbol = HashMap::<&str, f64>::new();
     let mut valued_qty_by_symbol = HashMap::<&str, f64>::new();
@@ -680,8 +683,19 @@ fn check_position(
                 account_qty_by_symbol.insert(row.symbol.as_str(), account_qty);
             }
         }
-        *inflight_sum.entry(row.symbol.as_str()).or_insert(0.0) +=
-            row.pending_qty.unwrap_or(0.0) + row.live_order_qty.unwrap_or(0.0);
+        *live_order_abs_by_symbol
+            .entry(row.symbol.as_str())
+            .or_insert(0.0) += row.live_order_qty.unwrap_or(0.0).abs();
+        if row.execution_complete
+            && matches!(
+                row.completion_reason.as_str(),
+                "exchange_minimum" | "target_tolerance"
+            )
+        {
+            *accepted_residual_by_symbol
+                .entry(row.symbol.as_str())
+                .or_insert(0.0) += row.pending_qty.unwrap_or(0.0);
+        }
         // Rows with both qty and USDT value price the symbol's position gaps.
         if let (Some(qty), Some(usdt)) = (row.current_qty, row.current_usdt) {
             *usdt_value_by_symbol
@@ -703,16 +717,22 @@ fn check_position(
     // window. None means the Redis read failed and the check is skipped.
     let grace_ms = monitor.execution_grace_secs as i64 * 1_000;
     if let Some(configured) = configured {
+        if snapshot_fresh && snapshot.position_ready {
+            issues.extend(check_strategy_config_applied(
+                source, monitor, snapshot, configured, now_us,
+            ));
+        }
+        let configured_targets = &configured.aggregate_targets;
         let mut symbols = BTreeSet::new();
         symbols.extend(account_qty_by_symbol.keys().copied());
         symbols.extend(
-            configured
+            configured_targets
                 .iter()
                 .filter(|(_, qty)| qty.abs() > monitor.position_tolerance)
                 .map(|(symbol, _)| symbol.as_str()),
         );
         for symbol in symbols {
-            let configured_qty = configured.get(symbol).copied().unwrap_or(0.0);
+            let configured_qty = configured_targets.get(symbol).copied().unwrap_or(0.0);
             let Some(account_qty) = account_qty_by_symbol.get(symbol).copied() else {
                 issues.push(
                     issue(
@@ -743,8 +763,15 @@ fn check_position(
             {
                 continue;
             }
-            let inflight = inflight_sum.get(symbol).copied().unwrap_or(0.0);
-            if inflight.abs() > tolerance {
+            let live_order_qty = live_order_abs_by_symbol.get(symbol).copied().unwrap_or(0.0);
+            if live_order_qty > tolerance {
+                continue;
+            }
+            let accepted_residual = accepted_residual_by_symbol
+                .get(symbol)
+                .copied()
+                .unwrap_or(0.0);
+            if (gap - accepted_residual).abs() <= tolerance {
                 continue;
             }
             let settling = symbol_last_update
@@ -767,6 +794,90 @@ fn check_position(
         }
     }
     issues
+}
+
+fn check_strategy_config_applied(
+    source: &SourceConfig,
+    monitor: &MonitorConfig,
+    snapshot: &ExecStateSnapshot,
+    configured: &ExecTargetSnapshot,
+    now_us: i64,
+) -> Vec<MonitorIssue> {
+    let rows = snapshot
+        .rows
+        .iter()
+        .map(|row| ((row.strategy_name.as_str(), row.symbol.as_str()), row))
+        .collect::<HashMap<_, _>>();
+    let grace_us = seconds_to_us(monitor.execution_grace_secs);
+    let mut issues = Vec::new();
+
+    for (strategy_name, strategy) in &configured.strategies {
+        if now_us.saturating_sub(strategy.updated_at_us) < grace_us {
+            continue;
+        }
+        let expected_updated_at_ms = strategy.updated_at_us / 1_000;
+        let mut missing = Vec::new();
+        let mut stale = Vec::new();
+        let mut mismatched = Vec::new();
+        for (symbol, expected_qty) in &strategy.targets {
+            let Some(row) = rows.get(&(strategy_name.as_str(), symbol.as_str())) else {
+                missing.push(symbol.as_str());
+                continue;
+            };
+            if row.source_updated_at_ms < expected_updated_at_ms {
+                stale.push(symbol.as_str());
+                continue;
+            }
+            let matches_target = row.target_qty.is_some_and(|actual_qty| {
+                let scale = actual_qty.abs().max(expected_qty.abs()).max(1.0);
+                (actual_qty - expected_qty).abs() <= monitor.position_tolerance * scale
+            });
+            if !matches_target {
+                mismatched.push(symbol.as_str());
+            }
+        }
+        if missing.is_empty() && stale.is_empty() && mismatched.is_empty() {
+            continue;
+        }
+
+        let mut details = Vec::new();
+        if !missing.is_empty() {
+            details.push(format!("缺少行={}", summarize_symbols(&missing)));
+        }
+        if !stale.is_empty() {
+            details.push(format!("版本滞后={}", summarize_symbols(&stale)));
+        }
+        if !mismatched.is_empty() {
+            details.push(format!("目标值不一致={}", summarize_symbols(&mismatched)));
+        }
+        issues.push(issue(
+            "position",
+            &format!("config-not-applied:{strategy_name}"),
+            source,
+            format!(
+                "Exec 未确认应用 {} 策略 {} 的最新 Redis 仓位发布（已超过 {} 秒）：{}",
+                strategy.family,
+                strategy_name,
+                monitor.execution_grace_secs,
+                details.join("；")
+            ),
+        ));
+    }
+    issues
+}
+
+fn summarize_symbols(symbols: &[&str]) -> String {
+    const DISPLAY_LIMIT: usize = 5;
+    let mut summary = symbols
+        .iter()
+        .take(DISPLAY_LIMIT)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(",");
+    if symbols.len() > DISPLAY_LIMIT {
+        summary.push_str(&format!(" 等{}个", symbols.len()));
+    }
+    summary
 }
 
 fn is_terminal_order_status(status: &str) -> bool {
@@ -1547,6 +1658,13 @@ mod tests {
         }
     }
 
+    fn target_snapshot(aggregate_targets: BTreeMap<String, f64>) -> ExecTargetSnapshot {
+        ExecTargetSnapshot {
+            aggregate_targets,
+            strategies: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn position_check_alerts_only_when_configured_gap_is_stuck() {
         let source = test_source("binance-futures");
@@ -1555,7 +1673,7 @@ mod tests {
         let now_ms = now_us / 1_000;
         let old_ms = now_ms - (monitor.execution_grace_secs as i64 + 10) * 1_000;
         // Configured position comes from the Redis Exec targets.
-        let configured = BTreeMap::from([("BTCUSDT".to_string(), 0.3)]);
+        let configured = target_snapshot(BTreeMap::from([("BTCUSDT".to_string(), 0.3)]));
         let snapshot = |account: f64| ExecStateSnapshot {
             source_id: source.id.clone(),
             snapshot_ts_ms: now_ms,
@@ -1605,6 +1723,60 @@ mod tests {
         let issues = check_position(&source, &monitor, &executing, Some(&configured), now_us);
         assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
 
+        // Pending work is only a desired residual; without an exchange-live
+        // order it must not suppress a stuck-position alert.
+        let mut pending_only = snapshot(0.2);
+        pending_only.rows[0].pending_qty = Some(0.1);
+        let issues = check_position(&source, &monitor, &pending_only, Some(&configured), now_us);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.key.contains("account:BTCUSDT"))
+        );
+
+        // Exec may intentionally finish with a non-actionable residual. It is
+        // safe to suppress only when those signed residuals exactly explain
+        // the account-level gap.
+        let mut completed_residual = ExecStateSnapshot {
+            source_id: source.id.clone(),
+            snapshot_ts_ms: now_ms,
+            position_ready: true,
+            rows: vec![position_row(
+                "cta_a",
+                "BTCUSDT",
+                0.2,
+                0.3,
+                0.1,
+                0.0,
+                Some(0.2),
+                old_ms,
+            )],
+        };
+        completed_residual.rows[0].execution_complete = true;
+        completed_residual.rows[0].completion_reason = "exchange_minimum".to_string();
+        let issues = check_position(
+            &source,
+            &monitor,
+            &completed_residual,
+            Some(&configured),
+            now_us,
+        );
+        assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
+
+        completed_residual.rows[0].completion_reason = "symbol_not_tradable".to_string();
+        let issues = check_position(
+            &source,
+            &monitor,
+            &completed_residual,
+            Some(&configured),
+            now_us,
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.key.contains("account:BTCUSDT"))
+        );
+
         // A strategy row updated inside the grace window is still settling.
         let mut settling = snapshot(0.4);
         settling.rows[0].source_updated_at_ms = now_ms;
@@ -1618,7 +1790,7 @@ mod tests {
 
         // A configured symbol absent from the Viz snapshot is unknown rather
         // than a factual zero, and receives an initial grace period.
-        let missing = BTreeMap::from([("SOLUSDT".to_string(), 5.0)]);
+        let missing = target_snapshot(BTreeMap::from([("SOLUSDT".to_string(), 5.0)]));
         let issues = check_position(&source, &monitor, &snapshot(0.3), Some(&missing), now_us);
         let issue = issues
             .iter()
@@ -1643,6 +1815,96 @@ mod tests {
     }
 
     #[test]
+    fn position_check_detects_unapplied_strategy_when_account_net_is_unchanged() {
+        let source = test_source("binance-futures");
+        let monitor = MonitorConfig::default();
+        let now_us = unix_time_us();
+        let now_ms = now_us / 1_000;
+        let published_us = now_us - seconds_to_us(monitor.execution_grace_secs + 10);
+        let published_ms = published_us / 1_000;
+        let configured = ExecTargetSnapshot {
+            aggregate_targets: BTreeMap::from([("BTCUSDT".to_string(), 0.3)]),
+            strategies: BTreeMap::from([
+                (
+                    "cta_a".to_string(),
+                    crate::redis_runtime::ExecStrategyTargetState {
+                        family: "batch_exec".to_string(),
+                        updated_at_us: published_us,
+                        targets: BTreeMap::from([("BTCUSDT".to_string(), 0.6)]),
+                    },
+                ),
+                (
+                    "cta_b".to_string(),
+                    crate::redis_runtime::ExecStrategyTargetState {
+                        family: "batch_exec".to_string(),
+                        updated_at_us: published_us,
+                        targets: BTreeMap::from([("BTCUSDT".to_string(), -0.3)]),
+                    },
+                ),
+            ]),
+        };
+        let mut snapshot = ExecStateSnapshot {
+            source_id: source.id.clone(),
+            snapshot_ts_ms: now_ms,
+            position_ready: true,
+            rows: vec![
+                position_row(
+                    "cta_a",
+                    "BTCUSDT",
+                    0.5,
+                    0.5,
+                    0.0,
+                    0.0,
+                    Some(0.3),
+                    published_ms - 1,
+                ),
+                position_row(
+                    "cta_b",
+                    "BTCUSDT",
+                    -0.2,
+                    -0.2,
+                    0.0,
+                    0.0,
+                    Some(0.3),
+                    published_ms - 1,
+                ),
+            ],
+        };
+
+        let issues = check_position(&source, &monitor, &snapshot, Some(&configured), now_us);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.key.contains("config-not-applied:cta_a"))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.key.contains("config-not-applied:cta_b"))
+        );
+        assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
+
+        snapshot.rows[0].source_updated_at_ms = published_ms;
+        snapshot.rows[0].target_qty = Some(0.6);
+        snapshot.rows[1].source_updated_at_ms = published_ms;
+        snapshot.rows[1].target_qty = Some(-0.3);
+        let issues = check_position(&source, &monitor, &snapshot, Some(&configured), now_us);
+        assert!(
+            issues
+                .iter()
+                .all(|issue| !issue.key.contains("config-not-applied:"))
+        );
+
+        snapshot.rows.pop();
+        let issues = check_position(&source, &monitor, &snapshot, Some(&configured), now_us);
+        let missing = issues
+            .iter()
+            .find(|issue| issue.key.contains("config-not-applied:cta_b"))
+            .expect("missing strategy row should report an unapplied config");
+        assert!(missing.message.contains("缺少行=BTCUSDT"));
+    }
+
+    #[test]
     fn position_check_suppresses_dust_residuals() {
         let source = test_source("binance-futures");
         let monitor = MonitorConfig::default();
@@ -1657,7 +1919,7 @@ mod tests {
         };
 
         // Configured-vs-account gap valued below the residual threshold -> quiet.
-        let configured = BTreeMap::from([("DOGEUSDT".to_string(), 150.0)]);
+        let configured = target_snapshot(BTreeMap::from([("DOGEUSDT".to_string(), 150.0)]));
         let mut mismatch = snapshot(vec![position_row(
             "cta_a",
             "DOGEUSDT",

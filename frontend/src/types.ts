@@ -134,9 +134,8 @@ export interface ChaseParameters {
   max_open_usdt: number
   maker_recenter_trigger_bps: number
   maker_amend_cooldown_ms: number
-  maker_timeout_ms: number
+  maker_timeout_sec: number
   target_tolerance_usdt: number
-  bbo_max_age_ms: number
 }
 
 export interface OrderParameterOverrides {
