@@ -3,6 +3,7 @@ import { DEFAULT_ORDER_STRATEGY_NAME } from './orderParametersMeta'
 
 export const DEFAULT_ORDER: OrderParameters = {
   algorithm: 'batch',
+  signal_execution_enabled: true,
   pov: {
     participation_rate: 0.1,
     max_batch_usdt: 300,

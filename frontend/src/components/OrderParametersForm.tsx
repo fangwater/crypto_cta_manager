@@ -73,6 +73,23 @@ export function OrderParametersForm({
         </FieldHint>
       </Label>
 
+      <label className="flex cursor-pointer items-start gap-3 border-l-2 border-brand px-3 py-2">
+        <input
+          type="checkbox"
+          className="mt-1 accent-brand"
+          checked={value.signal_execution_enabled}
+          onChange={(event) =>
+            onChange({ ...value, signal_execution_enabled: event.target.checked })
+          }
+        />
+        <span>
+          <span className="block text-sm font-medium text-ink">启用 signal 执行语义</span>
+          <span className="mt-1 block text-xs leading-5 text-muted">
+            开启时向 Exec 透传 signal；关闭时归档保留原值，但写入 Exec Redis 前置为 0。下一次仓位发布或手动重发时生效。
+          </span>
+        </span>
+      </label>
+
       {value.algorithm !== 'chase' ? (
         <>
           <div className="grid gap-4 sm:grid-cols-2">

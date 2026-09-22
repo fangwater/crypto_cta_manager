@@ -577,8 +577,12 @@ host Nginx welcome page; the CTA workspace is `/manager/workspace/`.
 account bindings, and publish. The Exec `/exec_trade01/config/` page stays
 read-only. Runtime Redis JSON is written only by Manager through the loopback
 Exec Config `POST /api/strategy`. There is no write token. Each target is
-`{qty, signal}`; `signal=±1` means that symbol uses taker-only for the current
-execution. A successful `POST /api/catalog/position-strategies` republishes
+`{qty, signal}`. When the selected order strategy has
+`signal_execution_enabled=true`, `signal=±1` means that symbol uses taker-only
+for the current execution. With the switch disabled, Manager keeps the factual
+signal in its archive but writes `signal=0` into the Exec runtime target, so Exec
+follows its unchanged normal Maker/Taker path. A successful
+`POST /api/catalog/position-strategies` republishes
 every active bound account automatically using `qty × shares`. Each binding
 stores a non-negative `shares` multiplier. Setting it to zero immediately
 publishes one complete zero target vector under the original strategy name,

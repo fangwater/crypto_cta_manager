@@ -166,6 +166,8 @@ impl RedisRuntime {
             bail!("strategy_name is reserved");
         }
 
+        let runtime_targets =
+            filter_runtime_target_signals(order_parameters, symbol_order_parameters, targets);
         let family = order_parameters.algorithm.family();
         let prefix = format!(
             "{}:{}:{}:",
@@ -299,7 +301,7 @@ impl RedisRuntime {
                         max_maker_requotes: order_parameters.max_maker_requotes,
                         target_tolerance_usdt: order_parameters.target_tolerance_usdt,
                         symbol_overrides: &symbol_overrides,
-                        targets,
+                        targets: &runtime_targets,
                         updated_at_us,
                     }),
                     ExecutionFamily::ChaseExec => serde_json::to_string(&StoredChaseExecConfig {
@@ -319,7 +321,7 @@ impl RedisRuntime {
                             .chase
                             .strategy_order_rate_limit_10s,
                         symbol_overrides: &chase_symbol_overrides,
-                        targets,
+                        targets: &runtime_targets,
                         updated_at_us,
                     }),
                 }
@@ -1031,6 +1033,31 @@ fn parse_exec_order_rate_limit(raw: Option<&str>, field: &str) -> Result<i32> {
         .with_context(|| format!("Redis {field} must be in 0..={}", i32::MAX))
 }
 
+fn filter_runtime_target_signals(
+    order_parameters: &OrderParameters,
+    symbol_order_parameters: &BTreeMap<String, OrderParameters>,
+    targets: &BTreeMap<String, TargetPosition>,
+) -> BTreeMap<String, TargetPosition> {
+    targets
+        .iter()
+        .map(|(symbol, target)| {
+            let signal_execution_enabled = symbol_order_parameters
+                .get(symbol)
+                .unwrap_or(order_parameters)
+                .signal_execution_enabled;
+            let target = if signal_execution_enabled {
+                *target
+            } else {
+                TargetPosition {
+                    qty: target.qty,
+                    signal: 0,
+                }
+            };
+            (symbol.clone(), target)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1058,6 +1085,49 @@ mod tests {
         assert_eq!(next_updated_at_us(Some(i64::MAX)), i64::MAX);
         let current = next_updated_at_us(None);
         assert!(next_updated_at_us(Some(current)) > current);
+    }
+
+    #[test]
+    fn runtime_target_signal_filter_uses_effective_symbol_order_strategy() {
+        let mut defaults = valid_parameters();
+        defaults.signal_execution_enabled = false;
+        let mut passthrough = defaults.clone();
+        passthrough.signal_execution_enabled = true;
+        let symbol_order_parameters = BTreeMap::from([
+            ("ETHUSDT".to_string(), passthrough),
+            ("SOLUSDT".to_string(), defaults.clone()),
+        ]);
+        let targets = BTreeMap::from([
+            (
+                "BTCUSDT".to_string(),
+                TargetPosition {
+                    qty: 0.1,
+                    signal: 1,
+                },
+            ),
+            (
+                "ETHUSDT".to_string(),
+                TargetPosition {
+                    qty: -2.0,
+                    signal: -1,
+                },
+            ),
+            (
+                "SOLUSDT".to_string(),
+                TargetPosition {
+                    qty: 3.0,
+                    signal: 2,
+                },
+            ),
+        ]);
+
+        let filtered = filter_runtime_target_signals(&defaults, &symbol_order_parameters, &targets);
+
+        assert_eq!(filtered["BTCUSDT"].qty, 0.1);
+        assert_eq!(filtered["BTCUSDT"].signal, 0);
+        assert_eq!(filtered["ETHUSDT"].signal, -1);
+        assert_eq!(filtered["SOLUSDT"].signal, 0);
+        assert_eq!(targets["BTCUSDT"].signal, 1);
     }
 
     #[test]
@@ -1130,6 +1200,7 @@ mod tests {
         })
         .unwrap();
         assert!(without_overrides.get("symbol_overrides").is_none());
+        assert!(without_overrides.get("signal_execution_enabled").is_none());
 
         let overrides = BTreeMap::from([(
             "BTCUSDT".to_string(),
@@ -1206,6 +1277,7 @@ mod tests {
         );
         assert!(payload.get("algorithm").is_none());
         assert!(payload.get("maker_price_anchor").is_none());
+        assert!(payload.get("signal_execution_enabled").is_none());
     }
 
     #[test]

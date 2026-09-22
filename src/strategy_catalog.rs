@@ -858,7 +858,7 @@ pub async fn delete_position_strategy(pool: &PgPool, strategy_name: &str) -> Res
 pub async fn list_order_strategies(pool: &PgPool) -> Result<Vec<OrderStrategy>> {
     let rows = sqlx::query(
         r#"
-        SELECT strategy_name, algorithm, pov, chase,
+        SELECT strategy_name, algorithm, pov, chase, signal_execution_enabled,
                single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
                tick_spacing, batch_interval_ms, maker_timeout_ms, max_maker_requotes,
                target_tolerance_usdt, updated_at_us
@@ -889,16 +889,17 @@ pub async fn upsert_order_strategy(
     sqlx::query(
         r#"
         INSERT INTO cta_order_strategies (
-            strategy_name, algorithm, pov, chase,
+            strategy_name, algorithm, pov, chase, signal_execution_enabled,
             single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
             tick_spacing, batch_interval_ms, maker_timeout_ms, max_maker_requotes,
             target_tolerance_usdt, updated_at_us
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         ON CONFLICT (strategy_name) DO UPDATE SET
             algorithm = EXCLUDED.algorithm,
             pov = EXCLUDED.pov,
             chase = EXCLUDED.chase,
+            signal_execution_enabled = EXCLUDED.signal_execution_enabled,
             single_order_usdt = EXCLUDED.single_order_usdt,
             orders_per_batch = EXCLUDED.orders_per_batch,
             max_batch = EXCLUDED.max_batch,
@@ -915,6 +916,7 @@ pub async fn upsert_order_strategy(
     .bind(request.order_parameters.algorithm.as_str())
     .bind(serde_json::to_value(&request.order_parameters.pov)?)
     .bind(serde_json::to_value(&request.order_parameters.chase)?)
+    .bind(request.order_parameters.signal_execution_enabled)
     .bind(request.order_parameters.single_order_usdt)
     .bind(i32::try_from(request.order_parameters.orders_per_batch)?)
     .bind(i32::try_from(request.order_parameters.max_batch)?)
@@ -1187,6 +1189,7 @@ pub async fn load_binding_parts(
             o.algorithm,
             o.pov,
             o.chase,
+            o.signal_execution_enabled,
             o.single_order_usdt,
             o.orders_per_batch,
             o.max_batch,
@@ -1315,6 +1318,7 @@ fn decode_order_parameters(row: &sqlx::postgres::PgRow) -> Result<OrderParameter
         algorithm,
         pov: serde_json::from_value(row.try_get("pov")?)?,
         chase: serde_json::from_value(row.try_get("chase")?)?,
+        signal_execution_enabled: row.try_get("signal_execution_enabled")?,
         single_order_usdt: row.try_get("single_order_usdt")?,
         orders_per_batch: u32::try_from(row.try_get::<i32, _>("orders_per_batch")?)?,
         max_batch: u32::try_from(row.try_get::<i32, _>("max_batch")?)?,

@@ -363,7 +363,7 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'target-signal',
     group: '策略目录',
     title: 'qty 与 signal',
-    lead: 'POST 可以用裸数字；写入 Redis 后每条仓位都是 {qty, signal}。signal 只影响该品种这一轮怎么成交。',
+    lead: 'POST 可以用裸数字；写入 Redis 后每条仓位都是 {qty, signal}。下单策略可统一启用或关闭 signal 的执行语义。',
     content: (
       <>
         <CodeBlock label="发布到 Redis 的 targets">{`{
@@ -374,12 +374,12 @@ function buildChapters(gateway: string): Chapter[] {
           headers={['signal', 'Exec 行为']}
           rows={[
             ['0 或省略', '默认：taker 转 maker'],
-            ['+1 / -1', '该品种本轮全部用 taker，不再转 maker'],
+            ['+1 / -1', '开关启用时，该品种本轮全部用 taker，不再转 maker'],
             ['+2 / -2', '预留整数；当前按默认路径处理，直到 Exec 定义用途'],
           ]}
         />
         <Note>
-          ±1 只作用于这一次该 symbol 的执行。下一轮若仍要 taker，需要再次发布同样的 signal。份数只乘 qty。
+          开关在“下单策略”模板中配置。关闭后归档仍保留原始 signal，但 Manager 写入 Exec Redis 前将其置为 0；份数只乘 qty。保存模板后在下一次仓位发布或手动重发时生效。
         </Note>
       </>
     ),

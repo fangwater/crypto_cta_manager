@@ -8,6 +8,7 @@ export function OrderParametersView({ value }: { value: OrderParameters }) {
   if (value.algorithm === 'chase') {
     const chaseRows = [
       { label: '算法', value: 'Chase' },
+      { label: 'Signal 执行', value: value.signal_execution_enabled ? '启用' : '关闭' },
       { label: '最小批次名义金额', value: `${value.chase.batch_floor_usdt} USDT` },
       { label: '最大批次数', value: String(value.chase.max_batch) },
       { label: '最大在途批数', value: String(value.chase.max_open_batches) },
@@ -37,6 +38,7 @@ export function OrderParametersView({ value }: { value: OrderParameters }) {
 
   const rows = [
     { label: '算法', value: value.algorithm === 'pov' ? 'POV' : 'Batch' },
+    { label: 'Signal 执行', value: value.signal_execution_enabled ? '启用' : '关闭' },
     { label: orderParameterMeta.single_order_usdt.label, value: `${value.single_order_usdt} USDT` },
     { label: orderParameterMeta.orders_per_batch.label, value: String(value.orders_per_batch) },
     { label: orderParameterMeta.max_batch.label, value: String(value.max_batch) },

@@ -112,6 +112,7 @@ export interface OrderParameters {
   algorithm: 'batch' | 'pov' | 'chase'
   pov: PovParameters
   chase: ChaseParameters
+  signal_execution_enabled: boolean
   single_order_usdt: number
   orders_per_batch: number
   max_batch: number

@@ -194,6 +194,8 @@ pub struct OrderParameters {
     pub pov: PovParameters,
     #[serde(default)]
     pub chase: ChaseParameters,
+    #[serde(default = "default_signal_execution_enabled")]
+    pub signal_execution_enabled: bool,
     pub single_order_usdt: f64,
     pub orders_per_batch: u32,
     #[serde(default = "default_max_batch")]
@@ -212,6 +214,7 @@ impl Default for OrderParameters {
             algorithm: ExecutionAlgorithm::Batch,
             pov: PovParameters::default(),
             chase: ChaseParameters::default(),
+            signal_execution_enabled: default_signal_execution_enabled(),
             single_order_usdt: 100.0,
             orders_per_batch: 3,
             max_batch: default_max_batch(),
@@ -302,6 +305,7 @@ impl OrderParameterOverrides {
 
     pub fn apply_to(&self, defaults: &OrderParameters) -> OrderParameters {
         OrderParameters {
+            signal_execution_enabled: defaults.signal_execution_enabled,
             algorithm: self.algorithm.unwrap_or(defaults.algorithm),
             pov: self.pov.clone().unwrap_or_else(|| defaults.pov.clone()),
             chase: defaults.chase.clone(),
@@ -606,6 +610,7 @@ impl ExecConfigPayload {
             algorithm: self.algorithm,
             pov: self.pov.clone(),
             chase: ChaseParameters::default(),
+            signal_execution_enabled: default_signal_execution_enabled(),
             single_order_usdt: self.single_order_usdt,
             orders_per_batch: self.orders_per_batch,
             max_batch: self.max_batch,
@@ -621,6 +626,10 @@ impl ExecConfigPayload {
 
 const fn default_max_batch() -> u32 {
     20
+}
+
+const fn default_signal_execution_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -1064,8 +1073,13 @@ mod tests {
     fn legacy_order_parameters_default_max_batch() {
         let mut payload = serde_json::to_value(valid_parameters()).unwrap();
         payload.as_object_mut().unwrap().remove("max_batch");
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("signal_execution_enabled");
         let decoded: OrderParameters = serde_json::from_value(payload).unwrap();
         assert_eq!(decoded.max_batch, 20);
+        assert!(decoded.signal_execution_enabled);
     }
 
     #[test]
@@ -1096,6 +1110,7 @@ mod tests {
         pov.pov.participation_rate = 0.2;
         let encoded = runtime_order_parameters(&pov).unwrap();
         assert_eq!(encoded["algorithm"], "pov");
+        assert!(encoded.get("signal_execution_enabled").is_none());
         assert_eq!(encoded["pov"]["participation_rate"], 0.2);
         assert!(encoded.get("chase").is_none());
 
@@ -1106,6 +1121,7 @@ mod tests {
         chase.chase.strategy_order_rate_limit_per_min = 60;
         chase.chase.strategy_order_rate_limit_10s = 15;
         let encoded = runtime_order_parameters(&chase).unwrap();
+        assert!(encoded.get("signal_execution_enabled").is_none());
         assert_eq!(encoded["max_batch"], 8);
         assert_eq!(encoded["max_open_batches"], 3);
         assert_eq!(encoded["strategy_order_rate_limit_per_min"], 60);
@@ -1119,6 +1135,7 @@ mod tests {
         assert_eq!(decoded.chase.max_open_batches, 3);
         assert_eq!(decoded.chase.strategy_order_rate_limit_per_min, 60);
         assert_eq!(decoded.chase.strategy_order_rate_limit_10s, 15);
+        assert!(decoded.signal_execution_enabled);
     }
 
     #[test]

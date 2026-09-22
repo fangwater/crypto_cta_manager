@@ -463,7 +463,11 @@ loopback Exec Config. The per-binding publish endpoint
 remains only as a manual republish. There is no write token. Each target is
 `{"qty": <f64>, "signal": <int>}` with `signal` in `-2,-1,0,1,2`; omitted or
 legacy bare-number targets become `signal=0`. `signal=±1` means that symbol's
-current execution is all-taker and must not convert taker to maker. `POST
+current execution is all-taker and must not convert taker to maker when the
+bound order strategy has `signal_execution_enabled = true`. Disabling that
+order-strategy switch preserves the archived signal value, while Manager writes
+`signal=0` to the Exec runtime target so Exec follows its unchanged normal
+algorithm liquidity path. `POST
 /api/targets` is gone. Parameter-only
 updates of an existing strategy still use
 `POST /api/order-parameters` and require a positive `expected_updated_at_us`,
