@@ -469,6 +469,18 @@ single-order amount is `max(single_order_usdt, dynamic_single_usdt)` and remains
 fixed for that target generation. The Manager form shows the corresponding
 maximum maker-path estimate:
 `(max_batch - 1) * batch_interval_ms + (max_maker_requotes + 1) * maker_timeout_ms`.
+Chase uses its own sizing contract. It freezes
+`effective_batch_usdt = max(batch_floor_usdt, initial_delta_usdt / max_batch)`
+for each target generation, releases one level-0 child per pass, and keeps the
+total unfilled water level within
+`effective_batch_usdt * max_open_batches`. Partial fills reopen the same amount
+of capacity; the final residual may be smaller than `batch_floor_usdt`.
+Chase also accepts `strategy_order_rate_limit_per_min` and
+`strategy_order_rate_limit_10s` (both default to `0`, disabled). These rolling windows
+aggregate new orders and amendments across every symbol under the actual
+runtime strategy name. They are cumulative with the account Exec limits;
+cancels consume neither quota. Strategy limits are top-level parameters and
+cannot be selected through a symbol override.
 An account binding's order strategy is the default execution template. A position
 strategy may provide `symbol_order_strategy_overrides`, keyed by uppercase symbol
 and valued by another named order-strategy template. Manager resolves those templates
@@ -575,12 +587,34 @@ strategy without routing its fills through `SYSTEM_POSITION_CLOSE`. Manager
 keeps a reconnecting Redis long connection, writes and rereads the runtime JSON there, then notifies
 `exec-pre-trade` over iceoryx. The 30s Redis poll remains the fallback.
 
+Before publishing any non-zero target, Manager checks that source's live account
+mode with its Exec `env.sh`. A Binance USD-M source must use Standard API mode
+with Multi-Assets Mode enabled (`/fapi/v1/accountConfig`). An OKX source must be
+a unified account: `acctLv` 3 (multi-currency margin) or 4 (portfolio margin)
+from `/api/v5/account/config`. Query failures also block the publish. Complete
+zero target vectors bypass this gate so an operator can always stop a strategy
+and reduce risk. Live Maker/Taker queries use Binance `commissionRate` or OKX
+`/api/v5/account/trade-fee`. OKX selects the instrument `groupId` inside
+`feeGroup`; a negative OKX rate is a cost and is returned with the positive
+Manager sign.
+
 Exchange contract leverage is an independent venue margin setting. Query and
 set it per account and per symbol through Manager. Both calls read that account's
 Exec `env.sh` (default `<rocksdb_path>/../../env.sh`). GET is the live venue
 value; PUT records the last requested value in PostgreSQL as
 `recorded_contract_leverage`. Neither call scales published qty, writes Exec
 Redis, or notifies `exec-pre-trade`. Range is 1–125.
+
+Account configure users may read and update the shared Exec order-action rate
+limits through
+`GET/PUT /api/catalog/accounts/{source_id}/exec-order-rate-limits`. Manager
+updates only `exec_order_rate_limit_per_min` and
+`exec_order_rate_limit_10s` in that account's
+`{source_id}:{venue}:pre_trade_risk_params` Redis hash and immediately reads
+them back. It does not replace the other risk fields. `0` disables the
+corresponding window. Batch, POV, and Chase new orders plus Chase amendments
+share this account-local Exec bucket; cancels are not counted. Exec picks up a
+saved value on its existing risk-parameter refresh, within about 60 seconds.
 
 ```bash
 # el01

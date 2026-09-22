@@ -1,14 +1,16 @@
-import { CheckCircle2, Layers3, LoaderCircle, Plus, Power, Save, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { CheckCircle2, Gauge, Layers3, LoaderCircle, Plus, Power, Save, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   deleteAccountBinding,
   getAccountContractLeverage,
+  getAccountExecOrderRateLimits,
   getAccountStudio,
   getDashboard,
   listPositionAccess,
   publishAccountBinding,
   saveAccountBinding,
   saveAccountContractLeverage,
+  saveAccountExecOrderRateLimits,
   saveBindingShares,
 } from '../../api'
 import {
@@ -23,7 +25,15 @@ import { FieldHint, Input, Label, Select } from '../../components/ui/Field'
 import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { readSourceId, routes } from '../../lib/routes'
-import type { AccountStudio, DashboardSnapshot } from '../../types'
+import type { AccountStudio, DashboardSnapshot, ExecOrderRateLimits } from '../../types'
+
+const MAX_EXEC_ORDER_RATE_LIMIT = 2_147_483_647
+
+function parseExecOrderRateLimit(value: string) {
+  if (!/^\d+$/.test(value.trim())) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed <= MAX_EXEC_ORDER_RATE_LIMIT ? parsed : null
+}
 
 export function AccountBindingsPage() {
   const initialSource = readSourceId()
@@ -33,6 +43,9 @@ export function AccountBindingsPage() {
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
   const [bindableStrategies, setBindableStrategies] = useState<Set<string>>(new Set())
   const [studio, setStudio] = useState<AccountStudio | null>(null)
+  const [execOrderRateLimits, setExecOrderRateLimits] = useState<ExecOrderRateLimits | null>(null)
+  const [execOrderRateLimitPerMin, setExecOrderRateLimitPerMin] = useState('')
+  const [execOrderRateLimit10s, setExecOrderRateLimit10s] = useState('')
   const [shareDrafts, setShareDrafts] = useState<Record<string, string>>({})
   const [sourceId, setSourceId] = useState(initialSource)
   const [contractSymbol, setContractSymbol] = useState('')
@@ -70,6 +83,15 @@ export function AccountBindingsPage() {
   const parsedNewShares = Number(newShares)
   const validNewShares =
     newShares.trim() !== '' && Number.isFinite(parsedNewShares) && parsedNewShares >= 0
+  const parsedExecOrderRateLimitPerMin = parseExecOrderRateLimit(execOrderRateLimitPerMin)
+  const parsedExecOrderRateLimit10s = parseExecOrderRateLimit(execOrderRateLimit10s)
+  const validExecOrderRateLimits =
+    parsedExecOrderRateLimitPerMin !== null && parsedExecOrderRateLimit10s !== null
+  const execOrderRateLimitsChanged =
+    validExecOrderRateLimits &&
+    execOrderRateLimits !== null &&
+    (parsedExecOrderRateLimitPerMin !== execOrderRateLimits.exec_order_rate_limit_per_min ||
+      parsedExecOrderRateLimit10s !== execOrderRateLimits.exec_order_rate_limit_10s)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -111,6 +133,12 @@ export function AccountBindingsPage() {
     )
   }, [])
 
+  const applyExecOrderRateLimits = useCallback((next: ExecOrderRateLimits) => {
+    setExecOrderRateLimits(next)
+    setExecOrderRateLimitPerMin(String(next.exec_order_rate_limit_per_min))
+    setExecOrderRateLimit10s(String(next.exec_order_rate_limit_10s))
+  }, [])
+
   const loadStudio = useCallback(async (nextSourceId: string, signal?: AbortSignal) => {
     const next = await getAccountStudio(nextSourceId, signal)
     applyStudio(next)
@@ -120,17 +148,29 @@ export function AccountBindingsPage() {
   useEffect(() => {
     if (!sourceId) {
       setStudio(null)
+      setExecOrderRateLimits(null)
+      setExecOrderRateLimitPerMin('')
+      setExecOrderRateLimit10s('')
       setQueriedContractLeverage(null)
       return
     }
+    setExecOrderRateLimits(null)
     setQueriedContractLeverage(null)
     const controller = new AbortController()
-    loadStudio(sourceId, controller.signal).catch((reason: unknown) => {
-      if (reason instanceof DOMException && reason.name === 'AbortError') return
-      setError(reason instanceof Error ? reason.message : String(reason))
-    })
+    Promise.all([
+      loadStudio(sourceId, controller.signal),
+      getAccountExecOrderRateLimits(sourceId, controller.signal),
+    ])
+      .then(([, limits]) => {
+        applyExecOrderRateLimits(limits)
+        setError(null)
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
     return () => controller.abort()
-  }, [loadStudio, sourceId])
+  }, [applyExecOrderRateLimits, loadStudio, sourceId])
 
   async function bindExecution(
     positionStrategyName: string,
@@ -204,6 +244,69 @@ export function AccountBindingsPage() {
                 />
                 <FieldHint>首次启用、切换或重新启用 POV/Chase 时使用。</FieldHint>
               </Label>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Gauge size={16} /> 账户 Exec 报单限频
+              </CardTitle>
+              <CardDescription>
+                Batch、POV、Chase 新单和 Chase 改单共享账户额度。
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form
+                className="grid max-w-2xl items-end gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  if (!validExecOrderRateLimits) return
+                  void withWrite(async () => {
+                    const next = await saveAccountExecOrderRateLimits(
+                      sourceId,
+                      parsedExecOrderRateLimitPerMin,
+                      parsedExecOrderRateLimit10s,
+                    )
+                    applyExecOrderRateLimits(next)
+                    return `已更新账户报单限频：60 秒 ${next.exec_order_rate_limit_per_min}，10 秒 ${next.exec_order_rate_limit_10s}`
+                  })
+                }}
+              >
+                <Label>
+                  60 秒请求上限
+                  <Input
+                    type="number"
+                    inputMode="numeric"
+                    min="0"
+                    max={MAX_EXEC_ORDER_RATE_LIMIT}
+                    step="1"
+                    value={execOrderRateLimitPerMin}
+                    onChange={(event) => setExecOrderRateLimitPerMin(event.target.value)}
+                  />
+                </Label>
+                <Label>
+                  10 秒请求上限
+                  <Input
+                    type="number"
+                    inputMode="numeric"
+                    min="0"
+                    max={MAX_EXEC_ORDER_RATE_LIMIT}
+                    step="1"
+                    value={execOrderRateLimit10s}
+                    onChange={(event) => setExecOrderRateLimit10s(event.target.value)}
+                  />
+                </Label>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={saving || !execOrderRateLimitsChanged}
+                >
+                  <Save size={15} /> 保存
+                </Button>
+                <FieldHint className="sm:col-span-3">
+                  0 表示关闭对应窗口；保存后由 Exec 风控参数热加载，最长约 60 秒生效。
+                </FieldHint>
+              </form>
             </CardContent>
           </Card>
           <ContractLeveragePanel

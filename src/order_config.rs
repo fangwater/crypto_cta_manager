@@ -132,36 +132,43 @@ impl PovParameters {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ChaseParameters {
-    pub single_order_usdt: f64,
-    pub max_open_usdt: f64,
+    pub batch_floor_usdt: f64,
+    pub max_batch: u32,
+    pub max_open_batches: u32,
     pub maker_recenter_trigger_bps: f64,
     pub maker_amend_cooldown_ms: u32,
     pub maker_timeout_sec: u32,
     pub target_tolerance_usdt: f64,
+    pub strategy_order_rate_limit_per_min: u32,
+    pub strategy_order_rate_limit_10s: u32,
 }
 
 impl Default for ChaseParameters {
     fn default() -> Self {
         Self {
-            single_order_usdt: 100.0,
-            max_open_usdt: 200.0,
+            batch_floor_usdt: 100.0,
+            max_batch: 4,
+            max_open_batches: 2,
             maker_recenter_trigger_bps: 5.0,
-            maker_amend_cooldown_ms: 0,
+            maker_amend_cooldown_ms: 1_000,
             maker_timeout_sec: 120,
             target_tolerance_usdt: 10.0,
+            strategy_order_rate_limit_per_min: 0,
+            strategy_order_rate_limit_10s: 0,
         }
     }
 }
 
 impl ChaseParameters {
     pub fn validate(&self) -> std::result::Result<(), String> {
-        for (field, value) in [
-            ("chase.single_order_usdt", self.single_order_usdt),
-            ("chase.max_open_usdt", self.max_open_usdt),
-        ] {
-            if !value.is_finite() || value <= 0.0 {
-                return Err(format!("{field} must be finite and greater than zero"));
-            }
+        if !self.batch_floor_usdt.is_finite() || self.batch_floor_usdt <= 0.0 {
+            return Err("chase.batch_floor_usdt must be finite and greater than zero".to_string());
+        }
+        if self.max_batch == 0 {
+            return Err("chase.max_batch must be greater than zero".to_string());
+        }
+        if self.max_open_batches == 0 || self.max_open_batches > self.max_batch {
+            return Err("chase.max_open_batches must be in the range 1..=max_batch".to_string());
         }
         if !self.maker_recenter_trigger_bps.is_finite() || self.maker_recenter_trigger_bps < 0.0 {
             return Err(
@@ -355,9 +362,11 @@ impl OrderParameterOverrides {
 #[serde(deny_unknown_fields)]
 pub struct ChaseParameterOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub single_order_usdt: Option<f64>,
+    pub batch_floor_usdt: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_open_usdt: Option<f64>,
+    pub max_batch: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_open_batches: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maker_recenter_trigger_bps: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -370,8 +379,9 @@ pub struct ChaseParameterOverrides {
 
 impl ChaseParameterOverrides {
     pub fn is_empty(&self) -> bool {
-        self.single_order_usdt.is_none()
-            && self.max_open_usdt.is_none()
+        self.batch_floor_usdt.is_none()
+            && self.max_batch.is_none()
+            && self.max_open_batches.is_none()
             && self.maker_recenter_trigger_bps.is_none()
             && self.maker_amend_cooldown_ms.is_none()
             && self.maker_timeout_sec.is_none()
@@ -380,10 +390,11 @@ impl ChaseParameterOverrides {
 
     pub fn from_templates(defaults: &ChaseParameters, selected: &ChaseParameters) -> Self {
         Self {
-            single_order_usdt: (selected.single_order_usdt != defaults.single_order_usdt)
-                .then_some(selected.single_order_usdt),
-            max_open_usdt: (selected.max_open_usdt != defaults.max_open_usdt)
-                .then_some(selected.max_open_usdt),
+            batch_floor_usdt: (selected.batch_floor_usdt != defaults.batch_floor_usdt)
+                .then_some(selected.batch_floor_usdt),
+            max_batch: (selected.max_batch != defaults.max_batch).then_some(selected.max_batch),
+            max_open_batches: (selected.max_open_batches != defaults.max_open_batches)
+                .then_some(selected.max_open_batches),
             maker_recenter_trigger_bps: (selected.maker_recenter_trigger_bps
                 != defaults.maker_recenter_trigger_bps)
                 .then_some(selected.maker_recenter_trigger_bps),
@@ -553,14 +564,40 @@ struct ExecConfigPayload {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChaseExecConfigPayload {
-    #[serde(flatten)]
-    chase: ChaseParameters,
+    batch_floor_usdt: f64,
+    max_batch: u32,
+    max_open_batches: u32,
+    maker_recenter_trigger_bps: f64,
+    maker_amend_cooldown_ms: u32,
+    maker_timeout_sec: u32,
+    target_tolerance_usdt: f64,
+    #[serde(default)]
+    strategy_order_rate_limit_per_min: u32,
+    #[serde(default)]
+    strategy_order_rate_limit_10s: u32,
     #[serde(default)]
     targets: BTreeMap<String, TargetPosition>,
     #[serde(default)]
     symbol_overrides: BTreeMap<String, serde_json::Value>,
     updated_at_us: Option<i64>,
+}
+
+impl ChaseExecConfigPayload {
+    fn order_parameters(&self) -> ChaseParameters {
+        ChaseParameters {
+            batch_floor_usdt: self.batch_floor_usdt,
+            max_batch: self.max_batch,
+            max_open_batches: self.max_open_batches,
+            maker_recenter_trigger_bps: self.maker_recenter_trigger_bps,
+            maker_amend_cooldown_ms: self.maker_amend_cooldown_ms,
+            maker_timeout_sec: self.maker_timeout_sec,
+            target_tolerance_usdt: self.target_tolerance_usdt,
+            strategy_order_rate_limit_per_min: self.strategy_order_rate_limit_per_min,
+            strategy_order_rate_limit_10s: self.strategy_order_rate_limit_10s,
+        }
+    }
 }
 
 impl ExecConfigPayload {
@@ -819,7 +856,7 @@ fn decode_runtime_config(
                 .map_err(|error| ExecConfigError::invalid(error.to_string()))?;
             let parameters = OrderParameters {
                 algorithm: ExecutionAlgorithm::Chase,
-                chase: config.chase,
+                chase: config.order_parameters(),
                 ..OrderParameters::default()
             };
             Ok(DecodedRuntimeConfig {
@@ -966,7 +1003,7 @@ mod tests {
         chase.algorithm = ExecutionAlgorithm::Chase;
         chase.chase.maker_recenter_trigger_bps = 0.0;
         assert!(chase.validate().is_ok());
-        chase.chase.max_open_usdt = 0.0;
+        chase.chase.max_open_batches = 0;
         assert!(chase.validate().is_err());
     }
 
@@ -1009,6 +1046,18 @@ mod tests {
         assert_eq!(derived.max_maker_requotes, Some(0));
         assert_eq!(derived.orders_per_batch, None);
         assert_eq!(derived.apply_to(&defaults), selected);
+
+        let chase_defaults = ChaseParameters::default();
+        let mut chase_selected = chase_defaults.clone();
+        chase_selected.batch_floor_usdt = 250.0;
+        chase_selected.strategy_order_rate_limit_per_min = 60;
+        chase_selected.strategy_order_rate_limit_10s = 15;
+        let chase_derived =
+            ChaseParameterOverrides::from_templates(&chase_defaults, &chase_selected);
+        let encoded = serde_json::to_value(chase_derived).unwrap();
+        assert_eq!(encoded["batch_floor_usdt"], 250.0);
+        assert!(encoded.get("strategy_order_rate_limit_per_min").is_none());
+        assert!(encoded.get("strategy_order_rate_limit_10s").is_none());
     }
 
     #[test]
@@ -1052,15 +1101,37 @@ mod tests {
 
         let mut chase = valid_parameters();
         chase.algorithm = ExecutionAlgorithm::Chase;
-        chase.chase.max_open_usdt = 450.0;
+        chase.chase.max_batch = 8;
+        chase.chase.max_open_batches = 3;
+        chase.chase.strategy_order_rate_limit_per_min = 60;
+        chase.chase.strategy_order_rate_limit_10s = 15;
         let encoded = runtime_order_parameters(&chase).unwrap();
-        assert_eq!(encoded["max_open_usdt"], 450.0);
+        assert_eq!(encoded["max_batch"], 8);
+        assert_eq!(encoded["max_open_batches"], 3);
+        assert_eq!(encoded["strategy_order_rate_limit_per_min"], 60);
+        assert_eq!(encoded["strategy_order_rate_limit_10s"], 15);
         assert!(encoded.get("algorithm").is_none());
         assert!(encoded.get("orders_per_batch").is_none());
 
         let decoded = decode_runtime_order_parameters(encoded, ExecutionFamily::ChaseExec).unwrap();
         assert_eq!(decoded.algorithm, ExecutionAlgorithm::Chase);
-        assert_eq!(decoded.chase.max_open_usdt, 450.0);
+        assert_eq!(decoded.chase.max_batch, 8);
+        assert_eq!(decoded.chase.max_open_batches, 3);
+        assert_eq!(decoded.chase.strategy_order_rate_limit_per_min, 60);
+        assert_eq!(decoded.chase.strategy_order_rate_limit_10s, 15);
+    }
+
+    #[test]
+    fn chase_runtime_contract_rejects_removed_fixed_usdt_fields() {
+        let value = serde_json::json!({
+            "single_order_usdt": 100.0,
+            "max_open_usdt": 200.0,
+            "maker_recenter_trigger_bps": 5.0,
+            "maker_amend_cooldown_ms": 0,
+            "maker_timeout_sec": 120,
+            "target_tolerance_usdt": 10.0
+        });
+        assert!(decode_runtime_order_parameters(value, ExecutionFamily::ChaseExec).is_err());
     }
 
     #[test]

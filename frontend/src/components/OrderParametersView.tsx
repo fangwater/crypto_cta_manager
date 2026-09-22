@@ -8,12 +8,25 @@ export function OrderParametersView({ value }: { value: OrderParameters }) {
   if (value.algorithm === 'chase') {
     const chaseRows = [
       { label: '算法', value: 'Chase' },
-      { label: '单笔名义金额', value: `${value.chase.single_order_usdt} USDT` },
-      { label: '最大在途金额', value: `${value.chase.max_open_usdt} USDT` },
+      { label: '最小批次名义金额', value: `${value.chase.batch_floor_usdt} USDT` },
+      { label: '最大批次数', value: String(value.chase.max_batch) },
+      { label: '最大在途批数', value: String(value.chase.max_open_batches) },
       { label: '追价触发', value: `${value.chase.maker_recenter_trigger_bps} bps` },
       { label: '改单冷却', value: `${value.chase.maker_amend_cooldown_ms} ms` },
       { label: 'Maker 超时', value: `${value.chase.maker_timeout_sec} s` },
       { label: '目标容差', value: `${value.chase.target_tolerance_usdt} USDT` },
+      {
+        label: '策略 60 秒报单上限',
+        value: value.chase.strategy_order_rate_limit_per_min === 0
+          ? '关闭'
+          : String(value.chase.strategy_order_rate_limit_per_min),
+      },
+      {
+        label: '策略 10 秒报单上限',
+        value: value.chase.strategy_order_rate_limit_10s === 0
+          ? '关闭'
+          : String(value.chase.strategy_order_rate_limit_10s),
+      },
     ]
     return <ParameterRows rows={chaseRows} />
   }

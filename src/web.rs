@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
-use crate::account_ipc::{LiveEquityHub, LiveEquitySnapshot};
+use crate::account_ipc::{LiveAccountReading, LiveEquityHub};
 use crate::auth::{self, AuthUser};
 use crate::config::{AppConfig, FeeRates, SourceConfig};
 use crate::manager_db::ManagerDb;
@@ -125,6 +125,11 @@ pub struct DashboardAccount {
     pub strategy_pnl_start_ts_us: Option<i64>,
     pub live_equity_usdt: Option<f64>,
     pub live_equity_status: Option<&'static str>,
+    /// True after account_monitor publishes an OKX unified AccountRisk sample.
+    pub unified_account: bool,
+    /// OKX `mgnRatio` from that sample. Higher is safer; 1.0 is the liquidation boundary.
+    pub uni_mmr: Option<f64>,
+    pub uni_mmr_status: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -349,6 +354,13 @@ struct SavedPositionStrategyResponse {
     publishes: Vec<BindingPublishResult>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveExecOrderRateLimitsRequest {
+    exec_order_rate_limit_per_min: i64,
+    exec_order_rate_limit_10s: i64,
+}
+
 struct ApiError(anyhow::Error);
 
 impl<E> From<E> for ApiError
@@ -528,6 +540,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             delete(delete_order_strategy),
         )
         .route("/api/catalog/accounts/{source_id}", get(get_account_studio))
+        .route(
+            "/api/catalog/accounts/{source_id}/exec-order-rate-limits",
+            get(get_account_exec_order_rate_limits).put(save_account_exec_order_rate_limits),
+        )
         .route(
             "/api/catalog/accounts/{source_id}/grants",
             get(list_account_grants).put(save_account_grants),
@@ -1047,10 +1063,7 @@ async fn dashboard(
     dashboard.report = nav::restrict_report(&dashboard.report, &visible.0);
     let now_ms = unix_now_ms();
     for account in &mut dashboard.accounts {
-        if let Some(snapshot) = state.live_equity.get(&account.source_id) {
-            account.live_equity_usdt = Some(snapshot.equity_usdt);
-            account.live_equity_status = Some(live_equity_status(snapshot.ts_ms, now_ms));
-        }
+        apply_live_account(account, state.live_equity.get(&account.source_id), now_ms);
     }
     (NO_STORE, Json(dashboard))
 }
@@ -1254,11 +1267,31 @@ async fn exchange_nav(
         .into_response())
 }
 
+fn apply_live_account(
+    account: &mut DashboardAccount,
+    reading: Option<LiveAccountReading>,
+    now_ms: i64,
+) {
+    let Some(reading) = reading else {
+        return;
+    };
+    if let Some(snapshot) = reading.equity {
+        account.live_equity_usdt = Some(snapshot.equity_usdt);
+        account.live_equity_status = Some(live_equity_status(snapshot.ts_ms, now_ms));
+    }
+    account.unified_account = reading.unified_account;
+    account.uni_mmr = reading.uni_mmr;
+    account.uni_mmr_status = reading
+        .uni_mmr_ts_ms
+        .map(|ts_ms| live_equity_status(ts_ms, now_ms));
+}
+
 fn exchange_nav_account(
     source: &SourceConfig,
-    snapshot: Option<LiveEquitySnapshot>,
+    reading: Option<LiveAccountReading>,
     now_ms: i64,
 ) -> ExchangeNavAccount {
+    let snapshot = reading.as_ref().and_then(|reading| reading.equity.clone());
     let status = snapshot
         .as_ref()
         .map(|snapshot| live_equity_status(snapshot.ts_ms, now_ms))
@@ -2507,6 +2540,79 @@ async fn get_account_studio(
     }
 }
 
+async fn get_account_exec_order_rate_limits(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
+    match state
+        .redis_runtime
+        .load_exec_order_rate_limits(source)
+        .await
+    {
+        Ok(limits) => Ok((NO_STORE, Json(limits)).into_response()),
+        Err(error) => {
+            error!(
+                source_id,
+                error = %error,
+                "account Exec order rate limits read failed"
+            );
+            Ok(runtime_redis_error_response())
+        }
+    }
+}
+
+async fn save_account_exec_order_rate_limits(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Json(request): Json<SaveExecOrderRateLimitsRequest>,
+) -> Result<Response, ApiError> {
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
+    let limit_per_min = match validate_exec_order_rate_limit(
+        "exec_order_rate_limit_per_min",
+        request.exec_order_rate_limit_per_min,
+    ) {
+        Ok(value) => value,
+        Err(message) => return Ok(bad_request(message)),
+    };
+    let limit_10s = match validate_exec_order_rate_limit(
+        "exec_order_rate_limit_10s",
+        request.exec_order_rate_limit_10s,
+    ) {
+        Ok(value) => value,
+        Err(message) => return Ok(bad_request(message)),
+    };
+    match state
+        .redis_runtime
+        .save_exec_order_rate_limits(source, limit_per_min, limit_10s)
+        .await
+    {
+        Ok(limits) => {
+            info!(
+                source_id,
+                exec_order_rate_limit_per_min = limits.exec_order_rate_limit_per_min,
+                exec_order_rate_limit_10s = limits.exec_order_rate_limit_10s,
+                "account Exec order rate limits saved"
+            );
+            Ok((NO_STORE, Json(limits)).into_response())
+        }
+        Err(error) => {
+            error!(
+                source_id,
+                error = %error,
+                "account Exec order rate limits save failed"
+            );
+            Ok(runtime_redis_error_response())
+        }
+    }
+}
+
 /// Grant lists are managed by admins and by the account's configure
 /// holders; a view-only grant does not expose who else is authorized.
 async fn list_account_grants(
@@ -3176,6 +3282,29 @@ async fn publish_binding(
         });
     };
     let targets = strategy_catalog::scale_targets(&position.targets, shares);
+    if targets_require_trading_account_mode(&targets) {
+        match crate::exchange_leverage::has_required_trading_account_mode(source).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(PublishFailure {
+                    status: StatusCode::CONFLICT,
+                    message: format!(
+                        "source {source_id} must use {} before a non-zero target can be published",
+                        crate::exchange_leverage::required_trading_account_mode(&source.venue)
+                    ),
+                });
+            }
+            Err(error) => {
+                return Err(PublishFailure {
+                    status: StatusCode::BAD_GATEWAY,
+                    message: format!(
+                        "failed to verify {} for source {source_id}: {error:#}",
+                        crate::exchange_leverage::required_trading_account_mode(&source.venue)
+                    ),
+                });
+            }
+        }
+    }
     let published = state
         .redis_runtime
         .publish_strategy(
@@ -3213,6 +3342,12 @@ async fn publish_binding(
         );
     }
     Ok(published)
+}
+
+fn targets_require_trading_account_mode(
+    targets: &BTreeMap<String, crate::order_config::TargetPosition>,
+) -> bool {
+    targets.values().any(|target| target.qty != 0.0)
 }
 
 fn resolve_publish_source<'a>(
@@ -3384,6 +3519,16 @@ fn internal_error() -> Response {
         .into_response()
 }
 
+fn runtime_redis_error_response() -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(ErrorResponse {
+            error: "Exec runtime Redis is unavailable".to_string(),
+        }),
+    )
+        .into_response()
+}
+
 fn not_found(message: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -3414,6 +3559,13 @@ fn resolve_order_config_source<'a>(
             .into_response());
     }
     Ok(source)
+}
+
+fn validate_exec_order_rate_limit(field: &str, value: i64) -> std::result::Result<i32, String> {
+    i32::try_from(value)
+        .ok()
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| format!("{field} must be an integer in 0..={}", i32::MAX))
 }
 
 fn exec_config_error_response(error: &ExecConfigError) -> Response {
@@ -4009,7 +4161,8 @@ async fn build_dashboard(
         .sources
         .iter()
         .map(|source| {
-            let live = live_equity.get(&source.id);
+            let reading = live_equity.get(&source.id);
+            let live = reading.as_ref().and_then(|reading| reading.equity.clone());
             let account_pnl_start_ts_us = snapshots
                 .get(&source.id)
                 .map(|snapshot| snapshot.snapshot_ts_us);
@@ -4035,6 +4188,14 @@ async fn build_dashboard(
                 live_equity_status: live
                     .as_ref()
                     .map(|snapshot| live_equity_status(snapshot.ts_ms, now_ms)),
+                unified_account: reading
+                    .as_ref()
+                    .is_some_and(|reading| reading.unified_account),
+                uni_mmr: reading.as_ref().and_then(|reading| reading.uni_mmr),
+                uni_mmr_status: reading
+                    .as_ref()
+                    .and_then(|reading| reading.uni_mmr_ts_ms)
+                    .map(|ts_ms| live_equity_status(ts_ms, now_ms)),
             }
         })
         .collect();
@@ -4222,6 +4383,27 @@ mod tests {
             Some(1.0),
             1.0,
         ));
+    }
+
+    #[test]
+    fn trading_account_mode_gate_allows_zero_targets_only() {
+        let targets = BTreeMap::from([
+            (
+                "BTCUSDT".to_string(),
+                crate::order_config::TargetPosition::new(0.0, 0).unwrap(),
+            ),
+            (
+                "ETHUSDT".to_string(),
+                crate::order_config::TargetPosition::new(-0.0, -1).unwrap(),
+            ),
+        ]);
+        assert!(!targets_require_trading_account_mode(&targets));
+
+        let targets = BTreeMap::from([(
+            "BTCUSDT".to_string(),
+            crate::order_config::TargetPosition::new(0.001, 0).unwrap(),
+        )]);
+        assert!(targets_require_trading_account_mode(&targets));
     }
 
     #[test]
@@ -4720,5 +4902,13 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn exec_order_rate_limit_validation_accepts_disabled_and_rejects_out_of_range() {
+        assert_eq!(validate_exec_order_rate_limit("limit", 0).unwrap(), 0);
+        assert_eq!(validate_exec_order_rate_limit("limit", 400).unwrap(), 400);
+        assert!(validate_exec_order_rate_limit("limit", -1).is_err());
+        assert!(validate_exec_order_rate_limit("limit", i64::from(i32::MAX) + 1).is_err());
     }
 }

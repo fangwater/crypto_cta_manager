@@ -157,7 +157,7 @@ function buildChapters(gateway: string): Chapter[] {
             ],
             [
               '下单策略',
-              <code>strategy_name + 9 个参数</code>,
+              <code>strategy_name + algorithm 参数</code>,
               '全局模板，多账户可共用同一个 default_order。',
             ],
             [
@@ -433,14 +433,21 @@ function buildChapters(gateway: string): Chapter[] {
           参数在选择对应算法后由表单保存为完整配置。POV 和 Chase 属于实验算法，相关写请求必须携带
           <code>X-Experimental-Algorithm-Token</code>；浏览器页面通过密码输入框发送该请求头。
         </Note>
+        <Note>
+          Chase 使用独立参数：batch_floor_usdt、max_batch、max_open_batches。目标激活后按
+          max(batch_floor_usdt, initial_delta_usdt / max_batch) 冻结批次金额，未成交挂单水位不超过
+          max_open_batches 个批次。strategy_order_rate_limit_per_min 和 strategy_order_rate_limit_10s
+          按实际 Chase 策略名汇总全部 symbol 的新单与 amend，0 关闭对应窗口；它们与账户 Exec
+          限频同时生效，且不能由 symbol_overrides 覆盖。
+        </Note>
       </>
     ),
   },
   {
     id: 'account-studio',
     group: '账户绑定',
-    title: '账户与合约杠杆',
-    lead: '账户 studio 保存策略绑定和份数；合约杠杆按单个 symbol 查/设交易所保证金杠杆。',
+    title: '账户参数与合约杠杆',
+    lead: '账户 studio 保存策略绑定和份数；账户级 Exec 报单限频和合约杠杆在这里维护。',
     content: (
       <>
         <ApiTable
@@ -454,6 +461,21 @@ function buildChapters(gateway: string): Chapter[] {
               method: 'PUT',
               path: `${ACCOUNT_PATH}/fee-rates`,
               summary: '更新三项费率；事实 NAV 重算，理论费率从后续信号起生效',
+            },
+            {
+              method: 'GET',
+              path: `${ACCOUNT_PATH}/exchange-fees?symbol=BTCUSDT`,
+              summary: '查询该 symbol 的交易所实时 Maker/Taker；Binance 与 OKX 都支持',
+            },
+            {
+              method: 'GET',
+              path: `${ACCOUNT_PATH}/exec-order-rate-limits`,
+              summary: '读取账户 Redis 中的 Exec 60 秒和 10 秒共享报单上限',
+            },
+            {
+              method: 'PUT',
+              path: `${ACCOUNT_PATH}/exec-order-rate-limits`,
+              summary: '原子更新两个限频字段；不覆盖同一 Hash 的其他风控参数',
             },
             {
               method: 'GET',
@@ -475,6 +497,11 @@ curl --noproxy '*' -sS -X PUT \\
   -H 'Content-Type: application/json' \\
   -d '{"maker_fee_rate":-0.00005,"taker_fee_rate":0.000146,"theoretical_twap_fee_rate":0.000048}'
 
+curl --noproxy '*' -sS -X PUT \\
+  '${account}/exec-order-rate-limits' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"exec_order_rate_limit_per_min":400,"exec_order_rate_limit_10s":200}'
+
 curl --noproxy '*' -sS \\
   '${account}/contract-leverage?symbol=BTCUSDT'
 
@@ -493,6 +520,10 @@ curl --noproxy '*' -sS -X PUT \\
               detail: '理论五切片 TWAP 成交费率；省略时取本次 Maker/Taker 平均值，可按账户修改',
             },
             {
+              field: 'exec_order_rate_limit_per_min / exec_order_rate_limit_10s',
+              detail: '非负整数；0 关闭对应窗口。Batch、POV、Chase 新单和 Chase 改单共享额度',
+            },
+            {
               field: 'contract_leverage',
               detail: '交易所当前保证金杠杆。GET 读实时值；PUT 设置 1–125',
             },
@@ -503,7 +534,7 @@ curl --noproxy '*' -sS -X PUT \\
           ]}
         />
         <Note>
-          合约杠杆读该账户 Exec env.sh。Binance STANDARD 走 fapi，UNIFIED 走 papi；OKX 走 leverage-info / set-leverage。jp-meta 若没有 env.sh，查询会 502。
+          报单限频写入该账户 pre_trade_risk_params Hash，Exec 最迟在下一次 60 秒参数刷新时加载。合约杠杆和实时手续费读该账户 Exec env.sh。Binance STANDARD 走 fapi，UNIFIED 走 papi；OKX 杠杆走 leverage-info / set-leverage，手续费走 trade-fee，并按合约 groupId 取 USDT 永续费率。OKX 返回的负费率会换成正的成本口径。非零目标发布前，Binance 必须是 Standard 且打开多资产模式，OKX 必须是统一账户（acctLv 为 3 或 4）。jp-meta 若没有 env.sh，查询会 502。
         </Note>
       </>
     ),

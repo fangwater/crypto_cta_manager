@@ -15,7 +15,7 @@ import { AppShell, PageIntro, StatTile } from '../components/AppShell'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
-import { feeBps, integer, money, signedClass, timestampUs } from '../format'
+import { feeBps, formatUniMmr, integer, isOkxVenue, money, signedClass, timestampUs } from '../format'
 import { cn } from '../lib/cn'
 import { routes } from '../lib/routes'
 import type {
@@ -272,7 +272,12 @@ function AccountCard({
             <CardDescription className="font-mono text-[11px]">{account.source_id}</CardDescription>
           </div>
         </div>
-        <Badge tone={ready ? 'success' : 'neutral'}>{status}</Badge>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {isOkxVenue(account.venue) && (
+            <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
+          )}
+          <Badge tone={ready ? 'success' : 'neutral'}>{status}</Badge>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4 pt-0">
         <div className="grid grid-cols-2 gap-3 text-sm">
@@ -289,6 +294,17 @@ function AccountCard({
                 : '--'
             }
           />
+          {isOkxVenue(account.venue) && (
+            <Metric
+              label="UniMMR"
+              value={
+                account.uni_mmr_status === 'stale'
+                  ? `${formatUniMmr(account.uni_mmr)} 延迟`
+                  : formatUniMmr(account.uni_mmr)
+              }
+              tone={uniMmrTone(account.uni_mmr, account.uni_mmr_status)}
+            />
+          )}
           <Metric label="当前持仓" value={report ? `${openPositions} symbols` : '--'} />
           <Metric
             label="Maker / Taker 费率"
@@ -336,6 +352,13 @@ function AccountCard({
       </CardContent>
     </Card>
   )
+}
+
+function uniMmrTone(value: number | null | undefined, status?: string | null) {
+  if (status === 'stale' || value == null || !Number.isFinite(value)) return 'text-muted'
+  if (value <= 1.05) return 'text-rose-700'
+  if (value <= 1.5) return 'text-warning'
+  return ''
 }
 
 function Metric({ label, value, tone = '' }: { label: string; value: string; tone?: string }) {

@@ -29,7 +29,7 @@ import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
-import { feeBps, money, signedClass, timestampUs } from '../format'
+import { feeBps, formatUniMmr, isOkxVenue, money, signedClass, timestampUs } from '../format'
 import { FieldHint, Input, Label } from '../components/ui/Field'
 import { readSourceId, routes } from '../lib/routes'
 import { cn } from '../lib/cn'
@@ -39,6 +39,13 @@ import type {
   DashboardSnapshot,
   SourceNavReport,
 } from '../types'
+
+function uniMmrTone(value: number | null | undefined, status?: string | null) {
+  if (status === 'stale' || value == null || !Number.isFinite(value)) return 'text-muted'
+  if (value <= 1.05) return 'text-rose-700'
+  if (value <= 1.5) return 'text-warning'
+  return 'text-ink'
+}
 
 function venueMark(venue: string) {
   const normalized = venue.toLowerCase()
@@ -151,7 +158,11 @@ export function AccountOverviewPage() {
           <PageIntro
             eyebrow="Account Overview"
             title={account?.account ?? sourceId}
-            description="这里只展示当前组合配置与运行摘要。修改请进入右侧独立的策略配置分区。"
+            description={
+              isOkxVenue(account?.venue ?? '')
+                ? 'OKX 账户按统一账户运行。UniMMR 来自 account monitor 推送的 mgnRatio，数值越大越安全。'
+                : '这里只展示当前组合配置与运行摘要。修改请进入右侧独立的策略配置分区。'
+            }
             actions={
               <div className="flex flex-wrap gap-2">
                 <ActionButton href={routes.nav(sourceId)} primary icon={<Activity size={15} />}>
@@ -536,6 +547,17 @@ function AccountMeta({
           </span>
           <code className="text-[11px]">{sourceId}</code>
         </span>
+        {isOkxVenue(account.venue) && (
+          <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
+        )}
+        {isOkxVenue(account.venue) && (
+          <span className={uniMmrTone(account.uni_mmr, account.uni_mmr_status)}>
+            UniMMR{' '}
+            {account.uni_mmr_status === 'stale'
+              ? `${formatUniMmr(account.uni_mmr)} 延迟`
+              : formatUniMmr(account.uni_mmr)}
+          </span>
+        )}
         <span>最近成交 {timestampUs(report.last_fill_ts_us)}</span>
         <span className={signedClass(report.nav_change_after_fee_quote)}>
           累计费后 {money(report.nav_change_after_fee_quote)} USDT

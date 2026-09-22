@@ -62,10 +62,10 @@ export function OrderStrategyPage() {
               const item = orders.find((entry) => entry.strategy_name === name)
               if (!item) return ''
               const algorithm = item.order_parameters.algorithm.toUpperCase()
-              const singleOrder = item.order_parameters.algorithm === 'chase'
-                ? item.order_parameters.chase.single_order_usdt
-                : item.order_parameters.single_order_usdt
-              return `${algorithm} · ${orderParameterMeta.single_order_usdt.label} ${singleOrder} USDT`
+              if (item.order_parameters.algorithm === 'chase') {
+                return `${algorithm} · 最小批次 ${item.order_parameters.chase.batch_floor_usdt} USDT`
+              }
+              return `${algorithm} · ${orderParameterMeta.single_order_usdt.label} ${item.order_parameters.single_order_usdt} USDT`
             }}
           />
 

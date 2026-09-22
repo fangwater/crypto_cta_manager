@@ -58,6 +58,7 @@ pub struct ExecStateRowSnapshot {
     pub target_qty: Option<f64>,
     pub pending_qty: Option<f64>,
     pub live_order_qty: Option<f64>,
+    pub remaining_batches: u32,
     pub estimated_completion_ts_ms: i64,
     pub execution_complete: bool,
     pub completion_reason: String,
@@ -208,6 +209,8 @@ struct ExecStateRow {
     pending_qty: Option<f64>,
     live_order_qty: Option<f64>,
     #[serde(default)]
+    remaining_batches: u32,
+    #[serde(default)]
     estimated_completion_ts_ms: i64,
     #[serde(default)]
     execution_complete: bool,
@@ -256,6 +259,7 @@ fn extract_exec_state_from_decoded(source_id: &str, snapshot: &VizSnapshot) -> E
                 target_qty: row.target_qty.filter(|value| value.is_finite()),
                 pending_qty: row.pending_qty.filter(|value| value.is_finite()),
                 live_order_qty: row.live_order_qty.filter(|value| value.is_finite()),
+                remaining_batches: row.remaining_batches,
                 estimated_completion_ts_ms: row.estimated_completion_ts_ms,
                 execution_complete: row.execution_complete,
                 completion_reason: row.completion_reason.clone(),
@@ -575,6 +579,7 @@ mod tests {
                         "target_qty": 0.8,
                         "pending_qty": 0.2,
                         "live_order_qty": 0.1,
+                        "remaining_batches": 3,
                         "estimated_completion_ts_ms": 2000,
                         "execution_complete": false,
                         "completion_reason": "",
@@ -591,6 +596,7 @@ mod tests {
         assert_eq!(state.rows[0].target_qty, Some(0.8));
         assert_eq!(state.rows[0].pending_qty, Some(0.2));
         assert_eq!(state.rows[0].live_order_qty, Some(0.1));
+        assert_eq!(state.rows[0].remaining_batches, 3);
         assert_eq!(state.rows[0].estimated_completion_ts_ms, 2000);
     }
 }

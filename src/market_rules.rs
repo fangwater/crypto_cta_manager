@@ -380,8 +380,16 @@ fn parse_okx_futures(value: &Value) -> Result<BTreeMap<String, MarketRule>> {
         }
         let inst_id = required_string(row, "instId")?;
         let symbol = inst_id.replace("-SWAP", "").replace('-', "").to_uppercase();
-        let ct_val = required_positive_f64(row, "ctVal", &symbol)?;
-        let ct_mult = optional_positive_f64(row, "ctMult", &symbol)?.unwrap_or(1.0);
+        // mkt_signal OkexProvider::parse_swap_response:
+        // contract size = ctVal × ctMult; a missing or unparseable component is 1.
+        // SWAP rows have no notional floor, so min_notional stays empty and minSz
+        // is the quantity minimum.
+        let ct_val = okx_contract_component(row, "ctVal");
+        let ct_mult = okx_contract_component(row, "ctMult");
+        let contract_size = ct_val * ct_mult;
+        if !contract_size.is_finite() || contract_size <= 0.0 {
+            bail!("OKX contract size is not positive: {symbol} ctVal={ct_val} ctMult={ct_mult}");
+        }
         let rule = MarketRule {
             status: required_string(row, "state")?.to_string(),
             base_asset: inst_id.split('-').next().unwrap_or_default().to_uppercase(),
@@ -390,7 +398,7 @@ fn parse_okx_futures(value: &Value) -> Result<BTreeMap<String, MarketRule>> {
             qty_step: required_string(row, "lotSz")?.to_string(),
             min_qty: required_string(row, "minSz")?.to_string(),
             min_notional: None,
-            contract_multiplier: Some((ct_val * ct_mult).to_string()),
+            contract_multiplier: Some(contract_size.to_string()),
         };
         if symbols.insert(symbol.clone(), rule).is_some() {
             bail!("duplicate OKX symbol: {symbol}");
@@ -435,25 +443,11 @@ fn json_decimal(value: &Value, field: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn required_positive_f64(value: &Value, field: &str, symbol: &str) -> Result<f64> {
-    optional_positive_f64(value, field, symbol)?
-        .with_context(|| format!("required decimal is missing: {symbol}.{field}"))
-}
-
-fn optional_positive_f64(value: &Value, field: &str, symbol: &str) -> Result<Option<f64>> {
-    let Some(raw) = value.get(field).and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    if raw.trim().is_empty() {
-        return Ok(None);
-    }
-    let parsed = raw
-        .parse::<f64>()
-        .with_context(|| format!("invalid decimal: {symbol}.{field}={raw}"))?;
-    if !parsed.is_finite() || parsed <= 0.0 {
-        bail!("decimal must be positive: {symbol}.{field}={raw}");
-    }
-    Ok(Some(parsed))
+fn okx_contract_component(row: &Value, field: &str) -> f64 {
+    row.get(field)
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1.0)
 }
 
 fn now_us() -> i64 {
@@ -551,11 +545,39 @@ mod tests {
                 "lotSz": "0.01",
                 "minSz": "0.01",
                 "tickSz": "0.1"
+            }, {
+                "instId": "FIL-USDT-SWAP",
+                "ctType": "linear",
+                "settleCcy": "USDT",
+                "state": "live",
+                "ctVal": "0.1",
+                "ctMult": "1",
+                "lotSz": "1",
+                "minSz": "1",
+                "tickSz": "0.001"
+            }, {
+                "instId": "ETH-USDT-SWAP",
+                "ctType": "inverse",
+                "settleCcy": "USDT",
+                "state": "live",
+                "ctVal": "0.1",
+                "ctMult": "1",
+                "lotSz": "1",
+                "minSz": "1",
+                "tickSz": "0.01"
             }]
         });
         let symbols = parse_okx_futures(&value).unwrap();
+        assert!(!symbols.contains_key("ETHUSDT"));
         let rule = symbols.get("BTCUSDT").unwrap();
+        assert_eq!(rule.min_notional, None);
         assert_eq!(rule.contract_multiplier.as_deref(), Some("0.01"));
+        assert_eq!(rule.min_qty, "0.01");
+        assert_eq!(
+            symbols["FILUSDT"].contract_multiplier.as_deref(),
+            Some("0.1")
+        );
+        assert_eq!(symbols["FILUSDT"].min_notional, None);
     }
 
     #[test]

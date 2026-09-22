@@ -665,6 +665,7 @@ fn check_position(
     let mut account_qty_by_symbol = HashMap::<&str, f64>::new();
     let mut live_order_abs_by_symbol = HashMap::<&str, f64>::new();
     let mut accepted_residual_by_symbol = HashMap::<&str, f64>::new();
+    let mut scheduled_execution_until_by_symbol = HashMap::<&str, i64>::new();
     let mut symbol_last_update = HashMap::<&str, i64>::new();
     let mut usdt_value_by_symbol = HashMap::<&str, f64>::new();
     let mut valued_qty_by_symbol = HashMap::<&str, f64>::new();
@@ -695,6 +696,15 @@ fn check_position(
             *accepted_residual_by_symbol
                 .entry(row.symbol.as_str())
                 .or_insert(0.0) += row.pending_qty.unwrap_or(0.0);
+        }
+        if !row.execution_complete
+            && row.remaining_batches > 0
+            && row.estimated_completion_ts_ms > 0
+        {
+            scheduled_execution_until_by_symbol
+                .entry(row.symbol.as_str())
+                .and_modify(|ts| *ts = (*ts).max(row.estimated_completion_ts_ms))
+                .or_insert(row.estimated_completion_ts_ms);
         }
         // Rows with both qty and USDT value price the symbol's position gaps.
         if let (Some(qty), Some(usdt)) = (row.current_qty, row.current_usdt) {
@@ -772,6 +782,18 @@ fn check_position(
                 .copied()
                 .unwrap_or(0.0);
             if (gap - accepted_residual).abs() <= tolerance {
+                continue;
+            }
+            // BatchExec can have no exchange-live order between short batches.
+            // Its explicit completion estimate keeps those normal gaps from being
+            // mistaken for a stopped execution, but an overdue schedule still
+            // falls through to the stuck-position alert.
+            let scheduled_execution = snapshot_fresh
+                && snapshot.position_ready
+                && scheduled_execution_until_by_symbol
+                    .get(symbol)
+                    .is_some_and(|deadline| now_ms <= deadline.saturating_add(grace_ms));
+            if scheduled_execution {
                 continue;
             }
             let settling = symbol_last_update
@@ -1651,7 +1673,8 @@ mod tests {
             target_qty: Some(target),
             pending_qty: Some(pending),
             live_order_qty: Some(live),
-            estimated_completion_ts_ms: updated_ms + 3_600_000,
+            remaining_batches: 0,
+            estimated_completion_ts_ms: 0,
             execution_complete: false,
             completion_reason: String::new(),
             account_position_qty: account,
@@ -1722,6 +1745,26 @@ mod tests {
         executing.rows[0].live_order_qty = Some(0.1);
         let issues = check_position(&source, &monitor, &executing, Some(&configured), now_us);
         assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
+
+        // Batch execution legitimately has short intervals with no live order.
+        // A remaining batch schedule suppresses the account mismatch until its
+        // estimated completion time plus the normal execution grace expires.
+        let mut scheduled = snapshot(0.2);
+        scheduled.rows[0].current_qty = Some(0.4);
+        scheduled.rows[0].pending_qty = Some(0.1);
+        scheduled.rows[0].remaining_batches = 5;
+        scheduled.rows[0].estimated_completion_ts_ms = now_ms + 60_000;
+        let issues = check_position(&source, &monitor, &scheduled, Some(&configured), now_us);
+        assert!(issues.iter().all(|issue| !issue.key.contains("account:")));
+
+        scheduled.rows[0].estimated_completion_ts_ms =
+            now_ms - monitor.execution_grace_secs as i64 * 1_000 - 1;
+        let issues = check_position(&source, &monitor, &scheduled, Some(&configured), now_us);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.key.contains("account:BTCUSDT"))
+        );
 
         // Pending work is only a desired residual; without an exchange-live
         // order it must not suppress a stuck-position alert.

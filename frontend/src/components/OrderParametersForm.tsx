@@ -24,12 +24,15 @@ const povFields = [
 ] as const satisfies ReadonlyArray<[keyof PovParameters, string, string, string]>
 
 const chaseFields = [
-  ['single_order_usdt', '单笔名义金额 (USDT)', '1', '0.01'],
-  ['max_open_usdt', '最大在途金额 (USDT)', '1', '0.01'],
+  ['batch_floor_usdt', '最小批次名义金额 (USDT)', '1', '0.01'],
+  ['max_batch', '最大批次数', '1', '1'],
+  ['max_open_batches', '最大在途批数', '1', '1'],
   ['maker_recenter_trigger_bps', '追价触发 (bps)', '0.1', '0'],
   ['maker_amend_cooldown_ms', '改单冷却 (ms)', '1', '0'],
   ['maker_timeout_sec', 'Maker 超时 (s)', '1', '1'],
   ['target_tolerance_usdt', '目标容差 (USDT)', '1', '0'],
+  ['strategy_order_rate_limit_per_min', 'Chase 策略 60 秒报单上限', '1', '0'],
+  ['strategy_order_rate_limit_10s', 'Chase 策略 10 秒报单上限', '1', '0'],
 ] as const satisfies ReadonlyArray<[keyof ChaseParameters, string, string, string]>
 
 export function OrderParametersForm({
@@ -134,6 +137,9 @@ export function OrderParametersForm({
               />
             </Label>
           ))}
+          <FieldHint className="sm:col-span-2">
+            以实际 Chase 策略名汇总全部 symbol 的新单和改单；0 关闭对应窗口，并与账户 Exec 限频叠加。
+          </FieldHint>
         </div>
       )}
 

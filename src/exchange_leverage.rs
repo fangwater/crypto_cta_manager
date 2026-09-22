@@ -126,11 +126,89 @@ pub async fn get_exchange_fee_rates(
         "binance-futures" => {
             get_binance_exchange_fee_rates(&client, source, &credentials, symbol).await
         }
+        "okex-futures" => get_okx_exchange_fee_rates(&client, source, &credentials, symbol).await,
         other => bail!(
             "source {} venue does not support exchange fee queries: {other}",
             source.id
         ),
     }
+}
+
+/// Operator-facing name of the account mode required before a non-zero publish.
+pub fn required_trading_account_mode(venue: &str) -> &'static str {
+    match venue {
+        "okex-futures" => {
+            "OKX unified account mode (acctLv 3 multi-currency margin or 4 portfolio margin)"
+        }
+        _ => "Binance USD-M Multi-Assets Mode",
+    }
+}
+
+/// Returns whether the account satisfies the venue mode required before
+/// Manager may publish a non-zero target. Binance USD-M requires Standard API
+/// mode with Multi-Assets Mode enabled. OKX requires unified account mode:
+/// multi-currency margin (`acctLv=3`) or portfolio margin (`acctLv=4`).
+pub async fn has_required_trading_account_mode(source: &SourceConfig) -> Result<bool> {
+    match source.venue.as_str() {
+        "binance-futures" => has_binance_multi_assets_mode(source).await,
+        "okex-futures" => has_okx_unified_account_mode(source).await,
+        _ => Ok(true),
+    }
+}
+
+async fn has_binance_multi_assets_mode(source: &SourceConfig) -> Result<bool> {
+    let credentials = load_source_credentials(source)?;
+    if credentials.account_mode != AccountMode::Standard {
+        return Ok(false);
+    }
+    let client = Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
+        .no_proxy()
+        .build()
+        .context("failed to build Binance account-mode HTTP client")?;
+    // accountConfig exposes the same authoritative flag with one-sixth of the
+    // request weight of the dedicated multiAssetsMargin endpoint.
+    let path = "/fapi/v1/accountConfig";
+    let (http_status, body) = binance_signed_get(
+        &client,
+        &credentials,
+        &credentials.fapi_url,
+        path,
+        BTreeMap::new(),
+    )
+    .await?;
+    if !(200..300).contains(&http_status) {
+        bail!(
+            "Binance account-mode query failed source={} status={} body={}",
+            source.id,
+            http_status,
+            truncate(&body, 300)
+        );
+    }
+    parse_binance_multi_assets_mode(&body)
+}
+
+async fn has_okx_unified_account_mode(source: &SourceConfig) -> Result<bool> {
+    let credentials = load_source_credentials(source)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
+        .no_proxy()
+        .build()
+        .context("failed to build OKX account-mode HTTP client")?;
+    let path = "/api/v5/account/config";
+    let (http_status, body) = okx_signed_get(&client, &credentials, path).await?;
+    if !(200..300).contains(&http_status) {
+        bail!(
+            "OKX account-mode query failed source={} status={} body={}",
+            source.id,
+            http_status,
+            truncate(&body, 300)
+        );
+    }
+    let acct_lv = parse_okx_acct_lv(&body)?;
+    // mkt_signal trade_engine::okex_precheck::MIN_ACCT_LV.
+    // acctLv 1/2 are spot/futures mode and reject tdMode=cross.
+    Ok(acct_lv >= 3)
 }
 
 async fn set_binance_symbol_leverage(
@@ -306,6 +384,71 @@ async fn get_binance_exchange_fee_rates(
     })
 }
 
+async fn get_okx_exchange_fee_rates(
+    client: &Client,
+    source: &SourceConfig,
+    credentials: &ExchangeCredentials,
+    symbol: &str,
+) -> Result<ExchangeFeeRatesResult> {
+    let symbol = symbol.trim().to_ascii_uppercase();
+    let inst_id = okx_swap_inst_id(&symbol);
+    let inst_family = inst_id
+        .strip_suffix("-SWAP")
+        .filter(|value| !value.is_empty())
+        .context("OKX fee query could not derive instFamily")?;
+    let instruments_path = format!("/api/v5/public/instruments?instType=SWAP&instId={inst_id}");
+    let instruments_url = format!(
+        "{}{instruments_path}",
+        credentials.okx_base_url.trim_end_matches('/')
+    );
+    let instruments_response = client
+        .get(instruments_url)
+        .send()
+        .await
+        .context("OKX instruments request failed")?;
+    let account_http_status = instruments_response.status().as_u16();
+    let instruments_body = instruments_response.text().await.unwrap_or_default();
+    if !(200..300).contains(&account_http_status) {
+        bail!(
+            "OKX instruments query failed source={} symbol={} status={} body={}",
+            source.id,
+            symbol,
+            account_http_status,
+            truncate(&instruments_body, 300)
+        );
+    }
+    let group_id = parse_okx_instrument_group_id(&instruments_body, &inst_id)?;
+
+    let commission_path = "/api/v5/account/trade-fee";
+    let request_path = format!("{commission_path}?instType=SWAP&instFamily={inst_family}");
+    let (commission_http_status, commission_body) =
+        okx_signed_get(client, credentials, &request_path).await?;
+    if !(200..300).contains(&commission_http_status) {
+        bail!(
+            "OKX trade-fee query failed source={} symbol={} status={} body={}",
+            source.id,
+            symbol,
+            commission_http_status,
+            truncate(&commission_body, 300)
+        );
+    }
+    let (vip_tier, maker_fee_rate, taker_fee_rate) =
+        parse_okx_trade_fee(&commission_body, group_id.as_deref())?;
+
+    Ok(ExchangeFeeRatesResult {
+        source_id: source.id.clone(),
+        symbol,
+        exchange: "okx".to_string(),
+        vip_tier,
+        maker_fee_rate,
+        taker_fee_rate,
+        account_endpoint: "/api/v5/public/instruments".to_string(),
+        commission_endpoint: commission_path.to_string(),
+        account_http_status,
+        commission_http_status,
+    })
+}
+
 async fn binance_signed_get(
     client: &Client,
     credentials: &ExchangeCredentials,
@@ -400,19 +543,16 @@ async fn set_okx_symbol_leverage(
     })
 }
 
-async fn get_okx_symbol_leverage(
+async fn okx_signed_get(
     client: &Client,
-    source: &SourceConfig,
     credentials: &ExchangeCredentials,
-    symbol: &str,
-) -> Result<SymbolContractLeverageResult> {
+    request_path: &str,
+) -> Result<(u16, String)> {
     let passphrase = credentials
         .okx_passphrase
         .as_deref()
         .filter(|value| !value.is_empty())
         .context("OKX_PASSPHRASE is missing in the Exec env file")?;
-    let inst_id = okx_swap_inst_id(symbol);
-    let request_path = format!("/api/v5/account/leverage-info?instId={inst_id}&mgnMode=cross");
     let timestamp = chrono_like_timestamp();
     let signature = sign_hmac_base64(
         &credentials.api_secret,
@@ -430,11 +570,22 @@ async fn get_okx_symbol_leverage(
         .header("OK-ACCESS-PASSPHRASE", passphrase)
         .send()
         .await
-        .context("OKX get leverage request failed")?;
+        .with_context(|| format!("OKX GET {request_path} request failed"))?;
     let http_status = response.status().as_u16();
-    let text = response.text().await.unwrap_or_default();
-    let ok = (200..300).contains(&http_status);
-    if !ok {
+    let body = response.text().await.unwrap_or_default();
+    Ok((http_status, body))
+}
+
+async fn get_okx_symbol_leverage(
+    client: &Client,
+    source: &SourceConfig,
+    credentials: &ExchangeCredentials,
+    symbol: &str,
+) -> Result<SymbolContractLeverageResult> {
+    let inst_id = okx_swap_inst_id(symbol);
+    let request_path = format!("/api/v5/account/leverage-info?instId={inst_id}&mgnMode=cross");
+    let (http_status, text) = okx_signed_get(client, credentials, &request_path).await?;
+    if !(200..300).contains(&http_status) {
         bail!(
             "OKX get leverage failed source={} symbol={} status={} body={}",
             source.id,
@@ -659,6 +810,22 @@ fn parse_binance_fee_tier(body: &str) -> Result<i32> {
     Ok(vip_tier)
 }
 
+fn parse_binance_multi_assets_mode(body: &str) -> Result<bool> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).context("Binance account-mode response is not JSON")?;
+    ensure_binance_success(&value, body, "account-mode")?;
+    let mode = value
+        .get("multiAssetsMargin")
+        .context("Binance account-mode response is missing multiAssetsMargin")?;
+    mode.as_bool()
+        .or_else(|| match mode.as_str() {
+            Some(value) if value.eq_ignore_ascii_case("true") => Some(true),
+            Some(value) if value.eq_ignore_ascii_case("false") => Some(false),
+            _ => None,
+        })
+        .context("Binance account-mode response has invalid multiAssetsMargin")
+}
+
 fn parse_binance_commission_rates(body: &str) -> Result<(f64, f64)> {
     let value: serde_json::Value =
         serde_json::from_str(body).context("Binance commission response is not JSON")?;
@@ -724,6 +891,151 @@ fn parse_okx_symbol_leverage(body: &str, inst_id: &str) -> Result<i32> {
         }
     }
     bail!("exchange did not return leverage for {inst_id}")
+}
+
+fn parse_okx_acct_lv(body: &str) -> Result<i64> {
+    let value = parse_okx_success(body, "account config")?;
+    let acct_lv = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.get("acctLv"))
+        .and_then(serde_json::Value::as_str)
+        .context("OKX account config is missing data[0].acctLv")?;
+    acct_lv
+        .parse::<i64>()
+        .with_context(|| format!("OKX account config acctLv is not an integer: {acct_lv}"))
+}
+
+fn parse_okx_instrument_group_id(body: &str, inst_id: &str) -> Result<Option<String>> {
+    let value = parse_okx_success(body, "instruments")?;
+    let rows = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .context("OKX instruments response is missing data")?;
+    for row in rows {
+        let row_inst = row
+            .get("instId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !row_inst.eq_ignore_ascii_case(inst_id) {
+            continue;
+        }
+        let group_id = row
+            .get("groupId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        return Ok(group_id);
+    }
+    bail!("OKX instruments did not include {inst_id}")
+}
+
+/// OKX trade-fee rates are negative when the account pays and positive for a
+/// rebate. Manager stores the Binance commission convention: positive is a
+/// cost and negative is a rebate.
+fn parse_okx_trade_fee(body: &str, group_id: Option<&str>) -> Result<(i32, f64, f64)> {
+    let value = parse_okx_success(body, "trade-fee")?;
+    let row = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|rows| rows.first())
+        .context("OKX trade-fee response is missing data")?;
+    let level = row
+        .get("level")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let vip_tier = parse_okx_fee_level(level)?;
+    let (maker, taker) = select_okx_usdt_swap_fee(row, group_id)?;
+    Ok((vip_tier, -maker, -taker))
+}
+
+fn select_okx_usdt_swap_fee(row: &serde_json::Value, group_id: Option<&str>) -> Result<(f64, f64)> {
+    if let Some(groups) = row.get("feeGroup").and_then(serde_json::Value::as_array) {
+        if !groups.is_empty() {
+            let group = if let Some(group_id) = group_id.filter(|value| !value.is_empty()) {
+                groups
+                    .iter()
+                    .find(|group| {
+                        group.get("groupId").and_then(serde_json::Value::as_str) == Some(group_id)
+                    })
+                    .with_context(|| {
+                        format!("OKX trade-fee has no feeGroup for groupId={group_id}")
+                    })?
+            } else if groups.len() == 1 {
+                &groups[0]
+            } else {
+                bail!("OKX trade-fee returned multiple fee groups without an instrument groupId");
+            };
+            return read_okx_maker_taker(group, "feeGroup");
+        }
+    }
+    let maker_u = row
+        .get("makerU")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let taker_u = row
+        .get("takerU")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if !maker_u.is_empty() && !taker_u.is_empty() {
+        return Ok((
+            parse_okx_fee_number(maker_u, "makerU")?,
+            parse_okx_fee_number(taker_u, "takerU")?,
+        ));
+    }
+    bail!("OKX trade-fee did not include a USDT swap feeGroup or makerU/takerU")
+}
+
+fn read_okx_maker_taker(row: &serde_json::Value, label: &str) -> Result<(f64, f64)> {
+    let maker = json_f64(row.get("maker").unwrap_or(&serde_json::Value::Null))
+        .with_context(|| format!("OKX {label} is missing maker"))?;
+    let taker = json_f64(row.get("taker").unwrap_or(&serde_json::Value::Null))
+        .with_context(|| format!("OKX {label} is missing taker"))?;
+    Ok((maker, taker))
+}
+
+fn parse_okx_fee_number(raw: &str, field: &str) -> Result<f64> {
+    let value = raw
+        .parse::<f64>()
+        .with_context(|| format!("OKX {field} is not a decimal: {raw}"))?;
+    if !value.is_finite() {
+        bail!("OKX {field} is not finite: {raw}");
+    }
+    Ok(value)
+}
+
+fn parse_okx_fee_level(level: &str) -> Result<i32> {
+    let digits: String = level.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        bail!("OKX trade-fee level is missing a numeric tier: {level}");
+    }
+    let tier = digits
+        .parse::<i32>()
+        .with_context(|| format!("OKX trade-fee level is not an integer: {level}"))?;
+    if tier < 0 {
+        bail!("OKX trade-fee level is negative: {level}");
+    }
+    Ok(tier)
+}
+
+fn parse_okx_success(body: &str, response_name: &str) -> Result<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .with_context(|| format!("OKX {response_name} response is not JSON"))?;
+    let code = value
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if code != "0" {
+        bail!(
+            "OKX {response_name} response error code={code} body={}",
+            truncate(body, 300)
+        );
+    }
+    Ok(value)
 }
 
 fn json_i32(value: &serde_json::Value) -> Option<i32> {
@@ -828,6 +1140,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_binance_multi_assets_mode() {
+        assert!(parse_binance_multi_assets_mode(r#"{"multiAssetsMargin":true}"#).unwrap());
+        assert!(!parse_binance_multi_assets_mode(r#"{"multiAssetsMargin":"false"}"#).unwrap());
+        assert!(parse_binance_multi_assets_mode(r#"{}"#).is_err());
+    }
+
+    #[test]
     fn rejects_missing_binance_fee_fields() {
         assert!(parse_binance_fee_tier(r#"{}"#).is_err());
         assert!(parse_binance_commission_rates(r#"{"makerCommissionRate":"0.0002"}"#).is_err());
@@ -839,5 +1158,42 @@ mod tests {
             r#"{"code":"0","data":[{"instId":"BTC-USDT-SWAP","mgnMode":"cross","lever":"5"}]}"#;
         assert_eq!(parse_okx_symbol_leverage(body, "BTC-USDT-SWAP").unwrap(), 5);
         assert!(parse_okx_symbol_leverage(body, "ETH-USDT-SWAP").is_err());
+    }
+
+    #[test]
+    fn okx_unified_account_requires_acct_lv_at_least_three() {
+        assert_eq!(
+            parse_okx_acct_lv(r#"{"code":"0","data":[{"acctLv":"4"}]}"#).unwrap(),
+            4
+        );
+        assert!(parse_okx_acct_lv(r#"{"code":"0","data":[{"acctLv":"3"}]}"#).unwrap() >= 3);
+        assert!(parse_okx_acct_lv(r#"{"code":"0","data":[{"acctLv":"2"}]}"#).unwrap() < 3);
+        assert!(parse_okx_acct_lv(r#"{"code":"50001","msg":"err"}"#).is_err());
+    }
+
+    #[test]
+    fn parses_okx_usdt_swap_fee_group_into_manager_sign() {
+        let instruments = r#"{"code":"0","data":[{"instId":"BTC-USDT-SWAP","groupId":"4"}]}"#;
+        assert_eq!(
+            parse_okx_instrument_group_id(instruments, "BTC-USDT-SWAP")
+                .unwrap()
+                .as_deref(),
+            Some("4")
+        );
+        let body = r#"{"code":"0","data":[{"level":"Lv1","feeGroup":[
+            {"groupId":"5","maker":"-0.0001","taker":"-0.0003"},
+            {"groupId":"4","maker":"-0.0002","taker":"-0.0005"}
+        ]}]}"#;
+        assert_eq!(
+            parse_okx_trade_fee(body, Some("4")).unwrap(),
+            (1, 0.0002, 0.0005)
+        );
+        let rebate =
+            r#"{"code":"0","data":[{"level":"Lv3","makerU":"0.00001","takerU":"-0.00015"}]}"#;
+        assert_eq!(
+            parse_okx_trade_fee(rebate, None).unwrap(),
+            (3, -0.00001, 0.00015)
+        );
+        assert!(parse_okx_trade_fee(body, Some("9")).is_err());
     }
 }

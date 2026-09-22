@@ -101,6 +101,11 @@ export interface DashboardAccount {
   strategy_pnl_start_ts_us?: number | null
   live_equity_usdt?: number | null
   live_equity_status?: 'ok' | 'stale' | string | null
+  /** Account monitor has published an OKX unified AccountRisk sample. */
+  unified_account?: boolean
+  /** OKX maintenance margin ratio. Higher is safer. */
+  uni_mmr?: number | null
+  uni_mmr_status?: 'ok' | 'stale' | string | null
 }
 
 export interface OrderParameters {
@@ -130,12 +135,15 @@ export interface PovParameters {
 }
 
 export interface ChaseParameters {
-  single_order_usdt: number
-  max_open_usdt: number
+  batch_floor_usdt: number
+  max_batch: number
+  max_open_batches: number
   maker_recenter_trigger_bps: number
   maker_amend_cooldown_ms: number
   maker_timeout_sec: number
   target_tolerance_usdt: number
+  strategy_order_rate_limit_per_min: number
+  strategy_order_rate_limit_10s: number
 }
 
 export interface OrderParameterOverrides {
@@ -209,6 +217,12 @@ export interface AccountStudio {
   taker_fee_rate: number
   theoretical_twap_fee_rate: number
   bindings: AccountBinding[]
+}
+
+export interface ExecOrderRateLimits {
+  source_id: string
+  exec_order_rate_limit_per_min: number
+  exec_order_rate_limit_10s: number
 }
 
 export interface SavedSymbolContractLeverage {

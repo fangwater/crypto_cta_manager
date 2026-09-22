@@ -18,6 +18,8 @@ use crate::order_config::{
 };
 
 const POSITION_CLOSE_STRATEGY_NAME: &str = "SYSTEM_POSITION_CLOSE";
+const EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD: &str = "exec_order_rate_limit_per_min";
+const EXEC_ORDER_RATE_LIMIT_10S_FIELD: &str = "exec_order_rate_limit_10s";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,12 +54,15 @@ struct StoredBatchExecConfig<'a> {
 
 #[derive(Debug, Clone, Serialize)]
 struct StoredChaseExecConfig<'a> {
-    single_order_usdt: f64,
-    max_open_usdt: f64,
+    batch_floor_usdt: f64,
+    max_batch: u32,
+    max_open_batches: u32,
     maker_recenter_trigger_bps: f64,
     maker_amend_cooldown_ms: u32,
     maker_timeout_sec: u32,
     target_tolerance_usdt: f64,
+    strategy_order_rate_limit_per_min: u32,
+    strategy_order_rate_limit_10s: u32,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     symbol_overrides: &'a BTreeMap<String, ChaseParameterOverrides>,
     targets: &'a BTreeMap<String, TargetPosition>,
@@ -75,6 +80,13 @@ pub(crate) struct ExecStrategyTargetState {
 pub(crate) struct ExecTargetSnapshot {
     pub(crate) aggregate_targets: BTreeMap<String, f64>,
     pub(crate) strategies: BTreeMap<String, ExecStrategyTargetState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecOrderRateLimits {
+    pub source_id: String,
+    pub exec_order_rate_limit_per_min: i32,
+    pub exec_order_rate_limit_10s: i32,
 }
 
 #[derive(Clone)]
@@ -291,14 +303,21 @@ impl RedisRuntime {
                         updated_at_us,
                     }),
                     ExecutionFamily::ChaseExec => serde_json::to_string(&StoredChaseExecConfig {
-                        single_order_usdt: order_parameters.chase.single_order_usdt,
-                        max_open_usdt: order_parameters.chase.max_open_usdt,
+                        batch_floor_usdt: order_parameters.chase.batch_floor_usdt,
+                        max_batch: order_parameters.chase.max_batch,
+                        max_open_batches: order_parameters.chase.max_open_batches,
                         maker_recenter_trigger_bps: order_parameters
                             .chase
                             .maker_recenter_trigger_bps,
                         maker_amend_cooldown_ms: order_parameters.chase.maker_amend_cooldown_ms,
                         maker_timeout_sec: order_parameters.chase.maker_timeout_sec,
                         target_tolerance_usdt: order_parameters.chase.target_tolerance_usdt,
+                        strategy_order_rate_limit_per_min: order_parameters
+                            .chase
+                            .strategy_order_rate_limit_per_min,
+                        strategy_order_rate_limit_10s: order_parameters
+                            .chase
+                            .strategy_order_rate_limit_10s,
                         symbol_overrides: &chase_symbol_overrides,
                         targets,
                         updated_at_us,
@@ -487,6 +506,97 @@ impl RedisRuntime {
                 self.mark_broken().await;
                 bail!(
                     "Redis request timed out after {}s",
+                    self.request_timeout_secs().await
+                )
+            }
+        }
+    }
+
+    pub async fn load_exec_order_rate_limits(
+        &self,
+        source: &SourceConfig,
+    ) -> Result<ExecOrderRateLimits> {
+        self.exec_order_rate_limits(source, None).await
+    }
+
+    pub async fn save_exec_order_rate_limits(
+        &self,
+        source: &SourceConfig,
+        limit_per_min: i32,
+        limit_10s: i32,
+    ) -> Result<ExecOrderRateLimits> {
+        if limit_per_min < 0 || limit_10s < 0 {
+            bail!("Exec order rate limits must be non-negative");
+        }
+        self.exec_order_rate_limits(source, Some((limit_per_min, limit_10s)))
+            .await
+    }
+
+    async fn exec_order_rate_limits(
+        &self,
+        source: &SourceConfig,
+        update: Option<(i32, i32)>,
+    ) -> Result<ExecOrderRateLimits> {
+        let key = exec_risk_params_key(source);
+        let timeout = Duration::from_secs(self.request_timeout_secs().await);
+        let loaded = {
+            let mut inner = self.inner.lock().await;
+            let connection = inner.connection().await?;
+            tokio::time::timeout(timeout, async {
+                let exists = connection
+                    .exists::<_, bool>(&key)
+                    .await
+                    .with_context(|| format!("check Redis Exec risk params key {key}"))?;
+                if !exists {
+                    bail!("Redis Exec risk params hash does not exist: {key}");
+                }
+                if let Some((limit_per_min, limit_10s)) = update {
+                    let _: i64 = redis::cmd("HSET")
+                        .arg(&key)
+                        .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
+                        .arg(limit_per_min)
+                        .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD)
+                        .arg(limit_10s)
+                        .query_async(connection)
+                        .await
+                        .with_context(|| format!("write Redis Exec order rate limits key {key}"))?;
+                }
+                let values: Vec<Option<String>> = redis::cmd("HMGET")
+                    .arg(&key)
+                    .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
+                    .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD)
+                    .query_async(connection)
+                    .await
+                    .with_context(|| format!("read Redis Exec order rate limits key {key}"))?;
+                if values.len() != 2 {
+                    bail!("Redis Exec order rate limit response has invalid field count");
+                }
+                Ok(ExecOrderRateLimits {
+                    source_id: source.id.clone(),
+                    exec_order_rate_limit_per_min: parse_exec_order_rate_limit(
+                        values[0].as_deref(),
+                        EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD,
+                    )?,
+                    exec_order_rate_limit_10s: parse_exec_order_rate_limit(
+                        values[1].as_deref(),
+                        EXEC_ORDER_RATE_LIMIT_10S_FIELD,
+                    )?,
+                })
+            })
+            .await
+        };
+        match loaded {
+            Ok(Ok(limits)) => Ok(limits),
+            Ok(Err(error)) => {
+                if is_redis_transport_error(&error) {
+                    self.mark_broken().await;
+                }
+                Err(error)
+            }
+            Err(_) => {
+                self.mark_broken().await;
+                bail!(
+                    "Redis Exec order rate limit request timed out after {}s",
                     self.request_timeout_secs().await
                 )
             }
@@ -904,6 +1014,23 @@ fn load_stored_config(raw: Option<String>) -> Result<Option<serde_json::Value>> 
     serde_json::from_str(&raw).context("Redis value is not valid JSON")
 }
 
+fn exec_risk_params_key(source: &SourceConfig) -> String {
+    format!("{}:{}:pre_trade_risk_params", source.id, source.venue)
+}
+
+fn parse_exec_order_rate_limit(raw: Option<&str>, field: &str) -> Result<i32> {
+    let Some(raw) = raw else {
+        return Ok(0);
+    };
+    let value = raw
+        .parse::<i64>()
+        .with_context(|| format!("Redis {field} is not an integer"))?;
+    i32::try_from(value)
+        .ok()
+        .filter(|value| *value >= 0)
+        .with_context(|| format!("Redis {field} must be in 0..={}", i32::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -931,6 +1058,41 @@ mod tests {
         assert_eq!(next_updated_at_us(Some(i64::MAX)), i64::MAX);
         let current = next_updated_at_us(None);
         assert!(next_updated_at_us(Some(current)) > current);
+    }
+
+    #[test]
+    fn exec_order_rate_limit_contract_uses_account_risk_hash() {
+        let source = SourceConfig {
+            id: "binance_exec_trade01".to_string(),
+            account: "trade01".to_string(),
+            alias: None,
+            venue: "binance-futures".to_string(),
+            rocksdb_path: "/tmp/orders".into(),
+            enabled: true,
+            start_ts_us: None,
+            poll_interval_secs: None,
+            estimated_fee_rate: Some(0.0),
+            maker_fee_rate: Some(0.0),
+            taker_fee_rate: Some(0.0),
+            gateway_prefix: None,
+            exec_config_url: None,
+            exec_viz_url: None,
+            ipc_namespace: None,
+            account_ipc_service: None,
+            legacy_share_unit_usdt: None,
+            env_path: None,
+        };
+        assert_eq!(
+            exec_risk_params_key(&source),
+            "binance_exec_trade01:binance-futures:pre_trade_risk_params"
+        );
+        assert_eq!(parse_exec_order_rate_limit(None, "limit").unwrap(), 0);
+        assert_eq!(
+            parse_exec_order_rate_limit(Some("400"), "limit").unwrap(),
+            400
+        );
+        assert!(parse_exec_order_rate_limit(Some("-1"), "limit").is_err());
+        assert!(parse_exec_order_rate_limit(Some("bad"), "limit").is_err());
     }
 
     #[test]
@@ -1003,7 +1165,8 @@ mod tests {
     fn chase_payload_matches_exec_contract() {
         let mut parameters = valid_parameters();
         parameters.algorithm = ExecutionAlgorithm::Chase;
-        parameters.chase.max_open_usdt = 500.0;
+        parameters.chase.max_batch = 8;
+        parameters.chase.max_open_batches = 3;
         let targets = BTreeMap::from([(
             "BTCUSDT".to_string(),
             TargetPosition {
@@ -1019,18 +1182,24 @@ mod tests {
             },
         )]);
         let payload = serde_json::to_value(StoredChaseExecConfig {
-            single_order_usdt: parameters.chase.single_order_usdt,
-            max_open_usdt: parameters.chase.max_open_usdt,
+            batch_floor_usdt: parameters.chase.batch_floor_usdt,
+            max_batch: parameters.chase.max_batch,
+            max_open_batches: parameters.chase.max_open_batches,
             maker_recenter_trigger_bps: parameters.chase.maker_recenter_trigger_bps,
             maker_amend_cooldown_ms: parameters.chase.maker_amend_cooldown_ms,
             maker_timeout_sec: parameters.chase.maker_timeout_sec,
             target_tolerance_usdt: parameters.chase.target_tolerance_usdt,
+            strategy_order_rate_limit_per_min: parameters.chase.strategy_order_rate_limit_per_min,
+            strategy_order_rate_limit_10s: parameters.chase.strategy_order_rate_limit_10s,
             symbol_overrides: &overrides,
             targets: &targets,
             updated_at_us: 1,
         })
         .unwrap();
-        assert_eq!(payload["max_open_usdt"], 500.0);
+        assert_eq!(payload["max_batch"], 8);
+        assert_eq!(payload["max_open_batches"], 3);
+        assert_eq!(payload["strategy_order_rate_limit_per_min"], 0);
+        assert_eq!(payload["strategy_order_rate_limit_10s"], 0);
         assert_eq!(
             payload["symbol_overrides"]["BTCUSDT"]["maker_recenter_trigger_bps"],
             0.0

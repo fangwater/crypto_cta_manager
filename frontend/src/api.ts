@@ -3,6 +3,7 @@ import type {
   AccountStudio,
   CatalogOrderStrategy,
   DashboardSnapshot,
+  ExecOrderRateLimits,
   HealthResponse,
   OrderParameters,
   OrderStrategyList,
@@ -453,6 +454,30 @@ export function getAccountContractLeverage(sourceId: string, symbol: string) {
   const params = new URLSearchParams({ symbol })
   return requestJson<SavedSymbolContractLeverage>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/contract-leverage?${params}`,
+  )
+}
+
+export function getAccountExecOrderRateLimits(sourceId: string, signal?: AbortSignal) {
+  return requestJson<ExecOrderRateLimits>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/exec-order-rate-limits`,
+    { signal },
+  )
+}
+
+export function saveAccountExecOrderRateLimits(
+  sourceId: string,
+  limitPerMin: number,
+  limit10s: number,
+) {
+  return requestJson<ExecOrderRateLimits>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/exec-order-rate-limits`,
+    {
+      method: 'PUT',
+      body: {
+        exec_order_rate_limit_per_min: limitPerMin,
+        exec_order_rate_limit_10s: limit10s,
+      },
+    },
   )
 }
 

@@ -54,6 +54,19 @@ export function feeBps(rate: number) {
   return `${(rate * 10_000).toFixed(2)} bps`
 }
 
+export function isOkxVenue(venue: string) {
+  const normalized = venue.toLowerCase()
+  return normalized.includes('okx') || normalized.includes('okex')
+}
+
+export function formatUniMmr(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return '--'
+  return value.toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+}
+
 export function signedClass(value: number) {
   if (value > 0) return 'number-positive'
   if (value < 0) return 'number-negative'

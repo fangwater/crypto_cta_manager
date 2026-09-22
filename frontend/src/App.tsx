@@ -33,7 +33,9 @@ import {
 import { PositionLeverageChart } from './components/PositionLeverageChart'
 import {
   feeBps,
+  formatUniMmr,
   integer,
+  isOkxVenue,
   money,
   quantity,
   signedClass,
@@ -1086,12 +1088,20 @@ function NavPage() {
             </span>
           </div>
           <div className="source-list">
-            {dashboard?.report.sources.map((source) => (
+            {dashboard?.report.sources.map((source) => {
+              const live = dashboard.accounts?.find(
+                (account) => account.source_id === source.source_id,
+              )
+              const okx = isOkxVenue(source.configured_venue)
+              return (
               <div className="source-row" key={source.source_id}>
                 <div className="source-identity">
-                  <span className="venue-mark">B</span>
+                  <span className="venue-mark">{okx ? 'O' : 'B'}</span>
                   <div>
-                    <strong>{source.account}</strong>
+                    <strong>
+                      {source.account}
+                      {okx ? ' · 统一账户' : ''}
+                    </strong>
                     <code>{source.source_id}</code>
                   </div>
                 </div>
@@ -1110,8 +1120,22 @@ function NavPage() {
                   value={`${money(source.nav_change_after_fee_quote)} USDT`}
                   tone={signedClass(source.nav_change_after_fee_quote)}
                 />
+                {okx && (
+                  <SourceDatum
+                    label="UniMMR"
+                    value={
+                      live?.uni_mmr_status === 'stale'
+                        ? `${formatUniMmr(live.uni_mmr)} 延迟`
+                        : formatUniMmr(live?.uni_mmr)
+                    }
+                    tone={
+                      live?.uni_mmr != null && live.uni_mmr <= 1.5 ? 'number-negative' : ''
+                    }
+                  />
+                )}
               </div>
-            ))}
+              )
+            })}
           </div>
         </section>
     </AppShell>
