@@ -661,8 +661,7 @@ async fn auth_middleware(
     );
     // Account grants are tiered: 'view' reads the account, 'configure' also
     // writes it. Global catalog/access mutations remain admin-only, except
-    // delegated strategy grant edits and position target publishes handled by
-    // their own gates.
+    // order strategy templates and delegated strategy grant edits.
     let access = match auth::allowed_source_access(
         &auth_state.pool,
         &user,
@@ -709,6 +708,13 @@ fn request_permission_error(
         if !access.configure.contains(source_id) {
             return Some("you are not authorized to configure this account");
         }
+        return None;
+    }
+    if path == "/api/catalog/order-strategies"
+        || path
+            .strip_prefix("/api/catalog/order-strategies/")
+            .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+    {
         return None;
     }
     // Delegated grant edits reach their own strategy-level check in the
@@ -4887,6 +4893,30 @@ mod tests {
         assert_eq!(
             request_permission_error(false, false, None, grants_path, &access),
             None
+        );
+        assert_eq!(
+            request_permission_error(false, false, None, "/api/catalog/order-strategies", &access),
+            None
+        );
+        assert_eq!(
+            request_permission_error(
+                false,
+                false,
+                None,
+                "/api/catalog/order-strategies/default_order",
+                &access
+            ),
+            None
+        );
+        assert_eq!(
+            request_permission_error(
+                false,
+                false,
+                None,
+                "/api/catalog/order-strategies/default_order/grants",
+                &access
+            ),
+            Some("administrator permission required")
         );
         assert_eq!(
             request_permission_error(false, false, None, "/api/auth/users", &access),

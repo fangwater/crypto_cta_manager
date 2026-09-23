@@ -426,7 +426,7 @@ function buildChapters(gateway: string): Chapter[] {
   }
 }`}</CodeBlock>
         <Note>
-          下单策略是可复用的完整模板。账户 binding 选择默认模板；仓位策略可以通过
+          登录用户均可维护下单策略模板，无需管理员或账户配置权限。下单策略是可复用的完整模板。账户 binding 选择默认模板；仓位策略可以通过
           symbol_order_strategy_overrides 为特定 symbol 选择另一条命名模板。max_batch 限制一次
           目标更新的预估批次数；Exec 按目标激活时的 mark price 计算动态单笔金额，并取该值与
           single_order_usdt 的较大者。algorithm 可选 batch、pov、chase；POV 和 Chase
