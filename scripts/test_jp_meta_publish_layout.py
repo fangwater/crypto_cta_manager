@@ -33,8 +33,8 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
         )
         self.assertEqual(
             source_enabled,
-            [("1", "true"), ("2", "false"), ("3", "false"), ("4", "false")],
-            "jp-meta keeps trade01 publishable and reserves trade02-04",
+            [("1", "true"), ("2", "true"), ("3", "true"), ("4", "true")],
+            "jp-meta exposes its four provisioned Exec sources",
         )
         self.assertIn("WorkingDirectory=/home/ubuntu/crypto_cta_manager", web)
         self.assertNotIn("Requires=postgresql.service", web)
@@ -46,10 +46,11 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
         self.assertNotIn("order-parameter-token-file", exec_unit)
         self.assertNotIn("Requires=redis-server.service", exec_unit)
         self.assertIn("/manager/api/", fragment)
-        self.assertIn("/exec_trade01/config/", fragment)
-        self.assertIn("/exec_trade02/", fragment)
-        self.assertIn("/exec_trade03/", fragment)
-        self.assertIn("/exec_trade04/", fragment)
+        self.assertIn(
+            "/manager/ external:/etc/nginx/snippets/crypto_cta_manager.conf",
+            fragment,
+        )
+        self.assertNotIn("/exec_trade01/", fragment)
         self.assertIn("EXPECTED_USER=\"ubuntu\"", installer)
         self.assertIn("127.0.0.1:5432", installer)
 
@@ -58,6 +59,8 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
         self.assertIn("root /home/ubuntu/crypto_cta_manager/webroot;", snippet)
         self.assertIn("try_files $uri $uri/ /manager/index.html;", snippet)
         self.assertIn("location /exec_trade04/", snippet)
+        self.assertIn("location /exec_trade04/config/", snippet)
+        self.assertIn("auth_request /manager-auth/exec_trade04;", snippet)
 
     def test_el01_layout_stays_on_el01_paths(self) -> None:
         toml = (EL01 / "cta-manager.toml").read_text(encoding="utf-8")
@@ -74,16 +77,10 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
             toml,
             re.M,
         )
-        self.assertEqual(
-            source_enabled,
-            [
-                ("1", "true"),
-                ("2", "true"),
-                ("3", "true"),
-                ("4", "true"),
-                ("5", "false"),
-            ],
-        )
+        source_states = dict(source_enabled)
+        for source in ("1", "2", "3", "4"):
+            self.assertEqual(source_states[source], "true")
+        self.assertEqual(source_states["5"], "false")
         self.assertIn('alias = "Dzy2025B1"', toml)
         self.assertIn('alias = "prc"', toml)
         trade04 = toml.split('id = "binance_exec_trade04"', 1)[1].split(
@@ -97,8 +94,8 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
     def test_jp_meta_trade01_alias_is_local_to_that_host(self) -> None:
         jp = (JP / "cta-manager.toml").read_text(encoding="utf-8")
         el01 = (EL01 / "cta-manager.toml").read_text(encoding="utf-8")
-        self.assertIn('alias = "rpc_hf_cta"', jp)
-        self.assertNotIn("rpc_hf_cta", el01)
+        self.assertIn('alias = "prc_cta_01"', jp)
+        self.assertNotIn("prc_cta_01", el01)
         self.assertIn('alias = "shaokai"', el01)
         self.assertNotIn("shaokai", jp)
 

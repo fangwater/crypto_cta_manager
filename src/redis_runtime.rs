@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -255,14 +255,6 @@ impl RedisRuntime {
                         "strategy {strategy_name} is active in both execution families; resolve the duplicate ownership before switching"
                     );
                 }
-                ensure_no_opposite_family_claims(
-                    connection,
-                    source,
-                    family,
-                    targets,
-                    switching.then_some(strategy_name),
-                )
-                .await?;
                 let symbol_overrides = symbol_order_parameters
                     .iter()
                     .filter_map(|(symbol, selected)| match family {
@@ -788,145 +780,6 @@ fn decode_exec_strategy_target_state(
     })
 }
 
-async fn ensure_no_opposite_family_claims(
-    connection: &mut ConnectionManager,
-    source: &SourceConfig,
-    family: ExecutionFamily,
-    targets: &BTreeMap<String, TargetPosition>,
-    allowed_strategy_name: Option<&str>,
-) -> Result<()> {
-    let mut requested = targets
-        .iter()
-        .filter(|(_, target)| allowed_strategy_name.is_some() || target.qty != 0.0)
-        .map(|(symbol, _)| symbol.clone())
-        .collect::<BTreeSet<_>>();
-
-    let opposite = family.opposite();
-    let prefix = format!(
-        "{}:{}:{}:",
-        source.id,
-        source.venue,
-        opposite.redis_namespace()
-    );
-    let ledger_key = format!(
-        "{}:{}:{}_state:position_allocations",
-        source.id,
-        source.venue,
-        opposite.redis_namespace()
-    );
-    let ledger = connection
-        .get::<_, Option<String>>(&ledger_key)
-        .await?
-        .map(|raw| {
-            serde_json::from_str::<serde_json::Value>(&raw).with_context(|| {
-                format!("opposite execution-family ledger is invalid JSON: {ledger_key}")
-            })
-        })
-        .transpose()?;
-    if let (Some(strategy_name), Some(ledger)) = (allowed_strategy_name, ledger.as_ref()) {
-        let strategy_positions = ledger
-            .get("positions")
-            .and_then(serde_json::Value::as_object)
-            .and_then(|positions| positions.get(strategy_name))
-            .and_then(serde_json::Value::as_object);
-        if let Some(strategy_positions) = strategy_positions {
-            requested.extend(strategy_positions.keys().cloned());
-        }
-    }
-    if requested.is_empty() {
-        return Ok(());
-    }
-
-    let names = decode_strategy_names(
-        connection
-            .get::<_, Option<String>>(format!("{prefix}strategy_names"))
-            .await?,
-        "opposite execution-family strategy index",
-    )?;
-    for name in names {
-        if allowed_strategy_name == Some(name.as_str()) {
-            continue;
-        }
-        let key = format!("{prefix}{name}");
-        let raw = connection
-            .get::<_, Option<String>>(&key)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("indexed Exec strategy config missing: {key}"))?;
-        let stored: serde_json::Value = serde_json::from_str(&raw)
-            .with_context(|| format!("opposite execution-family config is invalid JSON: {key}"))?;
-        let claimed = config_target_symbols(&stored).with_context(|| {
-            format!("invalid targets in opposite execution-family config: {key}")
-        })?;
-        if let Some(symbol) = requested
-            .iter()
-            .find(|symbol| claimed.contains(symbol.as_str()))
-        {
-            bail!(
-                "symbol {symbol} is already claimed by {} strategy {name}; batch/POV and chase cannot share one account-symbol position ledger",
-                opposite.redis_namespace()
-            );
-        }
-    }
-
-    if let Some(ledger) = ledger.as_ref() {
-        let claimed = ledger_symbols_except(ledger, allowed_strategy_name)
-            .with_context(|| format!("invalid opposite execution-family ledger: {ledger_key}"))?;
-        if let Some(symbol) = requested
-            .iter()
-            .find(|symbol| claimed.contains(symbol.as_str()))
-        {
-            bail!(
-                "symbol {symbol} is still present in the {} position ledger; wait for its removal to settle before publishing a {} target",
-                opposite.redis_namespace(),
-                family.redis_namespace()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn config_target_symbols(value: &serde_json::Value) -> Result<BTreeSet<&str>> {
-    let targets = value
-        .get("targets")
-        .and_then(serde_json::Value::as_object)
-        .context("targets must be an object")?;
-    Ok(targets.keys().map(String::as_str).collect())
-}
-
-#[cfg(test)]
-fn ledger_symbols(value: &serde_json::Value) -> Result<BTreeSet<&str>> {
-    ledger_symbols_except(value, None)
-}
-
-fn ledger_symbols_except<'a>(
-    value: &'a serde_json::Value,
-    excluded_strategy_name: Option<&str>,
-) -> Result<BTreeSet<&'a str>> {
-    let positions = value
-        .get("positions")
-        .and_then(serde_json::Value::as_object)
-        .context("positions must be an object")?;
-    let mut symbols = BTreeSet::new();
-    for (strategy_name, strategy_positions) in positions {
-        if excluded_strategy_name == Some(strategy_name.as_str()) {
-            continue;
-        }
-        let strategy_positions = strategy_positions
-            .as_object()
-            .context("strategy positions must be an object")?;
-        for (symbol, quantity) in strategy_positions {
-            let quantity = quantity
-                .as_f64()
-                .filter(|quantity| quantity.is_finite())
-                .context("strategy position quantity must be finite")?;
-            if quantity.abs() > 1e-10 {
-                symbols.insert(symbol.as_str());
-            }
-        }
-    }
-    Ok(symbols)
-}
-
 async fn keep_connection_alive(inner: &mut RedisRuntimeInner) -> Result<bool> {
     let url = inner.settings.url.clone();
     let connection = match inner.connection().await {
@@ -1304,30 +1157,5 @@ mod tests {
         let error = decode_exec_strategy_target_state("batch_exec", "cta_a", &stored)
             .expect_err("missing updated_at_us must make application verification fail");
         assert!(error.to_string().contains("updated_at_us"));
-    }
-
-    #[test]
-    fn extracts_cross_family_symbol_claims_from_config_and_ledger() {
-        let config = serde_json::json!({
-            "targets": {
-                "BTCUSDT": {"qty": 0.0, "signal": 0},
-                "ETHUSDT": {"qty": 1.0, "signal": 0}
-            }
-        });
-        assert_eq!(
-            config_target_symbols(&config).unwrap(),
-            BTreeSet::from(["BTCUSDT", "ETHUSDT"])
-        );
-
-        let ledger = serde_json::json!({
-            "positions": {
-                "alpha": {"BTCUSDT": 0.0},
-                "beta": {"SOLUSDT": 2.0}
-            }
-        });
-        assert_eq!(
-            ledger_symbols(&ledger).unwrap(),
-            BTreeSet::from(["SOLUSDT"])
-        );
     }
 }

@@ -961,17 +961,17 @@ mod tests {
     }
 
     #[test]
-    fn jp_meta_config_enables_trade01_and_reserves_later_accounts() {
+    fn jp_meta_config_enables_four_trade_accounts() {
         let config: AppConfig =
             toml::from_str(include_str!("../deploy/jp_meta/cta-manager.toml")).unwrap();
         config.validate().unwrap();
         assert_eq!(config.sources.len(), 4);
         assert_eq!(config.sources[0].id, "binance_exec_trade01");
-        assert_eq!(config.sources[0].display_name(), "rpc_hf_cta");
-        assert!(config.sources[0].enabled);
+        assert_eq!(config.sources[0].display_name(), "prc_cta_01");
         assert_eq!(config.sources[1].id, "binance_exec_trade02");
-        assert!(config.sources[1].enabled);
-        assert!(config.sources[2..].iter().all(|source| !source.enabled));
+        assert_eq!(config.sources[1].display_name(), "prc_cta_02");
+        assert_eq!(config.sources[3].display_name(), "prc");
+        assert!(config.sources.iter().all(|source| source.enabled));
         assert_eq!(
             config.twap.rocksdb_path.as_os_str(),
             "/home/ubuntu/crypto_cta_manager/db"

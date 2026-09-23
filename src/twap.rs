@@ -397,7 +397,7 @@ fn run_recorder(config: TwapConfig, db: ManagerDb, symbols: SharedSymbols) -> Re
         .name(&NodeName::new(node_name)?)
         .create::<ipc::Service>()
         .with_context(|| format!("failed to create iceoryx node {node_name}"))?;
-    let service_name = format!("spread_pbs/{}/ask_bid_spread", config.venue);
+    let service_name = bbo_service_name(&config.venue);
     info!(service_name, "opening TWAP BBO IPC");
     let service = loop {
         match node
@@ -471,6 +471,15 @@ fn run_recorder(config: TwapConfig, db: ManagerDb, symbols: SharedSymbols) -> Re
             last_compact = Instant::now();
         }
     }
+}
+
+fn bbo_service_name(venue: &str) -> String {
+    let root = if venue == "binance-futures" {
+        "spread_pbs_proxy"
+    } else {
+        "spread_pbs"
+    };
+    format!("{root}/{venue}/ask_bid_spread")
 }
 
 fn sample_current_bar(
@@ -566,6 +575,18 @@ fn normalize_symbol(raw: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn binance_futures_twap_uses_proxy_only() {
+        assert_eq!(
+            bbo_service_name("binance-futures"),
+            "spread_pbs_proxy/binance-futures/ask_bid_spread"
+        );
+        assert_eq!(
+            bbo_service_name("okex-futures"),
+            "spread_pbs/okex-futures/ask_bid_spread"
+        );
+    }
 
     #[test]
     fn parses_and_encodes_ask_bid_spread() {
