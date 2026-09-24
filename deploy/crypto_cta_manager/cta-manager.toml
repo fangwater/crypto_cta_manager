@@ -77,6 +77,69 @@ estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade01"
 account_ipc_service = "account_pubs/binance_pm"
 
+# Provisioned for configuration; enable health checks when Exec trading starts.
+[[sources]]
+id = "binance_exec_trade09"
+account = "trade09"
+alias = "dzynova"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade09/data/persist_manager"
+enabled = true
+monitor_enabled = false
+gateway_prefix = "/exec_trade09"
+exec_config_url = "http://127.0.0.1:18169/"
+exec_viz_url = "http://127.0.0.1:10049/"
+ipc_namespace = "binance_exec_trade09"
+account_ipc_service = "account_pubs/binance_pm"
+
+[[sources]]
+id = "binance_exec_trade10"
+account = "trade10"
+alias = "zy_group26"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade10/data/persist_manager"
+enabled = true
+monitor_enabled = false
+gateway_prefix = "/exec_trade10"
+exec_config_url = "http://127.0.0.1:18170/"
+exec_viz_url = "http://127.0.0.1:10050/"
+maker_fee_rate = 0.0001
+taker_fee_rate = 0.0003
+ipc_namespace = "binance_exec_trade10"
+account_ipc_service = "account_pubs/binance_pm"
+
+[[sources]]
+id = "binance_exec_trade11"
+account = "trade11"
+alias = "zy_group29"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade11/data/persist_manager"
+enabled = true
+monitor_enabled = false
+gateway_prefix = "/exec_trade11"
+exec_config_url = "http://127.0.0.1:18171/"
+exec_viz_url = "http://127.0.0.1:10052/"
+maker_fee_rate = 0.0001
+taker_fee_rate = 0.0003
+ipc_namespace = "binance_exec_trade11"
+account_ipc_service = "account_pubs/binance_pm"
+
+[[sources]]
+id = "binance_exec_trade12"
+account = "trade12"
+alias = "ygfund28"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade12/data/persist_manager"
+enabled = true
+monitor_enabled = true
+gateway_prefix = "/exec_trade12"
+exec_config_url = "http://127.0.0.1:18172/"
+exec_viz_url = "http://127.0.0.1:10053/"
+maker_fee_rate = 0.0001
+taker_fee_rate = 0.0003
+ipc_namespace = "binance_exec_trade12"
+account_ipc_service = "account_pubs/binance_pm"
+
 # Manager-visible account; Exec trading processes remain operator-controlled
 # and are intentionally not started by this configuration change.
 [[sources]]

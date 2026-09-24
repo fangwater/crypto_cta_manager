@@ -123,7 +123,7 @@ impl LiveEquityHub {
     pub fn spawn(sources: &[SourceConfig]) -> Self {
         let hub = Self::default();
         for source in sources {
-            if !source.enabled {
+            if !source.enabled || !source.monitor_enabled {
                 continue;
             }
             let Some(service_name) = source.account_ipc_service_name() else {

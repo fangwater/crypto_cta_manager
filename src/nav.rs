@@ -2859,6 +2859,7 @@ mod tests {
             venue: "multi-venue".to_string(),
             rocksdb_path: PathBuf::from(format!("/tmp/{id}/persist_manager")),
             enabled: true,
+            monitor_enabled: true,
             start_ts_us: None,
             poll_interval_secs: None,
             estimated_fee_rate: fee_rate,

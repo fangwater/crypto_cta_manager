@@ -143,6 +143,9 @@ pub struct SourceConfig {
     pub rocksdb_path: PathBuf,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Skip Exec health checks and live account IPC until this account's runtime starts.
+    #[serde(default = "default_true")]
+    pub monitor_enabled: bool,
     /// First RocksDB key to ingest when this source has no checkpoint. Defaults to all history.
     pub start_ts_us: Option<i64>,
     pub poll_interval_secs: Option<u64>,
@@ -745,6 +748,7 @@ mod tests {
             venue: "binance-futures".to_string(),
             rocksdb_path: PathBuf::from(path),
             enabled: true,
+            monitor_enabled: true,
             start_ts_us: None,
             poll_interval_secs: None,
             estimated_fee_rate: Some(0.0004),
@@ -767,6 +771,39 @@ mod tests {
             source("binance_exec_trade02", "/srv/trade02/persist_manager"),
         ]);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn monitor_enabled_defaults_on_and_can_be_disabled_for_provisioned_source() {
+        let raw = include_str!("../deploy/crypto_cta_manager/cta-manager.toml");
+        let config: AppConfig = toml::from_str(raw).unwrap();
+        config.validate().unwrap();
+        assert!(
+            config
+                .sources
+                .iter()
+                .find(|source| source.id == "binance_exec_trade01")
+                .unwrap()
+                .monitor_enabled
+        );
+        for number in 9..=11 {
+            let id = format!("binance_exec_trade{number:02}");
+            let source = config
+                .sources
+                .iter()
+                .find(|source| source.id == id)
+                .unwrap();
+            assert!(source.enabled);
+            assert!(!source.monitor_enabled);
+        }
+        assert!(
+            config
+                .sources
+                .iter()
+                .find(|source| source.id == "binance_exec_trade12")
+                .unwrap()
+                .monitor_enabled
+        );
     }
 
     #[test]

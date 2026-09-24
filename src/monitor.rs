@@ -219,7 +219,7 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
     let enabled_sources = config
         .sources
         .iter()
-        .filter(|source| source.enabled)
+        .filter(|source| source.enabled && source.monitor_enabled)
         .cloned()
         .collect::<Vec<_>>();
     let venues = enabled_sources
@@ -1510,6 +1510,7 @@ mod tests {
             venue: venue.to_string(),
             rocksdb_path: std::path::PathBuf::from("/tmp/nonexistent"),
             enabled: true,
+            monitor_enabled: true,
             start_ts_us: None,
             poll_interval_secs: None,
             estimated_fee_rate: None,

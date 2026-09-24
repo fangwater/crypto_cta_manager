@@ -992,6 +992,7 @@ mod tests {
             venue: "binance-futures".to_string(),
             rocksdb_path: "/tmp/orders".into(),
             enabled: true,
+            monitor_enabled: true,
             start_ts_us: None,
             poll_interval_secs: None,
             estimated_fee_rate: Some(0.0),
