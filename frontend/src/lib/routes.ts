@@ -18,6 +18,7 @@ export const routes = {
       : '/manager/acquisition-cost/',
   configPosition: '/manager/config/position/',
   configOrder: '/manager/config/order/',
+  autoEarn: '/manager/auto-earn/',
   configBindings: (sourceId?: string) =>
     sourceId
       ? `/manager/config/bindings/?source=${encodeURIComponent(sourceId)}`

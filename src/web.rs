@@ -25,6 +25,7 @@ use tracing::{error, info, warn};
 
 use crate::account_ipc::{LiveAccountReading, LiveEquityHub};
 use crate::auth::{self, AuthUser};
+use crate::bfusd_auto::{AccountSettings as BfusdAccountSettings, AutoEarnHub};
 use crate::config::{AppConfig, FeeRates, SourceConfig};
 use crate::manager_db::ManagerDb;
 use crate::order_config::{
@@ -202,6 +203,7 @@ struct WebState {
     twap_symbols: crate::twap::SharedSymbols,
     viz_snapshot: VizSnapshotClient,
     refresh_interval_secs: u64,
+    auto_earn: AutoEarnHub,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -394,6 +396,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
     postgres::migrate(&pool).await?;
     postgres::register_sources(&pool, &config.sources).await?;
+    let auto_earn = AutoEarnHub::new(&config)?;
+    auto_earn.spawn(config.sources.clone());
     let exec_config = ExecConfigClient::new(config.order_config.request_timeout_secs)?;
     let redis_runtime = RedisRuntime::connect(config.redis.clone())?;
     redis_runtime.spawn_keepalive();
@@ -541,6 +545,18 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .route("/api/catalog/accounts/{source_id}", get(get_account_studio))
         .route(
+            "/api/catalog/accounts/{source_id}/bfusd-auto",
+            get(get_account_bfusd_auto).put(save_account_bfusd_auto),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bfusd-auto/run",
+            post(run_account_bfusd_auto),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bfusd-auto/resume",
+            post(resume_account_bfusd_auto),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/exec-order-rate-limits",
             get(get_account_exec_order_rate_limits).put(save_account_exec_order_rate_limits),
         )
@@ -594,6 +610,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             twap_symbols,
             viz_snapshot,
             refresh_interval_secs,
+            auto_earn,
         })
         .layer(middleware::from_fn_with_state(
             AuthMiddlewareState {
@@ -2840,6 +2857,127 @@ async fn get_account_exchange_fee_rates(
             )
                 .into_response())
         }
+    }
+}
+
+const BFUSD_OPERATION_TOKEN_HEADER: &str = "x-bfusd-operation-token";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveBfusdAutoRequest {
+    enabled: bool,
+    interval_secs: u64,
+    round_cap_usdt: f64,
+    trigger_usdt: f64,
+}
+
+fn bfusd_source<'a>(
+    config: &'a AppConfig,
+    source_id: &str,
+) -> std::result::Result<&'a SourceConfig, Response> {
+    let Some(source) = config.sources.iter().find(|source| source.id == source_id) else {
+        return Err(not_found("account not found"));
+    };
+    if !source.enabled || source.venue != "binance-futures" {
+        return Err(bad_request(
+            "automatic earn requires an enabled Binance futures account".to_owned(),
+        ));
+    }
+    Ok(source)
+}
+
+fn bfusd_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(BFUSD_OPERATION_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+}
+
+fn bfusd_error(error: anyhow::Error) -> Response {
+    let message = format!("{error:#}");
+    let status = if message.contains("operation token required") {
+        StatusCode::FORBIDDEN
+    } else if message.contains("interval must")
+        || message.contains("round cap must")
+        || message.contains("trigger must")
+        || message.contains("disabled or paused")
+    {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    (status, Json(ErrorResponse { error: message })).into_response()
+}
+
+async fn get_account_bfusd_auto(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+) -> Response {
+    if let Err(response) = bfusd_source(&state.config, &source_id) {
+        return response;
+    }
+    (NO_STORE, Json(state.auto_earn.status(&source_id).await)).into_response()
+}
+
+async fn save_account_bfusd_auto(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SaveBfusdAutoRequest>,
+) -> Response {
+    if let Err(response) = bfusd_source(&state.config, &source_id) {
+        return response;
+    }
+    let settings = BfusdAccountSettings {
+        enabled: request.enabled,
+        interval_secs: request.interval_secs,
+        round_cap_usdt: request.round_cap_usdt,
+        trigger_usdt: request.trigger_usdt,
+        paused: false,
+    };
+    match state
+        .auto_earn
+        .save(&source_id, bfusd_token(&headers), settings)
+        .await
+    {
+        Ok(status) => (NO_STORE, Json(status)).into_response(),
+        Err(error) => bfusd_error(error),
+    }
+}
+
+async fn run_account_bfusd_auto(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let source = match bfusd_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return response,
+    };
+    match state
+        .auto_earn
+        .run(source, bfusd_token(&headers), true)
+        .await
+    {
+        Ok(result) => (NO_STORE, Json(serde_json::json!({"result": result}))).into_response(),
+        Err(error) => bfusd_error(error),
+    }
+}
+
+async fn resume_account_bfusd_auto(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = bfusd_source(&state.config, &source_id) {
+        return response;
+    }
+    match state
+        .auto_earn
+        .resume(&source_id, bfusd_token(&headers))
+        .await
+    {
+        Ok(status) => (NO_STORE, Json(status)).into_response(),
+        Err(error) => bfusd_error(error),
     }
 }
 

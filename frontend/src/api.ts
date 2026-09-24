@@ -148,6 +148,49 @@ export function getDashboard(signal?: AbortSignal) {
   return requestJson<DashboardSnapshot>('/dashboard', { signal })
 }
 
+export interface AutoEarnSettings {
+  enabled: boolean
+  interval_secs: number
+  round_cap_usdt: number
+  trigger_usdt: number
+  paused: boolean
+  running: boolean
+  last_result: string | null
+}
+
+const autoEarnPath = (sourceId: string) =>
+  `/catalog/accounts/${encodeURIComponent(sourceId)}/bfusd-auto`
+
+export function getAutoEarn(sourceId: string, signal?: AbortSignal) {
+  return requestJson<AutoEarnSettings>(autoEarnPath(sourceId), { signal })
+}
+
+export function saveAutoEarn(
+  sourceId: string,
+  settings: Pick<AutoEarnSettings, 'enabled' | 'interval_secs' | 'round_cap_usdt' | 'trigger_usdt'>,
+  token: string,
+) {
+  return requestJson<AutoEarnSettings>(autoEarnPath(sourceId), {
+    method: 'PUT',
+    headers: { 'X-BFUSD-Operation-Token': token },
+    body: settings,
+  })
+}
+
+export function runAutoEarn(sourceId: string, token: string) {
+  return requestJson<{ result: string }>(`${autoEarnPath(sourceId)}/run`, {
+    method: 'POST',
+    headers: { 'X-BFUSD-Operation-Token': token },
+  })
+}
+
+export function resumeAutoEarn(sourceId: string, token: string) {
+  return requestJson<AutoEarnSettings>(`${autoEarnPath(sourceId)}/resume`, {
+    method: 'POST',
+    headers: { 'X-BFUSD-Operation-Token': token },
+  })
+}
+
 export function getHealth(signal?: AbortSignal) {
   return requestJson<HealthResponse>('/health', { signal })
 }

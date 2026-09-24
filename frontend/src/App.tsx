@@ -24,6 +24,7 @@ import { DocsPage } from './pages/DocsPage'
 import { ExecutionCostPage } from './pages/ExecutionCostPage'
 import { AcquisitionCostPage } from './pages/AcquisitionCostPage'
 import { AdminPage } from './pages/AdminPage'
+import { AutoEarnPage } from './pages/AutoEarnPage'
 import { AuthGate } from './components/AuthGate'
 import { normalizePath, readSourceId, routes } from './lib/routes'
 import {
@@ -180,6 +181,7 @@ function AuthenticatedApp() {
   if (path === '/manager/execution-cost') return <ExecutionCostPage />
   if (path === '/manager/acquisition-cost') return <AcquisitionCostPage />
   if (path === '/manager/admin') return <AdminPage />
+  if (path === '/manager/auto-earn') return <AutoEarnPage />
   return <NavPage />
 }
 
