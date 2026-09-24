@@ -17,9 +17,9 @@ import type { DashboardAccount } from '../types'
 
 const defaults: AutoEarnSettings = {
   enabled: false,
-  interval_secs: 180,
+  interval_secs: 3600,
   round_cap_usdt: 5000,
-  trigger_usdt: 50,
+  trigger_usdt: 100,
   paused: false,
   running: false,
   last_result: null,
@@ -128,14 +128,14 @@ export function AutoEarnPage() {
         </div>
         {!loading && !sourceId && <Alert tone="warning">没有可用的 Binance 账户</Alert>}
         {sourceId && <>
-          {settings.paused && <Alert tone="warning">上次执行可能只完成了部分步骤。核对现货和合约余额后再解除暂停。</Alert>}
+          {settings.paused && <Alert tone="warning">上次执行可能只完成了部分步骤，或检测到申购费用。核对最近结果及账户余额后再解除暂停。</Alert>}
           {settings.last_result && <p className="text-sm text-muted">最近结果：{settings.last_result}</p>}
           <div className="grid gap-5 border-b border-border pb-6 sm:grid-cols-2">
             <Label className="sm:col-span-2">
               <span className="flex items-center gap-3 text-sm text-ink">
                 <input type="checkbox" checked={settings.enabled} disabled={!configurable || busy}
                   onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })} />
-                启用自动申购
+                启用自动申购与收益划转
               </span>
             </Label>
             <Label>执行间隔（分钟）

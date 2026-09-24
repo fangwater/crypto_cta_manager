@@ -19,6 +19,7 @@ use crate::config::{AppConfig, SourceConfig};
 use crate::exchange_leverage::parse_env_file;
 
 type HmacSha256 = Hmac<Sha256>;
+const MIN_SPOT_BFUSD_TRANSFER: f64 = 0.0001;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -34,9 +35,9 @@ impl Default for AccountSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            interval_secs: 180,
+            interval_secs: 3600,
             round_cap_usdt: 5000.0,
-            trigger_usdt: 50.0,
+            trigger_usdt: 100.0,
             paused: false,
         }
     }
@@ -263,6 +264,58 @@ impl AutoEarnHub {
         if account.get("multiAssetsMargin").and_then(Value::as_bool) != Some(true) {
             bail!("Binance Multi-Assets Mode must be enabled for BFUSD collateral");
         }
+        let swept = self.sweep_spot_bfusd(source, state, &api).await?;
+        let subscribed = self
+            .subscribe_futures_usdt(source, settings, state, &api, &account, ip)
+            .await;
+        match (swept, subscribed) {
+            (Some(sweep), Ok(subscription)) => Ok(format!("{sweep}; {subscription}")),
+            (Some(sweep), Err(error)) => Err(error.context(format!("{sweep}; USDT round failed"))),
+            (None, result) => result,
+        }
+    }
+
+    async fn sweep_spot_bfusd(
+        &self,
+        source: &SourceConfig,
+        state: &mut Runtime,
+        api: &BinanceApi,
+    ) -> Result<Option<String>> {
+        let spot = api.get(false, "/api/v3/account", &[]).await?;
+        let Some(amount) = spot_bfusd_transfer_amount(&spot)? else {
+            return Ok(None);
+        };
+        self.set_paused(state, &source.id, true)?;
+        let transfer = api
+            .post(
+                false,
+                "/sapi/v1/asset/transfer",
+                &[
+                    ("type", "MAIN_UMFUTURE"),
+                    ("asset", "BFUSD"),
+                    ("amount", &amount),
+                ],
+            )
+            .await?;
+        let transfer_id = transfer
+            .get("tranId")
+            .and_then(Value::as_u64)
+            .context("spot BFUSD transfer did not return tranId")?;
+        self.set_paused(state, &source.id, false)?;
+        Ok(Some(format!(
+            "transferred {amount} spot BFUSD to futures (tranId {transfer_id})"
+        )))
+    }
+
+    async fn subscribe_futures_usdt(
+        &self,
+        source: &SourceConfig,
+        settings: &AccountSettings,
+        state: &mut Runtime,
+        api: &BinanceApi,
+        account: &Value,
+        ip: IpAddr,
+    ) -> Result<String> {
         let usdt = account
             .get("assets")
             .and_then(Value::as_array)
@@ -282,7 +335,7 @@ impl AutoEarnHub {
         }
         let margin = number(&account, "totalMarginBalance")?;
         let maintenance = number(&account, "totalMaintMargin")?;
-        if margin - maintenance * 3.0 < 1.0 {
+        if margin - maintenance * 3.0 <= settings.trigger_usdt {
             return Ok("skipped: insufficient margin headroom".to_owned());
         }
         let quota = api.get(false, "/sapi/v1/bfusd/quota", &[]).await?;
@@ -298,24 +351,13 @@ impl AutoEarnHub {
             left,
             settings.round_cap_usdt,
         );
-        if amount_cents < 100 {
-            return Ok("skipped: transferable USDT or BFUSD quota below 1 USDT".to_owned());
+        if amount_cents < 100 || amount_cents as f64 / 100.0 <= settings.trigger_usdt {
+            return Ok("skipped: transferable USDT or BFUSD quota below trigger".to_owned());
         }
         let amount_text = format!("{}.{:02}", amount_cents / 100, amount_cents % 100);
 
-        // Persist the pause before the first mutation. A crash or ambiguous response
-        // leaves the account stopped until an operator reconciles Binance balances.
-        let old = state.disk.clone();
-        state
-            .disk
-            .accounts
-            .entry(source.id.clone())
-            .or_default()
-            .paused = true;
-        if let Err(error) = self.persist(&state.disk) {
-            state.disk = old;
-            return Err(error);
-        }
+        // A crash or ambiguous response leaves the account stopped for reconciliation.
+        self.set_paused(state, &source.id, true)?;
         api.post(
             false,
             "/sapi/v1/asset/transfer",
@@ -340,13 +382,7 @@ impl AutoEarnHub {
             .get("bfusdAmount")
             .and_then(Value::as_str)
             .context("BFUSD subscription did not return bfusdAmount")?;
-        if bfusd
-            .parse::<f64>()
-            .ok()
-            .is_none_or(|amount| !amount.is_finite() || amount <= 0.0)
-        {
-            bail!("BFUSD subscription returned invalid bfusdAmount");
-        }
+        let fee = subscription_fee(&amount_text, bfusd)?;
         api.post(
             false,
             "/sapi/v1/asset/transfer",
@@ -357,24 +393,30 @@ impl AutoEarnHub {
             ],
         )
         .await?;
+        if fee > 0.0 {
+            return Ok(format!(
+                "subscribed {amount_text} USDT into {bfusd} BFUSD using {ip}; purchase fee {fee:.8} USDT detected, automatic BFUSD paused"
+            ));
+        }
+        self.set_paused(state, &source.id, false)?;
+        Ok(format!(
+            "subscribed {amount_text} USDT into {bfusd} BFUSD using {ip}; purchase fee 0 USDT"
+        ))
+    }
+
+    fn set_paused(&self, state: &mut Runtime, source_id: &str, paused: bool) -> Result<()> {
+        let old = state.disk.clone();
         state
             .disk
             .accounts
-            .entry(source.id.clone())
+            .entry(source_id.to_owned())
             .or_default()
-            .paused = false;
+            .paused = paused;
         if let Err(error) = self.persist(&state.disk) {
-            state
-                .disk
-                .accounts
-                .entry(source.id.clone())
-                .or_default()
-                .paused = true;
+            state.disk = old;
             return Err(error);
         }
-        Ok(format!(
-            "subscribed {amount_text} USDT into {bfusd} BFUSD using {ip}"
-        ))
+        Ok(())
     }
 
     fn check_token(&self, disk: &DiskSettings, token: Option<&str>) -> Result<()> {
@@ -484,6 +526,44 @@ fn number(value: &Value, key: &str) -> Result<f64> {
         bail!("Binance field {key} is invalid");
     }
     Ok(amount)
+}
+
+fn spot_bfusd_transfer_amount(account: &Value) -> Result<Option<String>> {
+    let balances = account
+        .get("balances")
+        .and_then(Value::as_array)
+        .context("Binance spot account balances missing")?;
+    let Some(asset) = balances
+        .iter()
+        .find(|asset| asset.get("asset").and_then(Value::as_str) == Some("BFUSD"))
+    else {
+        return Ok(None);
+    };
+    if number(asset, "free")? < MIN_SPOT_BFUSD_TRANSFER {
+        return Ok(None);
+    }
+    let amount = asset
+        .get("free")
+        .and_then(Value::as_str)
+        .context("Binance spot BFUSD free balance is not a decimal string")?;
+    Ok(Some(amount.to_owned()))
+}
+
+fn subscription_fee(spent_usdt: &str, received_bfusd: &str) -> Result<f64> {
+    let spent = spent_usdt.parse::<f64>()?;
+    let received = received_bfusd.parse::<f64>()?;
+    if !spent.is_finite() || !received.is_finite() || received <= 0.0 {
+        bail!("BFUSD subscription returned invalid bfusdAmount");
+    }
+    let difference = spent - received;
+    if difference < -0.000000005 {
+        bail!("BFUSD subscription returned more BFUSD than USDT spent");
+    }
+    Ok(if difference > 0.000000005 {
+        difference
+    } else {
+        0.0
+    })
 }
 
 fn finite_number(value: &Value, key: &str) -> Result<f64> {
@@ -655,6 +735,46 @@ mod tests {
         assert_eq!(wallet, -0.25);
         assert!(wallet.min(withdrawable) <= AccountSettings::default().trigger_usdt);
         assert!(number(&asset, "walletBalance").is_err());
+    }
+
+    #[test]
+    fn subscription_fee_detects_non_par_conversion() {
+        assert_eq!(subscription_fee("5000.00", "5000.00000000").unwrap(), 0.0);
+        assert!((subscription_fee("100.01", "99.91").unwrap() - 0.1).abs() < 1e-8);
+        assert!(subscription_fee("100", "0").is_err());
+        assert!(subscription_fee("100", "100.01").is_err());
+    }
+
+    #[test]
+    fn spot_bfusd_sweep_uses_only_free_balance_with_exact_precision() {
+        let spot = serde_json::json!({
+            "balances": [
+                {"asset": "USDT", "free": "100.00"},
+                {"asset": "BFUSD", "free": "2.88457476", "locked": "50.00000000"}
+            ]
+        });
+        assert_eq!(
+            spot_bfusd_transfer_amount(&spot).unwrap(),
+            Some("2.88457476".to_owned())
+        );
+        assert_eq!(
+            spot_bfusd_transfer_amount(&serde_json::json!({
+                "balances": [{"asset": "BFUSD", "free": "0.00009999"}]
+            }))
+            .unwrap(),
+            None
+        );
+        assert!(
+            spot_bfusd_transfer_amount(&serde_json::json!({"balances": []}))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            spot_bfusd_transfer_amount(&serde_json::json!({"balances": [{
+                "asset": "BFUSD", "free": "invalid"
+            }]}))
+            .is_err()
+        );
     }
 
     #[test]
