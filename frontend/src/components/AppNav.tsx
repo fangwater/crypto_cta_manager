@@ -1,4 +1,5 @@
 import { Activity, BookOpen, LayoutDashboard, LogOut, Settings, Shield, Scale, PiggyBank } from 'lucide-react'
+import { useLayoutEffect, useRef } from 'react'
 import { useAuth } from './AuthGate'
 import { cn } from '../lib/cn'
 
@@ -21,12 +22,24 @@ const links: Array<{
 
 export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: boolean }) {
   const { logout } = useAuth()
+  const navRef = useRef<HTMLElement>(null)
+
+  useLayoutEffect(() => {
+    if (!mobile) return
+    const nav = navRef.current
+    const current = nav?.querySelector<HTMLElement>('[aria-current="page"]')
+    if (!nav || !current) return
+    const navBounds = nav.getBoundingClientRect()
+    const currentBounds = current.getBoundingClientRect()
+    nav.scrollLeft += currentBounds.left - navBounds.left - (nav.clientWidth - current.clientWidth) / 2
+  }, [active, mobile])
+
   return (
     <div className={cn('flex items-center gap-2', mobile ? 'w-full md:hidden' : '')}>
       <nav className={cn(
         'items-center gap-1',
         mobile ? 'flex w-full overflow-x-auto' : 'hidden rounded-xl border border-border bg-canvas/80 p-1 md:flex',
-      )} aria-label="主导航">
+      )} aria-label="主导航" ref={navRef}>
         {links.map((link) => {
         const Icon = link.icon
         const isActive = active === link.id
@@ -35,6 +48,7 @@ export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: 
             key={link.id}
             href={link.href}
             title={link.label}
+            aria-current={isActive ? 'page' : undefined}
             className={cn(
               'inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
               isActive
