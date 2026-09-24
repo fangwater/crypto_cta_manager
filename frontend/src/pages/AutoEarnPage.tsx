@@ -155,11 +155,7 @@ export function AutoEarnPage() {
 
   return (
     <AppShell active="auto-earn" title="自动理财" subtitle="Binance STANDARD" icon={PiggyBank}>
-      <PageIntro eyebrow="BFUSD" title="自动理财" actions={
-        <Button type="button" variant="ghost" onClick={() => void refresh()} title="刷新状态" aria-label="刷新状态" disabled={!sourceId || settingsLoading}>
-          <RefreshCw size={16} />
-        </Button>
-      } />
+      <PageIntro eyebrow="BFUSD" title="自动理财" />
       {error && <Alert tone="error" className="mb-5">{error}</Alert>}
       {notice && <Alert tone="success" className="mb-5">{notice}</Alert>}
       <div className="border-y border-border bg-surface px-4 py-4 sm:px-6">
@@ -169,10 +165,16 @@ export function AutoEarnPage() {
               {accounts.map((account) => <option key={account.source_id} value={account.source_id}>{account.account}</option>)}
             </Select>
           </Label>
-          <Badge tone={statusTone} className="self-start sm:mb-2">
-            {settings.running && <LoaderCircle size={12} className="mr-1 animate-spin-slow" />}
-            {statusLabel}
-          </Badge>
+          <div className="flex items-center gap-2 self-start sm:mb-1">
+            <Badge tone={statusTone}>
+              {settings.running && <LoaderCircle size={12} className="mr-1 animate-spin-slow" />}
+              {statusLabel}
+            </Badge>
+            <Button type="button" size="sm" variant="ghost" className="h-8 w-8 p-0"
+              onClick={() => void refresh()} title="刷新状态" aria-label="刷新状态" disabled={!sourceId || settingsLoading}>
+              <RefreshCw size={16} />
+            </Button>
+          </div>
         </div>
       </div>
       {!loading && !sourceId && <Alert tone="warning" className="mt-6">没有可用的 Binance 账户</Alert>}
@@ -258,7 +260,13 @@ export function AutoEarnPage() {
             </div>
             {settings.paused && <Alert tone="warning" className="mt-5">上次执行可能只完成了部分步骤，或检测到申购费用。核对最近结果及账户余额后再解除暂停。</Alert>}
             <div className="py-5 text-sm leading-6 text-muted">
-              {settings.last_result ? <p className="break-words text-ink">{settings.last_result}</p> : <p>暂无执行记录</p>}
+              {settings.last_result ? (
+                <div className="space-y-3 border-l-2 border-brand-ring pl-3">
+                  {settings.last_result.split('; ').map((part, index) => (
+                    <p key={index} className="break-words text-ink">{part}</p>
+                  ))}
+                </div>
+              ) : <p>暂无执行记录</p>}
             </div>
           </aside>
         </div>
