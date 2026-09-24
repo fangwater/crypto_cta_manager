@@ -17,15 +17,21 @@ use tracing::{info, warn};
 
 use crate::config::{AppConfig, DingTalkConfig, MonitorConfig, SourceConfig};
 use crate::model::{
-    ORDER_UPDATES_CF, TRADE_UPDATES_CF, UniformOrderEvent, decode_order_update,
-    decode_trade_update, decode_uniform_order,
+    ORDER_UPDATES_CF, ORDER_UPDATES_UNMATCHED_CF, TRADE_UPDATES_CF, TRADE_UPDATES_UNMATCHED_CF,
+    UniformOrderEvent, decode_order_update, decode_trade_update, decode_uniform_order,
 };
 use crate::redis_runtime::{ExecTargetSnapshot, RedisRuntime};
 use crate::rocks_source::{RawRocksRecord, read_latest_column_families};
 use crate::twap::parse_ask_bid_spread;
 use crate::viz_snapshot::{ExecStateSnapshot, VizSnapshotClient};
 
-const RECENT_COLUMN_FAMILIES: [&str; 3] = ["uniform_orders", ORDER_UPDATES_CF, TRADE_UPDATES_CF];
+const RECENT_COLUMN_FAMILIES: [&str; 5] = [
+    "uniform_orders",
+    ORDER_UPDATES_CF,
+    TRADE_UPDATES_CF,
+    ORDER_UPDATES_UNMATCHED_CF,
+    TRADE_UPDATES_UNMATCHED_CF,
+];
 const MARKET_PAYLOAD_BYTES: usize = 128;
 const MARKET_HISTORY_SIZE: usize = 100;
 const MARKET_MAX_SUBSCRIBERS: usize = 64;
@@ -528,6 +534,7 @@ fn check_orders(
     let mut issues = Vec::new();
     let mut latest_orders = HashMap::<i64, UniformOrderEvent>::new();
     let mut order_activity = HashMap::<i64, i64>::new();
+    let mut terminal_order_ids = HashSet::<i64>::new();
     let mut decode_failures = 0usize;
     for record in records.get("uniform_orders").into_iter().flatten() {
         match decode_uniform_order(&record.key, &record.value) {
@@ -552,24 +559,42 @@ fn check_orders(
             Err(_) => decode_failures += 1,
         }
     }
-    for record in records.get(ORDER_UPDATES_CF).into_iter().flatten() {
+    for record in records.get(ORDER_UPDATES_CF).into_iter().flatten().chain(
+        records
+            .get(ORDER_UPDATES_UNMATCHED_CF)
+            .into_iter()
+            .flatten(),
+    ) {
         match decode_order_update(&record.key, &record.value) {
             Ok(event) => {
                 order_activity
                     .entry(event.client_order_id)
                     .and_modify(|value| *value = (*value).max(event.event_ts_us))
                     .or_insert(event.event_ts_us);
+                if is_terminal_raw_status_code(event.status_code)
+                    || is_terminal_order_status(&event.raw_status)
+                {
+                    terminal_order_ids.insert(event.client_order_id);
+                }
             }
             Err(_) => decode_failures += 1,
         }
     }
-    for record in records.get(TRADE_UPDATES_CF).into_iter().flatten() {
+    for record in records.get(TRADE_UPDATES_CF).into_iter().flatten().chain(
+        records
+            .get(TRADE_UPDATES_UNMATCHED_CF)
+            .into_iter()
+            .flatten(),
+    ) {
         match decode_trade_update(&record.key, &record.value) {
             Ok(event) => {
                 order_activity
                     .entry(event.client_order_id)
                     .and_modify(|value| *value = (*value).max(event.event_ts_us))
                     .or_insert(event.event_ts_us);
+                if event.status_code.is_some_and(is_terminal_raw_status_code) {
+                    terminal_order_ids.insert(event.client_order_id);
+                }
             }
             Err(_) => decode_failures += 1,
         }
@@ -584,7 +609,9 @@ fn check_orders(
     }
 
     for event in latest_orders.values() {
-        if is_terminal_order_status(&event.status) {
+        if is_terminal_order_status(&event.status)
+            || terminal_order_ids.contains(&event.client_order_id)
+        {
             continue;
         }
         if event.status.starts_with("UNKNOWN(") {
@@ -907,6 +934,10 @@ fn is_terminal_order_status(status: &str) -> bool {
         status,
         "FILLED" | "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH"
     )
+}
+
+fn is_terminal_raw_status_code(status: i16) -> bool {
+    matches!(status, 2..=5)
 }
 
 fn normalize_symbol(raw: &str) -> String {
@@ -1524,6 +1555,156 @@ mod tests {
             legacy_share_unit_usdt: None,
             env_path: None,
         }
+    }
+
+    fn order_record(now_us: i64, order_id: i64) -> RawRocksRecord {
+        let event_ts_us = now_us - 300_000_000;
+        let mut value = Vec::new();
+        value.extend_from_slice(&event_ts_us.to_le_bytes());
+        value.extend_from_slice(&7_u16.to_le_bytes());
+        value.extend_from_slice(b"BTCUSDT");
+        for field in [event_ts_us; 6].into_iter().chain([order_id]) {
+            value.extend_from_slice(&field.to_le_bytes());
+        }
+        value.extend_from_slice(&[1, 1, 1]);
+        for field in [100.0_f64, 0.0, 1.0, 0.0] {
+            value.extend_from_slice(&field.to_le_bytes());
+        }
+        value.push(1); // NEW
+        value.extend_from_slice(&0_u32.to_le_bytes());
+        RawRocksRecord {
+            key: format!("{event_ts_us:020}").into_bytes(),
+            value,
+        }
+    }
+
+    fn order_update_record(now_us: i64, order_id: i64, status: u8) -> RawRocksRecord {
+        let event_ts_us = now_us - 299_000_000;
+        let mut value = Vec::new();
+        value.extend_from_slice(&event_ts_us.to_le_bytes());
+        value.extend_from_slice(&event_ts_us.to_le_bytes());
+        value.extend_from_slice(&7_u32.to_le_bytes());
+        value.extend_from_slice(b"BTCUSDT");
+        value.extend_from_slice(&order_id.to_le_bytes());
+        value.extend_from_slice(&order_id.to_le_bytes());
+        value.extend_from_slice(&[0, 1, 1, 1]);
+        for field in [100.0_f64, 1.0, 1.0] {
+            value.extend_from_slice(&field.to_le_bytes());
+        }
+        value.push(status);
+        let raw_status: &[u8] = if status == 2 { b"FILLED" } else { b"NEW" };
+        value.extend_from_slice(&(raw_status.len() as u32).to_le_bytes());
+        value.extend_from_slice(raw_status);
+        value.push(0);
+        value.extend_from_slice(&0_u32.to_le_bytes());
+        value.push(1);
+        RawRocksRecord {
+            key: format!("{event_ts_us:020}").into_bytes(),
+            value,
+        }
+    }
+
+    #[test]
+    fn terminal_order_update_clears_stale_uniform_new_order() {
+        let now_us = 1_000_000_000;
+        let order_id = 4771277421074710618;
+        let source = test_source("binance-futures");
+        let monitor = MonitorConfig::default();
+        let mut records = BTreeMap::from([(
+            "uniform_orders".to_string(),
+            vec![order_record(now_us, order_id)],
+        )]);
+        assert!(
+            check_orders(&source, &monitor, &records, now_us)
+                .iter()
+                .any(|issue| issue.key.contains("stale:"))
+        );
+
+        records.insert(
+            ORDER_UPDATES_CF.to_string(),
+            vec![order_update_record(now_us, order_id, 2)],
+        );
+        assert!(check_orders(&source, &monitor, &records, now_us).is_empty());
+    }
+
+    #[test]
+    fn terminal_unmatched_trade_clears_stale_uniform_new_order() {
+        let now_us = 1_000_000_000_i64;
+        let order_id = 4771277421074710618_i64;
+        let mut value = Vec::new();
+        let event_ts_us = now_us - 299_000_000;
+        for field in [event_ts_us; 3] {
+            value.extend_from_slice(&field.to_le_bytes());
+        }
+        value.extend_from_slice(&7_u32.to_le_bytes());
+        value.extend_from_slice(b"BTCUSDT");
+        value.extend_from_slice(&order_id.to_le_bytes());
+        value.extend_from_slice(&order_id.to_le_bytes());
+        value.push(1);
+        value.extend_from_slice(&100.0_f64.to_le_bytes());
+        value.extend_from_slice(&[0, 1]);
+        value.extend_from_slice(&1.0_f64.to_le_bytes());
+        value.extend_from_slice(&[1, 2]); // status present, FILLED
+        let mut records = BTreeMap::from([
+            (
+                "uniform_orders".to_string(),
+                vec![order_record(now_us, order_id)],
+            ),
+            (
+                TRADE_UPDATES_UNMATCHED_CF.to_string(),
+                vec![RawRocksRecord {
+                    key: format!("{event_ts_us:020}").into_bytes(),
+                    value,
+                }],
+            ),
+        ]);
+        assert!(
+            check_orders(
+                &test_source("binance-futures"),
+                &MonitorConfig::default(),
+                &records,
+                now_us,
+            )
+            .is_empty()
+        );
+
+        *records.get_mut(TRADE_UPDATES_UNMATCHED_CF).unwrap()[0]
+            .value
+            .last_mut()
+            .unwrap() = 1; // PARTIALLY_FILLED
+        assert!(
+            check_orders(
+                &test_source("binance-futures"),
+                &MonitorConfig::default(),
+                &records,
+                now_us,
+            )
+            .iter()
+            .any(|issue| issue.key.contains("stale:"))
+        );
+    }
+
+    #[test]
+    fn nonterminal_order_update_keeps_stale_order_alert() {
+        let now_us = 1_000_000_000;
+        let order_id = 4771277421074710618;
+        let source = test_source("binance-futures");
+        let monitor = MonitorConfig::default();
+        let records = BTreeMap::from([
+            (
+                "uniform_orders".to_string(),
+                vec![order_record(now_us, order_id)],
+            ),
+            (
+                ORDER_UPDATES_CF.to_string(),
+                vec![order_update_record(now_us, order_id, 1)],
+            ),
+        ]);
+        assert!(
+            check_orders(&source, &monitor, &records, now_us)
+                .iter()
+                .any(|issue| issue.key.contains("stale:"))
+        );
     }
 
     fn insert_quote(feed: &MarketFeed, venue: &str, symbol: &str, received_ts_us: i64) {

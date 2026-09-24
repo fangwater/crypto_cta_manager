@@ -786,7 +786,15 @@ mod tests {
                 .unwrap()
                 .monitor_enabled
         );
-        for number in 9..=11 {
+        assert!(
+            config
+                .sources
+                .iter()
+                .find(|source| source.id == "binance_exec_trade09")
+                .unwrap()
+                .monitor_enabled
+        );
+        for number in 10..=11 {
             let id = format!("binance_exec_trade{number:02}");
             let source = config
                 .sources
