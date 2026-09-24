@@ -272,12 +272,12 @@ impl AutoEarnHub {
                     .find(|asset| asset.get("asset").and_then(Value::as_str) == Some("USDT"))
             })
             .context("USDT asset missing from Binance account")?;
-        let wallet = number(usdt, "walletBalance")?;
+        let wallet = finite_number(usdt, "walletBalance")?;
         let withdrawable = number(usdt, "maxWithdrawAmount")?;
         if wallet.min(withdrawable) <= settings.trigger_usdt {
             return Ok(format!(
-                "skipped: transferable USDT {:.2} is below trigger",
-                wallet.min(withdrawable)
+                "skipped: USDT wallet {:.2}, max withdrawable {:.2} is below trigger",
+                wallet, withdrawable
             ));
         }
         let margin = number(&account, "totalMarginBalance")?;
@@ -479,6 +479,14 @@ fn load_account_ips(source: &SourceConfig) -> Result<Vec<IpAddr>> {
 }
 
 fn number(value: &Value, key: &str) -> Result<f64> {
+    let amount = finite_number(value, key)?;
+    if amount < 0.0 {
+        bail!("Binance field {key} is invalid");
+    }
+    Ok(amount)
+}
+
+fn finite_number(value: &Value, key: &str) -> Result<f64> {
     let field = value
         .get(key)
         .with_context(|| format!("Binance field {key} missing"))?;
@@ -488,7 +496,7 @@ fn number(value: &Value, key: &str) -> Result<f64> {
         .transpose()?
         .or_else(|| field.as_f64())
         .with_context(|| format!("Binance field {key} is not numeric"))?;
-    if !amount.is_finite() || amount < 0.0 {
+    if !amount.is_finite() {
         bail!("Binance field {key} is invalid");
     }
     Ok(amount)
@@ -634,6 +642,19 @@ mod tests {
             round_amount_cents(9000.0, 9000.0, 650.0, 200.0, 9000.0, 5000.0),
             5000
         );
+    }
+
+    #[test]
+    fn negative_usdt_wallet_balance_is_a_valid_skip_condition() {
+        let asset = serde_json::json!({
+            "walletBalance": "-0.25",
+            "maxWithdrawAmount": "0.00",
+        });
+        let wallet = finite_number(&asset, "walletBalance").unwrap();
+        let withdrawable = number(&asset, "maxWithdrawAmount").unwrap();
+        assert_eq!(wallet, -0.25);
+        assert!(wallet.min(withdrawable) <= AccountSettings::default().trigger_usdt);
+        assert!(number(&asset, "walletBalance").is_err());
     }
 
     #[test]
