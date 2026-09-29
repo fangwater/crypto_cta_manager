@@ -616,6 +616,7 @@ dependencies = [
  "arrow-schema",
  "axum",
  "base64",
+ "chrono",
  "clap",
  "hex",
  "hmac 0.12.1",

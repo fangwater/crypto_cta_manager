@@ -84,6 +84,8 @@ pub struct MonitorConfig {
     pub market_stale_secs: u64,
     pub order_stale_secs: u64,
     pub position_stale_secs: u64,
+    /// Continuous position_ready=false duration before alerting.
+    pub position_not_ready_secs: u64,
     /// Grace after the Exec estimated completion time before alerting.
     pub execution_grace_secs: u64,
     /// Maximum recent records read from each Exec RocksDB column family per poll.
@@ -226,6 +228,7 @@ impl Default for MonitorConfig {
             market_stale_secs: 5,
             order_stale_secs: 120,
             position_stale_secs: 30,
+            position_not_ready_secs: 60,
             execution_grace_secs: 30,
             recent_order_records: 2_000,
             position_tolerance: 1e-8,
@@ -305,6 +308,9 @@ impl AppConfig {
         }
         if self.monitor.position_stale_secs == 0 {
             bail!("monitor.position_stale_secs must be greater than zero");
+        }
+        if self.monitor.position_not_ready_secs == 0 {
+            bail!("monitor.position_not_ready_secs must be greater than zero");
         }
         if self.monitor.recent_order_records == 0 {
             bail!("monitor.recent_order_records must be greater than zero");
@@ -724,6 +730,23 @@ const fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_not_ready_threshold_defaults_and_validates() {
+        let monitor: MonitorConfig =
+            toml::from_str("position_stale_secs = 30").expect("legacy monitor config");
+        assert_eq!(monitor.position_not_ready_secs, 60);
+
+        let mut config = config_with_sources(vec![source("trade01", "/tmp/trade01")]);
+        config.monitor.position_not_ready_secs = 0;
+        assert!(
+            config
+                .validate()
+                .expect_err("zero threshold must be rejected")
+                .to_string()
+                .contains("monitor.position_not_ready_secs")
+        );
+    }
 
     fn config_with_sources(sources: Vec<SourceConfig>) -> AppConfig {
         AppConfig {

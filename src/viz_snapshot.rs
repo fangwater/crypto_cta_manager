@@ -52,6 +52,7 @@ pub struct ExecStateSnapshot {
 pub struct ExecStateRowSnapshot {
     pub strategy_name: String,
     pub symbol: String,
+    pub position_allocated: Option<bool>,
     pub source_updated_at_ms: i64,
     pub current_qty: Option<f64>,
     pub current_usdt: Option<f64>,
@@ -200,6 +201,7 @@ struct ExecStateRow {
     strategy_name: String,
     #[serde(default)]
     symbol: String,
+    position_allocated: Option<bool>,
     current_qty: Option<f64>,
     current_usdt: Option<f64>,
     account_position_qty: Option<f64>,
@@ -253,6 +255,7 @@ fn extract_exec_state_from_decoded(source_id: &str, snapshot: &VizSnapshot) -> E
             .map(|row| ExecStateRowSnapshot {
                 strategy_name: row.strategy_name.clone(),
                 symbol: normalize_symbol(&row.symbol),
+                position_allocated: row.position_allocated,
                 source_updated_at_ms: row.source_updated_at_ms,
                 current_qty: row.current_qty.filter(|value| value.is_finite()),
                 current_usdt: row.current_usdt.filter(|value| value.is_finite()),
@@ -573,6 +576,7 @@ mod tests {
                     "rows": [{
                         "strategy_name": "cta_a",
                         "symbol": "BTC-USDT",
+                        "position_allocated": false,
                         "source_updated_at_ms": 990,
                         "current_qty": 0.5,
                         "current_usdt": 32500.0,
@@ -592,6 +596,7 @@ mod tests {
         assert!(state.position_ready);
         assert_eq!(state.rows.len(), 1);
         assert_eq!(state.rows[0].symbol, "BTCUSDT");
+        assert_eq!(state.rows[0].position_allocated, Some(false));
         assert_eq!(state.rows[0].current_usdt, Some(32_500.0));
         assert_eq!(state.rows[0].target_qty, Some(0.8));
         assert_eq!(state.rows[0].pending_qty, Some(0.2));

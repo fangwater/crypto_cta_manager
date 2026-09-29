@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use iceoryx2::prelude::*;
 use iceoryx2::service::ipc;
@@ -88,6 +89,75 @@ fn issue(
         &source.id,
         format!("[{label}] {}", message.into()),
     )
+}
+
+#[derive(Default)]
+struct NotReadyTracker {
+    first_seen_by_source: HashMap<String, i64>,
+}
+
+impl NotReadyTracker {
+    fn observe(
+        &mut self,
+        source: &SourceConfig,
+        monitor: &MonitorConfig,
+        snapshot: Option<&ExecStateSnapshot>,
+        now_us: i64,
+    ) -> Option<MonitorIssue> {
+        let snapshot = match snapshot {
+            Some(snapshot)
+                if snapshot.source_id == source.id
+                    && position_snapshot_fresh(snapshot, monitor, now_us) =>
+            {
+                snapshot
+            }
+            _ => {
+                self.first_seen_by_source.remove(&source.id);
+                return None;
+            }
+        };
+        if snapshot.position_ready {
+            self.first_seen_by_source.remove(&source.id);
+            return None;
+        }
+        let first_seen = *self
+            .first_seen_by_source
+            .entry(source.id.clone())
+            .or_insert(now_us);
+        let elapsed_us = now_us.saturating_sub(first_seen);
+        if elapsed_us <= seconds_to_us(monitor.position_not_ready_secs) {
+            return None;
+        }
+        let first_seen_text = DateTime::<Utc>::from_timestamp_micros(first_seen)
+            .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| format!("{first_seen} us since Unix epoch"));
+        let unallocated = snapshot
+            .rows
+            .iter()
+            .filter(|row| row.position_allocated == Some(false))
+            .map(|row| format!("{}×{}", row.strategy_name, row.symbol))
+            .collect::<BTreeSet<_>>();
+        let details = if unallocated.is_empty() {
+            String::new()
+        } else {
+            let rows = unallocated.iter().take(5).cloned().collect::<Vec<_>>();
+            let more = if unallocated.len() > rows.len() {
+                format!(" 等共 {} 行", unallocated.len())
+            } else {
+                String::new()
+            };
+            format!("；未就绪行: {}{more}", rows.join("、"))
+        };
+        Some(issue(
+            "position",
+            "not-ready",
+            source,
+            format!(
+                "Exec pre-trade position_ready=false，仓位尚未准备好；首次出现: {first_seen_text}；持续 {} 秒{details}",
+                elapsed_us / 1_000_000
+            ),
+        ))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -250,6 +320,7 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
         .then(|| DingTalkSenders::from_config(&config.monitor.dingtalk, &config.monitor.host_tag))
         .transpose()?;
     let mut tracker = AlertTracker::default();
+    let mut not_ready = NotReadyTracker::default();
     let mut heartbeat = [
         (
             NoticeChannel::Market,
@@ -263,7 +334,15 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
     let poll_interval = Duration::from_secs(config.monitor.poll_interval_secs);
 
     loop {
-        let issues = check_once(&config, &enabled_sources, &market, &viz, &redis).await;
+        let issues = check_once(
+            &config,
+            &enabled_sources,
+            &market,
+            &viz,
+            &redis,
+            &mut not_ready,
+        )
+        .await;
         if dry_run {
             print_dry_run(&issues);
         } else {
@@ -353,6 +432,7 @@ async fn check_once(
     market: &MarketFeed,
     viz: &VizSnapshotClient,
     redis: &RedisRuntime,
+    not_ready: &mut NotReadyTracker,
 ) -> Vec<MonitorIssue> {
     let now_us = unix_time_us();
     let mut issues = check_market(config, market, now_us);
@@ -366,7 +446,17 @@ async fn check_once(
     }
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(source_issues) => issues.extend(source_issues),
+            Ok(result) => {
+                if let Some(not_ready_issue) = not_ready.observe(
+                    &result.source,
+                    &config.monitor,
+                    result.snapshot.as_ref(),
+                    now_us,
+                ) {
+                    issues.push(not_ready_issue);
+                }
+                issues.extend(result.issues);
+            }
             Err(error) => issues.push(MonitorIssue::new(
                 "monitor",
                 "worker",
@@ -435,14 +525,21 @@ fn check_market(config: &AppConfig, market: &MarketFeed, now_us: i64) -> Vec<Mon
     issues
 }
 
+struct SourceCheckResult {
+    source: SourceConfig,
+    issues: Vec<MonitorIssue>,
+    snapshot: Option<ExecStateSnapshot>,
+}
+
 async fn check_source(
     source: SourceConfig,
     monitor: MonitorConfig,
     viz: VizSnapshotClient,
     redis: RedisRuntime,
     now_us: i64,
-) -> Vec<MonitorIssue> {
+) -> SourceCheckResult {
     let mut issues = Vec::new();
+    let mut position_snapshot = None;
     let source_id = source.id.clone();
     let path = source.rocksdb_path.clone();
     let limit = monitor.recent_order_records;
@@ -506,13 +603,16 @@ async fn check_source(
                 }
             };
             match viz.load_exec_state(&source_id, origin).await {
-                Ok(snapshot) => issues.extend(check_position(
-                    &source,
-                    &monitor,
-                    &snapshot,
-                    configured.as_ref(),
-                    now_us,
-                )),
+                Ok(snapshot) => {
+                    issues.extend(check_position(
+                        &source,
+                        &monitor,
+                        &snapshot,
+                        configured.as_ref(),
+                        now_us,
+                    ));
+                    position_snapshot = Some(snapshot);
+                }
                 Err(error) => issues.push(issue(
                     "position",
                     "snapshot",
@@ -522,7 +622,11 @@ async fn check_source(
             }
         }
     }
-    issues
+    SourceCheckResult {
+        source,
+        issues,
+        snapshot: position_snapshot,
+    }
 }
 
 fn check_orders(
@@ -649,6 +753,15 @@ fn check_orders(
     issues
 }
 
+fn position_snapshot_fresh(
+    snapshot: &ExecStateSnapshot,
+    monitor: &MonitorConfig,
+    now_us: i64,
+) -> bool {
+    let age_ms = (now_us / 1_000).saturating_sub(snapshot.snapshot_ts_ms);
+    snapshot.snapshot_ts_ms > 0 && age_ms <= monitor.position_stale_secs as i64 * 1_000
+}
+
 fn check_position(
     source: &SourceConfig,
     monitor: &MonitorConfig,
@@ -658,10 +771,7 @@ fn check_position(
 ) -> Vec<MonitorIssue> {
     let mut issues = Vec::new();
     let now_ms = now_us / 1_000;
-    let age_ms = now_ms.saturating_sub(snapshot.snapshot_ts_ms);
-    let snapshot_fresh =
-        snapshot.snapshot_ts_ms > 0 && age_ms <= monitor.position_stale_secs as i64 * 1_000;
-    if !snapshot_fresh {
+    if !position_snapshot_fresh(snapshot, monitor, now_us) {
         issues.push(issue(
             "position",
             "stale",
@@ -681,15 +791,6 @@ fn check_position(
             format!("Exec Viz snapshot source_id 不匹配: {}", snapshot.source_id),
         ));
     }
-    if !snapshot.position_ready {
-        issues.push(issue(
-            "position",
-            "not-ready",
-            source,
-            "Exec pre-trade position_ready=false，仓位尚未准备好",
-        ));
-    }
-
     let mut account_qty_by_symbol = HashMap::<&str, f64>::new();
     let mut live_order_abs_by_symbol = HashMap::<&str, f64>::new();
     let mut accepted_residual_by_symbol = HashMap::<&str, f64>::new();
@@ -1861,6 +1962,7 @@ mod tests {
         ExecStateRowSnapshot {
             strategy_name: strategy.to_string(),
             symbol: symbol.to_string(),
+            position_allocated: None,
             source_updated_at_ms: updated_ms,
             current_qty: Some(current),
             current_usdt: None,
@@ -2213,11 +2315,6 @@ mod tests {
         snapshot.rows.pop();
         snapshot.position_ready = false;
         assert!(!unapplied(&snapshot, &configured));
-        assert!(
-            check_position(&source, &monitor, &snapshot, Some(&configured), now_us)
-                .iter()
-                .any(|issue| issue.key.contains("not-ready"))
-        );
         snapshot.position_ready = true;
         snapshot.snapshot_ts_ms = published_us / 1_000 - 1;
         assert!(unapplied(&snapshot, &configured));
@@ -2231,6 +2328,135 @@ mod tests {
             .targets
             .insert("BTCUSDT".to_string(), 1.0);
         assert!(unapplied(&snapshot, &nonzero));
+    }
+
+    #[test]
+    fn not_ready_requires_continuous_fresh_snapshots_per_source() {
+        let source = test_source("binance-futures");
+        let mut other = source.clone();
+        other.id = "other_source".to_string();
+        let monitor = MonitorConfig::default();
+        let start_us = 1_700_000_000_000_000;
+        let mut snapshot = ExecStateSnapshot {
+            source_id: source.id.clone(),
+            snapshot_ts_ms: start_us / 1_000,
+            position_ready: false,
+            rows: (0..7)
+                .map(|index| {
+                    let mut row = position_row(
+                        &format!("cta_{index}"),
+                        "BTCUSDT",
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        Some(0.0),
+                        start_us / 1_000,
+                    );
+                    row.position_allocated = Some(false);
+                    row
+                })
+                .collect(),
+        };
+        let mut allocated = position_row(
+            "cta_ready",
+            "ETHUSDT",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            Some(0.0),
+            start_us / 1_000,
+        );
+        allocated.position_allocated = Some(true);
+        snapshot.rows.push(allocated);
+        let mut tracker = NotReadyTracker::default();
+        assert!(
+            tracker
+                .observe(&source, &monitor, Some(&snapshot), start_us)
+                .is_none()
+        );
+        let mut other_snapshot = snapshot.clone();
+        other_snapshot.source_id = other.id.clone();
+        let other_start = start_us + 10_000_000;
+        other_snapshot.snapshot_ts_ms = other_start / 1_000;
+        assert!(
+            tracker
+                .observe(&other, &monitor, Some(&other_snapshot), other_start)
+                .is_none()
+        );
+        let at_threshold = start_us + seconds_to_us(monitor.position_not_ready_secs);
+        snapshot.snapshot_ts_ms = at_threshold / 1_000;
+        assert!(
+            tracker
+                .observe(&source, &monitor, Some(&snapshot), at_threshold)
+                .is_none()
+        );
+        let after_threshold = at_threshold + 1_000_000;
+        snapshot.snapshot_ts_ms = after_threshold / 1_000;
+        let alert = tracker
+            .observe(&source, &monitor, Some(&snapshot), after_threshold)
+            .expect("continuous not-ready should alert");
+        assert_eq!(alert.key, format!("position:not-ready:{}", source.id));
+        assert!(alert.message.contains("2023-11-14 22:13:20 UTC"));
+        assert!(alert.message.contains("持续 61 秒"));
+        assert!(alert.message.contains("cta_0×BTCUSDT"));
+        assert!(alert.message.contains("cta_4×BTCUSDT"));
+        assert!(!alert.message.contains("cta_5×BTCUSDT"));
+        assert!(!alert.message.contains("cta_ready×ETHUSDT"));
+        assert!(alert.message.contains("等共 7 行"));
+        other_snapshot.snapshot_ts_ms = after_threshold / 1_000;
+        assert!(
+            tracker
+                .observe(&other, &monitor, Some(&other_snapshot), after_threshold)
+                .is_none()
+        );
+
+        snapshot.position_ready = true;
+        assert!(
+            tracker
+                .observe(&source, &monitor, Some(&snapshot), after_threshold)
+                .is_none()
+        );
+        snapshot.position_ready = false;
+        assert!(
+            tracker
+                .observe(
+                    &source,
+                    &monitor,
+                    Some(&snapshot),
+                    after_threshold + 1_000_000
+                )
+                .is_none()
+        );
+        assert!(
+            tracker
+                .observe(&source, &monitor, None, after_threshold + 2_000_000)
+                .is_none()
+        );
+        snapshot.snapshot_ts_ms = (after_threshold + 3_000_000) / 1_000;
+        assert!(
+            tracker
+                .observe(
+                    &source,
+                    &monitor,
+                    Some(&snapshot),
+                    after_threshold + 3_000_000
+                )
+                .is_none()
+        );
+        let stale_at = after_threshold + 3_000_000 + seconds_to_us(monitor.position_stale_secs + 1);
+        assert!(
+            tracker
+                .observe(&source, &monitor, Some(&snapshot), stale_at)
+                .is_none()
+        );
+        snapshot.snapshot_ts_ms = (stale_at + 1_000_000) / 1_000;
+        assert!(
+            tracker
+                .observe(&source, &monitor, Some(&snapshot), stale_at + 1_000_000)
+                .is_none()
+        );
     }
 
     #[test]
