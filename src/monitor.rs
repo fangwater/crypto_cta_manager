@@ -657,14 +657,6 @@ fn check_position(
     now_us: i64,
 ) -> Vec<MonitorIssue> {
     let mut issues = Vec::new();
-    if snapshot.source_id != source.id {
-        issues.push(issue(
-            "position",
-            "source-id",
-            source,
-            format!("Exec Viz snapshot source_id 不匹配: {}", snapshot.source_id),
-        ));
-    }
     let now_ms = now_us / 1_000;
     let age_ms = now_ms.saturating_sub(snapshot.snapshot_ts_ms);
     let snapshot_fresh =
@@ -678,6 +670,15 @@ fn check_position(
                 "Exec pre-trade 仓位快照已超过 {} 秒没有更新",
                 monitor.position_stale_secs
             ),
+        ));
+        return issues;
+    }
+    if snapshot.source_id != source.id {
+        issues.push(issue(
+            "position",
+            "source-id",
+            source,
+            format!("Exec Viz snapshot source_id 不匹配: {}", snapshot.source_id),
         ));
     }
     if !snapshot.position_ready {
@@ -754,7 +755,7 @@ fn check_position(
     // window. None means the Redis read failed and the check is skipped.
     let grace_ms = monitor.execution_grace_secs as i64 * 1_000;
     if let Some(configured) = configured {
-        if snapshot_fresh && snapshot.position_ready {
+        if snapshot.position_ready {
             issues.extend(check_strategy_config_applied(
                 source, monitor, snapshot, configured, now_us,
             ));
@@ -815,8 +816,7 @@ fn check_position(
             // Its explicit completion estimate keeps those normal gaps from being
             // mistaken for a stopped execution, but an overdue schedule still
             // falls through to the stuck-position alert.
-            let scheduled_execution = snapshot_fresh
-                && snapshot.position_ready
+            let scheduled_execution = snapshot.position_ready
                 && scheduled_execution_until_by_symbol
                     .get(symbol)
                     .is_some_and(|deadline| now_ms <= deadline.saturating_add(grace_ms));
@@ -870,7 +870,19 @@ fn check_strategy_config_applied(
         let mut mismatched = Vec::new();
         for (symbol, expected_qty) in &strategy.targets {
             let Some(row) = rows.get(&(strategy_name.as_str(), symbol.as_str())) else {
-                missing.push(symbol.as_str());
+                // A filtered idle row is safe to omit only with factual zero-position evidence.
+                let mut account_rows = snapshot.rows.iter().filter(|row| row.symbol == *symbol);
+                let account_position_is_zero = account_rows
+                    .next()
+                    .is_some_and(|row| row.account_position_qty == Some(0.0))
+                    && account_rows.all(|row| row.account_position_qty == Some(0.0));
+                if *expected_qty != 0.0
+                    || snapshot.source_id != source.id
+                    || snapshot.snapshot_ts_ms < expected_updated_at_ms
+                    || !account_position_is_zero
+                {
+                    missing.push(symbol.as_str());
+                }
                 continue;
             };
             if row.source_updated_at_ms < expected_updated_at_ms {
@@ -2127,6 +2139,126 @@ mod tests {
             .find(|issue| issue.key.contains("config-not-applied:cta_b"))
             .expect("missing strategy row should report an unapplied config");
         assert!(missing.message.contains("缺少行=BTCUSDT"));
+    }
+
+    #[test]
+    fn missing_zero_target_requires_fresh_ready_snapshot_and_zero_account_position() {
+        let source = test_source("binance-futures");
+        let mut monitor = MonitorConfig::default();
+        monitor.execution_grace_secs = 5;
+        let now_us = unix_time_us();
+        let now_ms = now_us / 1_000;
+        let published_us = now_us - seconds_to_us(monitor.execution_grace_secs + 10);
+        let configured = ExecTargetSnapshot {
+            aggregate_targets: BTreeMap::new(),
+            strategies: BTreeMap::from([(
+                "cta_zero".to_string(),
+                crate::redis_runtime::ExecStrategyTargetState {
+                    family: "batch_exec".to_string(),
+                    updated_at_us: published_us,
+                    targets: BTreeMap::from([("BTCUSDT".to_string(), 0.0)]),
+                },
+            )]),
+        };
+        let mut snapshot = ExecStateSnapshot {
+            source_id: source.id.clone(),
+            snapshot_ts_ms: now_ms,
+            position_ready: true,
+            rows: vec![position_row(
+                "other_strategy",
+                "BTCUSDT",
+                0.0,
+                1.0,
+                1.0,
+                0.0,
+                Some(0.0),
+                now_ms,
+            )],
+        };
+        let unapplied = |snapshot: &ExecStateSnapshot, configured: &ExecTargetSnapshot| {
+            check_position(&source, &monitor, snapshot, Some(configured), now_us)
+                .iter()
+                .any(|issue| issue.key.contains("config-not-applied:cta_zero"))
+        };
+
+        assert!(!unapplied(&snapshot, &configured));
+
+        snapshot.rows.clear();
+        assert!(unapplied(&snapshot, &configured));
+        snapshot.rows.push(position_row(
+            "other_strategy",
+            "BTCUSDT",
+            0.0,
+            1.0,
+            1.0,
+            0.0,
+            Some(0.1),
+            now_ms,
+        ));
+        assert!(unapplied(&snapshot, &configured));
+        snapshot.rows[0].account_position_qty = None;
+        assert!(unapplied(&snapshot, &configured));
+        snapshot.rows[0].account_position_qty = Some(0.0);
+        snapshot.rows.push(position_row(
+            "third_strategy",
+            "BTCUSDT",
+            0.0,
+            1.0,
+            1.0,
+            0.0,
+            Some(0.1),
+            now_ms,
+        ));
+        assert!(unapplied(&snapshot, &configured));
+        snapshot.rows.pop();
+        snapshot.position_ready = false;
+        assert!(!unapplied(&snapshot, &configured));
+        assert!(
+            check_position(&source, &monitor, &snapshot, Some(&configured), now_us)
+                .iter()
+                .any(|issue| issue.key.contains("not-ready"))
+        );
+        snapshot.position_ready = true;
+        snapshot.snapshot_ts_ms = published_us / 1_000 - 1;
+        assert!(unapplied(&snapshot, &configured));
+
+        snapshot.snapshot_ts_ms = now_ms;
+        let mut nonzero = configured.clone();
+        nonzero
+            .strategies
+            .get_mut("cta_zero")
+            .unwrap()
+            .targets
+            .insert("BTCUSDT".to_string(), 1.0);
+        assert!(unapplied(&snapshot, &nonzero));
+    }
+
+    #[test]
+    fn stale_snapshot_only_reports_stale_position_issue() {
+        let source = test_source("binance-futures");
+        let monitor = MonitorConfig::default();
+        let now_us = unix_time_us();
+        let old_ms = now_us / 1_000 - (monitor.position_stale_secs as i64 + 1) * 1_000;
+        let snapshot = ExecStateSnapshot {
+            source_id: source.id.clone(),
+            snapshot_ts_ms: old_ms,
+            position_ready: false,
+            rows: vec![position_row(
+                "cta_a",
+                "BTCUSDT",
+                0.4,
+                0.4,
+                0.0,
+                0.0,
+                Some(0.4),
+                old_ms,
+            )],
+        };
+        let configured = target_snapshot(BTreeMap::from([("BTCUSDT".to_string(), 0.3)]));
+        let issues = check_position(&source, &monitor, &snapshot, Some(&configured), now_us);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].key.contains("stale"));
+        assert!(!issues[0].message.contains("无挂单"));
     }
 
     #[test]
