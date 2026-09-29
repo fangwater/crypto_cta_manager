@@ -971,16 +971,11 @@ fn check_strategy_config_applied(
         let mut mismatched = Vec::new();
         for (symbol, expected_qty) in &strategy.targets {
             let Some(row) = rows.get(&(strategy_name.as_str(), symbol.as_str())) else {
-                // A filtered idle row is safe to omit only with factual zero-position evidence.
-                let mut account_rows = snapshot.rows.iter().filter(|row| row.symbol == *symbol);
-                let account_position_is_zero = account_rows
-                    .next()
-                    .is_some_and(|row| row.account_position_qty == Some(0.0))
-                    && account_rows.all(|row| row.account_position_qty == Some(0.0));
+                // Exec omits idle zero-target rows from a ready post-publish snapshot.
                 if *expected_qty != 0.0
                     || snapshot.source_id != source.id
                     || snapshot.snapshot_ts_ms < expected_updated_at_ms
-                    || !account_position_is_zero
+                    || !snapshot.position_ready
                 {
                     missing.push(symbol.as_str());
                 }
@@ -2244,7 +2239,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_zero_target_requires_fresh_ready_snapshot_and_zero_account_position() {
+    fn missing_zero_target_uses_ready_snapshot_after_publish() {
         let source = test_source("binance-futures");
         let mut monitor = MonitorConfig::default();
         monitor.execution_grace_secs = 5;
@@ -2269,52 +2264,31 @@ mod tests {
             rows: vec![position_row(
                 "other_strategy",
                 "BTCUSDT",
-                0.0,
+                0.1,
                 1.0,
-                1.0,
+                0.9,
                 0.0,
-                Some(0.0),
+                Some(0.1),
                 now_ms,
             )],
         };
         let unapplied = |snapshot: &ExecStateSnapshot, configured: &ExecTargetSnapshot| {
-            check_position(&source, &monitor, snapshot, Some(configured), now_us)
+            check_strategy_config_applied(&source, &monitor, snapshot, configured, now_us)
                 .iter()
                 .any(|issue| issue.key.contains("config-not-applied:cta_zero"))
         };
 
         assert!(!unapplied(&snapshot, &configured));
-
         snapshot.rows.clear();
-        assert!(unapplied(&snapshot, &configured));
-        snapshot.rows.push(position_row(
-            "other_strategy",
-            "BTCUSDT",
-            0.0,
-            1.0,
-            1.0,
-            0.0,
-            Some(0.1),
-            now_ms,
-        ));
-        assert!(unapplied(&snapshot, &configured));
-        snapshot.rows[0].account_position_qty = None;
-        assert!(unapplied(&snapshot, &configured));
-        snapshot.rows[0].account_position_qty = Some(0.0);
-        snapshot.rows.push(position_row(
-            "third_strategy",
-            "BTCUSDT",
-            0.0,
-            1.0,
-            1.0,
-            0.0,
-            Some(0.1),
-            now_ms,
-        ));
-        assert!(unapplied(&snapshot, &configured));
-        snapshot.rows.pop();
-        snapshot.position_ready = false;
         assert!(!unapplied(&snapshot, &configured));
+        snapshot.snapshot_ts_ms = published_us / 1_000;
+        assert!(!unapplied(&snapshot, &configured));
+
+        snapshot.source_id = "other_source".to_string();
+        assert!(unapplied(&snapshot, &configured));
+        snapshot.source_id = source.id.clone();
+        snapshot.position_ready = false;
+        assert!(unapplied(&snapshot, &configured));
         snapshot.position_ready = true;
         snapshot.snapshot_ts_ms = published_us / 1_000 - 1;
         assert!(unapplied(&snapshot, &configured));
