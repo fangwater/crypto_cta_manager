@@ -473,8 +473,18 @@ fn run_recorder(config: TwapConfig, db: ManagerDb, symbols: SharedSymbols) -> Re
     }
 }
 
+fn binance_futures_proxy_enabled() -> bool {
+    std::env::var("BINANCE_FUTURES_IPC_PROXY").as_deref() == Ok("1")
+}
+
 fn bbo_service_name(venue: &str) -> String {
-    let root = if venue == "binance-futures" {
+    bbo_service_name_with_proxy(venue, binance_futures_proxy_enabled())
+}
+
+/// Mirrors Exec's `BINANCE_FUTURES_IPC_PROXY=1` switch: only Binance Futures may
+/// use the `spread_pbs_proxy` root, and only when the proxy is explicitly enabled.
+fn bbo_service_name_with_proxy(venue: &str, proxy_enabled: bool) -> String {
+    let root = if venue == "binance-futures" && proxy_enabled {
         "spread_pbs_proxy"
     } else {
         "spread_pbs"
@@ -577,13 +587,17 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn binance_futures_twap_uses_proxy_only() {
+    fn binance_futures_twap_proxy_follows_env_switch() {
         assert_eq!(
-            bbo_service_name("binance-futures"),
+            bbo_service_name_with_proxy("binance-futures", false),
+            "spread_pbs/binance-futures/ask_bid_spread"
+        );
+        assert_eq!(
+            bbo_service_name_with_proxy("binance-futures", true),
             "spread_pbs_proxy/binance-futures/ask_bid_spread"
         );
         assert_eq!(
-            bbo_service_name("okex-futures"),
+            bbo_service_name_with_proxy("okex-futures", true),
             "spread_pbs/okex-futures/ask_bid_spread"
         );
     }
