@@ -56,6 +56,12 @@ impl WalletAssetAccumulator {
         self.ts_ms = Some(row.ts_ms);
         self.assets.insert(row.asset.clone(), row);
 
+        // USDT is emitted for every standard UM wallet snapshot; BFUSD is optional.
+        // Wait for it so an earlier BFUSD row cannot publish a partial group.
+        if !self.assets.contains_key("USDT") {
+            return None;
+        }
+
         let mut wallet_balance_usdt = 0.0;
         let mut unrealized_pnl_usdt = 0.0;
         let mut available_balance_usdt = 0.0;
@@ -425,31 +431,57 @@ mod tests {
     #[test]
     fn aggregates_usdt_and_bfusd_wallet_rows() {
         let usdt = encode_wallet_event(10, 10, "USDT", true, 100.0, 90.0, 5.0, 80.0, 70.0);
-        let bfusd = encode_wallet_event(10, 10, "BFUSD", true, 200.0, 200.0, 0.0, 190.0, 180.0);
+        let bfusd = encode_wallet_event(10, 10, "BFUSD", true, 0.0, 0.0, 0.0, 0.0, 0.0);
         let mut accumulator = WalletAssetAccumulator::default();
-        accumulator
-            .update(parse_wallet_asset(&usdt).expect("USDT row"))
-            .expect("USDT equity");
+        assert!(
+            accumulator
+                .update(parse_wallet_asset(&bfusd).expect("BFUSD row"))
+                .is_none()
+        );
         let snapshot = accumulator
-            .update(parse_wallet_asset(&bfusd).expect("BFUSD row"))
+            .update(parse_wallet_asset(&usdt).expect("USDT row"))
             .expect("combined equity");
-        assert!((snapshot.equity_usdt - 295.0).abs() < 1e-9);
-        assert!((snapshot.wallet_balance_usdt - 290.0).abs() < 1e-9);
-        assert!((snapshot.available_balance_usdt - 270.0).abs() < 1e-9);
+        assert!((snapshot.equity_usdt - 95.0).abs() < 1e-9);
+        assert!((snapshot.wallet_balance_usdt - 90.0).abs() < 1e-9);
+        assert!((snapshot.available_balance_usdt - 80.0).abs() < 1e-9);
     }
 
     #[test]
     fn a_new_poll_replaces_previous_asset_rows() {
         let mut accumulator = WalletAssetAccumulator::default();
-        for asset in ["USDT", "BFUSD"] {
-            let payload = encode_wallet_event(10, 10, asset, true, 100.0, 100.0, 0.0, 100.0, 100.0);
-            accumulator.update(parse_wallet_asset(&payload).expect("wallet row"));
-        }
+        let usdt = encode_wallet_event(10, 10, "USDT", true, 100.0, 100.0, 0.0, 100.0, 100.0);
+        let bfusd = encode_wallet_event(10, 10, "BFUSD", true, 20.0, 20.0, 0.0, 20.0, 20.0);
+        assert_eq!(
+            accumulator
+                .update(parse_wallet_asset(&usdt).expect("USDT row"))
+                .expect("USDT-only equity")
+                .equity_usdt,
+            100.0
+        );
+        assert_eq!(
+            accumulator
+                .update(parse_wallet_asset(&bfusd).expect("BFUSD row"))
+                .expect("combined equity")
+                .equity_usdt,
+            120.0
+        );
+        let next_bfusd = encode_wallet_event(11, 11, "BFUSD", true, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(
+            accumulator
+                .update(parse_wallet_asset(&next_bfusd).expect("next BFUSD row"))
+                .is_none()
+        );
         let next = encode_wallet_event(11, 11, "USDT", true, 50.0, 50.0, 0.0, 50.0, 50.0);
         let snapshot = accumulator
             .update(parse_wallet_asset(&next).expect("next wallet row"))
             .expect("next equity");
         assert!((snapshot.equity_usdt - 50.0).abs() < 1e-9);
+        assert_eq!(snapshot.ts_ms, 11);
+        assert!(
+            accumulator
+                .update(parse_wallet_asset(&bfusd).expect("stale BFUSD row"))
+                .is_none()
+        );
     }
 
     #[test]
