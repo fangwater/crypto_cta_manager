@@ -595,6 +595,16 @@ gateway; trading/Viz/Config process IDs and all 24 trading TOML checksums stayed
 unchanged. Only Manager restarted, and only Manager API timeouts required an
 Nginx reload. No remote schema DDL or legacy data deletion was performed.
 
+Frontend-only release `20261005T151243Z` (commit `a435d1b`) subsequently removed
+combined-account NAV/cost selection and workspace financial totals. Browsers
+default to the first visible account and send one explicit source ID, retaining
+it between NAV and cost pages. Pending health checks are distinct from degraded
+data. Theoretical fee and cache notices use normal layout instead of full-page
+chart overlays. Chromium checks at 1440×1000 and 390×1100 verified account
+switches, account-scoped requests, notice placement and mobile width. This
+static release did not restart Manager or change host TOML, Nginx, or trading
+configs; the runtime remains commit `9023094`.
+
 Keep the service loopback-only like the existing Exec Viz deployment. Access it
 through an SSH tunnel:
 
