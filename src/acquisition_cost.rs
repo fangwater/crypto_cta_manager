@@ -6,7 +6,6 @@ use sqlx::postgres::PgPool;
 
 use crate::config::AppConfig;
 use crate::nav;
-use crate::position_archive::PositionArchive;
 
 pub const DEFAULT_PAGE_SIZE: usize = 25;
 pub const MAX_PAGE_SIZE: usize = 100;
@@ -272,7 +271,7 @@ fn finish_breakdowns(
 pub async fn report_acquisition_cost(
     pool: &PgPool,
     config: &AppConfig,
-    archive: &std::sync::Arc<PositionArchive>,
+    targets: &std::sync::Arc<crate::theoretical_nav::TheoreticalTargetCache>,
     klines: &crate::kline::KlineStore,
     histories: &nav::NavSourceHistories,
     start_received_at_us: i64,
@@ -291,8 +290,7 @@ pub async fn report_acquisition_cost(
     }
     let (deltas, warnings) = crate::theoretical_nav::prepare_acquisition(
         pool,
-        config,
-        archive,
+        targets,
         klines,
         start_received_at_us,
         end_received_at_us,

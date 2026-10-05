@@ -199,6 +199,7 @@ struct WebState {
     reload_notify: ReloadNotifyHub,
     live_equity: LiveEquityHub,
     position_archive: Arc<PositionArchive>,
+    theoretical_targets: Arc<crate::theoretical_nav::TheoreticalTargetCache>,
     klines: Arc<KlineStore>,
     viz_snapshot: VizSnapshotClient,
     refresh_interval_secs: u64,
@@ -388,6 +389,13 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let position_archive = Arc::new(PositionArchive::open(manager_db.clone())?);
     let klines = Arc::new(KlineStore::from_db(manager_db, config.kline.clone())?);
     klines.spawn_defaults();
+    let theoretical_targets = crate::theoretical_nav::TheoreticalTargetCache::new(
+        Arc::new(config.clone()),
+        position_archive.clone(),
+    );
+    if klines.enabled() {
+        theoretical_targets.refresh();
+    }
     let nav_history_store = Arc::new(std::sync::Mutex::new(nav::NavHistoryStore::default()));
     let first_build = build_dashboard(
         &config,
@@ -576,6 +584,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             reload_notify,
             live_equity,
             position_archive,
+            theoretical_targets,
             klines,
             viz_snapshot,
             refresh_interval_secs,
@@ -1476,8 +1485,7 @@ async fn rebuild_timeline_snapshot(
     let theoretical = if theoretical_symbols.is_empty() {
         crate::theoretical_nav::load_timeline(
             &state.pool,
-            &state.config,
-            &state.position_archive,
+            &state.theoretical_targets,
             &state.klines,
             report.start_ts_us,
             report.end_ts_us,
@@ -1658,7 +1666,9 @@ async fn rebuild_strategy_pnl_report(
 }
 
 async fn kline_status(State(state): State<WebState>) -> Response {
-    (NO_STORE, Json(state.klines.status())).into_response()
+    let mut status = serde_json::json!(state.klines.status());
+    status["target_history"] = serde_json::json!(state.theoretical_targets.status());
+    (NO_STORE, Json(status)).into_response()
 }
 
 async fn acquisition_cost(
@@ -1751,7 +1761,7 @@ async fn acquisition_cost(
     let report = crate::acquisition_cost::report_acquisition_cost(
         &state.pool,
         &config,
-        &state.position_archive,
+        &state.theoretical_targets,
         &state.klines,
         &histories,
         start_received_at_us,

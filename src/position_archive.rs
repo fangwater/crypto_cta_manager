@@ -223,6 +223,22 @@ impl PositionArchive {
     pub fn visit_target_updates_through(
         &self,
         end_received_at_us: i64,
+        visit: impl FnMut(PositionUpdateMsg) -> Result<()>,
+    ) -> Result<()> {
+        self.visit_target_updates_after(None, end_received_at_us, visit)
+    }
+
+    pub fn latest_cursor(&self) -> (i64, u32) {
+        *self
+            .last_key
+            .lock()
+            .expect("position archive sequence lock poisoned")
+    }
+
+    pub fn visit_target_updates_after(
+        &self,
+        after: Option<(i64, u32)>,
+        end_received_at_us: i64,
         mut visit: impl FnMut(PositionUpdateMsg) -> Result<()>,
     ) -> Result<()> {
         #[derive(Deserialize)]
@@ -240,15 +256,28 @@ impl PositionArchive {
             .db()
             .cf_handle(POSITION_UPDATES_CF)
             .context("position_updates column family disappeared")?;
-        for item in self.db.db().iterator_cf(&handle, IteratorMode::Start) {
+        let start =
+            manager_db::encode_seq_key(after.map_or(1, |key| key.0), after.map_or(0, |key| key.1))?;
+        for item in self
+            .db
+            .db()
+            .iterator_cf(&handle, IteratorMode::From(&start, Direction::Forward))
+        {
             let (key, value) = item.context("failed to iterate target updates")?;
-            let (received_at_us, _) =
-                manager_db::decode_seq_key(&key).context("invalid target update key")?;
+            let cursor = manager_db::decode_seq_key(&key).context("invalid target update key")?;
+            if after.is_some_and(|after| cursor <= after) {
+                continue;
+            }
+            let (received_at_us, _) = cursor;
             if received_at_us > end_received_at_us {
                 break;
             }
             let message: TargetUpdate = serde_json::from_slice(&value)
                 .context("failed to decode archived execution targets")?;
+            anyhow::ensure!(
+                (message.received_at_us, message.seq) == cursor,
+                "archived target timestamp does not match its key"
+            );
             visit(PositionUpdateMsg {
                 msg_type: message.msg_type,
                 schema_version: message.schema_version,

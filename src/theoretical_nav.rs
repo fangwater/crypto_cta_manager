@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use sqlx::postgres::PgPool;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub const EXECUTION_WINDOW_SECS: u64 = 300;
 const ZERO_EPSILON: f64 = 1e-12;
@@ -51,7 +52,7 @@ impl Default for TheoreticalNavTimeline {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VirtualDelta {
     pub source_id: String,
     pub binding_name: String,
@@ -90,98 +91,202 @@ impl VirtualDelta {
     }
 }
 
-fn collect_deltas(
-    config: &AppConfig,
-    archive: &PositionArchive,
-    fee_rates: &BTreeMap<String, f64>,
-    end: i64,
-    source_ids: &[String],
-    strategy: Option<&str>,
-) -> Result<Vec<VirtualDelta>> {
-    let mut latest = BTreeMap::<(String, String), LatestTargets>::new();
-    let mut deltas = Vec::new();
-    archive.visit_target_updates_through(end, |message| {
-        if strategy.is_some_and(|name| name != message.strategy.strategy_name) {
-            return Ok(());
-        }
-        for account in &message.published_accounts {
-            if !source_ids.is_empty() && !source_ids.contains(&account.source_id) {
-                continue;
-            }
-            let Some(source) = config
-                .sources
-                .iter()
-                .find(|s| s.enabled && s.id == account.source_id)
-            else {
-                continue;
-            };
-            let key = (account.source_id.clone(), account.binding_name.clone());
-            let next = LatestTargets {
-                position_strategy_name: message.strategy.strategy_name.clone(),
-                venue: source.venue.clone(),
-                targets: normalized_scaled_targets(&message, account.effective_shares())?,
-                received_at_us: message.received_at_us,
-                update_seq: message.seq,
-            };
-            if target_positions_changed(latest.get(&key), &next) {
-                let fee_rate = account
-                    .theoretical_fee_rate
-                    .or_else(|| fee_rates.get(&source.id).copied())
-                    .with_context(|| format!("missing theoretical fee for {}", source.id))?;
-                ensure!(fee_rate.is_finite(), "invalid archived theoretical fee");
-                for (symbol, quantity) in target_deltas(latest.get(&key), &next) {
-                    let target_signal = message
-                        .strategy
-                        .targets
-                        .get(&symbol)
-                        .map(|target| target.signal)
-                        .unwrap_or(0);
-                    deltas.push(VirtualDelta {
-                        source_id: source.id.clone(),
-                        binding_name: account.binding_name.clone(),
-                        strategy_name: next.position_strategy_name.clone(),
-                        symbol,
-                        venue: next.venue.clone(),
-                        received_at_us: next.received_at_us,
-                        seq: next.update_seq,
-                        delta_qty: quantity,
-                        fee_rate,
-                        legacy_fee: account.theoretical_fee_rate.is_none(),
-                        target_signal,
-                    });
-                }
-            }
-            latest.insert(key, next);
-        }
-        Ok(())
-    })?;
-    Ok(deltas)
+#[derive(Default)]
+struct TargetCacheState {
+    cursor: Option<(i64, u32)>,
+    latest: BTreeMap<(String, String), LatestTargets>,
+    deltas: Vec<VirtualDelta>,
 }
 
-async fn load_deltas(
+#[derive(Serialize)]
+pub struct TargetHistoryStatus {
+    pub ready: bool,
+    pub loading: bool,
+    pub processed_messages: u64,
+    pub last_error: Option<String>,
+}
+
+/// Rebuild once in the background, then fold only newly archived publications.
+/// This is a disposable metadata cache; RocksDB remains the durable source.
+pub struct TheoreticalTargetCache {
+    archive: Arc<PositionArchive>,
+    config: Arc<AppConfig>,
+    state: Mutex<TargetCacheState>,
+    ready: AtomicBool,
+    loading: AtomicBool,
+    processed_messages: AtomicU64,
+    error: Mutex<Option<String>>,
+    changed: tokio::sync::Notify,
+}
+impl TheoreticalTargetCache {
+    pub fn new(config: Arc<AppConfig>, archive: Arc<PositionArchive>) -> Arc<Self> {
+        Arc::new(Self {
+            archive,
+            config,
+            state: Mutex::new(TargetCacheState::default()),
+            ready: AtomicBool::new(false),
+            loading: AtomicBool::new(false),
+            processed_messages: AtomicU64::new(0),
+            error: Mutex::new(None),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+    pub fn status(&self) -> TargetHistoryStatus {
+        TargetHistoryStatus {
+            ready: self.ready.load(Ordering::Acquire),
+            loading: self.loading.load(Ordering::Acquire),
+            processed_messages: self.processed_messages.load(Ordering::Relaxed),
+            last_error: self.error.lock().unwrap().clone(),
+        }
+    }
+    pub fn refresh(self: &Arc<Self>) {
+        if self.loading.load(Ordering::Acquire) {
+            return;
+        }
+        if self.ready.load(Ordering::Acquire)
+            && self.state.lock().unwrap().cursor.unwrap_or((0, 0)) >= self.archive.latest_cursor()
+        {
+            return;
+        }
+        if self
+            .loading
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let cache = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = cache.refresh_blocking();
+            *cache.error.lock().unwrap() = result.err().map(|error| error.to_string());
+            cache.loading.store(false, Ordering::Release);
+            cache.changed.notify_waiters();
+        });
+    }
+    fn refresh_blocking(&self) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let after = state.cursor;
+        self.archive
+            .visit_target_updates_after(after, now_us(), |message| {
+                ingest_target(&self.config, &mut state, &message)?;
+                state.cursor = Some((message.received_at_us, message.seq));
+                self.processed_messages.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })?;
+        self.ready.store(true, Ordering::Release);
+        Ok(())
+    }
+    async fn query(
+        self: &Arc<Self>,
+        fee_rates: BTreeMap<String, f64>,
+        end: i64,
+        source_ids: &[String],
+        strategy: Option<&str>,
+    ) -> Result<Option<Vec<VirtualDelta>>> {
+        self.refresh();
+        let wait = async {
+            loop {
+                let changed = self.changed.notified();
+                // Ready data must include the completed incremental refresh too.
+                if !self.loading.load(Ordering::Acquire) {
+                    if let Some(error) = self.error.lock().unwrap().clone() {
+                        bail!("target history cache: {error}");
+                    }
+                    if self.ready.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                }
+                changed.await;
+            }
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(10), wait).await {
+            Ok(result) => result?,
+            Err(_) => return Ok(None),
+        }
+        let cache = self.clone();
+        let source_ids = source_ids.to_vec();
+        let strategy = strategy.map(str::to_owned);
+        tokio::task::spawn_blocking(move || {
+            let state = cache.state.lock().unwrap();
+            let mut deltas = Vec::new();
+            for delta in state
+                .deltas
+                .iter()
+                .take_while(|delta| delta.received_at_us <= end)
+            {
+                if (!source_ids.is_empty() && !source_ids.contains(&delta.source_id))
+                    || strategy
+                        .as_deref()
+                        .is_some_and(|name| name != delta.strategy_name)
+                {
+                    continue;
+                }
+                let mut delta = delta.clone();
+                if delta.legacy_fee {
+                    delta.fee_rate =
+                        fee_rates.get(&delta.source_id).copied().with_context(|| {
+                            format!("missing theoretical fee for {}", delta.source_id)
+                        })?;
+                }
+                ensure!(delta.fee_rate.is_finite(), "invalid theoretical fee");
+                deltas.push(delta);
+            }
+            Ok(Some(deltas))
+        })
+        .await
+        .context("theoretical target reader failed")?
+    }
+}
+
+fn ingest_target(
     config: &AppConfig,
-    archive: &Arc<PositionArchive>,
-    fee_rates: BTreeMap<String, f64>,
-    end: i64,
-    source_ids: &[String],
-    strategy: Option<&str>,
-) -> Result<Vec<VirtualDelta>> {
-    let config = config.clone();
-    let archive = archive.clone();
-    let source_ids = source_ids.to_vec();
-    let strategy = strategy.map(str::to_owned);
-    tokio::task::spawn_blocking(move || {
-        collect_deltas(
-            &config,
-            &archive,
-            &fee_rates,
-            end,
-            &source_ids,
-            strategy.as_deref(),
-        )
-    })
-    .await
-    .context("theoretical target reader failed")?
+    state: &mut TargetCacheState,
+    message: &PositionUpdateMsg,
+) -> Result<()> {
+    for account in &message.published_accounts {
+        let Some(source) = config
+            .sources
+            .iter()
+            .find(|s| s.enabled && s.id == account.source_id)
+        else {
+            continue;
+        };
+        let key = (account.source_id.clone(), account.binding_name.clone());
+        let next = LatestTargets {
+            position_strategy_name: message.strategy.strategy_name.clone(),
+            venue: source.venue.clone(),
+            targets: normalized_scaled_targets(message, account.effective_shares())?,
+            received_at_us: message.received_at_us,
+            update_seq: message.seq,
+        };
+        if target_positions_changed(state.latest.get(&key), &next) {
+            let fee_rate = account.theoretical_fee_rate.unwrap_or(0.0);
+            ensure!(fee_rate.is_finite(), "invalid archived theoretical fee");
+            for (symbol, quantity) in target_deltas(state.latest.get(&key), &next) {
+                let target_signal = message
+                    .strategy
+                    .targets
+                    .get(&symbol)
+                    .map(|target| target.signal)
+                    .unwrap_or(0);
+                state.deltas.push(VirtualDelta {
+                    source_id: source.id.clone(),
+                    binding_name: account.binding_name.clone(),
+                    strategy_name: next.position_strategy_name.clone(),
+                    symbol,
+                    venue: next.venue.clone(),
+                    received_at_us: next.received_at_us,
+                    seq: next.update_seq,
+                    delta_qty: quantity,
+                    fee_rate,
+                    legacy_fee: account.theoretical_fee_rate.is_none(),
+                    target_signal,
+                });
+            }
+        }
+        state.latest.insert(key, next);
+    }
+    Ok(())
 }
 
 /// Detached backfills survive HTTP cancellation. Return coverage after at most
@@ -219,8 +324,7 @@ fn add_range(ranges: &mut BTreeMap<String, (i64, i64)>, symbol: &str, start: i64
 }
 pub async fn prepare_acquisition(
     pool: &PgPool,
-    config: &AppConfig,
-    archive: &Arc<PositionArchive>,
+    targets: &Arc<TheoreticalTargetCache>,
     store: &KlineStore,
     start: i64,
     end: i64,
@@ -231,7 +335,12 @@ pub async fn prepare_acquisition(
     ensure!(store.enabled(), "分钟 K 线理论分析未启用");
     let fees = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
     // Older target metadata establishes deltas only; no older market data is read.
-    let mut deltas = load_deltas(config, archive, fees, end, source_ids, strategy).await?;
+    let Some(mut deltas) = targets.query(fees, end, source_ids, strategy).await? else {
+        return Ok((
+            Vec::new(),
+            vec!["目标历史正在后台读取，请稍后重新查询".into()],
+        ));
+    };
     deltas.retain(|d| d.received_at_us >= (start - 300 * 1_000_000).max(store.cutoff_us(now_us())));
     let mut ranges = BTreeMap::new();
     for delta in &deltas {
@@ -250,8 +359,7 @@ pub async fn prepare_acquisition(
 
 pub async fn load_timeline(
     pool: &PgPool,
-    config: &AppConfig,
-    archive: &Arc<PositionArchive>,
+    targets: &Arc<TheoreticalTargetCache>,
     store: &KlineStore,
     start: i64,
     end: i64,
@@ -277,7 +385,10 @@ pub async fn load_timeline(
         return Ok(output);
     }
     let fees = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
-    let deltas = load_deltas(config, archive, fees, end, source_ids, None).await?;
+    let Some(deltas) = targets.query(fees, end, source_ids, None).await? else {
+        output.unavailable_reason = Some("目标历史正在后台读取，请稍后重新查询".into());
+        return Ok(output);
+    };
     // Exact inventory immediately before start follows from the frozen schedules,
     // without needing old execution prices. Carry lots use the start's mark.
     let mut carry = BTreeMap::<(String, String, String), f64>::new();
@@ -758,6 +869,115 @@ fn quantities_equal(left: f64, right: f64, scale_hint: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn target_cache_coalesces_reads_keeps_fee_and_source_identity_and_resumes_same_timestamp()
+    {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive = Arc::new(
+            PositionArchive::open(crate::manager_db::ManagerDb::open(dir.path()).unwrap()).unwrap(),
+        );
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        config.sources[1].enabled = true;
+        let first_source = config.sources[0].id.clone();
+        let second_source = config.sources[1].id.clone();
+        let config = Arc::new(config);
+        let cache = TheoreticalTargetCache::new(config.clone(), archive.clone());
+        let mut strategy = crate::strategy_catalog::PositionStrategy {
+            strategy_name: "alpha".into(),
+            targets: BTreeMap::from([(
+                "BTCUSDT".into(),
+                crate::order_config::TargetPosition {
+                    qty: 1.0,
+                    signal: -1,
+                },
+            )]),
+            symbol_order_strategy_overrides: BTreeMap::new(),
+            updated_at_us: 1,
+        };
+        let a = crate::position_archive::published_account(&first_source, "alpha", 2.0);
+        let mut b = crate::position_archive::published_account(&second_source, "alpha", 3.0);
+        b.theoretical_fee_rate = Some(0.0003);
+        archive
+            .append(100, &strategy, Vec::new(), vec![a.clone(), b.clone()])
+            .unwrap();
+        // A repeated target still archives a message but cannot add an execution.
+        archive
+            .append(100, &strategy, Vec::new(), vec![a.clone(), b.clone()])
+            .unwrap();
+        strategy.targets.get_mut("BTCUSDT").unwrap().qty = 3.0;
+        archive
+            .append(101, &strategy, Vec::new(), vec![a, b])
+            .unwrap();
+        let fees = BTreeMap::from([(first_source.clone(), 0.0004)]);
+        let scope_a = vec![first_source.clone()];
+        let scope_b = vec![second_source.clone()];
+        let (a, b) = tokio::join!(
+            cache.query(fees.clone(), 101, &scope_a, Some("alpha")),
+            cache.query(BTreeMap::new(), 101, &scope_b, None)
+        );
+        let a = a.unwrap().unwrap();
+        let b = b.unwrap().unwrap();
+        assert_eq!(
+            a.iter().map(|delta| delta.delta_qty).collect::<Vec<_>>(),
+            [2.0, 4.0]
+        );
+        assert!(a.iter().all(|delta| delta.legacy_fee
+            && delta.fee_rate == 0.0004
+            && delta.target_signal == -1));
+        assert_eq!(
+            b.iter().map(|delta| delta.delta_qty).collect::<Vec<_>>(),
+            [3.0, 6.0]
+        );
+        assert!(
+            b.iter()
+                .all(|delta| !delta.legacy_fee && delta.fee_rate == 0.0003)
+        );
+        assert_eq!(cache.status().processed_messages, 3);
+        let mut stopped = crate::position_archive::published_account(&first_source, "alpha", 0.0);
+        stopped.theoretical_fee_rate = Some(-0.0001);
+        archive
+            .append(101, &strategy, Vec::new(), vec![stopped])
+            .unwrap();
+        let changed_fees = BTreeMap::from([(first_source.clone(), 0.0008)]);
+        let resumed = cache
+            .query(changed_fees.clone(), 101, &scope_a, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.len(), 3);
+        assert_eq!(resumed[0].fee_rate, 0.0008);
+        assert_eq!(resumed[2].delta_qty, -6.0);
+        assert_eq!(resumed[2].seq, 1);
+        assert_eq!(resumed[2].fee_rate, -0.0001);
+        assert_eq!(cache.status().processed_messages, 4);
+        assert_eq!(
+            cache
+                .query(fees, 100, &scope_a, None)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(cache.status().processed_messages, 4);
+        let restarted = TheoreticalTargetCache::new(config, archive);
+        assert_eq!(
+            restarted
+                .query(changed_fees, 101, &scope_a, None)
+                .await
+                .unwrap()
+                .unwrap(),
+            resumed
+        );
+        assert!(
+            cache
+                .query(BTreeMap::new(), 101, &scope_a, None)
+                .await
+                .is_err()
+        );
+    }
 
     fn cached_market() -> (tempfile::TempDir, KlineStore, i64, Vec<crate::kline::Kline>) {
         let dir = tempfile::TempDir::new().unwrap();
