@@ -272,6 +272,13 @@ zero new exchange requests. All 24 trading TOMLs and 120 trading/Viz/Config/Ngin
 process IDs remained unchanged; only `cta_web` restarted. The four affected
 `rbf_small` targets involve contracts settled and delisted on October 5;
 see `docs/jp_meta_zero_volume_minutes_20261005.md` for the read-only evidence.
+The final frontend release is `20261005T155217Z` from commit `72444b6`;
+the runtime remains `0a99d6e`. Desktop 1440×1000 and mobile 390×1100 Chromium
+checks verified the four independent account choices, source-scoped requests,
+normal-flow pricing notices, no legacy-fee warning and no mobile horizontal
+overflow. Workspace health shows checking while pending, then online. Exec
+trade03 Viz/snapshot/Config returned 200 and its WebSocket returned 101.
+Temporary auth sessions and browser profiles were removed after verification.
 
 The 5-second BBO recorder, its `/api/catalog/execution-cost` evaluation API,
 browser page, and client command are removed. The PostgreSQL theoretical
