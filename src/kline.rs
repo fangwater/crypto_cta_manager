@@ -41,17 +41,6 @@ impl Kline {
         (self.base_volume > 0.0 && self.quote_volume > 0.0 && price.is_finite() && price > 0.0)
             .then_some(price)
     }
-    /// A factual empty minute has no VWAP. Use its exchange close only for
-    /// this case; absent candles and invalid volume relationships stay missing.
-    pub fn execution_price(&self) -> Option<(f64, bool)> {
-        self.vwap().map(|price| (price, false)).or_else(|| {
-            (self.base_volume == 0.0
-                && self.quote_volume == 0.0
-                && self.close.is_finite()
-                && self.close > 0.0)
-                .then_some((self.close, true))
-        })
-    }
     fn encode(&self) -> [u8; VALUE_BYTES] {
         let mut value = [0; VALUE_BYTES];
         for (index, number) in [
@@ -828,14 +817,12 @@ mod tests {
     fn vwap_uses_quote_over_base_not_ohlc_average_and_zero_volume_has_no_price() {
         let mut row = candle(first_complete_open(now_us() - DAY_US));
         assert_eq!(row.vwap(), Some(101.0));
-        assert_eq!(row.execution_price(), Some((101.0, false)));
         assert_eq!(Kline::decode(row.open_ts_us, &row.encode()).unwrap(), row);
         row.base_volume = 0.0;
         row.quote_volume = 0.0;
         assert_eq!(row.vwap(), None);
-        assert_eq!(row.execution_price(), Some((102.0, true)));
         row.quote_volume = 1.0;
-        assert_eq!(row.execution_price(), None);
+        assert_eq!(row.vwap(), None);
     }
     #[test]
     fn signal_schedule_excludes_the_partial_arrival_minute() {

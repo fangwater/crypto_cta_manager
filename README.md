@@ -110,8 +110,10 @@ only missing minutes with pages of at most 499; persisted candles are never
 requested again. A per-symbol in-memory async lock coalesces simultaneous misses.
 Failed or omitted minutes stay missing and are retried on the next query or
 default-symbol refresh, without separate retry records. A zero-volume candle
-is cached and priced at its exchange close for theoretical execution, with
-explicit fallback sample counts on NAV, cost totals, and each delta row.
+is cached and skipped within a theoretical five-minute window. The remaining
+traded minutes share the entire target quantity equally. Only a window with
+five zero-volume candles uses all five exchange closes. NAV, cost totals and
+delta rows expose separate skipped-minute and all-empty fallback counts.
 Only closed candles are accepted. A missing candle is never filled by this rule.
 
 TOML must explicitly configure `kline.local_ip`, the assigned socket binding
@@ -370,17 +372,22 @@ allocation anchor exists, it replaces the older account anchor for that source.
 The portfolio view overlays theoretical NAV before and after estimated fees,
 computed on demand from the immutable target archive and the minute cache.
 A distinct scaled target vector freezes `delta = target - previous target`.
-Each delta owns five equal-quantity fills in the first five complete wall-clock
-minutes at or after publication; a partial arrival minute is excluded. Each
-minute's price is `quote_volume / base_volume`; the five-slice virtual price
-is their arithmetic mean, not the five-minute volume-weighted average. Later
+Each delta owns the first five complete wall-clock minutes at or after
+publication; a partial arrival minute is excluded. Each traded minute's price
+is `quote_volume / base_volume`. Zero-volume minutes are skipped and the
+remaining `N` minutes each execute `delta / N`. The virtual price is their
+arithmetic mean, not the five-minute volume-weighted average. If all five
+minutes have zero volume, each instead executes `delta / 5` at its close. Later
 targets never truncate earlier schedules. Unchanged targets and insignificant
 floating-point persistence tails create no new delta.
 
 New publications archive each account's theoretical fee rate with its shares.
 Legacy publications without a frozen rate use the current configured rate and
-are explicitly counted. The virtual cost is `delta / 5 * sum(sample_prices)`;
-the fee is `abs(delta) / 5 * sum(sample_prices) * archived_fee_rate`.
+are counted in the API without a browser warning. With `P` the mean of the
+priced minutes, virtual cost is `delta * P` and the fee is
+`abs(delta) * P * archived_fee_rate`. Determining the quantity per minute
+requires the complete five-minute window; the live theoretical NAV therefore
+ends four minutes before the latest closed minute and displays its timestamp.
 
 `GET /api/catalog/acquisition-cost` and `/manager/acquisition-cost/` compare
 factual strategy fills with the latest same-symbol delta preceding the stable

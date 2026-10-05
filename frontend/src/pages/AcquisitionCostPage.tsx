@@ -43,7 +43,7 @@ function side(delta: number) {
 }
 
 function sampleText(row: AcquisitionCostRow) {
-  return row.sample_prices.map((value) => money(value)).join(' / ')
+  return row.sample_prices.map((value) => value == null ? "无成交" : money(value)).join(' / ')
 }
 
 export function AcquisitionCostPage() {
@@ -156,7 +156,7 @@ export function AcquisitionCostPage() {
       <PageIntro
         eyebrow="Delta cost"
         title="实际成本 vs 虚拟成本"
-        description="理论 TWAP 每分钟等量执行 1/5，使用目标发布后五个完整分钟的 VWAP（成交额 ÷ 成交量）定价，无成交分钟使用收盘价补位。按实际成交数量比较价格与费用，仅支持最近 30 天。"
+        description="理论 TWAP 使用目标发布后五个完整分钟的 VWAP（成交额 ÷ 成交量），跳过无成交分钟，在其余分钟均分数量；五分钟全部无成交时使用收盘价。按实际成交数量比较价格与费用，仅支持最近 30 天。"
       />
 
       {error && <Alert className="mb-4">{error}</Alert>}
@@ -165,7 +165,8 @@ export function AcquisitionCostPage() {
       </div>}
       {report?.warnings.map((warning) => <Alert key={warning} className="mb-4">{warning}</Alert>)}
       {Boolean(totals?.pending_virtual_delta_count) && <Alert className="mb-4">{totals?.pending_virtual_delta_count} 个 delta 的五分钟执行窗口尚未结束。</Alert>}
-      {Boolean(totals?.zero_volume_fallback_sample_count) && <Alert className="mb-4">无成交分钟使用收盘价补位 {totals?.zero_volume_fallback_sample_count} 次，涉及 {totals?.zero_volume_fallback_delta_count} 个目标 delta。</Alert>}
+      {Boolean(totals?.zero_volume_skipped_sample_count) && <div className="mb-4 text-sm text-muted" role="status">跳过 {totals?.zero_volume_skipped_sample_count} 个无成交分钟样本，其余分钟均分理论成交量。</div>}
+      {Boolean(totals?.zero_volume_fallback_sample_count) && <Alert className="mb-4">{totals?.zero_volume_fallback_delta_count} 个目标的五分钟全部无成交，使用收盘价定价。</Alert>}
       {totals && totals.missing_virtual_delta_count > 0 && (
         <Alert className="mb-4">
           {totals.missing_virtual_delta_count} 个 delta 缺少完整五点行情，未进入可比成本。
@@ -213,7 +214,7 @@ export function AcquisitionCostPage() {
         <StatTile label="事实成交额" value={totals ? moneyU(totals.actual_turnover_usdt) : '--'} hint={totals ? `${totals.actual_fill_count} 笔 · 费 ${moneyU(totals.actual_fee_usdt)}` : undefined} />
         <StatTile label="同量虚拟成交额" value={totals ? moneyU(totals.matched_virtual_turnover_usdt) : '--'} hint="完全使用事实 fill 数量" />
         <StatTile label="事实成交覆盖" value={totals ? `${(totals.actual_fill_reference_coverage * 100).toFixed(1)}%` : '--'} />
-        <StatTile label="价格差" value={totals ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? `首分钟均价 ${moneyU(totals.first_minute_shortfall_usdt)} · 后续路径 ${moneyU(totals.five_sample_drift_usdt)}` : undefined} />
+        <StatTile label="价格差" value={totals ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? `首个计价分钟 ${moneyU(totals.first_minute_shortfall_usdt)} · 后续路径 ${moneyU(totals.five_sample_drift_usdt)}` : undefined} />
         <StatTile label="费后差" value={totals ? moneyU(totals.after_fee_shortfall_usdt) : '--'} hint={totals ? `手续费差 ${moneyU(totals.fee_shortfall_usdt)}` : undefined} />
       </div>
 
@@ -241,7 +242,7 @@ export function AcquisitionCostPage() {
           <CardHeader className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
             <div>
               <CardTitle>逐 delta 成本</CardTitle>
-              <CardDescription>理论 TWAP 均价是五个分钟价格的等权平均，无成交分钟用收盘价补位；完成率按实际配对数量除以 delta 数量。</CardDescription>
+              <CardDescription>理论 TWAP 均价只平均有成交分钟，全部无成交时平均收盘价；完成率按实际配对数量除以 delta 数量。</CardDescription>
             </div>
             <div className="flex items-center gap-2">
               <Button type="button" size="sm" variant="secondary" className="w-8 px-0" title="上一页" aria-label="上一页" disabled={loading || page <= 1} onClick={() => void query(page - 1)}><ChevronLeft size={15} /></Button>
@@ -253,7 +254,7 @@ export function AcquisitionCostPage() {
             <table className="min-w-full text-left text-[13px]">
               <thead className="border-b border-border-soft bg-canvas/80 text-[11px] uppercase tracking-wide text-muted">
                 <tr>
-                  <th className="px-4 py-2 font-medium">信号</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">五个分钟价格</th><th className="px-4 py-2 text-right font-medium">收盘价补位</th><th className="px-4 py-2 text-right font-medium">理论 TWAP 均价</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
+                  <th className="px-4 py-2 font-medium">信号</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">五个分钟价格</th><th className="px-4 py-2 text-right font-medium">计价分钟</th><th className="px-4 py-2 text-right font-medium">理论 TWAP 均价</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
                 </tr>
               </thead>
               <tbody>
@@ -264,7 +265,7 @@ export function AcquisitionCostPage() {
                     <td className="px-4 py-2">{side(row.delta_qty)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{quantity(Math.abs(row.delta_qty))}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right text-[11px] tabular-nums text-muted">{sampleText(row)}</td>
-                    <td className="px-4 py-2 text-right tabular-nums">{row.zero_volume_fallback_sample_count} / 5</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{row.zero_volume_fallback_sample_count ? "收盘价" : (5 - row.zero_volume_skipped_sample_count) + " / 5"}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{money(row.virtual_vwap)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{row.actual_vwap == null ? '--' : money(row.actual_vwap)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{(row.fill_ratio * 100).toFixed(1)}%</td>

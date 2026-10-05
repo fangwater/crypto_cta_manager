@@ -745,8 +745,12 @@ function NavPage() {
           {timeline?.theoretical.unavailable_reason && (
             <div className="chart-notice" role="status">理论净值：{timeline.theoretical.unavailable_reason}</div>
           )}
+          {timeline?.theoretical.latest_point_ts_us != null && timeline.theoretical.latest_point_ts_us < timeline.report.end_ts_us && (
+            <div className="chart-notice" role="status">最新五分钟窗口尚未结束，理论曲线截至 {timestampUs(timeline.theoretical.latest_point_ts_us)}。</div>
+          )}
+          {Boolean(timeline?.theoretical.zero_volume_skipped_sample_count) && <div className="chart-notice" role="status">跳过 {timeline?.theoretical.zero_volume_skipped_sample_count} 个无成交分钟样本，其余分钟均分理论成交量。</div>}
           {Boolean(timeline?.theoretical.zero_volume_fallback_sample_count) && (
-            <div className="chart-notice" role="status">无成交分钟使用收盘价补位 {timeline?.theoretical.zero_volume_fallback_sample_count} 次。</div>
+            <div className="chart-notice" role="status">{integer((timeline?.theoretical.zero_volume_fallback_sample_count ?? 0) / 5)} 个目标的五分钟全部无成交，使用收盘价定价。</div>
           )}
           <div className="chart-body has-picker">
             <div className="chart-stage">

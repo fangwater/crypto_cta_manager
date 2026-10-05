@@ -34,6 +34,7 @@ pub struct TheoreticalNavTimeline {
     pub unavailable_reason: Option<String>,
     pub missing_price_count: usize,
     pub legacy_fee_delta_count: usize,
+    pub zero_volume_skipped_sample_count: usize,
     pub zero_volume_fallback_sample_count: usize,
 }
 impl Default for TheoreticalNavTimeline {
@@ -41,7 +42,7 @@ impl Default for TheoreticalNavTimeline {
         Self {
             valuation: "quantity_fifo_window_delta",
             execution_window_secs: EXECUTION_WINDOW_SECS,
-            price_basis: "five_equal_qty_complete_1m_quote_over_base_vwap_or_zero_volume_close+closed_1m_close_mark",
+            price_basis: "equal_qty_over_traded_minutes_in_complete_5m_window_or_all_empty_close+closed_1m_close_mark",
             fee_basis: "archived_theoretical_rate_or_current_rate_for_legacy_targets",
             available_from_us: None,
             latest_point_ts_us: None,
@@ -50,6 +51,7 @@ impl Default for TheoreticalNavTimeline {
             unavailable_reason: None,
             missing_price_count: 0,
             legacy_fee_delta_count: 0,
+            zero_volume_skipped_sample_count: 0,
             zero_volume_fallback_sample_count: 0,
         }
     }
@@ -70,8 +72,21 @@ pub struct VirtualDelta {
 }
 #[derive(Debug, PartialEq)]
 pub struct VirtualPrices {
-    pub prices: [f64; SAMPLE_COUNT],
-    pub zero_volume_fallback_sample_count: usize,
+    pub prices: [Option<f64>; SAMPLE_COUNT],
+    pub zero_volume_skipped_sample_count: usize,
+    pub all_zero_volume_fallback: bool,
+}
+impl VirtualPrices {
+    pub fn priced_sample_count(&self) -> usize {
+        self.prices.iter().flatten().count()
+    }
+    pub fn average(&self) -> Option<f64> {
+        let count = self.priced_sample_count();
+        (count > 0).then(|| self.prices.iter().flatten().sum::<f64>() / count as f64)
+    }
+    pub fn first_price(&self) -> Option<f64> {
+        self.prices.iter().flatten().copied().next()
+    }
 }
 
 impl VirtualDelta {
@@ -85,21 +100,32 @@ impl VirtualDelta {
         if self.venue != "binance-futures" {
             return Ok(None);
         }
-        let mut prices = [0.0; SAMPLE_COUNT];
-        let mut zero_volume_fallback_sample_count = 0;
+        let mut prices = [None; SAMPLE_COUNT];
+        let mut closes = [0.0; SAMPLE_COUNT];
+        let mut zero_volume_skipped_sample_count = 0;
         for (index, price) in prices.iter_mut().enumerate() {
             let Some(candle) = store.get(&self.symbol, self.open_ts_us(index))? else {
                 return Ok(None);
             };
-            let Some((execution_price, fallback)) = candle.execution_price() else {
+            closes[index] = candle.close;
+            if candle.base_volume == 0.0 && candle.quote_volume == 0.0 {
+                zero_volume_skipped_sample_count += 1;
+                continue;
+            }
+            let Some(execution_price) = candle.vwap() else {
                 return Ok(None);
             };
-            *price = execution_price;
-            zero_volume_fallback_sample_count += usize::from(fallback);
+            *price = Some(execution_price);
+        }
+        let all_zero_volume_fallback = zero_volume_skipped_sample_count == SAMPLE_COUNT;
+        if all_zero_volume_fallback {
+            prices = closes.map(Some);
+            zero_volume_skipped_sample_count = 0;
         }
         Ok(Some(VirtualPrices {
             prices,
-            zero_volume_fallback_sample_count,
+            zero_volume_skipped_sample_count,
+            all_zero_volume_fallback,
         }))
     }
 }
@@ -431,26 +457,40 @@ pub async fn load_timeline(
         output.unavailable_reason = Some("目标历史正在后台读取，请稍后重新查询".into());
         return Ok(output);
     };
+    // The quantity per traded minute is known only after all five minutes
+    // close. Bound the curve so every displayed execution has a full schedule.
+    let end = end.min(now_us().div_euclid(MINUTE_US) * MINUTE_US - 4 * MINUTE_US);
+    if end < start {
+        output.unavailable_reason = Some("五分钟理论执行窗口尚未完整收盘，请稍后查询".into());
+        return Ok(output);
+    }
     // Exact inventory immediately before start follows from the frozen schedules,
     // without needing old execution prices. Carry lots use the start's mark.
     let mut carry = BTreeMap::<(String, String, String), f64>::new();
     let mut fills = Vec::<(i64, usize, usize)>::new();
     let mut ranges = BTreeMap::new();
     for (index, delta) in deltas.iter().enumerate() {
+        if delta.execution_ts_us() < start {
+            *carry
+                .entry((
+                    delta.source_id.clone(),
+                    delta.symbol.clone(),
+                    delta.venue.clone(),
+                ))
+                .or_default() += delta.delta_qty;
+            continue;
+        }
         for slice in 0..SAMPLE_COUNT {
             let ts = delta.open_ts_us(slice) + MINUTE_US;
-            if ts < start {
-                *carry
-                    .entry((
-                        delta.source_id.clone(),
-                        delta.symbol.clone(),
-                        delta.venue.clone(),
-                    ))
-                    .or_default() += delta.delta_qty / 5.0;
-            } else if ts <= end {
+            if ts <= end {
                 fills.push((ts, index, slice));
                 if delta.venue == "binance-futures" {
-                    add_range(&mut ranges, &delta.symbol, baseline_open, end);
+                    add_range(
+                        &mut ranges,
+                        &delta.symbol,
+                        baseline_open.min(delta.open_ts_us(0)),
+                        end.max(delta.execution_ts_us()),
+                    );
                 }
             }
         }
@@ -489,7 +529,7 @@ pub async fn load_timeline(
 
 fn rebuild_timeline(
     deltas: &[VirtualDelta],
-    carry: BTreeMap<(String, String, String), f64>,
+    mut carry: BTreeMap<(String, String, String), f64>,
     fills: Vec<(i64, usize, usize)>,
     store: &KlineStore,
     start: i64,
@@ -497,6 +537,45 @@ fn rebuild_timeline(
     max_points: usize,
     output: &mut TheoreticalNavTimeline,
 ) -> Result<()> {
+    let mut schedules = BTreeMap::new();
+    for index in fills
+        .iter()
+        .map(|(_, index, _)| *index)
+        .collect::<BTreeSet<_>>()
+    {
+        let Some(priced) = deltas[index].prices(store)? else {
+            output.missing_price_count += 1;
+            continue;
+        };
+        output.zero_volume_skipped_sample_count += priced.zero_volume_skipped_sample_count;
+        output.zero_volume_fallback_sample_count +=
+            usize::from(priced.all_zero_volume_fallback) * SAMPLE_COUNT;
+        schedules.insert(index, priced);
+    }
+    for (_, index, slice) in fills.iter().filter(|(ts, _, _)| *ts < start) {
+        if let Some(priced) = schedules.get(index)
+            && priced.prices[*slice].is_some()
+        {
+            let delta = &deltas[*index];
+            *carry
+                .entry((
+                    delta.source_id.clone(),
+                    delta.symbol.clone(),
+                    delta.venue.clone(),
+                ))
+                .or_default() += delta.delta_qty / priced.priced_sample_count() as f64;
+        }
+    }
+    carry.retain(|_, qty| clean_zero(*qty) != 0.0);
+    let fills = fills
+        .into_iter()
+        .filter(|(ts, index, slice)| {
+            *ts >= start
+                && schedules
+                    .get(index)
+                    .is_some_and(|p| p.prices[*slice].is_some())
+        })
+        .collect::<Vec<_>>();
     let mut states = BTreeMap::<(String, String, String), (SymbolState, VecDeque<FifoLot>)>::new();
     let mut markets = BTreeMap::new();
     let mut needed = carry
@@ -564,16 +643,8 @@ fn rebuild_timeline(
             let (_, index, slice) = fills[cursor];
             let delta = &deltas[index];
             cursor += 1;
-            let candle = if delta.venue == "binance-futures" {
-                store.get(&delta.symbol, delta.open_ts_us(slice))?
-            } else {
-                None
-            };
-            let Some((price, fallback)) = candle.and_then(|c| c.execution_price()) else {
-                output.missing_price_count += 1;
-                continue;
-            };
-            output.zero_volume_fallback_sample_count += usize::from(fallback);
+            let priced = &schedules[&index];
+            let price = priced.prices[slice].context("scheduled minute has no price")?;
             if delta.legacy_fee {
                 legacy.insert(index);
             }
@@ -594,7 +665,7 @@ fn rebuild_timeline(
             let applied = evaluate_fill(
                 *state,
                 std::mem::take(lots),
-                delta.delta_qty / 5.0,
+                delta.delta_qty / priced.priced_sample_count() as f64,
                 price,
                 delta.fee_rate,
             )?;
@@ -1172,8 +1243,8 @@ mod tests {
         let (_dir, store, start, bars) = cached_market();
         let first = delta(start);
         let samples = first.prices(&store).unwrap().unwrap().prices;
-        assert_eq!(samples, [100.0, 101.0, 102.0, 103.0, 104.0]);
-        assert_eq!(samples.iter().sum::<f64>() / 5.0, 102.0);
+        assert_eq!(samples, [100.0, 101.0, 102.0, 103.0, 104.0].map(Some));
+        assert_eq!(samples.iter().flatten().sum::<f64>() / 5.0, 102.0);
         let weighted = bars[1..].iter().map(|c| c.quote_volume).sum::<f64>()
             / bars[1..].iter().map(|c| c.base_volume).sum::<f64>();
         assert!((weighted - 102.0).abs() > 0.5);
@@ -1184,7 +1255,7 @@ mod tests {
         assert_eq!(second.execution_ts_us(), start + 6 * MINUTE_US);
     }
     #[test]
-    fn zero_volume_close_is_shared_by_cost_prices_and_nav_with_explicit_counts() {
+    fn empty_minute_is_skipped_and_remaining_minutes_share_the_entire_quantity() {
         let (_dir, store, start, mut bars) = cached_market();
         bars[3].base_volume = 0.0;
         bars[3].quote_volume = 0.0;
@@ -1194,8 +1265,14 @@ mod tests {
             .unwrap();
         let delta = delta(start);
         let priced = delta.prices(&store).unwrap().unwrap();
-        assert_eq!(priced.prices, [100.0, 101.0, 105.0, 103.0, 104.0]);
-        assert_eq!(priced.zero_volume_fallback_sample_count, 1);
+        assert_eq!(
+            priced.prices,
+            [Some(100.0), Some(101.0), None, Some(103.0), Some(104.0)]
+        );
+        assert_eq!(priced.average(), Some(102.0));
+        assert_eq!(priced.priced_sample_count(), 4);
+        assert_eq!(priced.zero_volume_skipped_sample_count, 1);
+        assert!(!priced.all_zero_volume_fallback);
         let fills = (0..5)
             .map(|slice| (start + (slice as i64 + 1) * MINUTE_US, 0, slice))
             .collect();
@@ -1211,11 +1288,83 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        assert_eq!(output.zero_volume_fallback_sample_count, 1);
+        assert_eq!(output.zero_volume_skipped_sample_count, 1);
+        assert_eq!(output.zero_volume_fallback_sample_count, 0);
+        assert_eq!(output.missing_price_count, 0);
+        assert!((output.points[1].nav_change_before_fee_quote - 6.25).abs() < 1e-10);
+        let last = output.points.last().unwrap();
+        assert!((last.nav_change_before_fee_quote - 15.0).abs() < 1e-10);
+        assert!((last.estimated_trading_fee_quote - 0.102).abs() < 1e-10);
+    }
+    #[test]
+    fn complete_empty_window_uses_closes_but_a_missing_candle_does_not() {
+        let (_dir, store, start, mut bars) = cached_market();
+        for bar in &mut bars[1..] {
+            bar.base_volume = 0.0;
+            bar.quote_volume = 0.0;
+            bar.trades = 0;
+        }
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, start + 5 * MINUTE_US, &bars)
+            .unwrap();
+        let delta = delta(start);
+        let priced = delta.prices(&store).unwrap().unwrap();
+        assert_eq!(priced.average(), Some(105.0));
+        assert_eq!(priced.first_price(), Some(105.0));
+        assert_eq!(priced.priced_sample_count(), 5);
+        assert_eq!(priced.zero_volume_skipped_sample_count, 0);
+        assert!(priced.all_zero_volume_fallback);
+        let fills = (0..5)
+            .map(|slice| (start + (slice as i64 + 1) * MINUTE_US, 0, slice))
+            .collect();
+        let mut output = TheoreticalNavTimeline::default();
+        rebuild_timeline(
+            &[delta],
+            BTreeMap::new(),
+            fills,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            100,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output.zero_volume_skipped_sample_count, 0);
+        assert_eq!(output.zero_volume_fallback_sample_count, 5);
         assert_eq!(output.missing_price_count, 0);
         let last = output.points.last().unwrap();
-        assert!((last.nav_change_before_fee_quote - 12.0).abs() < 1e-10);
-        assert!((last.estimated_trading_fee_quote - 0.1026).abs() < 1e-10);
+        assert!(last.nav_change_before_fee_quote.abs() < 1e-10);
+        assert!((last.estimated_trading_fee_quote - 0.105).abs() < 1e-10);
+    }
+    #[test]
+    fn traded_minute_weights_reconstruct_partial_window_inventory_without_seed_fees() {
+        let (_dir, store, start, mut bars) = cached_market();
+        bars[3].base_volume = 0.0;
+        bars[3].quote_volume = 0.0;
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, start + 5 * MINUTE_US, &bars)
+            .unwrap();
+        let delta = delta(start);
+        let fills = (0..5)
+            .map(|slice| (start + (slice as i64 + 1) * MINUTE_US, 0, slice))
+            .collect();
+        let mut output = TheoreticalNavTimeline::default();
+        rebuild_timeline(
+            &[delta],
+            BTreeMap::new(),
+            fills,
+            &store,
+            start + 2 * MINUTE_US + MINUTE_US / 2,
+            start + 5 * MINUTE_US,
+            100,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output.points[0].nav_change_before_fee_quote, 0.0);
+        assert_eq!(output.points[0].estimated_trading_fee_quote, 0.0);
+        let last = output.points.last().unwrap();
+        assert!((last.nav_change_before_fee_quote - 3.75).abs() < 1e-10);
+        assert!((last.estimated_trading_fee_quote - 0.05175).abs() < 1e-10);
     }
     #[test]
     fn missing_minute_suppresses_nav_and_cache_repair_reconstructs_without_ghost_holdings() {

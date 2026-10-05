@@ -283,17 +283,24 @@ processed-message counts. Do not recreate PostgreSQL materializer tables or
 persist a second copy of this derived cache.
 
 The theoretical target model freezes `delta = target - previous distinct target`.
-Each delta executes 1/5 quantity in each of the first five complete wall-clock
-minutes after publication, excluding a partial arrival minute. Each minute price
-is Binance quote volume / base volume. By operator choice, a cached minute with
-zero base and quote volume uses its exchange close, and NAV, cost totals and
-individual delta rows must report fallback counts. Missing candles remain
-missing. The five-minute virtual price is their
-arithmetic mean, never weighted again by market volume. Later target changes
+Each delta owns the first five complete wall-clock minutes after publication,
+excluding a partial arrival minute. Each traded minute price is Binance quote
+volume / base volume. By operator choice, cached minutes with zero base and
+quote volume are skipped; the remaining N traded minutes each execute delta / N.
+Only when all five cached minutes have zero volume do all five exchange closes
+price delta / 5 each. NAV, cost totals and individual delta rows report separate
+skipped-minute and all-empty fallback counts. Missing candles remain missing.
+The virtual price is the arithmetic mean of priced minutes, never weighted
+again by market volume. The first-price cost benchmark is the earliest priced
+minute. Later target changes
 own independent schedules; repeated targets and insignificant float tails must
 not add deltas. New target archives include frozen theoretical fee rates with
 each account's shares. Legacy archives without a fee use the current rate and
-expose explicit fallback counts. No mark price is needed for cost comparison.
+expose fallback counts in the API without a browser warning. No mark price is
+needed for cost comparison. Quantity weights require the entire five-minute
+window, so the live theoretical NAV ends four minutes before the latest closed
+minute; show its latest timestamp. Reconstruct start-boundary inventory using
+the same traded-minute weights, with no seed fees.
 
 Both cost analysis and theoretical NAV support only the last retained 1–30 days.
 Older requested ranges must never trigger a backfill or show theoretical data.

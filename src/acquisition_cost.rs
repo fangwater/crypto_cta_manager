@@ -19,7 +19,9 @@ pub struct AcquisitionCostTotals {
     pub pending_virtual_delta_count: usize,
     pub legacy_fee_delta_count: usize,
     pub zero_volume_fallback_sample_count: usize,
+    pub zero_volume_skipped_sample_count: usize,
     pub zero_volume_fallback_delta_count: usize,
+    pub zero_volume_skipped_delta_count: usize,
     pub comparable_delta_count: usize,
     pub virtual_turnover_usdt: f64,
     pub virtual_fee_usdt: f64,
@@ -167,8 +169,9 @@ pub struct AcquisitionCostRow {
     pub received_at_us: i64,
     pub virtual_execution_ts_us: i64,
     pub delta_qty: f64,
-    pub sample_prices: [f64; 5],
+    pub sample_prices: [Option<f64>; 5],
     pub zero_volume_fallback_sample_count: usize,
+    pub zero_volume_skipped_sample_count: usize,
     pub virtual_vwap: f64,
     pub virtual_turnover_usdt: f64,
     pub virtual_fee_usdt: f64,
@@ -224,8 +227,10 @@ struct VirtualFill {
     received_at_us: i64,
     execution_ts_us: i64,
     delta_qty: f64,
-    sample_prices: [f64; 5],
+    sample_prices: [Option<f64>; 5],
+    first_price: f64,
     zero_volume_fallback_sample_count: usize,
+    zero_volume_skipped_sample_count: usize,
     virtual_vwap: f64,
     virtual_fee_usdt: f64,
     virtual_fee_rate: f64,
@@ -310,6 +315,8 @@ pub async fn report_acquisition_cost(
     let mut legacy_fee_delta_count = 0;
     let mut zero_volume_fallback_sample_count = 0;
     let mut zero_volume_fallback_delta_count = 0;
+    let mut zero_volume_skipped_sample_count = 0;
+    let mut zero_volume_skipped_delta_count = 0;
     for delta in deltas {
         let execution_ts_us = delta.execution_ts_us();
         let samples = delta.prices(klines)?;
@@ -329,14 +336,18 @@ pub async fn report_acquisition_cost(
         };
         let sample_prices = priced.prices;
         if delta.received_at_us >= start_received_at_us {
-            zero_volume_fallback_sample_count += priced.zero_volume_fallback_sample_count;
-            zero_volume_fallback_delta_count +=
-                usize::from(priced.zero_volume_fallback_sample_count > 0);
+            zero_volume_fallback_sample_count += usize::from(priced.all_zero_volume_fallback) * 5;
+            zero_volume_skipped_sample_count += priced.zero_volume_skipped_sample_count;
+            zero_volume_skipped_delta_count +=
+                usize::from(priced.zero_volume_skipped_sample_count > 0);
+            zero_volume_fallback_delta_count += usize::from(priced.all_zero_volume_fallback);
         }
         if delta.legacy_fee {
             legacy_fee_delta_count += 1;
         }
-        let virtual_vwap = sample_prices.iter().sum::<f64>() / 5.0;
+        let virtual_vwap = priced
+            .average()
+            .context("virtual schedule has no priced minutes")?;
         virtual_fills.push(VirtualFill {
             source_id: delta.source_id,
             binding_name: delta.binding_name,
@@ -347,7 +358,11 @@ pub async fn report_acquisition_cost(
             execution_ts_us,
             delta_qty: delta.delta_qty,
             sample_prices,
-            zero_volume_fallback_sample_count: priced.zero_volume_fallback_sample_count,
+            first_price: priced
+                .first_price()
+                .context("virtual schedule has no arrival price")?,
+            zero_volume_fallback_sample_count: usize::from(priced.all_zero_volume_fallback) * 5,
+            zero_volume_skipped_sample_count: priced.zero_volume_skipped_sample_count,
             virtual_vwap,
             virtual_fee_usdt: delta.delta_qty.abs() * virtual_vwap * delta.fee_rate,
             virtual_fee_rate: delta.fee_rate,
@@ -379,6 +394,8 @@ pub async fn report_acquisition_cost(
         legacy_fee_delta_count,
         zero_volume_fallback_sample_count,
         zero_volume_fallback_delta_count,
+        zero_volume_skipped_sample_count,
+        zero_volume_skipped_delta_count,
         ..AcquisitionCostTotals::default()
     };
     let mut by_strategy = BTreeMap::<String, BreakdownAccumulator>::new();
@@ -484,8 +501,8 @@ pub async fn report_acquisition_cost(
             };
             let reference_turnover = (signed_qty * fill.virtual_vwap).abs();
             let price_shortfall = signed_qty * (event.price - fill.virtual_vwap);
-            let first_minute_shortfall = signed_qty * (event.price - fill.sample_prices[0]);
-            let five_sample_drift = signed_qty * (fill.sample_prices[0] - fill.virtual_vwap);
+            let first_minute_shortfall = signed_qty * (event.price - fill.first_price);
+            let five_sample_drift = signed_qty * (fill.first_price - fill.virtual_vwap);
             totals.first_minute_shortfall_usdt += first_minute_shortfall;
             totals.five_sample_drift_usdt += five_sample_drift;
             fill_diagnostics.push(AcquisitionFillDiagnostic {
@@ -539,7 +556,7 @@ pub async fn report_acquisition_cost(
                     signed_qty,
                     event.price,
                     fill.virtual_vwap,
-                    fill.sample_prices[0],
+                    fill.first_price,
                     actual_fee,
                     fill.virtual_fee_rate,
                 );
@@ -558,7 +575,7 @@ pub async fn report_acquisition_cost(
                     signed_qty,
                     event.price,
                     fill.virtual_vwap,
-                    fill.sample_prices[0],
+                    fill.first_price,
                     actual_fee,
                     fill.virtual_fee_rate,
                 );
@@ -636,6 +653,7 @@ pub async fn report_acquisition_cost(
             delta_qty: fill.delta_qty,
             sample_prices: fill.sample_prices,
             zero_volume_fallback_sample_count: fill.zero_volume_fallback_sample_count,
+            zero_volume_skipped_sample_count: fill.zero_volume_skipped_sample_count,
             virtual_vwap: fill.virtual_vwap,
             virtual_turnover_usdt: virtual_turnover,
             virtual_fee_usdt: fill.virtual_fee_usdt,
@@ -687,7 +705,7 @@ pub async fn report_acquisition_cost(
     fill_diagnostics.truncate(100);
     Ok(AcquisitionCostReport {
         generated_at_us,
-        price_basis: "five_equal_qty_complete_1m_quote_over_base_vwap_or_zero_volume_close",
+        price_basis: "equal_qty_over_traded_minutes_in_complete_5m_window_or_all_empty_close",
         fee_basis: "actual_maker_taker_vs_archived_theoretical_rate_or_current_legacy_fallback",
         start_received_at_us,
         end_received_at_us,

@@ -319,7 +319,7 @@ function buildChapters(gateway: string): Chapter[] {
         <FieldRows rows={[
           { field: 'startMs / endMs', detail: '最近 30 天内的查询区间；更早的数据不支持理论分析' },
           { field: 'sourceIds / strategyName', detail: '账户或策略筛选；省略策略则比较全部策略' },
-          { field: 'sample_prices', detail: '目标发布后的五个完整分钟 VWAP：每分钟成交额 ÷ 成交量，无成交分钟使用该根 K 线收盘价并统计补位次数，各执行 delta 的 1/5；理论 TWAP 均价是五份价格的等权平均' },
+          { field: 'sample_prices', detail: '目标发布后的五个完整分钟 VWAP：每分钟成交额 ÷ 成交量，无成交分钟为 null，在其余 N 个分钟各执行 delta/N，理论 TWAP 均价为有效价格之和/N；五分钟全无成交才用五根收盘价的等权平均' },
           { field: 'price_shortfall_usdt', detail: '实际有符号成交数量 × (实际成交价 − 五个分钟均价的等权平均)' },
         ]} />
         <Note>分钟 K 线存入 Manager 自己的 RocksDB。已缓存的分钟不重复请求，其他币对按查询缺口向前补拉 24 小时。缺失数据明确显示覆盖不足，不产生虚假的理论净值。</Note>

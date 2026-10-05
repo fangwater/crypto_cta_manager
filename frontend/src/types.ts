@@ -300,6 +300,7 @@ export interface TheoreticalNavTimeline {
   missing_price_count: number
   legacy_fee_delta_count: number
   zero_volume_fallback_sample_count: number
+  zero_volume_skipped_sample_count: number
   valuation: string
   execution_window_secs: number
   price_basis: string
@@ -315,8 +316,10 @@ export interface AcquisitionCostTotals {
   missing_virtual_delta_count: number
   pending_virtual_delta_count: number
   zero_volume_fallback_delta_count: number
+  zero_volume_skipped_delta_count: number
   legacy_fee_delta_count: number
   zero_volume_fallback_sample_count: number
+  zero_volume_skipped_sample_count: number
   comparable_delta_count: number
   virtual_turnover_usdt: number
   virtual_fee_usdt: number
@@ -400,8 +403,9 @@ export interface AcquisitionCostRow {
   received_at_us: number
   virtual_execution_ts_us: number
   delta_qty: number
-  sample_prices: [number, number, number, number, number]
+  sample_prices: [number | null, number | null, number | null, number | null, number | null]
   zero_volume_fallback_sample_count: number
+  zero_volume_skipped_sample_count: number
   virtual_vwap: number
   virtual_turnover_usdt: number
   virtual_fee_usdt: number
