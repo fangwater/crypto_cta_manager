@@ -2,14 +2,14 @@
 
 ## Project Scope
 
-`crypto_cta_manager` is an independent Rust project for Exec/CTA order ingestion
-and management. It is intentionally separate from
+`crypto_cta_manager` is an independent Rust project for Exec/CTA management and
+read-only order-history analysis. It is intentionally separate from
 `/home/fanghaizhou/crypto_nav_manager`, whose current responsibility is
 NAV-oriented order/history collection. Large Exec-specific changes belong here;
 do not couple the two projects through relative paths or shared runtime state.
 
 The crate was initialized as a Rust 2024 binary. Keep application code under
-`src/`, database migrations under `migrations/`, deployment files under
+`src/`, the current database schema under `migrations/schema.sql`, deployment files under
 `deploy/`, and operational scripts under `scripts/` as those areas are added.
 Manager may keep its own TWAP RocksDB. It must never write into an Exec
 `persist_manager` RocksDB or publish through persist_manager.
@@ -34,7 +34,7 @@ cargo build --release
 
 The standalone `cta_monitor` binary is the DingTalk health monitor for CTA
 market data, order flow, and position execution. Keep it independent from
-`cta_web` and the ingestion worker; build and deploy it as its own binary and
+`cta_web`; build and deploy it as its own binary and
 pmdaemon process:
 
 ```bash
@@ -48,7 +48,7 @@ cta_monitor --config config/cta-manager.toml --once --dry-run
 source's Exec `persist_manager` RocksDB read-only to inspect recent
 `uniform_orders`, `order_updates`, and `trade_updates`, and reads the Exec Viz
 `/snapshot` endpoint for `exec_pre_trade_state`. It must never write to an Exec
-RocksDB, PostgreSQL order store, Redis, Exec Config endpoint, or exchange API.
+RocksDB, PostgreSQL, Redis, Exec Config endpoint, or exchange API.
 Each source check is isolated so a missing or corrupt source cannot stop checks
 for other accounts.
 
@@ -73,7 +73,7 @@ must not start or restart trading, Viz, Config, Nginx, or `cta_web` services.
 
 Run `cargo fmt` before committing Rust changes. Prefer focused tests while
 iterating, then run the full crate tests when changing database schemas,
-ingestion checkpoints, or shared order models.
+position snapshots, or shared order models.
 
 Do not pre-start a local frontend development server by default. Verify frontend
 changes with `npm run build`; start Vite only when the operator explicitly asks
@@ -81,15 +81,18 @@ for a live local URL or browser-render verification.
 
 ## Database Topology
 
-Each CTA Exec host owns a user-managed local PostgreSQL instance. That local
-database is the primary store for the CTA instance's orders, fills, account
-state, and synchronization checkpoints. Exec hosts do not require `sudo` for
-PostgreSQL and must not write directly to the central database as their only
-durable store.
+Each CTA host owns a local PostgreSQL instance for Manager catalogs,
+permissions, fee settings, symbol indexes, immutable position snapshots, and
+theoretical-analysis results. Actual orders and fills remain in each Exec's
+`persist_manager` RocksDB; Manager must not maintain a PostgreSQL order copy.
+The unused RocksDB-to-PostgreSQL order-ingestion worker was removed by operator
+request on 2026-10-05. el01 uses user-managed PostgreSQL; jp-meta uses the
+existing system PostgreSQL cluster.
 
-The PostgreSQL instance on `el_dev` is the synchronization and aggregation
-target for multiple CTA instances. It does not replace any Exec-local
-PostgreSQL database. ClickHouse remains on `el_dev` for analytical data.
+The PostgreSQL instance on `el_dev` is available for Manager aggregation, and
+ClickHouse remains there for analytical data. A future Rust order/signal sync
+must preserve durable source records and must not depend on PostgreSQL order
+tables or make the central host the only durable copy.
 
 The central development host is:
 
@@ -103,28 +106,31 @@ Passwordless login with `~/.ssh/id_ed25519` was verified on 2026-08-13 UTC.
 Connect with `ssh el_dev`. Do not hard-code credentials in this repository,
 commits, logs, or chat output.
 
-## Multi-Account Order Ingestion
+## Multi-Account Order History
 
-A single host-level manager may ingest multiple local Exec deployments, such
+A single host-level manager may read multiple local Exec deployments, such
 as `binance_exec_trade01` and `binance_exec_trade02`. Treat each deployment as
 an independent source with a stable, globally unique `source_id`; never infer
 identity only from an account label, path, process name, or array position.
 
-Order primary keys, ingestion failures, and checkpoints must include
-`source_id`. Each source runs as an independent worker so a missing/corrupt
-RocksDB or a delayed account cannot stop the other accounts. Source paths must
-be absolute and two enabled sources must not point at the same RocksDB.
+Order histories and position ledgers must include `source_id`. Source paths
+must be absolute and two enabled sources must not point at the same RocksDB.
+Readers must not write into Exec RocksDB or require stopping a live trading
+process. Retain NAV history's read-only incremental scans and overlap window.
+`[dashboard].refresh_secs` controls the cached NAV report's refresh interval;
+there is no `[ingestion]` section or per-source ingestion cursor configuration.
 
-The source reader opens the live `persist_manager` RocksDB read-only once per
-poll and scans `uniform_orders` using half-open microsecond ranges. It must not
-write into the RocksDB or require stopping a live trading process. PostgreSQL
-writes are idempotent on `(source_id, record_key)`, and the order rows plus the
-source checkpoint advance in one transaction. Retain a safety lag and overlap
-window so records racing the minute boundary are re-read safely.
-
-CTA Exec hosts write only to their local PostgreSQL primary. Future central
-synchronization must preserve the same `source_id` and idempotency keys; it
-must not turn `el_dev` into the only durable copy for an Exec account.
+By operator request on 2026-10-05, the 29 historical SQL migrations and the
+automatic sqlx migration/checksum mechanism were removed. Keep only the current
+schema in `migrations/schema.sql`. `cta_web --init-db` initializes a new, empty
+Manager database explicitly and atomically; normal startup and snapshot tools
+must never run schema DDL or inspect `_sqlx_migrations`.
+For existing databases, review and apply schema changes as explicit maintenance,
+then update `schema.sql` to describe the resulting current schema for fresh
+databases. Do not reintroduce numbered migration history or startup schema
+updates. Do not remove the active `cta_order_sources` account catalog,
+`cta_source_symbols` index, or position snapshots because their names refer to
+orders. Dropping legacy tables is a separate database maintenance operation.
 
 ## CTA PnL Reconstruction
 
@@ -225,46 +231,54 @@ a schema-version field for serving multiple formats. Make an incompatible
 contract change as one coordinated Manager/Exec replacement of the single
 format. Venue-owned external API paths such as Binance `/v1` or `/v2` endpoints
 retain the names required by that venue and are not internal contract versions.
-When `[twap]` is enabled, the same database records 5-second mid TWAP bars
-from `spread_pbs/<venue>/ask_bid_spread`. Each configured catalog symbol uses
-column family `SYMBOL:binance-futures`, values are 21-byte binary bars, and
-rows older than 30 days are deleted then compacted. Position-update messages
-are not part of that compaction. This path must not join the Exec order
-hot path.
+When `[kline]` is enabled, Manager's own RocksDB caches closed Binance USD-M
+1-minute candles in `klines_1m`, with one compact 56-byte value per symbol/minute.
+Retain at most 30 days. Never prune `position_updates` with the market-data cache.
+Default maintenance pulls only BNBUSDT, XRPUSDT, ETHUSDT, BTCUSDT and SOLUSDT
+every 300 seconds. All other symbols load on demand in backwards 24-hour blocks.
+Fetch only missing minutes and coalesce concurrent misses with an in-memory
+per-symbol lock. Failed/omitted minutes stay missing and are retried on a later
+query or default-symbol refresh; do not persist separate retry records.
+Cached candles must never be repeatedly downloaded.
+This path must not join the Exec order hot path.
 
-`GET /api/catalog/execution-cost` is on-demand, not a live job. It rebuilds
-from archived position updates, 5-second mid bars, and later Exec
-`uniform_orders` fills. Query parameters are camel-case `startMs`, `endMs`,
-`windowSec` (default 300, max 86400), comma-separated `sourceIds`, and
-`strategyName`. Intended qty is template qty × archived shares minus the
-snapshot `current_qty`. Each account binding's update window starts at
-`received_at_us` and ends at the earlier of `received_at_us + windowSec`, that
-same source and binding's next strategy publication, or now. Assume uniform
-execution over that window.
-Split the window into consecutive 1-minute buckets from `received_at_us`, not
-wall-clock minutes. Each 1-minute mid is the equal average of the 5-second mid
-bars in that bucket (12 bars in a full minute). The window TWAP is the equal
-average of those 1-minute mids when the window is an exact multiple of 60s, or
-duration-weighted if a later update truncates the last bucket. TWAP cost before fee is
-`intended × (twap_mid − arrival_mid)`. Actual cost before fee is
-`filled_qty × (fill VWAP − arrival_mid)` using signed fills attributed by
-`batch_exec:<strategy_name>`. Messages without `published_accounts` are skipped
-and must not be reconstructed from the current catalog. The browser page is
-`/manager/execution-cost/`.
+Require explicit `kline.local_ip` and expected `kline.public_ip` in TOML; disable
+HTTP environment proxies and default-route fallback. Verify public egress before
+Binance access. Read only the IP fields from every configured live trade engine
+TOML and reject collisions with local_ips, primary/secondary or Binance whitelist
+IPs. For private trading addresses also require their public NAT addresses in
+`forbidden_public_ips`. Dedicated market-data egress must never share a trading
+public address. `GET /api/catalog/kline-status` exposes cache/backfill progress.
 
-The theoretical target execution model freezes `delta = current target - previous
-distinct target` when a complete scaled target vector changes. It prices that
-delta as five equal-quantity virtual fills at 5-second mid bars sampled 60 seconds
-apart, starting with the first complete bar after the target message. A later
-target change owns a separate schedule and must not truncate an earlier delta.
-Repeated publications and insignificant JSON persistence tails must not create a
-new delta. Virtual cost and fee are respectively `delta / 5 * sum(mid)` and
-`abs(delta) / 5 * sum(mid) * theoretical_twap_fee_rate`; neither requires a mark
-price. FIFO and periodic marks are presentation inputs for the optional NAV
-overlay, not inputs to the acquisition-cost comparison.
+The 5-second BBO recorder, its `/api/catalog/execution-cost` evaluation API,
+browser page, and client command are removed. The PostgreSQL theoretical
+materializer is removed; current initialization SQL does not create its derived
+tables. Existing remote historical tables/cache files are not changed by this
+replacement and are not analysis inputs. No automatic migration or data reset.
+
+The theoretical target model freezes `delta = target - previous distinct target`.
+Each delta executes 1/5 quantity in each of the first five complete wall-clock
+minutes after publication, excluding a partial arrival minute. Each minute price
+is Binance quote volume / base volume. The five-minute virtual price is their
+arithmetic mean, never weighted again by market volume. Later target changes
+own independent schedules; repeated targets and insignificant float tails must
+not add deltas. New target archives include frozen theoretical fee rates with
+each account's shares. Legacy archives without a fee use the current rate and
+expose explicit fallback counts. No mark price is needed for cost comparison.
+
+Both cost analysis and theoretical NAV support only the last retained 1–30 days.
+Older requested ranges must never trigger a backfill or show theoretical data.
+NAV reconstructs carried inventory from archived delta schedules, seeds isolated
+source/symbol/venue FIFO lots at the start's closed-minute mark with zero fees,
+and applies each in-window virtual slice. Marks use completed minute close;
+15-minute presentation ticks and execution timestamps are preserved. Missing
+execution prices or open-position marks suppress the entire theoretical curve
+with an explicit reason, keeping factual NAV available. Never consume a missing
+delta or render ghost holdings. Cache warming may continue after an HTTP query
+returns incomplete coverage or the browser disconnects.
 
 `GET /api/catalog/acquisition-cost` is the canonical actual-versus-virtual cost
-contract. It reads materialized delta events and factual `batch_exec:<strategy>`
+contract. It reconstructs archived delta schedules and reads factual `batch_exec:<strategy>`
 fills, maps each fill by its stable order `signal_ts_us` to the latest preceding
 same-symbol delta, and keeps the factual quantity unchanged on both price paths.
 Target completion and actual-fill reference coverage are separate metrics. Price
@@ -590,7 +604,7 @@ tunnel; do not expose these ports or assume the conventional 8123/9000 ports.
 ## Data Safety
 
 Treat both databases as persistent trading infrastructure. Default to
-read-only inspection, use migrations for PostgreSQL schema changes, and keep
+read-only inspection, keep PostgreSQL schema maintenance explicit and reviewable, and keep
 ClickHouse DDL explicit and reviewable. Never drop, truncate, replace, or bulk
 rewrite remote data unless the user explicitly authorizes the exact host,
 database, tables, and operation. Before any mutating remote command, state the

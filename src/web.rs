@@ -27,6 +27,7 @@ use crate::account_ipc::{LiveAccountReading, LiveEquityHub};
 use crate::auth::{self, AuthUser};
 use crate::bfusd_auto::{AccountSettings as BfusdAccountSettings, AutoEarnHub};
 use crate::config::{AppConfig, FeeRates, SourceConfig};
+use crate::kline::KlineStore;
 use crate::manager_db::ManagerDb;
 use crate::order_config::{
     ExecConfigClient, ExecConfigError, ExecutionAlgorithm, ExecutionFamily, OrderStrategyView,
@@ -40,7 +41,6 @@ use crate::strategy_catalog::{
     SaveFeeRatesRequest, SaveOrderStrategyRequest, SavePositionStrategyRequest,
     SaveSymbolContractLeverageRequest,
 };
-use crate::twap::TwapStore;
 use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
 use crate::{nav, postgres};
 
@@ -199,8 +199,7 @@ struct WebState {
     reload_notify: ReloadNotifyHub,
     live_equity: LiveEquityHub,
     position_archive: Arc<PositionArchive>,
-    twap: Arc<TwapStore>,
-    twap_symbols: crate::twap::SharedSymbols,
+    klines: Arc<KlineStore>,
     viz_snapshot: VizSnapshotClient,
     refresh_interval_secs: u64,
     auto_earn: AutoEarnHub,
@@ -245,19 +244,6 @@ struct StrategyPnlSummary {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ExecutionCostQuery {
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    #[serde(alias = "windowSecs")]
-    window_sec: Option<u64>,
-    source_ids: Option<String>,
-    strategy_name: Option<String>,
-    page: Option<usize>,
-    page_size: Option<usize>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct AcquisitionCostQuery {
     start_ms: Option<i64>,
     end_ms: Option<i64>,
@@ -273,13 +259,6 @@ struct PositionUpdatesQuery {
     after_us: Option<i64>,
     after_seq: Option<u32>,
     limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct ExecutionCostSnapshot {
-    generated_at_us: i64,
-    generation_duration_ms: u64,
-    report: crate::execution_cost::ExecutionCostReport,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -394,7 +373,6 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
 
     let database_url = config.database_url()?;
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
-    postgres::migrate(&pool).await?;
     postgres::register_sources(&pool, &config.sources).await?;
     let auto_earn = AutoEarnHub::new(&config)?;
     auto_earn.spawn(config.sources.clone());
@@ -405,19 +383,11 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let reload_notify = ReloadNotifyHub::spawn();
     let live_equity = LiveEquityHub::spawn(&config.sources);
     let viz_snapshot = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
-    let manager_db = ManagerDb::open(&config.twap.rocksdb_path)?;
+    crate::kline::validate_host_configs(&config)?;
+    let manager_db = ManagerDb::open(&config.kline.rocksdb_path)?;
     let position_archive = Arc::new(PositionArchive::open(manager_db.clone())?);
-    let twap = Arc::new(TwapStore::from_db(
-        manager_db.clone(),
-        config.twap.retain_days.max(1),
-    )?);
-    let twap_symbols = crate::twap::spawn_with_db(pool.clone(), config.twap.clone(), manager_db);
-    crate::theoretical_nav::spawn(
-        config.clone(),
-        pool.clone(),
-        Arc::clone(&position_archive),
-        Arc::clone(&twap),
-    );
+    let klines = Arc::new(KlineStore::from_db(manager_db, config.kline.clone())?);
+    klines.spawn_defaults();
     let nav_history_store = Arc::new(std::sync::Mutex::new(nav::NavHistoryStore::default()));
     let first_build = build_dashboard(
         &config,
@@ -483,8 +453,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/pnl/strategies", get(strategies_pnl_arrow))
         .route("/api/pnl/strategy", get(strategy_pnl))
         .route("/api/pnl/strategy/summary", get(strategy_pnl_summary))
-        .route("/api/catalog/execution-cost", get(execution_cost))
         .route("/api/catalog/acquisition-cost", get(acquisition_cost))
+        .route("/api/catalog/kline-status", get(kline_status))
         .route("/api/catalog/position-updates", get(position_updates))
         .route("/api/order-config/auth", post(order_config_auth))
         .route(
@@ -606,8 +576,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             reload_notify,
             live_equity,
             position_archive,
-            twap,
-            twap_symbols,
+            klines,
             viz_snapshot,
             refresh_interval_secs,
             auto_earn,
@@ -1507,12 +1476,22 @@ async fn rebuild_timeline_snapshot(
     let theoretical = if theoretical_symbols.is_empty() {
         crate::theoretical_nav::load_timeline(
             &state.pool,
+            &state.config,
+            &state.position_archive,
+            &state.klines,
             report.start_ts_us,
             report.end_ts_us,
             &report.selected_source_ids,
             max_points,
         )
-        .await?
+        .await
+        .unwrap_or_else(|error| {
+            warn!(%error, "minute-candle theoretical NAV unavailable");
+            crate::theoretical_nav::TheoreticalNavTimeline {
+                unavailable_reason: Some("理论分析暂不可用，请稍后重试".into()),
+                ..Default::default()
+            }
+        })
     } else {
         crate::theoretical_nav::TheoreticalNavTimeline::default()
     };
@@ -1678,130 +1657,8 @@ async fn rebuild_strategy_pnl_report(
     Ok((report, data_generated_at_us))
 }
 
-async fn execution_cost(
-    State(state): State<WebState>,
-    Query(query): Query<ExecutionCostQuery>,
-    Extension(visible): Extension<VisibleSources>,
-) -> Result<Response, ApiError> {
-    let requested_source_ids = parse_csv(query.source_ids.as_deref(), false);
-    if requested_source_ids
-        .iter()
-        .any(|source_id| !visible.0.contains(source_id))
-    {
-        return Ok(forbidden(
-            "you are not authorized to view one or more accounts",
-        ));
-    }
-    let selected_source_ids = if requested_source_ids.is_empty() {
-        visible.0.iter().cloned().collect::<Vec<_>>()
-    } else {
-        requested_source_ids
-    };
-    if selected_source_ids.is_empty() {
-        return Ok(forbidden("you are not authorized to view any account"));
-    }
-    if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
-        return Ok(bad_request(message));
-    }
-    let start_received_at_us = match query.start_ms {
-        Some(value) => match milliseconds_to_microseconds(value, "startMs") {
-            Ok(value) => value,
-            Err(message) => return Ok(bad_request(message)),
-        },
-        None => 1,
-    };
-    let end_received_at_us = match query.end_ms {
-        Some(value) => match milliseconds_to_microseconds(value, "endMs") {
-            Ok(value) => Some(value),
-            Err(message) => return Ok(bad_request(message)),
-        },
-        None => None,
-    };
-    if end_received_at_us.is_some_and(|end| end < start_received_at_us) {
-        return Ok(bad_request(
-            "endMs must be greater than or equal to startMs".to_string(),
-        ));
-    }
-    let window_secs = query
-        .window_sec
-        .unwrap_or(crate::execution_cost::DEFAULT_WINDOW_SECS);
-    let strategy_name = query
-        .strategy_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(name) = strategy_name
-        && let Err(message) = validate_strategy_name(name)
-    {
-        return Ok(bad_request(message));
-    }
-    let page = query.page.unwrap_or(1);
-    let page_size = query
-        .page_size
-        .unwrap_or(crate::execution_cost::DEFAULT_PAGE_SIZE);
-    if page == 0 {
-        return Ok(bad_request("page must be greater than zero".to_string()));
-    }
-    if page_size == 0 || page_size > crate::execution_cost::MAX_PAGE_SIZE {
-        return Ok(bad_request(format!(
-            "pageSize must be between 1 and {}",
-            crate::execution_cost::MAX_PAGE_SIZE
-        )));
-    }
-
-    let started = Instant::now();
-    let fee_rates = postgres::load_fee_rates(&state.pool).await?;
-    let config = Arc::clone(&state.config)
-        .as_ref()
-        .clone()
-        .with_fee_rates(&fee_rates);
-    let archive = Arc::clone(&state.position_archive);
-    let twap = Arc::clone(&state.twap);
-    let (histories, generated_at_us) = {
-        let cache = state.cache.read().await;
-        (
-            Arc::clone(&cache.nav_histories),
-            cache.dashboard.generated_at_us,
-        )
-    };
-    let source_ids = selected_source_ids.clone();
-    let strategy_name = strategy_name.map(str::to_string);
-    let report = tokio::task::spawn_blocking(move || {
-        crate::execution_cost::report_execution_cost(
-            &config,
-            &archive,
-            &twap,
-            start_received_at_us,
-            end_received_at_us,
-            window_secs,
-            generated_at_us,
-            &source_ids,
-            strategy_name.as_deref(),
-            page,
-            page_size,
-            &histories,
-        )
-    })
-    .await
-    .context("CTA execution-cost rebuild task failed")?;
-    let report = match report {
-        Ok(report) => report,
-        Err(error) if is_execution_cost_request_error(&error) => {
-            return Ok(bad_request(error.to_string()));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-
-    Ok((
-        NO_STORE,
-        Json(ExecutionCostSnapshot {
-            generated_at_us,
-            generation_duration_ms,
-            report,
-        }),
-    )
-        .into_response())
+async fn kline_status(State(state): State<WebState>) -> Response {
+    (NO_STORE, Json(state.klines.status())).into_response()
 }
 
 async fn acquisition_cost(
@@ -1809,6 +1666,9 @@ async fn acquisition_cost(
     Query(query): Query<AcquisitionCostQuery>,
     Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
+    if !state.klines.enabled() {
+        return Ok(bad_request("分钟 K 线理论分析未启用".into()));
+    }
     let requested_source_ids = parse_csv(query.source_ids.as_deref(), false);
     if requested_source_ids
         .iter()
@@ -1834,7 +1694,7 @@ async fn acquisition_cost(
             Ok(value) => value,
             Err(message) => return Ok(bad_request(message)),
         },
-        None => 1,
+        None => unix_now_us() - crate::kline::DAY_US,
     };
     let (histories, generated_at_us) = {
         let cache = state.cache.read().await;
@@ -1875,6 +1735,13 @@ async fn acquisition_cost(
             crate::acquisition_cost::MAX_PAGE_SIZE
         )));
     }
+    if let Err(error) =
+        state
+            .klines
+            .validate_range(start_received_at_us, end_received_at_us, unix_now_us())
+    {
+        return Ok(bad_request(error.to_string()));
+    }
     let started = Instant::now();
     let fee_rates = postgres::load_fee_rates(&state.pool).await?;
     let config = Arc::clone(&state.config)
@@ -1885,6 +1752,7 @@ async fn acquisition_cost(
         &state.pool,
         &config,
         &state.position_archive,
+        &state.klines,
         &histories,
         start_received_at_us,
         end_received_at_us,
@@ -2229,9 +2097,8 @@ async fn save_position_strategy(
     .await
     {
         Ok(saved) => {
-            state.twap_symbols.track(saved.targets.keys());
             let factual_positions = load_factual_positions(&state, &saved.strategy_name).await;
-            let published_accounts = load_published_accounts(&state, &saved.strategy_name).await;
+            let published_accounts = load_published_accounts(&state, &saved.strategy_name).await?;
             if let Err(error) = state.position_archive.append(
                 saved.updated_at_us,
                 &saved,
@@ -3360,6 +3227,15 @@ async fn stop_binding(
             message: "shares were saved as zero, but the binding disappeared".to_string(),
         })?;
     let position = loaded.0;
+    let mut archived_account =
+        crate::position_archive::published_account(source_id, binding_name, 0.0);
+    archived_account.theoretical_fee_rate =
+        postgres::load_theoretical_twap_fee_rate(&state.pool, source_id)
+            .await
+            .map_err(|error| PublishFailure {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: format!("load stop archive fee: {error}"),
+            })?;
     let factual_positions = load_factual_position(state, source_id, binding_name)
         .await
         .into_iter()
@@ -3370,11 +3246,7 @@ async fn stop_binding(
             updated_at_us,
             &position,
             factual_positions,
-            vec![crate::position_archive::published_account(
-                source_id,
-                binding_name,
-                0.0,
-            )],
+            vec![archived_account],
         )
         .map_err(|error| {
             error!(
@@ -3532,29 +3404,24 @@ fn publish_failure_response(error: PublishFailure) -> Response {
 async fn load_published_accounts(
     state: &WebState,
     strategy_name: &str,
-) -> Vec<crate::position_archive::ArchivedPublishedAccount> {
+) -> Result<Vec<crate::position_archive::ArchivedPublishedAccount>> {
     let snapshots =
-        match strategy_catalog::list_publish_snapshots_for_position(&state.pool, strategy_name)
-            .await
-        {
-            Ok(snapshots) => snapshots,
-            Err(error) => {
-                warn!(
-                    strategy_name,
-                    error = %error,
-                    "failed to list bound-account shares for position update archive"
-                );
-                return Vec::new();
-            }
-        };
+        strategy_catalog::list_publish_snapshots_for_position(&state.pool, strategy_name).await?;
+    let fees = postgres::load_theoretical_twap_fee_rates(&state.pool).await?;
     snapshots
         .into_iter()
         .map(|snapshot| {
-            crate::position_archive::published_account(
+            let fee = fees
+                .get(&snapshot.source_id)
+                .copied()
+                .context("missing theoretical fee for archived account")?;
+            let mut account = crate::position_archive::published_account(
                 snapshot.source_id,
                 snapshot.binding_name,
                 snapshot.shares,
-            )
+            );
+            account.theoretical_fee_rate = Some(fee);
+            Ok(account)
         })
         .collect()
 }
@@ -4212,15 +4079,6 @@ fn is_strategy_pnl_request_error(error: &anyhow::Error) -> bool {
         || message.starts_with("source_id")
 }
 
-fn is_execution_cost_request_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    message.starts_with("start timestamp")
-        || message.starts_with("end timestamp")
-        || message.starts_with("windowSecs")
-        || message.starts_with("page")
-        || message.starts_with("sourceIds")
-}
-
 fn bad_request(message: String) -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -4779,10 +4637,10 @@ mod tests {
                 url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),
                 max_connections: 1,
             },
-            ingestion: crate::config::IngestionConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
             order_config: crate::config::OrderConfigSettings::default(),
             redis: crate::config::RedisSettings::default(),
-            twap: crate::config::TwapConfig::default(),
+            kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
             sources: vec![crate::config::SourceConfig {
                 id: "binance_exec_trade01".into(),
@@ -4792,8 +4650,6 @@ mod tests {
                 rocksdb_path: std::path::PathBuf::from("/tmp/missing"),
                 enabled: true,
                 monitor_enabled: true,
-                start_ts_us: None,
-                poll_interval_secs: None,
                 estimated_fee_rate: None,
                 maker_fee_rate: None,
                 taker_fee_rate: None,
@@ -4848,8 +4704,6 @@ mod tests {
             rocksdb_path: std::path::PathBuf::from("/tmp/missing"),
             enabled: true,
             monitor_enabled: true,
-            start_ts_us: None,
-            poll_interval_secs: None,
             estimated_fee_rate: None,
             maker_fee_rate: None,
             taker_fee_rate: None,
@@ -4866,10 +4720,10 @@ mod tests {
                 url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),
                 max_connections: 1,
             },
-            ingestion: crate::config::IngestionConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
             order_config: crate::config::OrderConfigSettings::default(),
             redis: crate::config::RedisSettings::default(),
-            twap: crate::config::TwapConfig::default(),
+            kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
             sources: vec![source],
         };

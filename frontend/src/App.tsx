@@ -21,7 +21,6 @@ import { PositionStrategyPage } from './pages/config/PositionStrategyPage'
 import { OrderStrategyPage } from './pages/config/OrderStrategyPage'
 import { AccountBindingsPage } from './pages/config/AccountBindingsPage'
 import { DocsPage } from './pages/DocsPage'
-import { ExecutionCostPage } from './pages/ExecutionCostPage'
 import { AcquisitionCostPage } from './pages/AcquisitionCostPage'
 import { AdminPage } from './pages/AdminPage'
 import { AutoEarnPage } from './pages/AutoEarnPage'
@@ -178,7 +177,6 @@ function AuthenticatedApp() {
   if (path === '/manager/config/order') return <OrderStrategyPage />
   if (path === '/manager/config/bindings') return <AccountBindingsPage />
   if (path === '/manager/docs') return <DocsPage />
-  if (path === '/manager/execution-cost') return <ExecutionCostPage />
   if (path === '/manager/acquisition-cost') return <AcquisitionCostPage />
   if (path === '/manager/admin') return <AdminPage />
   if (path === '/manager/auto-earn') return <AutoEarnPage />
@@ -748,6 +746,12 @@ function NavPage() {
               )}
             </div>
           </div>
+          {timeline?.theoretical.unavailable_reason && (
+            <div className="chart-empty" role="status">理论净值：{timeline.theoretical.unavailable_reason}</div>
+          )}
+          {Boolean(timeline?.theoretical.legacy_fee_delta_count) && (
+            <div className="chart-empty" role="status">部分历史信号未归档理论费率，按当前理论费率估算。</div>
+          )}
           <div className="chart-body has-picker">
             <div className="chart-stage">
               {timeline &&

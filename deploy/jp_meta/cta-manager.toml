@@ -4,10 +4,8 @@
 url_env = "CRYPTO_CTA_LOCAL_DATABASE_URL"
 max_connections = 8
 
-[ingestion]
-poll_interval_secs = 60
-safety_lag_secs = 5
-overlap_secs = 300
+[dashboard]
+refresh_secs = 60
 
 [order_config]
 request_timeout_secs = 5
@@ -17,15 +15,25 @@ url = "redis://127.0.0.1:6379/0"
 request_timeout_secs = 2
 reconnect_interval_ms = 500
 
-[twap]
-enabled = true
-# Host-global Manager RocksDB. This is not an Exec persist_manager path.
+[kline]
+# Enable only after assigning a dedicated non-trading market-data egress.
+enabled = false
 rocksdb_path = "/home/ubuntu/crypto_cta_manager/db"
-venue = "binance-futures"
-interval_ms = 5000
 retain_days = 30
-catalog_reload_secs = 30
+refresh_secs = 300
 compact_interval_secs = 3600
+default_symbols = ["BNBUSDT", "XRPUSDT", "ETHUSDT", "BTCUSDT", "SOLUSDT"]
+# Bind an assigned local address; public_ip is its expected public/NAT address.
+# local_ip = "DEDICATED_LOCAL_IP"
+# public_ip = "DEDICATED_PUBLIC_IP"
+# List EVERY live trade engine TOML; the client rejects their trading IPs.
+trade_engine_configs = []
+# Also exclude trading public/NAT addresses when different from local_ips.
+forbidden_public_ips = []
+request_timeout_secs = 15
+concurrency = 8
+# Conservative shared budget for this Kline client, independent of order traffic.
+weight_per_minute = 120
 
 [monitor]
 # Enable only after both webhook URLs are installed in the host EnvironmentFile.

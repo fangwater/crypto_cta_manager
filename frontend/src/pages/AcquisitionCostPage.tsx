@@ -1,6 +1,7 @@
 import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, Scale } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
-import { getAcquisitionCost, getDashboard } from '../api'
+import { getAcquisitionCost, getDashboard, getKlineCacheStatus } from '../api'
+import type { KlineCacheStatus } from '../api'
 import { AppShell, PageIntro, StatTile } from '../components/AppShell'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
@@ -42,7 +43,7 @@ function side(delta: number) {
 }
 
 function sampleText(row: AcquisitionCostRow) {
-  return row.sample_mids.map((value) => money(value)).join(' / ')
+  return row.sample_prices.map((value) => money(value)).join(' / ')
 }
 
 export function AcquisitionCostPage() {
@@ -51,12 +52,21 @@ export function AcquisitionCostPage() {
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
   const [snapshot, setSnapshot] = useState<AcquisitionCostSnapshot | null>(null)
   const [scope, setScope] = useState(initialSource || 'all')
-  const [strategyName, setStrategyName] = useState('rbf_small')
+  const [strategyName, setStrategyName] = useState('')
   const [startInput, setStartInput] = useState(toDatetimeLocal(now - 24 * 60 * 60 * 1_000))
   const [endInput, setEndInput] = useState(toDatetimeLocal(now))
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [cacheStatus, setCacheStatus] = useState<KlineCacheStatus | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const refresh = () => { void getKlineCacheStatus(controller.signal).then(setCacheStatus).catch(() => {}) }
+    refresh()
+    const interval = window.setInterval(refresh, 10_000)
+    return () => { controller.abort(); window.clearInterval(interval) }
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -110,7 +120,7 @@ export function AcquisitionCostPage() {
   const totals = report?.totals
   return (
     <AppShell
-      active="execution-cost"
+      active="acquisition-cost"
       title="持仓成本"
       subtitle="实际成交与五切片虚拟成交"
       icon={Scale}
@@ -124,10 +134,16 @@ export function AcquisitionCostPage() {
       <PageIntro
         eyebrow="Delta cost"
         title="实际成本 vs 虚拟成本"
-        description="每次目标变化冻结 delta，按五个相隔 60 秒的 5 秒 mid 等量模拟成交。实际成交按同方向和 delta 数量上限配对。"
+        description="每次目标变化冻结 delta，使用发布后五个完整分钟的成交均价（成交额 ÷ 成交量），每分钟执行 1/5。按实际成交数量比较价格与费用，仅支持最近 30 天。"
       />
 
       {error && <Alert className="mb-4">{error}</Alert>}
+      {cacheStatus?.enabled && <div className="mb-4 text-sm text-muted" role="status">
+        行情缓存：已补拉 {cacheStatus.fetched_candles.toLocaleString()} 根分钟 K 线 · {cacheStatus.active_backfills ? `${cacheStatus.active_backfills} 个币对正在补齐，可稍后重新查询` : '当前没有补拉任务'}
+      </div>}
+      {report?.warnings.map((warning) => <Alert key={warning} className="mb-4">{warning}</Alert>)}
+      {Boolean(totals?.pending_virtual_delta_count) && <Alert className="mb-4">{totals?.pending_virtual_delta_count} 个 delta 的五分钟执行窗口尚未结束。</Alert>}
+      {Boolean(totals?.legacy_fee_delta_count) && <Alert className="mb-4">{totals?.legacy_fee_delta_count} 个历史 delta 未归档理论费率，按当前理论费率估算。</Alert>}
       {totals && totals.missing_virtual_delta_count > 0 && (
         <Alert className="mb-4">
           {totals.missing_virtual_delta_count} 个 delta 缺少完整五点行情，未进入可比成本。
@@ -175,7 +191,7 @@ export function AcquisitionCostPage() {
         <StatTile label="事实成交额" value={totals ? moneyU(totals.actual_turnover_usdt) : '--'} hint={totals ? `${totals.actual_fill_count} 笔 · 费 ${moneyU(totals.actual_fee_usdt)}` : undefined} />
         <StatTile label="同量虚拟成交额" value={totals ? moneyU(totals.matched_virtual_turnover_usdt) : '--'} hint="完全使用事实 fill 数量" />
         <StatTile label="事实成交覆盖" value={totals ? `${(totals.actual_fill_reference_coverage * 100).toFixed(1)}%` : '--'} />
-        <StatTile label="价格差" value={totals ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? `首个 mid ${moneyU(totals.first_mid_shortfall_usdt)} · 后续路径 ${moneyU(totals.five_sample_drift_usdt)}` : undefined} />
+        <StatTile label="价格差" value={totals ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? `首分钟均价 ${moneyU(totals.first_minute_shortfall_usdt)} · 后续路径 ${moneyU(totals.five_sample_drift_usdt)}` : undefined} />
         <StatTile label="费后差" value={totals ? moneyU(totals.after_fee_shortfall_usdt) : '--'} hint={totals ? `手续费差 ${moneyU(totals.fee_shortfall_usdt)}` : undefined} />
       </div>
 
@@ -183,11 +199,27 @@ export function AcquisitionCostPage() {
       {loading && !snapshot && <Card><CardContent className="flex items-center justify-center gap-2 py-16 text-sm text-muted"><LoaderCircle size={18} className="animate-spin-slow" />正在生成成本账本</CardContent></Card>}
 
       {report && (
+        <Card className="mb-6">
+          <CardHeader><CardTitle>策略对比</CardTitle><CardDescription>正值表示实际成交更贵；先看覆盖率，再比较价格差和费用差。</CardDescription></CardHeader>
+          <CardContent className="overflow-x-auto">
+            <table className="min-w-full text-left text-[13px]">
+              <thead><tr><th>策略</th><th className="text-right">可比成交数</th><th className="text-right">可比成交额 U</th><th className="text-right">价格差 bps</th><th className="text-right">费后差 U</th></tr></thead>
+              <tbody>{report.by_strategy.map((row) => <tr key={row.bucket} className="border-b border-border-soft">
+                <td className="py-2">{row.bucket}</td><td className="text-right tabular-nums">{row.fill_count}</td>
+                <td className="text-right tabular-nums">{money(row.reference_turnover_usdt)}</td>
+                <td className={cn('text-right tabular-nums', costClass(row.price_shortfall_bps))}>{bps(row.price_shortfall_bps)}</td>
+                <td className={cn('text-right tabular-nums', costClass(row.after_fee_shortfall_usdt))}>{moneyU(row.after_fee_shortfall_usdt)}</td>
+              </tr>)}</tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+      {report && (
         <Card>
           <CardHeader className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
             <div>
               <CardTitle>逐 delta 成本</CardTitle>
-              <CardDescription>虚拟价格保存全部五个 mid；完成率按实际配对数量除以 delta 数量。</CardDescription>
+              <CardDescription>虚拟价格保存全部五个分钟均价；完成率按实际配对数量除以 delta 数量。</CardDescription>
             </div>
             <div className="flex items-center gap-2">
               <Button type="button" size="sm" variant="secondary" className="w-8 px-0" title="上一页" aria-label="上一页" disabled={loading || page <= 1} onClick={() => void query(page - 1)}><ChevronLeft size={15} /></Button>
@@ -199,7 +231,7 @@ export function AcquisitionCostPage() {
             <table className="min-w-full text-left text-[13px]">
               <thead className="border-b border-border-soft bg-canvas/80 text-[11px] uppercase tracking-wide text-muted">
                 <tr>
-                  <th className="px-4 py-2 font-medium">信号</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">五个 mid</th><th className="px-4 py-2 text-right font-medium">虚拟均价</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
+                  <th className="px-4 py-2 font-medium">信号</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">五个分钟均价</th><th className="px-4 py-2 text-right font-medium">虚拟均价</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
                 </tr>
               </thead>
               <tbody>

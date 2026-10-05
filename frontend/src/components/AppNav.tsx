@@ -3,7 +3,7 @@ import { useLayoutEffect, useRef } from 'react'
 import { useAuth } from './AuthGate'
 import { cn } from '../lib/cn'
 
-export type AppNavId = 'workspace' | 'manager' | 'execution-cost' | 'config' | 'auto-earn' | 'docs' | 'admin'
+export type AppNavId = 'workspace' | 'manager' | 'acquisition-cost' | 'config' | 'auto-earn' | 'docs' | 'admin'
 
 const links: Array<{
   id: AppNavId
@@ -13,7 +13,7 @@ const links: Array<{
 }> = [
   { id: 'workspace', href: '/manager/workspace/', label: '总览', icon: LayoutDashboard },
   { id: 'manager', href: '/manager/', label: '净值', icon: Activity },
-  { id: 'execution-cost', href: '/manager/acquisition-cost/', label: '成本', icon: Scale },
+  { id: 'acquisition-cost', href: '/manager/acquisition-cost/', label: '成本', icon: Scale },
   { id: 'config', href: '/manager/config/position/', label: '策略', icon: Settings },
   { id: 'auto-earn', href: '/manager/auto-earn/', label: '自动理财', icon: PiggyBank },
   { id: 'docs', href: '/manager/docs/', label: '文档', icon: BookOpen },

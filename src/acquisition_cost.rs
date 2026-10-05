@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use sqlx::Row;
-use sqlx::postgres::{PgPool, PgRow};
+use sqlx::postgres::PgPool;
 
 use crate::config::AppConfig;
 use crate::nav;
@@ -18,6 +17,8 @@ const MAX_VIRTUAL_REFERENCE_AGE_US: i64 = 300_000_000;
 pub struct AcquisitionCostTotals {
     pub virtual_delta_count: usize,
     pub missing_virtual_delta_count: usize,
+    pub pending_virtual_delta_count: usize,
+    pub legacy_fee_delta_count: usize,
     pub comparable_delta_count: usize,
     pub virtual_turnover_usdt: f64,
     pub virtual_fee_usdt: f64,
@@ -35,12 +36,12 @@ pub struct AcquisitionCostTotals {
     pub stale_reference_fill_count: u64,
     pub stale_reference_fill_notional_usdt: f64,
     pub price_shortfall_usdt: f64,
-    pub first_mid_shortfall_usdt: f64,
+    pub first_minute_shortfall_usdt: f64,
     pub five_sample_drift_usdt: f64,
     pub fee_shortfall_usdt: f64,
     pub after_fee_shortfall_usdt: f64,
     pub price_shortfall_bps: f64,
-    pub first_mid_shortfall_bps: f64,
+    pub first_minute_shortfall_bps: f64,
     pub matched_turnover_coverage: f64,
     pub actual_fill_reference_coverage: f64,
 }
@@ -63,10 +64,10 @@ pub struct AcquisitionCostBreakdown {
     pub actual_fee_usdt: f64,
     pub virtual_fee_usdt: f64,
     pub price_shortfall_usdt: f64,
-    pub first_mid_shortfall_usdt: f64,
+    pub first_minute_shortfall_usdt: f64,
     pub five_sample_drift_usdt: f64,
     pub price_shortfall_bps: f64,
-    pub first_mid_shortfall_bps: f64,
+    pub first_minute_shortfall_bps: f64,
     pub after_fee_shortfall_usdt: f64,
 }
 
@@ -90,7 +91,7 @@ pub struct AcquisitionFillDiagnostic {
     pub order_delay_us: i64,
     pub reference_turnover_usdt: f64,
     pub price_shortfall_usdt: f64,
-    pub first_mid_shortfall_usdt: f64,
+    pub first_minute_shortfall_usdt: f64,
     pub five_sample_drift_usdt: f64,
     pub price_shortfall_bps: f64,
 }
@@ -103,7 +104,7 @@ struct BreakdownAccumulator {
     actual_fee_usdt: f64,
     virtual_fee_usdt: f64,
     price_shortfall_usdt: f64,
-    first_mid_shortfall_usdt: f64,
+    first_minute_shortfall_usdt: f64,
     five_sample_drift_usdt: f64,
 }
 
@@ -113,7 +114,7 @@ impl BreakdownAccumulator {
         signed_qty: f64,
         actual_price: f64,
         virtual_price: f64,
-        first_mid: f64,
+        first_minute: f64,
         actual_fee: f64,
         virtual_fee_rate: f64,
     ) {
@@ -124,8 +125,8 @@ impl BreakdownAccumulator {
         self.actual_fee_usdt += actual_fee;
         self.virtual_fee_usdt += reference_turnover * virtual_fee_rate;
         self.price_shortfall_usdt += signed_qty * (actual_price - virtual_price);
-        self.first_mid_shortfall_usdt += signed_qty * (actual_price - first_mid);
-        self.five_sample_drift_usdt += signed_qty * (first_mid - virtual_price);
+        self.first_minute_shortfall_usdt += signed_qty * (actual_price - first_minute);
+        self.five_sample_drift_usdt += signed_qty * (first_minute - virtual_price);
     }
 
     fn finish(self, bucket: String) -> AcquisitionCostBreakdown {
@@ -137,15 +138,15 @@ impl BreakdownAccumulator {
             actual_fee_usdt: self.actual_fee_usdt,
             virtual_fee_usdt: self.virtual_fee_usdt,
             price_shortfall_usdt: self.price_shortfall_usdt,
-            first_mid_shortfall_usdt: self.first_mid_shortfall_usdt,
+            first_minute_shortfall_usdt: self.first_minute_shortfall_usdt,
             five_sample_drift_usdt: self.five_sample_drift_usdt,
             price_shortfall_bps: if self.reference_turnover_usdt > 0.0 {
                 self.price_shortfall_usdt / self.reference_turnover_usdt * 10_000.0
             } else {
                 0.0
             },
-            first_mid_shortfall_bps: if self.reference_turnover_usdt > 0.0 {
-                self.first_mid_shortfall_usdt / self.reference_turnover_usdt * 10_000.0
+            first_minute_shortfall_bps: if self.reference_turnover_usdt > 0.0 {
+                self.first_minute_shortfall_usdt / self.reference_turnover_usdt * 10_000.0
             } else {
                 0.0
             },
@@ -165,7 +166,7 @@ pub struct AcquisitionCostRow {
     pub received_at_us: i64,
     pub virtual_execution_ts_us: i64,
     pub delta_qty: f64,
-    pub sample_mids: [f64; 5],
+    pub sample_prices: [f64; 5],
     pub virtual_vwap: f64,
     pub virtual_turnover_usdt: f64,
     pub virtual_fee_usdt: f64,
@@ -196,6 +197,8 @@ pub struct AcquisitionCostReport {
     pub returned_row_count: usize,
     pub totals: AcquisitionCostTotals,
     pub points: Vec<AcquisitionCostPoint>,
+    pub warnings: Vec<String>,
+    pub by_strategy: Vec<AcquisitionCostBreakdown>,
     pub by_symbol: Vec<AcquisitionCostBreakdown>,
     pub by_side: Vec<AcquisitionCostBreakdown>,
     pub by_liquidity: Vec<AcquisitionCostBreakdown>,
@@ -219,7 +222,7 @@ struct VirtualFill {
     received_at_us: i64,
     execution_ts_us: i64,
     delta_qty: f64,
-    sample_mids: [f64; 5],
+    sample_prices: [f64; 5],
     virtual_vwap: f64,
     virtual_fee_usdt: f64,
     virtual_fee_rate: f64,
@@ -228,40 +231,6 @@ struct VirtualFill {
     actual_signed_notional_usdt: f64,
     actual_fee_usdt: f64,
     matched_fill_count: u64,
-}
-
-fn decode_virtual_fill(row: PgRow) -> Result<VirtualFill> {
-    let sample_value: serde_json::Value = row.try_get("sample_mids")?;
-    let samples = serde_json::from_value::<Vec<f64>>(sample_value)
-        .context("decode theoretical sample_mids")?;
-    let sample_mids: [f64; 5] = samples.try_into().map_err(|values: Vec<f64>| {
-        anyhow::anyhow!("expected 5 sample mids, got {}", values.len())
-    })?;
-    if sample_mids
-        .iter()
-        .any(|price| !price.is_finite() || *price <= 0.0)
-    {
-        bail!("theoretical sample mids contain an invalid price");
-    }
-    Ok(VirtualFill {
-        source_id: row.try_get("source_id")?,
-        binding_name: row.try_get("binding_name")?,
-        strategy_name: row.try_get("position_strategy_name")?,
-        symbol: row.try_get("symbol")?,
-        venue: row.try_get("venue")?,
-        received_at_us: row.try_get("received_at_us")?,
-        execution_ts_us: row.try_get("execution_ts_us")?,
-        delta_qty: row.try_get("executed_quantity")?,
-        sample_mids,
-        virtual_vwap: row.try_get("twap_price")?,
-        virtual_fee_usdt: row.try_get("fee_quote")?,
-        virtual_fee_rate: row.try_get("fee_rate")?,
-        target_signal: 0,
-        actual_matched_qty: 0.0,
-        actual_signed_notional_usdt: 0.0,
-        actual_fee_usdt: 0.0,
-        matched_fill_count: 0,
-    })
 }
 
 fn page_bounds(count: usize, page: usize, page_size: usize) -> (usize, usize) {
@@ -304,6 +273,7 @@ pub async fn report_acquisition_cost(
     pool: &PgPool,
     config: &AppConfig,
     archive: &PositionArchive,
+    klines: &crate::kline::KlineStore,
     histories: &nav::NavSourceHistories,
     start_received_at_us: i64,
     end_received_at_us: i64,
@@ -319,83 +289,64 @@ pub async fn report_acquisition_cost(
     if page == 0 || page_size == 0 || page_size > MAX_PAGE_SIZE {
         bail!("invalid acquisition-cost pagination");
     }
-    let rows = sqlx::query(
-        r#"
-        SELECT source_id, binding_name, position_strategy_name, symbol, venue,
-               received_at_us, execution_ts_us, executed_quantity,
-               twap_price, sample_mids, fee_rate, fee_quote
-        FROM cta_theoretical_nav_events
-        WHERE received_at_us >= $1 AND received_at_us <= $2
-          AND (cardinality($3::text[]) = 0 OR source_id = ANY($3))
-          AND ($4::text IS NULL OR position_strategy_name = $4)
-        ORDER BY received_at_us, source_id, binding_name, symbol
-        "#,
+    let (deltas, warnings) = crate::theoretical_nav::prepare_acquisition(
+        pool,
+        config,
+        archive,
+        klines,
+        start_received_at_us,
+        end_received_at_us,
+        source_ids,
+        strategy_name,
     )
-    .bind(start_received_at_us)
-    .bind(end_received_at_us)
-    .bind(source_ids.to_vec())
-    .bind(strategy_name)
-    .fetch_all(pool)
-    .await
-    .context("load theoretical acquisition-cost events")?;
-    let mut virtual_fills = rows
-        .into_iter()
-        .map(decode_virtual_fill)
-        .collect::<Result<Vec<_>>>()?;
-    let mut target_signals = BTreeMap::<(String, String, i64, String), i32>::new();
-    for message in archive.scan_from(start_received_at_us.max(1))? {
-        if message.received_at_us > end_received_at_us {
-            break;
-        }
-        if strategy_name.is_some_and(|selected| selected != message.strategy.strategy_name) {
+    .await?;
+    let analysis_now_us = crate::kline::now_us();
+    let mut virtual_fills = Vec::new();
+    let mut unavailable = BTreeMap::<(String, String, String), Vec<i64>>::new();
+    let mut missing_virtual_delta_count = 0;
+    let mut pending_virtual_delta_count = 0;
+    let mut legacy_fee_delta_count = 0;
+    for delta in deltas {
+        let execution_ts_us = delta.execution_ts_us();
+        let samples = delta.prices(klines)?;
+        let Some(sample_prices) = samples else {
+            unavailable
+                .entry((delta.source_id, delta.strategy_name, delta.symbol))
+                .or_default()
+                .push(delta.received_at_us);
+            if delta.received_at_us >= start_received_at_us {
+                if execution_ts_us > analysis_now_us {
+                    pending_virtual_delta_count += 1;
+                } else {
+                    missing_virtual_delta_count += 1;
+                }
+            }
             continue;
+        };
+        if delta.legacy_fee {
+            legacy_fee_delta_count += 1;
         }
-        for account in &message.published_accounts {
-            if !source_ids.is_empty() && !source_ids.contains(&account.source_id) {
-                continue;
-            }
-            for (symbol, target) in &message.strategy.targets {
-                target_signals.insert(
-                    (
-                        account.source_id.clone(),
-                        account.binding_name.clone(),
-                        message.received_at_us,
-                        symbol.clone(),
-                    ),
-                    target.signal,
-                );
-            }
-        }
+        let virtual_vwap = sample_prices.iter().sum::<f64>() / 5.0;
+        virtual_fills.push(VirtualFill {
+            source_id: delta.source_id,
+            binding_name: delta.binding_name,
+            strategy_name: delta.strategy_name,
+            symbol: delta.symbol,
+            venue: delta.venue,
+            received_at_us: delta.received_at_us,
+            execution_ts_us,
+            delta_qty: delta.delta_qty,
+            sample_prices,
+            virtual_vwap,
+            virtual_fee_usdt: delta.delta_qty.abs() * virtual_vwap * delta.fee_rate,
+            virtual_fee_rate: delta.fee_rate,
+            target_signal: delta.target_signal,
+            actual_matched_qty: 0.0,
+            actual_signed_notional_usdt: 0.0,
+            actual_fee_usdt: 0.0,
+            matched_fill_count: 0,
+        });
     }
-    for fill in &mut virtual_fills {
-        fill.target_signal = target_signals
-            .get(&(
-                fill.source_id.clone(),
-                fill.binding_name.clone(),
-                fill.received_at_us,
-                fill.symbol.clone(),
-            ))
-            .copied()
-            .unwrap_or(0);
-    }
-    let missing_virtual_delta_count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT count(*)
-        FROM cta_theoretical_nav_skips
-        WHERE received_at_us >= $1 AND received_at_us <= $2
-          AND reason = 'missing_five_slice_mid'
-          AND (cardinality($3::text[]) = 0 OR source_id = ANY($3))
-          AND ($4::text IS NULL OR position_strategy_name = $4)
-        "#,
-    )
-    .bind(start_received_at_us)
-    .bind(end_received_at_us)
-    .bind(source_ids.to_vec())
-    .bind(strategy_name)
-    .fetch_one(pool)
-    .await
-    .context("count missing theoretical acquisition-cost events")?;
-
     let mut by_key = BTreeMap::<(String, String, String), Vec<usize>>::new();
     for (index, fill) in virtual_fills.iter().enumerate() {
         by_key
@@ -408,10 +359,16 @@ pub async fn report_acquisition_cost(
             .push(index);
     }
     let mut totals = AcquisitionCostTotals {
-        virtual_delta_count: virtual_fills.len(),
-        missing_virtual_delta_count: usize::try_from(missing_virtual_delta_count.max(0))?,
+        virtual_delta_count: virtual_fills
+            .iter()
+            .filter(|f| f.received_at_us >= start_received_at_us)
+            .count(),
+        missing_virtual_delta_count,
+        pending_virtual_delta_count,
+        legacy_fee_delta_count,
         ..AcquisitionCostTotals::default()
     };
+    let mut by_strategy = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_symbol = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_side = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_liquidity = BTreeMap::<String, BreakdownAccumulator>::new();
@@ -422,7 +379,10 @@ pub async fn report_acquisition_cost(
     let mut by_target_signal = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut by_execution_mode = BTreeMap::<String, BreakdownAccumulator>::new();
     let mut fill_diagnostics = Vec::new();
-    for fill in &virtual_fills {
+    for fill in virtual_fills
+        .iter()
+        .filter(|f| f.received_at_us >= start_received_at_us)
+    {
         totals.virtual_turnover_usdt += (fill.delta_qty * fill.virtual_vwap).abs();
         totals.virtual_fee_usdt += fill.virtual_fee_usdt;
     }
@@ -475,6 +435,15 @@ pub async fn report_acquisition_cost(
                 continue;
             };
             let fill = &mut virtual_fills[index];
+            if unavailable.get(&key).is_some_and(|times| {
+                times
+                    .iter()
+                    .any(|ts| *ts >= fill.received_at_us && *ts <= signal_ts_us)
+            }) {
+                totals.unmatched_fill_count += 1;
+                totals.unmatched_fill_notional_usdt += (signed_qty * event.price).abs();
+                continue;
+            }
             if signal_ts_us.saturating_sub(fill.received_at_us) > MAX_VIRTUAL_REFERENCE_AGE_US {
                 totals.stale_reference_fill_count =
                     totals.stale_reference_fill_count.saturating_add(1);
@@ -502,9 +471,9 @@ pub async fn report_acquisition_cost(
             };
             let reference_turnover = (signed_qty * fill.virtual_vwap).abs();
             let price_shortfall = signed_qty * (event.price - fill.virtual_vwap);
-            let first_mid_shortfall = signed_qty * (event.price - fill.sample_mids[0]);
-            let five_sample_drift = signed_qty * (fill.sample_mids[0] - fill.virtual_vwap);
-            totals.first_mid_shortfall_usdt += first_mid_shortfall;
+            let first_minute_shortfall = signed_qty * (event.price - fill.sample_prices[0]);
+            let five_sample_drift = signed_qty * (fill.sample_prices[0] - fill.virtual_vwap);
+            totals.first_minute_shortfall_usdt += first_minute_shortfall;
             totals.five_sample_drift_usdt += five_sample_drift;
             fill_diagnostics.push(AcquisitionFillDiagnostic {
                 source_id: source_id.clone(),
@@ -525,7 +494,7 @@ pub async fn report_acquisition_cost(
                 execution_mode,
                 reference_turnover_usdt: reference_turnover,
                 price_shortfall_usdt: price_shortfall,
-                first_mid_shortfall_usdt: first_mid_shortfall,
+                first_minute_shortfall_usdt: first_minute_shortfall,
                 five_sample_drift_usdt: five_sample_drift,
                 price_shortfall_bps: if reference_turnover > 0.0 {
                     price_shortfall / reference_turnover * 10_000.0
@@ -534,6 +503,7 @@ pub async fn report_acquisition_cost(
                 },
             });
             for (values, bucket) in [
+                (&mut by_strategy, fill.strategy_name.as_str()),
                 (&mut by_symbol, event.symbol.as_str()),
                 (&mut by_side, side),
                 (&mut by_liquidity, liquidity),
@@ -556,7 +526,7 @@ pub async fn report_acquisition_cost(
                     signed_qty,
                     event.price,
                     fill.virtual_vwap,
-                    fill.sample_mids[0],
+                    fill.sample_prices[0],
                     actual_fee,
                     fill.virtual_fee_rate,
                 );
@@ -575,7 +545,7 @@ pub async fn report_acquisition_cost(
                     signed_qty,
                     event.price,
                     fill.virtual_vwap,
-                    fill.sample_mids[0],
+                    fill.sample_prices[0],
                     actual_fee,
                     fill.virtual_fee_rate,
                 );
@@ -590,7 +560,14 @@ pub async fn report_acquisition_cost(
     let mut cumulative_price_shortfall = 0.0;
     let mut cumulative_after_fee_shortfall = 0.0;
     for fill in virtual_fills {
-        let virtual_turnover = (fill.delta_qty * fill.virtual_vwap).abs();
+        if fill.received_at_us < start_received_at_us && fill.matched_fill_count == 0 {
+            continue;
+        }
+        let virtual_turnover = if fill.received_at_us >= start_received_at_us {
+            (fill.delta_qty * fill.virtual_vwap).abs()
+        } else {
+            0.0
+        };
         let matched_turnover = (fill.actual_matched_qty * fill.virtual_vwap).abs();
         let actual_turnover = fill.actual_signed_notional_usdt.abs();
         let actual_vwap = (fill.actual_matched_qty.abs() > ZERO_EPSILON)
@@ -622,7 +599,7 @@ pub async fn report_acquisition_cost(
         cumulative_price_shortfall += price_shortfall.unwrap_or_default();
         cumulative_after_fee_shortfall += after_fee_shortfall.unwrap_or_default();
         let point = AcquisitionCostPoint {
-            ts_us: fill.received_at_us,
+            ts_us: fill.received_at_us.max(start_received_at_us),
             virtual_turnover_usdt: cumulative_virtual_turnover,
             actual_matched_turnover_usdt: cumulative_actual_turnover,
             price_shortfall_usdt: cumulative_price_shortfall,
@@ -644,7 +621,7 @@ pub async fn report_acquisition_cost(
             received_at_us: fill.received_at_us,
             virtual_execution_ts_us: fill.execution_ts_us,
             delta_qty: fill.delta_qty,
-            sample_mids: fill.sample_mids,
+            sample_prices: fill.sample_prices,
             virtual_vwap: fill.virtual_vwap,
             virtual_turnover_usdt: virtual_turnover,
             virtual_fee_usdt: fill.virtual_fee_usdt,
@@ -669,8 +646,8 @@ pub async fn report_acquisition_cost(
     } else {
         0.0
     };
-    totals.first_mid_shortfall_bps = if totals.matched_virtual_turnover_usdt > 0.0 {
-        totals.first_mid_shortfall_usdt / totals.matched_virtual_turnover_usdt * 10_000.0
+    totals.first_minute_shortfall_bps = if totals.matched_virtual_turnover_usdt > 0.0 {
+        totals.first_minute_shortfall_usdt / totals.matched_virtual_turnover_usdt * 10_000.0
     } else {
         0.0
     };
@@ -696,8 +673,8 @@ pub async fn report_acquisition_cost(
     fill_diagnostics.truncate(100);
     Ok(AcquisitionCostReport {
         generated_at_us,
-        price_basis: "delta_split_into_five_equal_qty_5s_mid_samples_60s_apart",
-        fee_basis: "actual_maker_taker_vs_virtual_frozen_blended_rate",
+        price_basis: "five_equal_qty_complete_1m_quote_over_base_vwap",
+        fee_basis: "actual_maker_taker_vs_archived_theoretical_rate_or_current_legacy_fallback",
         start_received_at_us,
         end_received_at_us,
         source_ids: source_ids.to_vec(),
@@ -708,6 +685,8 @@ pub async fn report_acquisition_cost(
         returned_row_count: rows.len(),
         totals,
         points,
+        warnings,
+        by_strategy: finish_breakdowns(by_strategy, true),
         by_symbol: finish_breakdowns(by_symbol, true),
         by_side: finish_breakdowns(by_side, false),
         by_liquidity: finish_breakdowns(by_liquidity, false),
@@ -754,7 +733,7 @@ mod tests {
         assert_eq!(row.price_shortfall_usdt, 5.0);
         assert_eq!(
             row.price_shortfall_usdt,
-            row.first_mid_shortfall_usdt + row.five_sample_drift_usdt
+            row.first_minute_shortfall_usdt + row.five_sample_drift_usdt
         );
         assert_eq!(row.price_shortfall_bps, 100.0);
         assert!((row.virtual_fee_usdt - 0.1).abs() <= f64::EPSILON);

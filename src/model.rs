@@ -7,6 +7,25 @@ pub const ORDER_UPDATES_CF: &str = "order_updates";
 pub const ORDER_UPDATES_UNMATCHED_CF: &str = "order_updates_unmatched";
 const SIGNAL_BBO_LEG_BINARY_LEN: usize = 41;
 const SIGNAL_BBO_BINARY_LEN: usize = 83;
+const UNIFORM_ORDER_TAIL_BINARY_LEN: usize = SIGNAL_BBO_BINARY_LEN + 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillLiquidity {
+    Unknown,
+    Maker,
+    Taker,
+}
+
+impl FillLiquidity {
+    fn decode(code: u8) -> Result<Self> {
+        match code {
+            0 => Ok(Self::Unknown),
+            1 => Ok(Self::Maker),
+            2 => Ok(Self::Taker),
+            _ => bail!("invalid uniform fill_liquidity: {code}"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UniformOrderEvent {
@@ -38,7 +57,9 @@ pub struct UniformOrderEvent {
     pub bbo_spread: String,
     pub signal_open: Option<SignalBboLeg>,
     pub signal_hedge: Option<SignalBboLeg>,
-    pub wire_payload: Vec<u8>,
+    /// None only for historical records without the field; explicit Unknown
+    /// must not be inferred as Maker from LIMIT order type.
+    pub fill_liquidity: Option<FillLiquidity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,13 +70,6 @@ pub struct SignalBboLeg {
     pub bid_quantity: f64,
     pub ask_price: f64,
     pub ask_quantity: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct DecodeFailure {
-    pub record_key: Vec<u8>,
-    pub wire_payload: Vec<u8>,
-    pub error: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,12 +234,19 @@ pub fn decode_uniform_order(key: &[u8], payload: &[u8]) -> Result<UniformOrderEv
 
     let (signal_open, signal_hedge) = match decoder.remaining() {
         0 => (None, None),
-        SIGNAL_BBO_BINARY_LEN => {
+        SIGNAL_BBO_BINARY_LEN | UNIFORM_ORDER_TAIL_BINARY_LEN => {
             decode_signal_bbo(decoder.bytes(SIGNAL_BBO_BINARY_LEN, "signal_bbo")?)?
         }
         remaining => {
-            bail!("uniform order signal_bbo must be {SIGNAL_BBO_BINARY_LEN} bytes, got {remaining}")
+            bail!(
+                "uniform order tail must contain signal_bbo and optional fill_liquidity, got {remaining} bytes"
+            )
         }
+    };
+    let fill_liquidity = if decoder.remaining() == 1 {
+        Some(FillLiquidity::decode(decoder.u8("fill_liquidity")?)?)
+    } else {
+        None
     };
     if decoder.remaining() != 0 {
         bail!(
@@ -263,7 +284,7 @@ pub fn decode_uniform_order(key: &[u8], payload: &[u8]) -> Result<UniformOrderEv
         bbo_spread,
         signal_open,
         signal_hedge,
-        wire_payload: payload.to_vec(),
+        fill_liquidity,
     })
 }
 
@@ -489,5 +510,35 @@ mod tests {
         assert!(event.bbo_spread.is_empty());
         assert!(event.signal_open.is_none());
         assert!(event.signal_hedge.is_none());
+    }
+
+    #[test]
+    fn decodes_factual_fill_role_and_rejects_invalid_or_truncated_tail() {
+        for (code, expected) in [
+            (0, FillLiquidity::Unknown),
+            (1, FillLiquidity::Maker),
+            (2, FillLiquidity::Taker),
+        ] {
+            let mut payload = fixture();
+            payload.push(code);
+            let event = decode_uniform_order(b"00000000000000001000", &payload).unwrap();
+            assert_eq!(event.fill_liquidity, Some(expected));
+            assert_eq!(event.amount_update, 0.5);
+            assert_eq!(event.signal_open.unwrap().bid_price, 99.0);
+        }
+        assert_eq!(
+            decode_uniform_order(b"00000000000000001000", &fixture())
+                .unwrap()
+                .fill_liquidity,
+            None
+        );
+        let mut invalid = fixture();
+        invalid.push(3);
+        assert!(decode_uniform_order(b"00000000000000001000", &invalid).is_err());
+        invalid.extend_from_slice(&[0]);
+        assert!(decode_uniform_order(b"00000000000000001000", &invalid).is_err());
+        let mut truncated = fixture();
+        truncated.pop();
+        assert!(decode_uniform_order(b"00000000000000001000", &truncated).is_err());
     }
 }

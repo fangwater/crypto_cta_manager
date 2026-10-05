@@ -17,13 +17,13 @@ pub struct FeeRates {
 pub struct AppConfig {
     pub database: DatabaseConfig,
     #[serde(default)]
-    pub ingestion: IngestionConfig,
+    pub dashboard: DashboardConfig,
     #[serde(default)]
     pub order_config: OrderConfigSettings,
     #[serde(default)]
     pub redis: RedisSettings,
     #[serde(default)]
-    pub twap: TwapConfig,
+    pub kline: KlineConfig,
     #[serde(default)]
     pub monitor: MonitorConfig,
     pub sources: Vec<SourceConfig>,
@@ -40,10 +40,8 @@ pub struct DatabaseConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct IngestionConfig {
-    pub poll_interval_secs: u64,
-    pub safety_lag_secs: u64,
-    pub overlap_secs: u64,
+pub struct DashboardConfig {
+    pub refresh_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,14 +61,24 @@ pub struct RedisSettings {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct TwapConfig {
+pub struct KlineConfig {
     pub enabled: bool,
     pub rocksdb_path: PathBuf,
-    pub venue: String,
-    pub interval_ms: u32,
     pub retain_days: u32,
-    pub catalog_reload_secs: u64,
+    pub refresh_secs: u64,
     pub compact_interval_secs: u64,
+    pub default_symbols: Vec<String>,
+    /// The assigned local address selecting the dedicated market-data route.
+    pub local_ip: Option<IpAddr>,
+    /// Expected public address after NAT. Verified before accessing Binance.
+    pub public_ip: Option<IpAddr>,
+    /// All live trade engine TOMLs on this host; only their IP fields are read.
+    pub trade_engine_configs: Vec<PathBuf>,
+    /// Additional public trading addresses when local_ips are behind NAT.
+    pub forbidden_public_ips: Vec<IpAddr>,
+    pub request_timeout_secs: u64,
+    pub concurrency: usize,
+    pub weight_per_minute: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -148,9 +156,6 @@ pub struct SourceConfig {
     /// Skip Exec health checks and live account IPC until this account's runtime starts.
     #[serde(default = "default_true")]
     pub monitor_enabled: bool,
-    /// First RocksDB key to ingest when this source has no checkpoint. Defaults to all history.
-    pub start_ts_us: Option<i64>,
-    pub poll_interval_secs: Option<u64>,
     /// Effective fee rate used to estimate fees from fill notional, for example 0.0004.
     pub estimated_fee_rate: Option<f64>,
     /// Maker fee fraction. Negative values represent rebates.
@@ -177,13 +182,9 @@ pub struct SourceConfig {
     pub env_path: Option<PathBuf>,
 }
 
-impl Default for IngestionConfig {
+impl Default for DashboardConfig {
     fn default() -> Self {
-        Self {
-            poll_interval_secs: 60,
-            safety_lag_secs: 5,
-            overlap_secs: 300,
-        }
+        Self { refresh_secs: 60 }
     }
 }
 
@@ -205,16 +206,25 @@ impl Default for RedisSettings {
     }
 }
 
-impl Default for TwapConfig {
+impl Default for KlineConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             rocksdb_path: PathBuf::from("/home/el01/crypto_cta_manager/db"),
-            venue: "binance-futures".to_string(),
-            interval_ms: 5_000,
             retain_days: 30,
-            catalog_reload_secs: 30,
+            refresh_secs: 300,
             compact_interval_secs: 3_600,
+            default_symbols: ["BNBUSDT", "XRPUSDT", "ETHUSDT", "BTCUSDT", "SOLUSDT"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            local_ip: None,
+            public_ip: None,
+            trade_engine_configs: Vec::new(),
+            forbidden_public_ips: Vec::new(),
+            request_timeout_secs: 15,
+            concurrency: 8,
+            weight_per_minute: 120,
         }
     }
 }
@@ -246,6 +256,64 @@ impl Default for MonitorConfig {
             heartbeat_quiet_end_hour: 6,
             dingtalk: DingTalkConfig::default(),
         }
+    }
+}
+
+impl KlineConfig {
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=30).contains(&self.retain_days) {
+            bail!("kline.retain_days must be between 1 and 30");
+        }
+        if self.refresh_secs == 0
+            || self.compact_interval_secs == 0
+            || self.request_timeout_secs == 0
+            || !(1..=64).contains(&self.concurrency)
+            || !(2..=1200).contains(&self.weight_per_minute)
+        {
+            bail!("invalid kline refresh, timeout, concurrency or weight budget");
+        }
+        for symbol in &self.default_symbols {
+            if symbol.is_empty()
+                || !symbol
+                    .bytes()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+            {
+                bail!("kline.default_symbols must contain uppercase exchange symbols");
+            }
+        }
+        if self.enabled {
+            let local = self
+                .local_ip
+                .context("kline.local_ip is required when enabled")?;
+            let public = self
+                .public_ip
+                .context("kline.public_ip is required when enabled")?;
+            if local.is_unspecified()
+                || local.is_loopback()
+                || local.is_multicast()
+                || public.is_unspecified()
+                || public.is_loopback()
+                || public.is_multicast()
+                || matches!(public, IpAddr::V4(address) if address.is_private())
+                || matches!(public, IpAddr::V6(address) if address.is_unique_local() || address.is_unicast_link_local())
+            {
+                bail!("kline requires explicit dedicated local/public addresses");
+            }
+            if self.trade_engine_configs.is_empty() {
+                bail!("kline.trade_engine_configs must list all live trade engine TOMLs");
+            }
+            if self
+                .trade_engine_configs
+                .iter()
+                .any(|path| !path.is_absolute())
+            {
+                bail!("kline.trade_engine_configs paths must be absolute");
+            }
+            if self.forbidden_public_ips.contains(&public) {
+                bail!("kline.public_ip must not use a trading public IP");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -282,8 +350,8 @@ impl AppConfig {
         if self.database.max_connections == 0 {
             bail!("database.max_connections must be greater than zero");
         }
-        if self.ingestion.poll_interval_secs == 0 {
-            bail!("ingestion.poll_interval_secs must be greater than zero");
+        if self.dashboard.refresh_secs == 0 {
+            bail!("dashboard.refresh_secs must be greater than zero");
         }
         if self.order_config.request_timeout_secs == 0 {
             bail!("order_config.request_timeout_secs must be greater than zero");
@@ -382,37 +450,21 @@ impl AppConfig {
             }
         }
         validate_loopback_redis_url(&self.redis.url)?;
-        if !self.twap.rocksdb_path.is_absolute() {
+        if !self.kline.rocksdb_path.is_absolute() {
             bail!(
-                "twap.rocksdb_path must be absolute: {}",
-                self.twap.rocksdb_path.display()
+                "kline.rocksdb_path must be absolute: {}",
+                self.kline.rocksdb_path.display()
             );
         }
         for source in &self.sources {
-            if source.enabled && source.rocksdb_path == self.twap.rocksdb_path {
+            if source.enabled && source.rocksdb_path == self.kline.rocksdb_path {
                 bail!(
-                    "twap.rocksdb_path must not reuse an Exec persist_manager path: {}",
-                    self.twap.rocksdb_path.display()
+                    "kline.rocksdb_path must not reuse an Exec persist_manager path: {}",
+                    self.kline.rocksdb_path.display()
                 );
             }
         }
-        if self.twap.enabled {
-            if self.twap.venue.trim().is_empty() {
-                bail!("twap.venue must not be empty");
-            }
-            if self.twap.interval_ms == 0 {
-                bail!("twap.interval_ms must be greater than zero");
-            }
-            if self.twap.retain_days == 0 {
-                bail!("twap.retain_days must be greater than zero");
-            }
-            if self.twap.catalog_reload_secs == 0 {
-                bail!("twap.catalog_reload_secs must be greater than zero");
-            }
-            if self.twap.compact_interval_secs == 0 {
-                bail!("twap.compact_interval_secs must be greater than zero");
-            }
-        }
+        self.kline.validate()?;
         if self.sources.is_empty() {
             bail!("at least one [[sources]] entry is required");
         }
@@ -441,15 +493,6 @@ impl AppConfig {
                     "source {} rocksdb_path must be absolute: {}",
                     source.id,
                     source.rocksdb_path.display()
-                );
-            }
-            if source.start_ts_us.is_some_and(|value| value < 0) {
-                bail!("source {} start_ts_us must not be negative", source.id);
-            }
-            if source.poll_interval_secs == Some(0) {
-                bail!(
-                    "source {} poll_interval_secs must be greater than zero",
-                    source.id
                 );
             }
             if source
@@ -529,11 +572,6 @@ impl AppConfig {
 }
 
 impl SourceConfig {
-    pub fn poll_interval_secs(&self, defaults: &IngestionConfig) -> u64 {
-        self.poll_interval_secs
-            .unwrap_or(defaults.poll_interval_secs)
-    }
-
     pub fn nav_fee_rates(&self) -> Result<FeeRates> {
         let legacy = self.estimated_fee_rate;
         let rates = FeeRates {
@@ -754,10 +792,10 @@ mod tests {
                 url_env: default_database_url_env(),
                 max_connections: 4,
             },
-            ingestion: IngestionConfig::default(),
+            dashboard: DashboardConfig::default(),
             order_config: OrderConfigSettings::default(),
             redis: RedisSettings::default(),
-            twap: TwapConfig::default(),
+            kline: KlineConfig::default(),
             monitor: MonitorConfig::default(),
             sources,
         }
@@ -772,8 +810,6 @@ mod tests {
             rocksdb_path: PathBuf::from(path),
             enabled: true,
             monitor_enabled: true,
-            start_ts_us: None,
-            poll_interval_secs: None,
             estimated_fee_rate: Some(0.0004),
             maker_fee_rate: None,
             taker_fee_rate: None,
@@ -794,6 +830,41 @@ mod tests {
             source("binance_exec_trade02", "/srv/trade02/persist_manager"),
         ]);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn dashboard_refresh_defaults_and_validates_host_configs() {
+        for raw in [
+            include_str!("../config/cta-manager.example.toml"),
+            include_str!("../deploy/crypto_cta_manager/cta-manager.toml"),
+            include_str!("../deploy/jp_meta/cta-manager.toml"),
+        ] {
+            let mut settings: toml::Value = toml::from_str(raw).unwrap();
+            settings.as_table_mut().unwrap().remove("dashboard");
+            let config: AppConfig = settings.clone().try_into().unwrap();
+            config.validate().unwrap();
+            assert_eq!(config.dashboard.refresh_secs, 60);
+
+            let mut dashboard = toml::Table::new();
+            dashboard.insert("refresh_secs".to_string(), 90.into());
+            settings
+                .as_table_mut()
+                .unwrap()
+                .insert("dashboard".to_string(), toml::Value::Table(dashboard));
+            let config: AppConfig = settings.clone().try_into().unwrap();
+            config.validate().unwrap();
+            assert_eq!(config.dashboard.refresh_secs, 90);
+
+            settings["dashboard"]["refresh_secs"] = 0.into();
+            let config: AppConfig = settings.try_into().unwrap();
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("dashboard.refresh_secs")
+            );
+        }
     }
 
     #[test]
@@ -1000,9 +1071,9 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.sources[0].id, "binance_exec_trade01");
         assert_eq!(config.sources[0].display_name(), "trade01");
-        assert!(config.twap.enabled);
-        assert_eq!(config.twap.interval_ms, 5_000);
-        assert_eq!(config.twap.retain_days, 30);
+        assert!(!config.kline.enabled);
+        assert_eq!(config.kline.refresh_secs, 300);
+        assert_eq!(config.kline.retain_days, 30);
         assert_eq!(config.redis.url, "redis://127.0.0.1:6379/0");
         assert_eq!(
             config.sources[0].reload_notify_service_name().as_deref(),
@@ -1041,19 +1112,19 @@ mod tests {
         assert_eq!(config.sources[3].display_name(), "prc");
         assert!(config.sources.iter().all(|source| source.enabled));
         assert_eq!(
-            config.twap.rocksdb_path.as_os_str(),
+            config.kline.rocksdb_path.as_os_str(),
             "/home/ubuntu/crypto_cta_manager/db"
         );
     }
 
     #[test]
-    fn twap_path_must_not_reuse_exec_persist_manager() {
+    fn kline_path_must_not_reuse_exec_persist_manager() {
         let mut config = config_with_sources(vec![source(
             "binance_exec_trade01",
             "/srv/trade01/persist_manager",
         )]);
-        config.twap.enabled = false;
-        config.twap.rocksdb_path = PathBuf::from("/srv/trade01/persist_manager");
+        config.kline.enabled = false;
+        config.kline.rocksdb_path = PathBuf::from("/srv/trade01/persist_manager");
         assert!(
             config
                 .validate()

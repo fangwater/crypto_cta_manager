@@ -16,6 +16,7 @@ use sha2::Sha256;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
+use crate::bbo::parse_ask_bid_spread;
 use crate::config::{AppConfig, DingTalkConfig, MonitorConfig, SourceConfig};
 use crate::model::{
     ORDER_UPDATES_CF, ORDER_UPDATES_UNMATCHED_CF, TRADE_UPDATES_CF, TRADE_UPDATES_UNMATCHED_CF,
@@ -23,7 +24,6 @@ use crate::model::{
 };
 use crate::redis_runtime::{ExecTargetSnapshot, RedisRuntime};
 use crate::rocks_source::{RawRocksRecord, read_latest_column_families};
-use crate::twap::parse_ask_bid_spread;
 use crate::viz_snapshot::{ExecStateSnapshot, VizSnapshotClient};
 
 const RECENT_COLUMN_FAMILIES: [&str; 5] = [
@@ -1628,10 +1628,10 @@ mod tests {
                 url_env: "TEST_DATABASE_URL".to_string(),
                 max_connections: 1,
             },
-            ingestion: Default::default(),
+            dashboard: Default::default(),
             order_config: Default::default(),
             redis: Default::default(),
-            twap: Default::default(),
+            kline: Default::default(),
             monitor: MonitorConfig {
                 market_stale_secs: 5,
                 market_symbols: symbols.iter().map(|s| s.to_string()).collect(),
@@ -1650,8 +1650,6 @@ mod tests {
             rocksdb_path: std::path::PathBuf::from("/tmp/nonexistent"),
             enabled: true,
             monitor_enabled: true,
-            start_ts_us: None,
-            poll_interval_secs: None,
             estimated_fee_rate: None,
             maker_fee_rate: None,
             taker_fee_rate: None,

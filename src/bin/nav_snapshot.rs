@@ -85,7 +85,6 @@ async fn main() -> Result<()> {
 
     let database_url = config.database_url()?;
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
-    postgres::migrate(&pool).await?;
     postgres::register_sources(&pool, &config.sources).await?;
     postgres::create_position_snapshot(&pool, &snapshot, args.note.as_deref()).await?;
 

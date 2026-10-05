@@ -296,6 +296,9 @@ export interface TheoreticalNavPoint {
 }
 
 export interface TheoreticalNavTimeline {
+  unavailable_reason: string | null
+  missing_price_count: number
+  legacy_fee_delta_count: number
   valuation: string
   execution_window_secs: number
   price_basis: string
@@ -306,125 +309,11 @@ export interface TheoreticalNavTimeline {
   sampled: boolean
 }
 
-export interface ExecutionCostTotals {
-  intended_qty: number
-  filled_qty: number
-  actual_fill_count: number
-  arrival_notional_usdt: number
-  twap_notional_usdt: number
-  actual_notional_usdt: number
-  twap_cost_before_fee_usdt: number
-  actual_cost_before_fee_usdt: number
-  estimated_trading_fee_usdt: number
-  actual_cost_after_fee_usdt: number
-  comparable_fill_count: number
-  comparable_arrival_notional_usdt: number
-  comparable_twap_notional_usdt: number
-  actual_price_slippage_usdt: number
-  twap_price_slippage_on_filled_usdt: number
-  shortfall_vs_twap_usdt: number
-  actual_slippage_bps: number
-  twap_slippage_bps: number
-  shortfall_vs_twap_bps: number
-}
-
-export interface ExecutionCostPoint {
-  ts_us: number
-  twap_cost_before_fee_usdt: number
-  actual_cost_before_fee_usdt: number
-  estimated_trading_fee_usdt: number
-  actual_cost_after_fee_usdt: number
-  actual_price_slippage_usdt: number
-  twap_price_slippage_on_filled_usdt: number
-  shortfall_vs_twap_usdt: number
-  actual_slippage_bps: number | null
-  twap_slippage_bps: number | null
-  shortfall_vs_twap_bps: number | null
-}
-
-export interface SymbolExecutionCost {
-  symbol: string
-  template_qty: number
-  published_qty: number
-  snapshot_qty: number
-  intended_qty: number
-  filled_qty: number
-  fill_count: number
-  minute_bar_count: number
-  missing_minute_bar_count: number
-  arrival_mid: number | null
-  twap_mid: number | null
-  actual_vwap: number | null
-  arrival_notional_usdt: number | null
-  twap_notional_usdt: number | null
-  actual_notional_usdt: number | null
-  twap_cost_before_fee_usdt: number | null
-  actual_cost_before_fee_usdt: number | null
-  estimated_trading_fee_usdt: number
-  actual_cost_after_fee_usdt: number | null
-  side: 'buy' | 'sell' | null
-  actual_price_slippage_usdt: number | null
-  twap_price_slippage_on_filled_usdt: number | null
-  shortfall_vs_twap_usdt: number | null
-  actual_slippage_bps: number | null
-  twap_slippage_bps: number | null
-  shortfall_vs_twap_bps: number | null
-}
-
-export interface AccountExecutionCost {
-  source_id: string
-  binding_name: string
-  shares: number
-  snapshot_ts_ms: number | null
-  position_ready: boolean | null
-  totals: ExecutionCostTotals
-  symbols: SymbolExecutionCost[]
-}
-
-export interface PositionUpdateExecutionCost {
-  received_at_us: number
-  seq: number
-  schema_version: number
-  strategy_name: string
-  window_start_us: number
-  window_end_us: number
-  skipped_legacy: boolean
-  totals: ExecutionCostTotals
-  accounts: AccountExecutionCost[]
-}
-
-export interface ExecutionCostReport {
-  generated_at_us: number
-  window_secs: number
-  twap_secs: number
-  price_basis: string
-  fee_basis: string
-  actual_fee_basis: string
-  start_received_at_us: number
-  end_received_at_us: number | null
-  source_ids: string[]
-  strategy_name: string | null
-  update_count: number
-  execution_update_count: number
-  page: number
-  page_size: number
-  page_count: number
-  returned_update_count: number
-  skipped_legacy_update_count: number
-  totals: ExecutionCostTotals
-  points: ExecutionCostPoint[]
-  updates: PositionUpdateExecutionCost[]
-}
-
-export interface ExecutionCostSnapshot {
-  generated_at_us: number
-  generation_duration_ms: number
-  report: ExecutionCostReport
-}
-
 export interface AcquisitionCostTotals {
   virtual_delta_count: number
   missing_virtual_delta_count: number
+  pending_virtual_delta_count: number
+  legacy_fee_delta_count: number
   comparable_delta_count: number
   virtual_turnover_usdt: number
   virtual_fee_usdt: number
@@ -442,12 +331,12 @@ export interface AcquisitionCostTotals {
   stale_reference_fill_count: number
   stale_reference_fill_notional_usdt: number
   price_shortfall_usdt: number
-  first_mid_shortfall_usdt: number
+  first_minute_shortfall_usdt: number
   five_sample_drift_usdt: number
   fee_shortfall_usdt: number
   after_fee_shortfall_usdt: number
   price_shortfall_bps: number
-  first_mid_shortfall_bps: number
+  first_minute_shortfall_bps: number
   matched_turnover_coverage: number
   actual_fill_reference_coverage: number
 }
@@ -468,10 +357,10 @@ export interface AcquisitionCostBreakdown {
   actual_fee_usdt: number
   virtual_fee_usdt: number
   price_shortfall_usdt: number
-  first_mid_shortfall_usdt: number
+  first_minute_shortfall_usdt: number
   five_sample_drift_usdt: number
   price_shortfall_bps: number
-  first_mid_shortfall_bps: number
+  first_minute_shortfall_bps: number
   after_fee_shortfall_usdt: number
 }
 
@@ -494,7 +383,7 @@ export interface AcquisitionFillDiagnostic {
   order_delay_us: number
   reference_turnover_usdt: number
   price_shortfall_usdt: number
-  first_mid_shortfall_usdt: number
+  first_minute_shortfall_usdt: number
   five_sample_drift_usdt: number
   price_shortfall_bps: number
 }
@@ -508,7 +397,7 @@ export interface AcquisitionCostRow {
   received_at_us: number
   virtual_execution_ts_us: number
   delta_qty: number
-  sample_mids: [number, number, number, number, number]
+  sample_prices: [number, number, number, number, number]
   virtual_vwap: number
   virtual_turnover_usdt: number
   virtual_fee_usdt: number
@@ -538,6 +427,8 @@ export interface AcquisitionCostReport {
   returned_row_count: number
   totals: AcquisitionCostTotals
   points: AcquisitionCostPoint[]
+  warnings: string[]
+  by_strategy: AcquisitionCostBreakdown[]
   by_symbol: AcquisitionCostBreakdown[]
   by_side: AcquisitionCostBreakdown[]
   by_liquidity: AcquisitionCostBreakdown[]

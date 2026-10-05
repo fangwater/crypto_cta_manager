@@ -76,7 +76,7 @@ pub struct AutoEarnHub {
 impl AutoEarnHub {
     pub fn new(config: &AppConfig) -> Result<Self> {
         let root = config
-            .twap
+            .kline
             .rocksdb_path
             .parent()
             .context("Manager RocksDB path must have a parent")?;

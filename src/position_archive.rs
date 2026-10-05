@@ -34,6 +34,9 @@ pub struct ArchivedPublishedAccount {
     pub source_id: String,
     pub binding_name: String,
     pub shares: f64,
+    /// Frozen at publication; absence in old messages is reported as a fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theoretical_fee_rate: Option<f64>,
     #[serde(default, rename = "leverage", skip_serializing_if = "Option::is_none")]
     legacy_leverage: Option<f64>,
 }
@@ -86,6 +89,7 @@ pub fn published_account(
         source_id: source_id.into(),
         binding_name: binding_name.into(),
         shares,
+        theoretical_fee_rate: None,
         legacy_leverage: None,
     }
 }

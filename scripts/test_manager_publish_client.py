@@ -57,8 +57,8 @@ class ManagerPublishClientTests(unittest.TestCase):
         self.assertNotIn("/exec_trade01/config/", el01)
         self.assertNotIn("/exec_trade01/config/", jp_meta)
         self.assertIn(
-            "/manager/api/catalog/execution-cost",
-            CLIENT.api_url(el01, "catalog/execution-cost"),
+            "/manager/api/catalog/acquisition-cost",
+            CLIENT.api_url(el01, "catalog/acquisition-cost"),
         )
 
     def test_requires_explicit_host_target(self) -> None:

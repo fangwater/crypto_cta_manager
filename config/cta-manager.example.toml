@@ -3,12 +3,9 @@
 url_env = "CRYPTO_CTA_LOCAL_DATABASE_URL"
 max_connections = 8
 
-[ingestion]
-poll_interval_secs = 60
-# Do not scan the newest few seconds while persist_manager may still be writing them.
-safety_lag_secs = 5
-# Re-read a recent window on every poll; PostgreSQL upserts make this idempotent.
-overlap_secs = 300
+[dashboard]
+# Refresh the cached NAV report from position snapshots and read-only Exec RocksDB.
+refresh_secs = 60
 
 [order_config]
 request_timeout_secs = 5
@@ -19,16 +16,25 @@ url = "redis://127.0.0.1:6379/0"
 request_timeout_secs = 2
 reconnect_interval_ms = 500
 
-[twap]
-enabled = true
-# Host-global Manager RocksDB for position-update messages and public BBO TWAP.
-# Do not put this under an Exec account.
+[kline]
+# Enable only after assigning a dedicated non-trading market-data egress.
+enabled = false
 rocksdb_path = "/home/el01/crypto_cta_manager/db"
-venue = "binance-futures"
-interval_ms = 5000
 retain_days = 30
-catalog_reload_secs = 30
+refresh_secs = 300
 compact_interval_secs = 3600
+default_symbols = ["BNBUSDT", "XRPUSDT", "ETHUSDT", "BTCUSDT", "SOLUSDT"]
+# Bind an assigned local address; public_ip is its expected public/NAT address.
+# local_ip = "DEDICATED_LOCAL_IP"
+# public_ip = "DEDICATED_PUBLIC_IP"
+# List EVERY live trade engine TOML; the client rejects their trading IPs.
+trade_engine_configs = []
+# Also exclude trading public/NAT addresses when different from local_ips.
+forbidden_public_ips = []
+request_timeout_secs = 15
+concurrency = 8
+# Conservative shared budget for this Kline client, independent of order traffic.
+weight_per_minute = 120
 
 [monitor]
 # Standalone cta_monitor checks market BBO, Exec order persistence, and
@@ -106,9 +112,7 @@ account_ipc_service = "account_pubs/binance_pm"
 # GET/PUT /api/catalog/accounts/{source_id}/contract-leverage.
 # Defaults to <rocksdb_path>/../../env.sh, for example /home/el01/binance_exec_trade01/env.sh.
 # env_path = "/home/el01/binance_exec_trade01/env.sh"
-# Omit start_ts_us to backfill all available history on the first run.
-
-# Additional accounts are independent workers with independent checkpoints.
+# Additional accounts keep separate RocksDB histories and position ledgers.
 # Keep reserved accounts disabled until that Exec directory and listeners exist.
 [[sources]]
 id = "binance_exec_trade02"

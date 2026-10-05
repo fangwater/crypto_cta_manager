@@ -11,7 +11,6 @@ import type {
   PositionStrategy,
   SavedPositionStrategy,
   SavedSymbolContractLeverage,
-  ExecutionCostSnapshot,
   AcquisitionCostSnapshot,
   TimelineSnapshot,
 } from './types'
@@ -224,10 +223,9 @@ function getTimelineFromPath(path: string, query: TimelineQuery) {
   })
 }
 
-export interface ExecutionCostQuery {
+export interface AcquisitionCostQuery {
   startMs?: number
   endMs?: number
-  windowSec?: number
   sourceIds?: string[]
   strategyName?: string
   page?: number
@@ -235,21 +233,7 @@ export interface ExecutionCostQuery {
   signal?: AbortSignal
 }
 
-export function getExecutionCost(query: ExecutionCostQuery) {
-  const params = new URLSearchParams()
-  if (query.startMs !== undefined) params.set('startMs', String(query.startMs))
-  if (query.endMs !== undefined) params.set('endMs', String(query.endMs))
-  params.set('windowSec', String(query.windowSec ?? 300))
-  if (query.sourceIds?.length) params.set('sourceIds', query.sourceIds.join(','))
-  if (query.strategyName?.trim()) params.set('strategyName', query.strategyName.trim())
-  params.set('page', String(query.page ?? 1))
-  params.set('pageSize', String(query.pageSize ?? 25))
-  return requestJson<ExecutionCostSnapshot>(`/catalog/execution-cost?${params}`, {
-    signal: query.signal,
-  })
-}
-
-export function getAcquisitionCost(query: Omit<ExecutionCostQuery, 'windowSec'>) {
+export function getAcquisitionCost(query: AcquisitionCostQuery) {
   const params = new URLSearchParams()
   params.set('startMs', String(query.startMs))
   params.set('endMs', String(query.endMs))
@@ -260,6 +244,18 @@ export function getAcquisitionCost(query: Omit<ExecutionCostQuery, 'windowSec'>)
   return requestJson<AcquisitionCostSnapshot>(`/catalog/acquisition-cost?${params}`, {
     signal: query.signal,
   })
+}
+
+export interface KlineCacheStatus {
+  enabled: boolean
+  active_backfills: number
+  requests: number
+  fetched_candles: number
+  cache_hits: number
+  last_error: string | null
+}
+export function getKlineCacheStatus(signal?: AbortSignal) {
+  return requestJson<KlineCacheStatus>('/catalog/kline-status', { signal })
 }
 
 export function authenticateOrderConfig(signal?: AbortSignal) {

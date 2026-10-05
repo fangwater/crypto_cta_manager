@@ -1082,6 +1082,13 @@ fn liquidity_role_for_event(
     if event.order_type_code == INTERNAL_CROSS_ORDER_TYPE_CODE {
         return LiquidityRole::InternalCross;
     }
+    if let Some(role) = event.fill_liquidity {
+        return match role {
+            crate::model::FillLiquidity::Maker => LiquidityRole::Maker,
+            crate::model::FillLiquidity::Taker => LiquidityRole::Taker,
+            crate::model::FillLiquidity::Unknown => LiquidityRole::Unknown,
+        };
+    }
     let key = (
         event.symbol.clone(),
         event.venue_code,
@@ -2847,7 +2854,7 @@ mod tests {
     use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 
     use super::*;
-    use crate::config::{DatabaseConfig, IngestionConfig, OrderConfigSettings};
+    use crate::config::{DashboardConfig, DatabaseConfig, OrderConfigSettings};
     use crate::model::UNIFORM_ORDERS_CF;
     use crate::snapshot::{SnapshotPosition, StrategyPositionSnapshot, StrategySnapshotPosition};
 
@@ -2860,8 +2867,6 @@ mod tests {
             rocksdb_path: PathBuf::from(format!("/tmp/{id}/persist_manager")),
             enabled: true,
             monitor_enabled: true,
-            start_ts_us: None,
-            poll_interval_secs: None,
             estimated_fee_rate: fee_rate,
             maker_fee_rate: None,
             taker_fee_rate: None,
@@ -2953,7 +2958,7 @@ mod tests {
             bbo_spread: String::new(),
             signal_open: None,
             signal_hedge: None,
-            wire_payload: Vec::new(),
+            fill_liquidity: None,
         }
     }
 
@@ -2989,6 +2994,15 @@ mod tests {
         payload.push(event.status_code as u8);
         payload.extend_from_slice(&(event.from_key.len() as u32).to_le_bytes());
         payload.extend_from_slice(&event.from_key);
+        if let Some(role) = event.fill_liquidity {
+            payload.extend_from_slice(&0_u16.to_le_bytes());
+            payload.extend_from_slice(&[0; 83]);
+            payload.push(match role {
+                crate::model::FillLiquidity::Unknown => 0,
+                crate::model::FillLiquidity::Maker => 1,
+                crate::model::FillLiquidity::Taker => 2,
+            });
+        }
         payload
     }
 
@@ -3071,10 +3085,10 @@ mod tests {
                 url_env: "CTA_NAV_TEST_DATABASE_URL_MUST_NOT_BE_READ".to_string(),
                 max_connections: 1,
             },
-            ingestion: IngestionConfig::default(),
+            dashboard: DashboardConfig::default(),
             order_config: OrderConfigSettings::default(),
             redis: crate::config::RedisSettings::default(),
-            twap: crate::config::TwapConfig::default(),
+            kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
             sources,
         }
@@ -3180,6 +3194,88 @@ mod tests {
     }
 
     #[test]
+    fn uniform_fill_roles_preserve_mixed_liquidity_on_the_same_order() {
+        use crate::model::FillLiquidity;
+
+        let mut source = source("trade01", Some(0.0));
+        source.maker_fee_rate = Some(-0.00005);
+        source.taker_fee_rate = Some(0.000146);
+        let mut maker = event(1, "BTCUSDT", 1, 1, 100.0, 1.0);
+        maker.client_order_id = 42;
+        maker.fill_liquidity = Some(FillLiquidity::Maker);
+        let mut taker = event(2, "BTCUSDT", 1, 1, 110.0, 1.0);
+        taker.client_order_id = 42;
+        taker.fill_liquidity = Some(FillLiquidity::Taker);
+        let conflicting_index = [(("BTCUSDT".to_string(), 1, 42), LiquidityRole::Unknown)]
+            .into_iter()
+            .collect();
+        let report = estimate_source_events_with_snapshot_and_liquidity(
+            &source,
+            vec![maker, taker],
+            &BTreeMap::new(),
+            None,
+            &conflicting_index,
+        )
+        .unwrap();
+
+        assert_eq!(report.totals.maker_fill_count, 1);
+        assert_eq!(report.totals.taker_fill_count, 1);
+        assert_eq!(report.totals.unknown_liquidity_fill_count, 0);
+        assert_close(report.totals.maker_volume_quote, 100.0);
+        assert_close(report.totals.taker_volume_quote, 110.0);
+        assert_close(report.totals.estimated_trading_fee_quote, 0.01106);
+    }
+
+    #[test]
+    fn uniform_only_history_keeps_canceled_fill_and_explicit_unknown() {
+        use crate::model::FillLiquidity;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut source = source_at("trade01", temp.path(), 0.0);
+        source.maker_fee_rate = Some(-0.0001);
+        source.taker_fee_rate = Some(0.0005);
+        let mut canceled = event(1, "BTCUSDT", 1, 1, 100.0, 0.4);
+        canceled.status_code = 4;
+        canceled.status = "CANCELED".to_string();
+        canceled.fill_liquidity = Some(FillLiquidity::Unknown);
+        let mut maker = event(2, "BTCUSDT", 1, 1, 100.0, 0.6);
+        maker.fill_liquidity = Some(FillLiquidity::Maker);
+        let legacy = event(3, "BTCUSDT", 1, 1, 100.0, 1.0);
+        write_events(temp.path(), &[canceled.clone(), maker, legacy]);
+        let history = load_source_history(&source).unwrap();
+        assert_eq!(history.events.len(), 3);
+        assert!(history.liquidity_by_order.is_empty());
+        assert_eq!(history.liquidity_role_name(&canceled), "unclassified");
+        assert_close(
+            history.estimated_fee_quote(&source, &canceled).unwrap(),
+            0.02,
+        );
+
+        let report = estimate_source_events_with_snapshot_and_liquidity(
+            &source,
+            history.events.iter().cloned(),
+            &BTreeMap::new(),
+            None,
+            &history.liquidity_by_order,
+        )
+        .unwrap();
+        assert_eq!(report.totals.fill_count, 3);
+        assert_eq!(report.totals.maker_fill_count, 2);
+        assert_eq!(report.totals.unknown_liquidity_fill_count, 1);
+        assert_close(report.totals.volume_quote, 200.0);
+        assert_close(report.totals.estimated_trading_fee_quote, 0.004);
+        assert_close(report.symbols[0].venues[0].net_quantity, 2.0);
+
+        let guessed_maker = [(("BTCUSDT".to_string(), 1, 1), LiquidityRole::Maker)]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            liquidity_role_for_event(&canceled, &guessed_maker),
+            LiquidityRole::Unknown
+        );
+    }
+
+    #[test]
     fn internal_cross_fill_counts_position_with_zero_fee() {
         let mut source = source("trade01", Some(0.0));
         source.maker_fee_rate = Some(0.0001);
@@ -3187,6 +3283,7 @@ mod tests {
         let mut cross = event(1, "BTCUSDT", 1, 1, 100.0, 0.4);
         cross.order_type_code = INTERNAL_CROSS_ORDER_TYPE_CODE;
         cross.order_type = "INTERNAL_CROSS".to_string();
+        cross.fill_liquidity = Some(crate::model::FillLiquidity::Unknown);
         let report = estimate_source_events_with_snapshot_and_liquidity(
             &source,
             vec![cross],
@@ -4287,10 +4384,10 @@ mod tests {
                 url_env: "CTA_NAV_TEST_DATABASE_URL_MUST_NOT_BE_READ".to_string(),
                 max_connections: 1,
             },
-            ingestion: IngestionConfig::default(),
+            dashboard: DashboardConfig::default(),
             order_config: OrderConfigSettings::default(),
             redis: crate::config::RedisSettings::default(),
-            twap: crate::config::TwapConfig::default(),
+            kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
             sources: vec![source],
         };

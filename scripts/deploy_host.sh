@@ -157,6 +157,29 @@ printf '%s  %s/manager/index.html\n' "$frontend_hash" "$RELEASE" >>"$FINAL_CHECK
 echo "checking ${TARGET} as ${EXPECTED_USER}@${SSH_HOST}"
 remote "test \"\$(id -un)\" = '${EXPECTED_USER}'"
 remote "test -d '${REMOTE_ROOT}'"
+echo "checking host config for removed PostgreSQL order-ingestion settings"
+remote "python3 - '${REMOTE_ROOT}/config/cta-manager.toml'" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+config = tomllib.loads(Path(sys.argv[1]).read_text())
+removed = []
+if "twap" in config:
+    removed.append("twap (replace with kline and dedicated non-trading egress)")
+if "ingestion" in config:
+    removed.append("[ingestion]")
+for source in config.get("sources", []):
+    for field in ("start_ts_us", "poll_interval_secs"):
+        if field in source:
+            removed.append(f"sources.{source['id']}.{field}")
+if removed:
+    raise SystemExit(
+        "Host config still contains removed settings: " + ", ".join(removed)
+        + ". Replace [ingestion] with [dashboard] refresh_secs before deployment; "
+        "remove per-source ingestion settings. See README.md."
+    )
+PY
 remote "install -d -m 0755 '${REMOTE_ROOT}/bin' '${REMOTE_ROOT}/config' '${REMOTE_ROOT}/${RELEASE}/manager' '${REMOTE_ROOT}/web-releases'"
 
 echo "uploading binaries and frontend to ${TARGET}"

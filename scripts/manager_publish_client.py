@@ -216,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
   %(prog)s --target el01 get-bindings binance_exec_trade01
   %(prog)s --target jp-meta get-contract-leverage binance_exec_trade01 BTCUSDT
   %(prog)s --target el01 set-contract-leverage binance_exec_trade01 BTCUSDT 5
-  %(prog)s --target jp-meta get-execution-cost --start-ms 1755648000000 --end-ms 1755734400000
+  %(prog)s --target jp-meta get-acquisition-cost --start-ms 1755648000000 --end-ms 1755734400000
   %(prog)s --target el01 publish binance_exec_trade01 CTA_SK_C40V6PosT1_LXY_filter_Position
 
 el01 and jp-meta are independent physical hosts. --target selects one of them.
@@ -285,12 +285,11 @@ token keep the legacy open push.
     contract_parser.add_argument("contract_leverage", type=int)
 
     cost_parser = commands.add_parser(
-        "get-execution-cost",
-        help="GET on-demand actual vs 1m mid TWAP execution cost",
+        "get-acquisition-cost",
+        help="GET actual vs five complete 1m VWAPs; last 30 days only",
     )
     cost_parser.add_argument("--start-ms", type=int)
     cost_parser.add_argument("--end-ms", type=int)
-    cost_parser.add_argument("--window-sec", type=int, default=300)
     cost_parser.add_argument("--source-id")
     cost_parser.add_argument("--strategy-name")
 
@@ -367,14 +366,12 @@ def run(args: argparse.Namespace) -> int:
             token=token,
             timeout=args.timeout,
         )
-    elif args.command == "get-execution-cost":
+    elif args.command == "get-acquisition-cost":
         params = []
         if args.start_ms is not None:
             params.append(f"startMs={int(args.start_ms)}")
         if args.end_ms is not None:
             params.append(f"endMs={int(args.end_ms)}")
-        if args.window_sec is not None:
-            params.append(f"windowSec={int(args.window_sec)}")
         if args.source_id:
             params.append(f"sourceIds={quote(args.source_id)}")
         if args.strategy_name:
@@ -382,7 +379,7 @@ def run(args: argparse.Namespace) -> int:
         query = f"?{'&'.join(params)}" if params else ""
         response = request_json(
             base_url,
-            f"catalog/execution-cost{query}",
+            f"catalog/acquisition-cost{query}",
             token=token,
             timeout=max(args.timeout, 30.0),
         )

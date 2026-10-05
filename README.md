@@ -1,15 +1,16 @@
 # crypto_cta_manager
 
 `crypto_cta_manager` reads order events from one or more local CTA Exec
-`persist_manager` RocksDB databases. It supports both PostgreSQL order ingestion
-and a PostgreSQL-independent CTA PnL/NAV-change reconstruction. Neither path
-creates Parquet or other export files. `cta_web` can also keep a Manager-owned
-TWAP archive from `spread_pbs` BBO; that RocksDB is separate from Exec.
+`persist_manager` RocksDB databases to reconstruct CTA PnL/NAV changes.
+Actual orders and fills remain in Exec RocksDB; Manager does not copy them into
+PostgreSQL. PostgreSQL stores catalogs, permissions, fees, symbol indexes,
+immutable position snapshots.
+`cta_web` can also keep a Manager-owned
+closed 1-minute Binance Kline cache; that RocksDB is separate from Exec.
 
-Each configured source is isolated by a stable `source_id`. PostgreSQL order
-keys and ingestion checkpoints include that ID, so accounts such as `trade01`
-and `trade02` can be collected by one process without key collisions. A failed
-source retries independently and does not stop the other source workers.
+Each configured source is isolated by a stable `source_id`, so accounts such
+as `trade01` and `trade02` keep separate order histories and position ledgers.
+Manager opens each Exec RocksDB read-only and never requires stopping trading.
 
 ## Configure
 
@@ -53,7 +54,7 @@ no visible accounts until an administrator grants access.
 
 Administrators can open `/manager/admin/` to promote users and select the
 configured `source_id` values each ordinary user may view. Dashboard, NAV
-timeline, execution-cost, acquisition-cost, account details, and Manager
+timeline, acquisition-cost, account details, and Manager
 position-update responses are filtered on the server. The machine-to-machine
 `POST /api/catalog/position-strategies` push endpoint is intentionally direct
 and does not require a browser session; catalog reads, deletes, account
@@ -68,9 +69,17 @@ database credential file or session values into this repository.
 Set `maker_fee_rate` and `taker_fee_rate` on every source used for NAV
 reconstruction. Both accept any finite decimal rate; negative values represent
 rebates. Each fill uses `price * amount_update * role_fee_rate`. Liquidity role
-comes from the exchange trade update `is_maker` flag, with order type used only
-when raw role data is unavailable. The order-ingestion process does not require
-these settings.
+comes first from each uniform fill's `fill_liquidity` field. An explicit Unknown
+stays Unclassified and uses the configured Taker rate for fee estimation; LIMIT
+does not turn it into factual Maker. For historical records without the field,
+retain the exchange trade-update index and order-type fallback. Internal crosses
+have zero fees. All fees are estimates, not exchange commission amounts.
+
+The coordinated Exec change appends one role byte after the existing 83-byte
+signal BBO tail (0=unknown, 1=maker, 2=taker); Manager reads both new records and
+historical records with no role field. Upgrade Manager/export readers before
+switching Exec and persist_manager together. These changes are local and have
+not been deployed to either live host.
 Set an explicit one-segment `gateway_prefix`, such as `/exec_trade01`, for each
 account whose Exec Viz and Config services are exposed through the unified
 gateway. The dashboard never derives service paths from account names.
@@ -88,11 +97,48 @@ Exec Viz
 `/snapshot` `exec_pre_trade_state` row (`current_qty` for that strategy).
 Published qty is reconstructed later as template qty × shares. Later share
 edits must not be used to reconstruct an older fill. Set
-`exec_viz_url` to the loopback Viz origin, such as `http://127.0.0.1:10041/`. When `[twap]` is enabled, the same database also records
-5-second mid TWAP bars for catalog symbols from
-`spread_pbs/<venue>/ask_bid_spread`. TWAP uses one compact binary column family
-per `SYMBOL:venue`. Bars older than `retain_days` are deleted and compacted;
-position-update messages are not compacted by that job.
+`exec_viz_url` to the loopback Viz origin, such as `http://127.0.0.1:10041/`. When `[kline]` is enabled, the same Manager-owned database caches closed
+Binance USD-M 1-minute candles in `klines_1m`. Keys contain symbol and minute
+open time; each value is 56 bytes (OHLC, base/quote volume, trade count).
+Retention is configurable from 1 to 30 days, never more. Only the Kline cache
+is pruned; archived target publications remain intact.
+
+The default symbols are BNBUSDT, XRPUSDT, ETHUSDT, BTCUSDT and SOLUSDT.
+Every 300 seconds only these five are maintained. Queries warm other symbols
+on demand, backwards in 24-hour blocks capped at retention. Each block requests
+only missing minutes with pages of at most 499; persisted candles are never
+requested again. A per-symbol in-memory async lock coalesces simultaneous misses.
+Failed or omitted minutes stay missing and are retried on the next query or
+default-symbol refresh, without separate retry records. A zero-volume candle
+is cached, but has no execution VWAP. Only closed candles are accepted.
+
+TOML must explicitly configure `kline.local_ip`, the assigned socket binding
+address, and `kline.public_ip`, its expected public address after NAT. The
+client disables environment proxies and redirects, verifies public egress via
+ipify before Binance access, and never falls back to the default route. List
+all live `trade_engine.toml` files in `kline.trade_engine_configs`; their
+`local_ips`, primary/secondary addresses and Binance whitelist IPs are excluded
+at startup and before requests. `forbidden_public_ips` lists all trading NAT
+public addresses and is required for private trading addresses. No Exec credentials are read. Templates keep Kline disabled
+until dedicated egress is filled in. Existing host TOMLs must replace `[twap]`
+with `[kline]` before replacing the binary; deployment refuses the old section.
+
+REST concurrency defaults to 8 and a shared paced budget to 120 weight/minute.
+Binance 429/418 responses pause the whole client according to Retry-After.
+`GET /api/catalog/kline-status` exposes active backfills, requests, cache hits,
+fetched candles and the latest error. Queries wait up to 10 seconds for warming;
+remaining work continues in the background and missing coverage is explicit.
+
+100 symbols at 1,440 candles/day produce 144,000 records, about 10.9 MB/day
+of uncompressed key/value payload. The offline synthetic measurement produced
+8.2 MB of compacted LZ4 SST data for this day. Reserve 20–30 MB/day including RocksDB
+and compaction headroom, or about 0.6–0.9 GB for 30 days. This excludes the
+immutable position archive and actual Exec orders. The offline synthetic
+capacity measurement can be repeated with:
+
+```bash
+cargo test --lib kline::tests::measure_100_symbols_one_day_storage -- --ignored --nocapture
+```
 
 ## CTA Health Monitor
 
@@ -127,28 +173,6 @@ emitted from the raw JSON stored in Manager RocksDB, without rebuilding or
 rescaling historical targets. To continue, set `afterUs` and `afterSeq` to the
 `received_at_us` and `seq` of the preceding page's final member.
 
-`GET /api/catalog/execution-cost` generates an on-demand report. It is not a
-real-time job. Each archived position update's intended qty is template qty ×
-the shares stored in that message minus the snapshot qty. The
-default execution window is 5 minutes (`windowSec`, later adjustable) and ends
-early at that same source and binding's next publication. Assume the intended
-qty is executed uniformly over that window. Split from the update timestamp
-into consecutive 1-minute buckets; each 1-minute mid is the equal average of the 5-second mid
-bars in that bucket, then those 1-minute mids are averaged. A 5-minute window
-therefore uses five 1-minute mids. The latest non-stale completed 5-second mid
-at the update is `arrival_mid`. For windows with actual fills, price execution
-uses the same signed filled quantity for both paths: actual slippage is
-`filled × (VWAP − arrival_mid)`, TWAP slippage is
-`filled × (twap_mid − arrival_mid)`, and shortfall versus TWAP is
-`filled × (VWAP − twap_mid)`. Positive values mean worse execution for both
-buys and sells. Estimated maker/taker fees are reported separately and never
-included in these price metrics. Fills come from that account's Exec
-`uniform_orders` and are attributed with `batch_exec:<strategy_name>` or
-`chase_exec:<strategy_name>`; both prefixes map to the same stable Manager
-binding name. Only
-messages that archived `published_accounts` (with each account's `shares`) are
-included. The browser page is `/manager/execution-cost/`.
-
 If the account already had positions when its RocksDB history began, store an
 immutable position snapshot in PostgreSQL with `nav_snapshot`. Position
 snapshots are recomputation anchors and are deliberately not deployment config.
@@ -158,31 +182,42 @@ recomputation anchor for that source.
 
 ## Run
 
-Apply migrations and verify source registration without reading RocksDB:
+Initialize a new, empty Manager PostgreSQL database and register sources:
 
 ```bash
-cargo run --release --bin crypto_cta_manager -- \
-  --config config/cta-manager.toml --migrate-only
+cargo run --release --bin cta_web -- \
+  --config config/cta-manager.toml --init-db
 ```
 
-Run one poll for a deployment smoke test:
+The unused RocksDB-to-PostgreSQL order-ingestion worker has been removed.
+Dashboard refresh is configured separately:
 
-```bash
-cargo run --release --bin crypto_cta_manager -- \
-  --config config/cta-manager.toml --once
+```toml
+[dashboard]
+refresh_secs = 60
 ```
 
-Run the minute-frequency workers continuously:
+Before deploying this change, replace the live host's entire `[ingestion]`
+section with `[dashboard]`, carrying its `poll_interval_secs` value into
+`refresh_secs`. Remove `safety_lag_secs`, `overlap_secs`, and any per-source
+`start_ts_us` or `poll_interval_secs` settings. The strict config parser rejects
+these removed fields; the deployment script checks for them before uploading.
+`cta_web --refresh-secs` still overrides the dashboard refresh interval.
 
-```bash
-cargo run --release --bin crypto_cta_manager -- \
-  --config config/cta-manager.toml
-```
+`migrations/schema.sql` is the single current schema definition. The former
+29 migration files, automatic migration runner, and migration checksum checks
+have been removed. Normal Manager and snapshot-tool startup executes no schema
+DDL and does not read `_sqlx_migrations`. Existing databases keep their business
+data and do not need to replay the initialization SQL. Initialization uses one
+transaction and fails if tables or sequences already exist.
 
-The first poll backfills all available history unless a source specifies
-`start_ts_us`. Later polls use independent PostgreSQL checkpoints and a recent
-overlap window. Inserts are idempotent on `(source_id, record_key)`, and the
-orders plus checkpoint commit in the same PostgreSQL transaction.
+Future schema changes update `schema.sql` for fresh databases and use an explicit,
+reviewed SQL maintenance operation for existing databases. There is no automatic
+schema upgrade at application startup. The old `_sqlx_migrations` table and the
+three empty order-ingestion tables can be removed separately after all deployed
+Manager tools use this code. The active `cta_order_sources` account catalog,
+`cta_source_symbols` index and position snapshots remain in use. The symbol
+index is refreshed from read-only RocksDB history.
 
 ## Rebuild CTA PnL
 
@@ -313,54 +348,48 @@ anchor, account-level initial snapshot positions remain unallocated because they
 do not contain historical strategy ownership. Once an immutable strategy
 allocation anchor exists, it replaces the older account anchor for that source.
 
-The portfolio view also overlays theoretical NAV before and after estimated
-fees. A background materializer consumes archived position updates by cursor,
-freezes each nonzero binding-level delta when the complete scaled target vector
-changes, and prices that delta as five equal-quantity virtual fills. The five
-prices are 5-second mid bars sampled 60 seconds apart, beginning with the first
-complete 5-second bar after the target update. Their arithmetic mean is stored
-as the synthetic fill price and is equivalent to summing the five equal-quantity
-costs. Later target changes own independent schedules and never truncate earlier
-deltas. Each account has an editable theoretical TWAP fee rate, initialized to
-the average of its Maker and Taker rates. The rate is frozen when the update is
-staged and stored with the synthetic fill, so later fee edits do not rewrite
-history. PostgreSQL stores only pending work, current target/FIFO
-state, skips, and one sparse event per nonzero synthetic symbol fill; it does
-not copy the 5-second BBO archive. Repeated publications of an unchanged
-account/binding target advance the archive cursor without adding pending work
-or changing an existing delta schedule. While a source has a nonzero
-theoretical position, one source-level portfolio mark is materialized at most
-every five minutes from the latest completed 5-second mid; empty periods
-produce no mark rows. Pending rows and closed FIFO lots are deleted as they are
-consumed. The first run backfills only the configured TWAP retention window,
-currently 30 days.
+The portfolio view overlays theoretical NAV before and after estimated fees,
+computed on demand from the immutable target archive and the minute cache.
+A distinct scaled target vector freezes `delta = target - previous target`.
+Each delta owns five equal-quantity fills in the first five complete wall-clock
+minutes at or after publication; a partial arrival minute is excluded. Each
+minute's price is `quote_volume / base_volume`; the five-slice virtual price
+is their arithmetic mean, not the five-minute volume-weighted average. Later
+targets never truncate earlier schedules. Unchanged targets and insignificant
+floating-point persistence tails create no new delta.
 
-The virtual acquisition cost for one symbol is
-`delta_qty / 5 * sum(sample_mid[0..5])`; its estimated fee is
-`abs(delta_qty) / 5 * sum(sample_mid[0..5]) * theoretical_twap_fee_rate`.
-These execution-cost values do not require a mark price. FIFO and periodic marks
-are retained only to render the optional theoretical NAV overlay.
+New publications archive each account's theoretical fee rate with its shares.
+Legacy publications without a frozen rate use the current configured rate and
+are explicitly counted. The virtual cost is `delta / 5 * sum(sample_prices)`;
+the fee is `abs(delta) / 5 * sum(sample_prices) * archived_fee_rate`.
 
-`GET /api/catalog/acquisition-cost` is the direct actual-versus-virtual ledger.
-For each materialized delta it returns the five source mids, virtual VWAP,
-virtual turnover and fee, then maps each same-direction factual strategy fill by
-its order `signal_ts_us` to the latest preceding symbol delta. The comparison
-keeps the factual fill quantity unchanged and replaces only its price and fee;
-target completion is reported separately from price shortfall. The aggregate
-reports actual-fill reference coverage, actual Maker/Taker fee, virtual blended
-fee, price shortfall, fee shortfall, and their sum. Symbol, side, liquidity-role,
-target-to-fill delay, and order-signal-to-fill delay breakdowns add exactly to
-the comparable total. Positive shortfall means factual acquisition was more
-expensive. This endpoint never reads a mark price. Its browser is
-`/manager/acquisition-cost/`.
+`GET /api/catalog/acquisition-cost` and `/manager/acquisition-cost/` compare
+factual strategy fills with the latest same-symbol delta preceding the stable
+order `signal_ts_us`, using exactly the factual signed fill quantity on both
+price paths. Target completion and reference coverage are separate. Price,
+fee and after-fee shortfall are exposed by strategy, symbol, side, liquidity,
+execution mode and delays. An incomplete latest delta blocks reference matching;
+it must never silently fall back to an earlier completed delta. Completed and
+not-yet-due missing references are counted separately. Cost needs no mark price.
 
-The JSON returned by `GET /api/timeline` and `GET /api/account-timeline`
-contains the portfolio-only series under `theoretical`. Query-time work is a
-direct read of the last pre-window portfolio point plus stored points in the
-requested window. Account filters apply, but no theoretical per-symbol or
-per-strategy curves are exposed. The theoretical overlay is therefore hidden
-when the browser selects only part of the symbol universe. Like the factual
-timeline, returned values are rebased to zero at the selected window start.
+The theoretical NAV reconstructs carried inventory directly from immutable
+delta schedules before the requested start, seeds isolated source/symbol/venue
+FIFO lots at the latest closed minute's close, and replays the in-window virtual
+fills. It marks with the latest completed minute close, uses 15-minute presentation
+points and preserves execution timestamps and extrema. Carried lots have zero
+turnover and fees, so no older candles or entry prices are needed for window
+NAV changes. If any required execution price or open-position mark is missing,
+no theoretical curve is returned, and the reason is explicit; factual NAV stays
+available. Unsupported venues and ranges older than the Kline retention do not
+have theoretical data. Near the retention boundary an extra complete minute is
+needed for the start mark. The portfolio overlay is hidden for a symbol subset.
+
+The 5-second BBO recorder, its old evaluation endpoint/page/client command,
+and the PostgreSQL theoretical materializer have been removed. The current
+initial schema no longer creates their derived tables. Existing production
+tables and old cache files have not been changed; they are neither read nor
+written by the new analysis. No database reset is required for the new pricing
+basis, which is always reconstructed from the target archive.
 
 `GET /api/timeline` is the strategy-attribution timeline and uses the latest
 strategy allocation anchor when one exists. `GET /api/account-timeline` uses
@@ -633,7 +662,7 @@ curl --noproxy '*' -sS -X PUT \
 # jp-meta is a different physical host. Choose it explicitly.
 python3 manager_publish_client.py --target jp-meta get-contract-leverage binance_exec_trade01 BTCUSDT
 python3 manager_publish_client.py --target jp-meta set-contract-leverage binance_exec_trade01 BTCUSDT 5
-python3 manager_publish_client.py --target jp-meta get-execution-cost --window-sec 300
+python3 manager_publish_client.py --target jp-meta get-acquisition-cost
 python3 manager_publish_client.py --target el01 get-contract-leverage binance_exec_trade01 BTCUSDT
 ```
 

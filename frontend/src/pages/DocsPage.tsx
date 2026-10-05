@@ -35,7 +35,7 @@ type ChapterId =
   | 'model'
   | 'bases'
   | 'catalog-position'
-  | 'execution-cost'
+  | 'acquisition-cost'
   | 'target-signal'
   | 'catalog-order'
   | 'account-studio'
@@ -129,8 +129,8 @@ function buildChapters(gateway: string): Chapter[] {
             },
             {
               method: 'GET',
-              path: `${CATALOG_PATH}/execution-cost`,
-              summary: '按需对比每次仓位更新的实际费前成本与 1 分钟 mid TWAP 预估',
+              path: `${CATALOG_PATH}/acquisition-cost`,
+              summary: '实际成交与五个完整分钟均价的成本比较',
             },
           ]}
         />
@@ -309,53 +309,20 @@ function buildChapters(gateway: string): Chapter[] {
     ),
   },
   {
-    id: 'execution-cost',
+    id: 'acquisition-cost',
     group: '策略目录',
-    title: '执行成本',
-    lead: '按需查询，不是实时任务。对比每次仓位更新窗口内的实际成交 VWAP 与 1 分钟 mid TWAP，都是费前。',
+    title: '持仓成本',
+    lead: '按需比较实际成交与五个完整分钟的成交均价，仅支持最近 30 天。',
     content: (
       <>
-        <Endpoint
-          method="GET"
-          path={`${CATALOG_PATH}/execution-cost`}
-          summary="从归档仓位更新、5s mid 条和 Exec 成交即时生成报告"
-        />
-        <CodeBlock label="curl">{`curl --noproxy '*' -sS \\
-  '${manager}/catalog/execution-cost?startMs=1755648000000&endMs=1755734400000&windowSec=300'`}</CodeBlock>
-        <FieldRows
-          rows={[
-            { field: 'startMs / endMs', detail: '按仓位更新 received_at 过滤；省略 start 从最早开始，省略 end 到现在' },
-            {
-              field: 'windowSec',
-              detail: '每次账户绑定发布的最长执行窗口；同一账户与绑定的下一次发布会提前截断',
-            },
-            { field: 'sourceIds', detail: '逗号分隔账户；省略则全部' },
-            { field: 'strategyName', detail: '只看一个仓位策略；省略则全部' },
-            {
-              field: 'intended_qty',
-              detail: '模板 qty × 当时归档的 shares − 快照 current_qty',
-            },
-            {
-              field: 'twap_cost_before_fee_usdt',
-              detail: 'intended × (窗口 TWAP − 到达 mid)。窗口从这次更新起按连续 1 分钟切桶；每桶对其中 5 秒 mid 等权平均，5 分钟就是 5 个 1 分钟 mid 再等权平均',
-            },
-            {
-              field: 'actual_cost_before_fee_usdt',
-              detail: '窗口内归属该策略的成交 filled × (VWAP − 到达分钟 mid)',
-            },
-          ]}
-        />
-        <Note>
-          价格用 Manager 自己的 5 秒 mid 条。假设窗口内均匀执行：从这次 POST
-          时刻起切连续 1 分钟，每分钟对其中 5 秒 mid 等权平均（满分钟 12 根），
-          再对这几个 1 分钟 mid 平均。5 分钟窗口就是 5 个 1 分钟 mid。成交只认
-          from_key_text 为 batch_exec:&lt;strategy_name&gt; 或 chase_exec:&lt;strategy_name&gt; 的 uniform_orders。
-          窗口从这次 POST 开始，遇到同策略下一次更新提前结束。只统计归档里带有
-          published_accounts（含当时 shares）的消息；份数以该条消息为准，不用当前目录回填。
-        </Note>
-        <Note tone="warn">
-          这是查询生成，不写 Exec RocksDB，也不进交易热路径。浏览器在 /manager/execution-cost/。
-        </Note>
+        <Endpoint method="GET" path={`${CATALOG_PATH}/acquisition-cost`} summary="归档目标与 Binance 1m K 线生成虚拟价格，再与实际成交比较" />
+        <FieldRows rows={[
+          { field: 'startMs / endMs', detail: '最近 30 天内的查询区间；更早的数据不支持理论分析' },
+          { field: 'sourceIds / strategyName', detail: '账户或策略筛选；省略策略则比较全部策略' },
+          { field: 'sample_prices', detail: '目标发布后的五个完整分钟，每分钟成交额 ÷ 成交量，各执行 delta 的 1/5' },
+          { field: 'price_shortfall_usdt', detail: '实际有符号成交数量 × (实际成交价 − 五个分钟均价的等权平均)' },
+        ]} />
+        <Note>分钟 K 线存入 Manager 自己的 RocksDB。已缓存的分钟不重复请求，其他币对按查询缺口向前补拉 24 小时。缺失数据明确显示覆盖不足，不产生虚假的理论净值。</Note>
       </>
     ),
   },
@@ -699,7 +666,7 @@ python3 manager_publish_client.py --target jp-meta put-position @cta.json
 python3 manager_publish_client.py --target el01 get-contract-leverage binance_exec_trade01 BTCUSDT
 python3 manager_publish_client.py --target jp-meta get-contract-leverage binance_exec_trade01 BTCUSDT
 python3 manager_publish_client.py --target el01 set-contract-leverage binance_exec_trade01 BTCUSDT 5
-python3 manager_publish_client.py --target jp-meta get-execution-cost --window-sec 300`}</CodeBlock>
+python3 manager_publish_client.py --target jp-meta get-acquisition-cost`}</CodeBlock>
         <CodeBlock label="cta.json 精简版">{`{
   "strategy_name": "CTA_SK_C4V6PosT1_LXY_filter_Position",
   "targets": {
@@ -765,7 +732,7 @@ const CHAPTER_IDS: ChapterId[] = [
   'model',
   'bases',
   'catalog-position',
-  'execution-cost',
+  'acquisition-cost',
   'target-signal',
   'catalog-order',
   'account-studio',

@@ -144,7 +144,6 @@ async fn main() -> Result<()> {
 
     let database_url = config.database_url()?;
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
-    postgres::migrate(&pool).await?;
     postgres::register_sources(&pool, &config.sources).await?;
     if args.infer_from_fills {
         if let Some(existing) =
@@ -823,7 +822,7 @@ mod tests {
             bbo_spread: String::new(),
             signal_open: None,
             signal_hedge: None,
-            wire_payload: Vec::new(),
+            fill_liquidity: None,
         }
     }
 

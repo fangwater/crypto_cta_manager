@@ -1,31 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use anyhow::{Context, Result, bail};
-use serde::Serialize;
-use sqlx::postgres::{PgPool, PgRow};
-use sqlx::{Postgres, Row, Transaction};
-use tracing::{info, warn};
-
+//! On-demand theoretical execution from immutable targets and minute candles.
+//! No PostgreSQL materialization cursor or realtime BBO dependency.
 use crate::config::AppConfig;
+use crate::kline::{KlineStore, MINUTE_US, first_complete_open, now_us};
 use crate::position_archive::{PositionArchive, PositionUpdateMsg};
-use crate::twap::{TwapBar, TwapStore};
+use anyhow::{Context, Result, bail, ensure};
+use serde::Serialize;
+use sqlx::postgres::PgPool;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const EXECUTION_WINDOW_SECS: u64 = 300;
-const FIVE_SECOND_BAR_US: i64 = 5_000_000;
-const TWAP_SAMPLE_COUNT: usize = 5;
-const MINUTE_US: i64 = 60_000_000;
-const MARK_INTERVAL_US: i64 = 300_000_000;
-const MARK_LOOKBACK_US: i64 = 10_000_000;
-const MARK_MAX_AGE_US: i64 = 10_000_000;
-const BAR_SETTLE_LAG_US: i64 = 5_000_000;
-const MISSING_BAR_GRACE_US: i64 = 120_000_000;
-const WORKER_INTERVAL_SECS: u64 = 5;
-const PROCESS_BATCH_SIZE: i64 = 64;
-const MAX_COMPLETIONS_PER_RUN: usize = 2_048;
-const MAX_MARKS_PER_CALL: usize = 512;
 const ZERO_EPSILON: f64 = 1e-12;
+pub const SAMPLE_COUNT: usize = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct TheoreticalNavPoint {
@@ -34,7 +19,6 @@ pub struct TheoreticalNavPoint {
     pub nav_change_after_fee_quote: f64,
     pub estimated_trading_fee_quote: f64,
 }
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TheoreticalNavTimeline {
     pub valuation: &'static str,
@@ -45,41 +29,441 @@ pub struct TheoreticalNavTimeline {
     pub latest_point_ts_us: Option<i64>,
     pub points: Vec<TheoreticalNavPoint>,
     pub sampled: bool,
+    pub unavailable_reason: Option<String>,
+    pub missing_price_count: usize,
+    pub legacy_fee_delta_count: usize,
 }
-
 impl Default for TheoreticalNavTimeline {
     fn default() -> Self {
         Self {
-            valuation: "quantity_fifo_five_slice_mid_mark_window_delta",
+            valuation: "quantity_fifo_window_delta",
             execution_window_secs: EXECUTION_WINDOW_SECS,
-            price_basis: "five_equal_qty_5s_mid_samples_60s_apart+latest_completed_5s_mid_mark_every_5m",
-            fee_basis: "source_theoretical_twap_fee_rate_at_staging",
+            price_basis: "five_equal_qty_complete_1m_quote_over_base_vwap+closed_1m_close_mark",
+            fee_basis: "archived_theoretical_rate_or_current_rate_for_legacy_targets",
             available_from_us: None,
             latest_point_ts_us: None,
             points: Vec::new(),
             sampled: false,
+            unavailable_reason: None,
+            missing_price_count: 0,
+            legacy_fee_delta_count: 0,
         }
     }
 }
-
 #[derive(Clone, Debug)]
-struct PendingKey {
-    source_id: String,
-    binding_name: String,
-    received_at_us: i64,
-    update_seq: i64,
-    window_end_us: i64,
+pub struct VirtualDelta {
+    pub source_id: String,
+    pub binding_name: String,
+    pub strategy_name: String,
+    pub symbol: String,
+    pub venue: String,
+    pub received_at_us: i64,
+    pub seq: u32,
+    pub delta_qty: f64,
+    pub fee_rate: f64,
+    pub legacy_fee: bool,
+    pub target_signal: i32,
+}
+impl VirtualDelta {
+    pub fn open_ts_us(&self, index: usize) -> i64 {
+        first_complete_open(self.received_at_us) + index as i64 * MINUTE_US
+    }
+    pub fn execution_ts_us(&self) -> i64 {
+        self.open_ts_us(4) + MINUTE_US
+    }
+    pub fn prices(&self, store: &KlineStore) -> Result<Option<[f64; SAMPLE_COUNT]>> {
+        if self.venue != "binance-futures" {
+            return Ok(None);
+        }
+        let mut prices = [0.0; SAMPLE_COUNT];
+        for (index, price) in prices.iter_mut().enumerate() {
+            let Some(candle) = store.get(&self.symbol, self.open_ts_us(index))? else {
+                return Ok(None);
+            };
+            let Some(vwap) = candle.vwap() else {
+                return Ok(None);
+            };
+            *price = vwap;
+        }
+        Ok(Some(prices))
+    }
 }
 
-#[derive(Clone, Debug)]
-struct PendingUpdate {
-    key: PendingKey,
-    position_strategy_name: String,
-    window_end_us: i64,
-    venue: String,
-    fee_rate: f64,
-    targets: BTreeMap<String, f64>,
-    deltas: BTreeMap<String, f64>,
+fn collect_deltas(
+    config: &AppConfig,
+    messages: &[PositionUpdateMsg],
+    fee_rates: &BTreeMap<String, f64>,
+    end: i64,
+    source_ids: &[String],
+    strategy: Option<&str>,
+) -> Result<Vec<VirtualDelta>> {
+    let mut latest = BTreeMap::<(String, String), LatestTargets>::new();
+    let mut deltas = Vec::new();
+    for message in messages.iter().take_while(|m| m.received_at_us <= end) {
+        if strategy.is_some_and(|name| name != message.strategy.strategy_name) {
+            continue;
+        }
+        for account in &message.published_accounts {
+            if !source_ids.is_empty() && !source_ids.contains(&account.source_id) {
+                continue;
+            }
+            let Some(source) = config
+                .sources
+                .iter()
+                .find(|s| s.enabled && s.id == account.source_id)
+            else {
+                continue;
+            };
+            let key = (account.source_id.clone(), account.binding_name.clone());
+            let next = LatestTargets {
+                position_strategy_name: message.strategy.strategy_name.clone(),
+                venue: source.venue.clone(),
+                targets: normalized_scaled_targets(message, account.effective_shares())?,
+                received_at_us: message.received_at_us,
+                update_seq: message.seq,
+            };
+            if target_positions_changed(latest.get(&key), &next) {
+                let fee_rate = account
+                    .theoretical_fee_rate
+                    .or_else(|| fee_rates.get(&source.id).copied())
+                    .with_context(|| format!("missing theoretical fee for {}", source.id))?;
+                ensure!(fee_rate.is_finite(), "invalid archived theoretical fee");
+                for (symbol, quantity) in target_deltas(latest.get(&key), &next) {
+                    let target_signal = message
+                        .strategy
+                        .targets
+                        .get(&symbol)
+                        .map(|target| target.signal)
+                        .unwrap_or(0);
+                    deltas.push(VirtualDelta {
+                        source_id: source.id.clone(),
+                        binding_name: account.binding_name.clone(),
+                        strategy_name: next.position_strategy_name.clone(),
+                        symbol,
+                        venue: next.venue.clone(),
+                        received_at_us: next.received_at_us,
+                        seq: next.update_seq,
+                        delta_qty: quantity,
+                        fee_rate,
+                        legacy_fee: account.theoretical_fee_rate.is_none(),
+                        target_signal,
+                    });
+                }
+            }
+            latest.insert(key, next);
+        }
+    }
+    Ok(deltas)
+}
+
+/// Detached backfills survive HTTP cancellation. Return coverage after at most
+/// 10s of waiting; a later query reuses the cache rather than restarting pulls.
+pub async fn warm_ranges(store: &KlineStore, ranges: BTreeMap<String, (i64, i64)>) -> Vec<String> {
+    let store = store.clone();
+    let mut task = tokio::spawn(async move {
+        let mut jobs = tokio::task::JoinSet::new();
+        for (symbol, (start, end)) in ranges {
+            let store = store.clone();
+            jobs.spawn(async move { store.ensure_range(&symbol, start, end).await });
+        }
+        let mut errors = Vec::new();
+        while let Some(result) = jobs.join_next().await {
+            if let Err(error) = result.unwrap_or_else(|e| Err(e.into())) {
+                errors.push(error.to_string());
+            }
+        }
+        errors
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
+        Ok(Ok(errors)) => errors,
+        Ok(Err(error)) => vec![error.to_string()],
+        Err(_) => vec!["分钟 K 线正在后台补齐，请稍后重新查询".into()],
+    }
+}
+fn add_range(ranges: &mut BTreeMap<String, (i64, i64)>, symbol: &str, start: i64, end: i64) {
+    ranges
+        .entry(symbol.into())
+        .and_modify(|range| {
+            range.0 = range.0.min(start);
+            range.1 = range.1.max(end);
+        })
+        .or_insert((start, end));
+}
+pub async fn prepare_acquisition(
+    pool: &PgPool,
+    config: &AppConfig,
+    archive: &PositionArchive,
+    store: &KlineStore,
+    start: i64,
+    end: i64,
+    source_ids: &[String],
+    strategy: Option<&str>,
+) -> Result<(Vec<VirtualDelta>, Vec<String>)> {
+    store.validate_range(start, end, now_us())?;
+    ensure!(store.enabled(), "分钟 K 线理论分析未启用");
+    let fees = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
+    // Older target metadata establishes deltas only; no older market data is read.
+    let mut deltas = collect_deltas(
+        config,
+        &archive.scan_from(1)?,
+        &fees,
+        end,
+        source_ids,
+        strategy,
+    )?;
+    deltas.retain(|d| d.received_at_us >= (start - 300 * 1_000_000).max(store.cutoff_us(now_us())));
+    let mut ranges = BTreeMap::new();
+    for delta in &deltas {
+        if delta.venue == "binance-futures" {
+            add_range(
+                &mut ranges,
+                &delta.symbol,
+                delta.open_ts_us(0),
+                delta.execution_ts_us(),
+            );
+        }
+    }
+    let errors = warm_ranges(store, ranges).await;
+    Ok((deltas, errors))
+}
+
+pub async fn load_timeline(
+    pool: &PgPool,
+    config: &AppConfig,
+    archive: &PositionArchive,
+    store: &KlineStore,
+    start: i64,
+    end: i64,
+    source_ids: &[String],
+    max_points: usize,
+) -> Result<TheoreticalNavTimeline> {
+    let mut output = TheoreticalNavTimeline {
+        available_from_us: Some(first_complete_open(store.cutoff_us(now_us())) + MINUTE_US),
+        ..Default::default()
+    };
+    if !store.enabled() {
+        output.unavailable_reason = Some("分钟 K 线理论分析未启用".into());
+        return Ok(output);
+    }
+    if let Err(error) = store.validate_range(start, end, now_us()) {
+        output.unavailable_reason = Some(error.to_string());
+        return Ok(output);
+    }
+    let baseline_open = start.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
+    if baseline_open < store.cutoff_us(now_us()) {
+        output.unavailable_reason =
+            Some("区间起点没有保留范围内的完整分钟基准价，请将起点后移一分钟".into());
+        return Ok(output);
+    }
+    let fees = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
+    let deltas = collect_deltas(config, &archive.scan_from(1)?, &fees, end, source_ids, None)?;
+    // Exact inventory immediately before start follows from the frozen schedules,
+    // without needing old execution prices. Carry lots use the start's mark.
+    let mut carry = BTreeMap::<(String, String, String), f64>::new();
+    let mut fills = Vec::<(i64, usize, usize)>::new();
+    let mut ranges = BTreeMap::new();
+    for (index, delta) in deltas.iter().enumerate() {
+        for slice in 0..SAMPLE_COUNT {
+            let ts = delta.open_ts_us(slice) + MINUTE_US;
+            if ts < start {
+                *carry
+                    .entry((
+                        delta.source_id.clone(),
+                        delta.symbol.clone(),
+                        delta.venue.clone(),
+                    ))
+                    .or_default() += delta.delta_qty / 5.0;
+            } else if ts <= end {
+                fills.push((ts, index, slice));
+                if delta.venue == "binance-futures" {
+                    add_range(&mut ranges, &delta.symbol, baseline_open, end);
+                }
+            }
+        }
+    }
+    carry.retain(|_, qty| clean_zero(*qty) != 0.0);
+    for ((_, symbol, venue), _) in &carry {
+        if venue == "binance-futures" {
+            add_range(&mut ranges, symbol, baseline_open, end);
+        }
+    }
+    let errors = warm_ranges(store, ranges).await;
+    fills.sort_by_key(|(ts, delta, slice)| {
+        (
+            *ts,
+            deltas[*delta].received_at_us,
+            deltas[*delta].seq,
+            *delta,
+            *slice,
+        )
+    });
+    rebuild_timeline(
+        &deltas,
+        carry,
+        fills,
+        store,
+        start,
+        end,
+        max_points,
+        &mut output,
+    )?;
+    if !errors.is_empty() && output.points.is_empty() {
+        output.unavailable_reason = Some(errors.join("; "));
+    }
+    Ok(output)
+}
+
+fn rebuild_timeline(
+    deltas: &[VirtualDelta],
+    carry: BTreeMap<(String, String, String), f64>,
+    fills: Vec<(i64, usize, usize)>,
+    store: &KlineStore,
+    start: i64,
+    end: i64,
+    max_points: usize,
+    output: &mut TheoreticalNavTimeline,
+) -> Result<()> {
+    let mut states = BTreeMap::<(String, String, String), (SymbolState, VecDeque<FifoLot>)>::new();
+    let mut markets = BTreeMap::new();
+    let mut needed = carry
+        .keys()
+        .map(|(_, symbol, _)| symbol.clone())
+        .collect::<BTreeSet<_>>();
+    needed.extend(
+        fills
+            .iter()
+            .map(|(_, index, _)| deltas[*index].symbol.clone()),
+    );
+    for symbol in needed {
+        markets.insert(
+            symbol.clone(),
+            store.scan(
+                &symbol,
+                start.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US,
+                end,
+            )?,
+        );
+    }
+    let mark = |symbol: &str, ts: i64| -> Option<f64> {
+        let bars = markets.get(symbol)?;
+        let end = bars.partition_point(|c| c.end_ts_us() <= ts);
+        let candle = bars.get(end.checked_sub(1)?)?;
+        (ts - candle.end_ts_us() < MINUTE_US).then_some(candle.close)
+    };
+    for (key, quantity) in carry {
+        let price = if key.2 == "binance-futures" {
+            mark(&key.1, start)
+        } else {
+            None
+        };
+        let Some(price) = price else {
+            output.missing_price_count += 1;
+            continue;
+        };
+        states.insert(
+            key,
+            (
+                SymbolState {
+                    net_quantity: quantity,
+                    next_lot_seq: 2,
+                    ..Default::default()
+                },
+                VecDeque::from([FifoLot {
+                    seq: 1,
+                    quantity,
+                    entry_price: price,
+                }]),
+            ),
+        );
+    }
+    let mut ticks = BTreeSet::from([start, end]);
+    let mut tick = start.div_euclid(900 * 1_000_000) * 900 * 1_000_000 + 900 * 1_000_000;
+    while tick < end {
+        ticks.insert(tick);
+        tick += 900 * 1_000_000;
+    }
+    ticks.extend(fills.iter().map(|(ts, _, _)| *ts));
+    let mut cursor = 0;
+    let mut legacy = BTreeSet::new();
+    for ts in ticks {
+        while cursor < fills.len() && fills[cursor].0 <= ts {
+            let (_, index, slice) = fills[cursor];
+            let delta = &deltas[index];
+            cursor += 1;
+            let candle = if delta.venue == "binance-futures" {
+                store.get(&delta.symbol, delta.open_ts_us(slice))?
+            } else {
+                None
+            };
+            let Some(price) = candle.and_then(|c| c.vwap()) else {
+                output.missing_price_count += 1;
+                continue;
+            };
+            if delta.legacy_fee {
+                legacy.insert(index);
+            }
+            let key = (
+                delta.source_id.clone(),
+                delta.symbol.clone(),
+                delta.venue.clone(),
+            );
+            let (state, lots) = states.entry(key).or_insert_with(|| {
+                (
+                    SymbolState {
+                        next_lot_seq: 1,
+                        ..Default::default()
+                    },
+                    VecDeque::new(),
+                )
+            });
+            let applied = evaluate_fill(
+                *state,
+                std::mem::take(lots),
+                delta.delta_qty / 5.0,
+                price,
+                delta.fee_rate,
+            )?;
+            *state = SymbolState {
+                net_quantity: applied.net_quantity,
+                realized_pnl_before_fee_quote: applied.realized_pnl_before_fee_quote,
+                estimated_trading_fee_quote: applied.cumulative_fee_quote,
+                next_lot_seq: applied.next_lot_seq,
+            };
+            *lots = applied.lots;
+        }
+        let mut point = TheoreticalNavPoint {
+            ts_us: ts,
+            ..Default::default()
+        };
+        for ((_, symbol, _), (state, lots)) in &states {
+            let floating = if lots.is_empty() {
+                0.0
+            } else if let Some(price) = mark(symbol, ts) {
+                floating_pnl_at_mark(lots, price)?
+            } else {
+                output.missing_price_count += 1;
+                0.0
+            };
+            point.nav_change_before_fee_quote += state.realized_pnl_before_fee_quote + floating;
+            point.estimated_trading_fee_quote += state.estimated_trading_fee_quote;
+        }
+        point.nav_change_after_fee_quote =
+            point.nav_change_before_fee_quote - point.estimated_trading_fee_quote;
+        push_or_replace_point(&mut output.points, point);
+    }
+    output.legacy_fee_delta_count = legacy.len();
+    if output.missing_price_count > 0 {
+        output.points.clear();
+        output.unavailable_reason = Some(format!(
+            "分钟行情尚未补齐或币对不受支持（{} 处缺失），理论净值暂不可用",
+            output.missing_price_count
+        ));
+    } else {
+        output.latest_point_ts_us = output.points.last().map(|point| point.ts_us);
+        output.sampled = output.points.len() > max_points;
+        output.points = downsample_points(std::mem::take(&mut output.points), max_points);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -110,33 +494,6 @@ struct AppliedFill {
     next_lot_seq: i64,
 }
 
-#[derive(Clone, Debug)]
-enum PlannedSymbol {
-    Fill {
-        symbol: String,
-        venue: String,
-        previous_quantity: f64,
-        target_quantity: f64,
-        executed_quantity: f64,
-        twap_price: f64,
-        sample_mids: [f64; TWAP_SAMPLE_COUNT],
-    },
-    Skip {
-        symbol: String,
-        venue: String,
-        reason: &'static str,
-    },
-}
-
-#[derive(Clone, Debug)]
-struct StoredContribution {
-    key: String,
-    ts_us: i64,
-    nav_before_fee: f64,
-    nav_after_fee: f64,
-    fee: f64,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct LatestTargets {
     position_strategy_name: String,
@@ -144,231 +501,6 @@ struct LatestTargets {
     targets: BTreeMap<String, f64>,
     received_at_us: i64,
     update_seq: u32,
-}
-
-pub fn spawn(config: AppConfig, pool: PgPool, archive: Arc<PositionArchive>, twap: Arc<TwapStore>) {
-    if !config.twap.enabled {
-        info!("theoretical five-slice TWAP NAV materializer disabled with TWAP recorder");
-        return;
-    }
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(WORKER_INTERVAL_SECS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            if let Err(error) =
-                materialize_once(&config, &pool, &archive, &twap, unix_now_us()).await
-            {
-                warn!(error = %format!("{error:#}"), "theoretical TWAP NAV materialization failed");
-            }
-        }
-    });
-}
-
-pub async fn materialize_once(
-    config: &AppConfig,
-    pool: &PgPool,
-    archive: &PositionArchive,
-    twap: &TwapStore,
-    now_us: i64,
-) -> Result<usize> {
-    let checkpoint = load_or_initialize_checkpoint(config, pool, now_us).await?;
-    let fee_rates = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
-    let messages = archive
-        .scan_from(checkpoint.0.max(1))?
-        .into_iter()
-        .filter(|message| (message.received_at_us, message.seq) > checkpoint)
-        .collect::<Vec<_>>();
-    stage_messages(config, pool, &messages, &fee_rates).await?;
-
-    let due_before_us = now_us.saturating_sub(BAR_SETTLE_LAG_US);
-    let mut completed = 0usize;
-    while completed < MAX_COMPLETIONS_PER_RUN {
-        let keys = load_due_keys(pool, due_before_us).await?;
-        if keys.is_empty() {
-            break;
-        }
-        let mut round_completed = 0usize;
-        for key in keys {
-            if !materialize_marks_until(pool, twap, &key.source_id, key.window_end_us, now_us)
-                .await?
-            {
-                continue;
-            }
-            if process_pending(pool, twap, &key, now_us).await? {
-                completed += 1;
-                round_completed += 1;
-                if completed == MAX_COMPLETIONS_PER_RUN {
-                    break;
-                }
-            }
-        }
-        if round_completed == 0 {
-            break;
-        }
-    }
-    let completed_mark_end = now_us.saturating_sub(BAR_SETTLE_LAG_US).saturating_add(1);
-    for source in config.sources.iter().filter(|source| source.enabled) {
-        let pending_end = earliest_pending_window(pool, &source.id).await?;
-        let mark_end = pending_end
-            .map(|pending_end| pending_end.min(completed_mark_end))
-            .unwrap_or(completed_mark_end);
-        materialize_marks_until(pool, twap, &source.id, mark_end, now_us).await?;
-    }
-    if completed > 0 {
-        info!(
-            completed,
-            "materialized theoretical five-slice TWAP NAV updates"
-        );
-    }
-    Ok(completed)
-}
-
-async fn load_or_initialize_checkpoint(
-    config: &AppConfig,
-    pool: &PgPool,
-    now_us: i64,
-) -> Result<(i64, u32)> {
-    let row = sqlx::query(
-        r#"
-        SELECT last_received_at_us, last_seq
-        FROM cta_theoretical_nav_checkpoint
-        WHERE singleton = true
-        "#,
-    )
-    .fetch_optional(pool)
-    .await
-    .context("failed to load theoretical NAV archive checkpoint")?;
-    if let Some(row) = row {
-        let received_at_us: i64 = row.try_get("last_received_at_us")?;
-        let seq: i64 = row.try_get("last_seq")?;
-        return Ok((received_at_us, u32::try_from(seq)?));
-    }
-
-    let retain_us = i64::from(config.twap.retain_days)
-        .saturating_mul(86_400)
-        .saturating_mul(1_000_000);
-    let cutoff_us = now_us.saturating_sub(retain_us).max(1);
-    sqlx::query(
-        r#"
-        INSERT INTO cta_theoretical_nav_checkpoint (
-            singleton, last_received_at_us, last_seq
-        ) VALUES (true, $1, $2)
-        ON CONFLICT (singleton) DO NOTHING
-        "#,
-    )
-    .bind(cutoff_us)
-    .bind(i64::from(u32::MAX))
-    .execute(pool)
-    .await
-    .context("failed to initialize theoretical NAV archive checkpoint")?;
-    Ok((cutoff_us, u32::MAX))
-}
-
-async fn stage_messages(
-    config: &AppConfig,
-    pool: &PgPool,
-    messages: &[PositionUpdateMsg],
-    fee_rates: &BTreeMap<String, f64>,
-) -> Result<usize> {
-    if messages.is_empty() {
-        return Ok(0);
-    }
-    let mut tx = pool
-        .begin()
-        .await
-        .context("failed to begin theoretical NAV staging transaction")?;
-    let mut latest = load_latest_targets(&mut tx).await?;
-    let mut touched = BTreeSet::new();
-    let mut staged = 0usize;
-    for message in messages {
-        for account in &message.published_accounts {
-            let Some(source) = config
-                .sources
-                .iter()
-                .find(|source| source.enabled && source.id == account.source_id)
-            else {
-                continue;
-            };
-            let targets = normalized_scaled_targets(message, account.effective_shares())
-                .with_context(|| {
-                    format!(
-                        "failed to scale theoretical targets for {}/{}",
-                        account.source_id, account.binding_name
-                    )
-                })?;
-            let key = (account.source_id.clone(), account.binding_name.clone());
-            let next = LatestTargets {
-                position_strategy_name: message.strategy.strategy_name.clone(),
-                venue: source.venue.clone(),
-                targets,
-                received_at_us: message.received_at_us,
-                update_seq: message.seq,
-            };
-            let changed = target_positions_changed(latest.get(&key), &next);
-            if changed {
-                let fee_rate = fee_rates.get(&source.id).copied().with_context(|| {
-                    format!("missing theoretical TWAP fee rate for {}", source.id)
-                })?;
-                stage_target_change(
-                    &mut tx,
-                    &account.source_id,
-                    &account.binding_name,
-                    latest.get(&key),
-                    &next,
-                    fee_rate,
-                )
-                .await?;
-                staged = staged.saturating_add(1);
-            }
-            latest.insert(key.clone(), next);
-            touched.insert(key);
-        }
-    }
-
-    for key in touched {
-        save_latest_targets(
-            &mut tx,
-            &key.0,
-            &key.1,
-            latest
-                .get(&key)
-                .context("theoretical latest target disappeared during staging")?,
-        )
-        .await?;
-    }
-    let last = messages
-        .last()
-        .context("non-empty theoretical message batch lost its tail")?;
-    sqlx::query(
-        r#"
-        INSERT INTO cta_theoretical_nav_checkpoint (
-            singleton, last_received_at_us, last_seq, updated_at
-        ) VALUES (true, $1, $2, now())
-        ON CONFLICT (singleton) DO UPDATE SET
-            last_received_at_us = EXCLUDED.last_received_at_us,
-            last_seq = EXCLUDED.last_seq,
-            updated_at = now()
-        WHERE (cta_theoretical_nav_checkpoint.last_received_at_us,
-               cta_theoretical_nav_checkpoint.last_seq)
-            < (EXCLUDED.last_received_at_us, EXCLUDED.last_seq)
-        "#,
-    )
-    .bind(last.received_at_us)
-    .bind(i64::from(last.seq))
-    .execute(&mut *tx)
-    .await
-    .context("failed to advance theoretical NAV archive checkpoint")?;
-    tx.commit()
-        .await
-        .context("failed to commit theoretical NAV staging transaction")?;
-    if staged > 0 {
-        info!(
-            scanned = messages.len(),
-            staged, "staged theoretical target changes"
-        );
-    }
-    Ok(staged)
 }
 
 fn normalized_scaled_targets(
@@ -386,14 +518,6 @@ fn normalized_scaled_targets(
         }
     }
     Ok(targets)
-}
-
-fn normalize_stored_targets(targets: &mut BTreeMap<String, f64>) -> Result<()> {
-    if targets.values().any(|quantity| !quantity.is_finite()) {
-        bail!("stored theoretical target is not finite");
-    }
-    targets.retain(|_, quantity| clean_zero(*quantity) != 0.0);
-    Ok(())
 }
 
 fn target_positions_changed(previous: Option<&LatestTargets>, next: &LatestTargets) -> bool {
@@ -421,874 +545,12 @@ fn target_deltas(previous: Option<&LatestTargets>, next: &LatestTargets) -> BTre
         .collect::<BTreeSet<_>>()
         .into_iter()
         .filter_map(|symbol| {
-            let delta = clean_zero(
-                next.targets.get(&symbol).copied().unwrap_or(0.0)
-                    - previous.get(&symbol).copied().unwrap_or(0.0),
-            );
-            (delta != 0.0).then_some((symbol, delta))
+            let before = previous.get(&symbol).copied().unwrap_or(0.0);
+            let after = next.targets.get(&symbol).copied().unwrap_or(0.0);
+            (!quantities_equal(before, after, before.abs()))
+                .then_some((symbol, clean_zero(after - before)))
         })
         .collect()
-}
-
-fn first_complete_bar_end(received_at_us: i64) -> i64 {
-    received_at_us
-        .saturating_add(FIVE_SECOND_BAR_US - 1)
-        .div_euclid(FIVE_SECOND_BAR_US)
-        .saturating_mul(FIVE_SECOND_BAR_US)
-        .saturating_add(FIVE_SECOND_BAR_US)
-}
-
-fn theoretical_execution_ts(received_at_us: i64) -> i64 {
-    first_complete_bar_end(received_at_us)
-        .saturating_add((TWAP_SAMPLE_COUNT as i64 - 1).saturating_mul(MINUTE_US))
-}
-
-async fn load_latest_targets(
-    tx: &mut Transaction<'_, Postgres>,
-) -> Result<BTreeMap<(String, String), LatestTargets>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT source_id, binding_name, position_strategy_name, venue,
-               targets, received_at_us, update_seq
-        FROM cta_theoretical_nav_latest_targets
-        ORDER BY source_id, binding_name
-        FOR UPDATE
-        "#,
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .context("failed to load latest theoretical targets")?;
-    rows.into_iter()
-        .map(|row| {
-            let source_id: String = row.try_get("source_id")?;
-            let binding_name: String = row.try_get("binding_name")?;
-            let targets: serde_json::Value = row.try_get("targets")?;
-            let mut targets = serde_json::from_value(targets)
-                .context("failed to decode latest theoretical targets")?;
-            normalize_stored_targets(&mut targets)?;
-            Ok((
-                (source_id, binding_name),
-                LatestTargets {
-                    position_strategy_name: row.try_get("position_strategy_name")?,
-                    venue: row.try_get("venue")?,
-                    targets,
-                    received_at_us: row.try_get("received_at_us")?,
-                    update_seq: u32::try_from(row.try_get::<i64, _>("update_seq")?)?,
-                },
-            ))
-        })
-        .collect()
-}
-
-async fn stage_target_change(
-    tx: &mut Transaction<'_, Postgres>,
-    source_id: &str,
-    binding_name: &str,
-    previous: Option<&LatestTargets>,
-    next: &LatestTargets,
-    fee_rate: f64,
-) -> Result<()> {
-    let seq = i64::from(next.update_seq);
-    let deltas = target_deltas(previous, next);
-    sqlx::query(
-        r#"
-        INSERT INTO cta_theoretical_nav_pending (
-            source_id, binding_name, position_strategy_name,
-            received_at_us, update_seq, window_end_us, venue, fee_rate, targets, deltas
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        ON CONFLICT (source_id, binding_name, received_at_us, update_seq)
-        DO NOTHING
-        "#,
-    )
-    .bind(source_id)
-    .bind(binding_name)
-    .bind(&next.position_strategy_name)
-    .bind(next.received_at_us)
-    .bind(seq)
-    .bind(theoretical_execution_ts(next.received_at_us))
-    .bind(&next.venue)
-    .bind(fee_rate)
-    .bind(serde_json::to_value(&next.targets)?)
-    .bind(serde_json::to_value(deltas)?)
-    .execute(&mut **tx)
-    .await
-    .context("failed to stage theoretical NAV target change")?;
-    Ok(())
-}
-
-async fn save_latest_targets(
-    tx: &mut Transaction<'_, Postgres>,
-    source_id: &str,
-    binding_name: &str,
-    latest: &LatestTargets,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO cta_theoretical_nav_latest_targets (
-            source_id, binding_name, position_strategy_name, venue, targets,
-            received_at_us, update_seq, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-        ON CONFLICT (source_id, binding_name) DO UPDATE SET
-            position_strategy_name = EXCLUDED.position_strategy_name,
-            venue = EXCLUDED.venue,
-            targets = EXCLUDED.targets,
-            received_at_us = EXCLUDED.received_at_us,
-            update_seq = EXCLUDED.update_seq,
-            updated_at = now()
-        WHERE (cta_theoretical_nav_latest_targets.received_at_us,
-               cta_theoretical_nav_latest_targets.update_seq)
-            < (EXCLUDED.received_at_us, EXCLUDED.update_seq)
-        "#,
-    )
-    .bind(source_id)
-    .bind(binding_name)
-    .bind(&latest.position_strategy_name)
-    .bind(&latest.venue)
-    .bind(serde_json::to_value(&latest.targets)?)
-    .bind(latest.received_at_us)
-    .bind(i64::from(latest.update_seq))
-    .execute(&mut **tx)
-    .await
-    .context("failed to save latest theoretical targets")?;
-    Ok(())
-}
-
-async fn load_due_keys(pool: &PgPool, due_before_us: i64) -> Result<Vec<PendingKey>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT p.source_id, p.binding_name, p.received_at_us, p.update_seq,
-               p.window_end_us
-        FROM cta_theoretical_nav_pending p
-        WHERE p.window_end_us <= $1
-          AND NOT EXISTS (
-              SELECT 1
-              FROM cta_theoretical_nav_pending earlier
-              WHERE earlier.source_id = p.source_id
-                AND earlier.binding_name = p.binding_name
-                AND (earlier.received_at_us, earlier.update_seq)
-                    < (p.received_at_us, p.update_seq)
-          )
-        ORDER BY p.window_end_us, p.received_at_us, p.update_seq,
-                 p.source_id, p.binding_name
-        LIMIT $2
-        "#,
-    )
-    .bind(due_before_us)
-    .bind(PROCESS_BATCH_SIZE)
-    .fetch_all(pool)
-    .await
-    .context("failed to load due theoretical NAV updates")?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(PendingKey {
-                source_id: row.try_get("source_id")?,
-                binding_name: row.try_get("binding_name")?,
-                received_at_us: row.try_get("received_at_us")?,
-                update_seq: row.try_get("update_seq")?,
-                window_end_us: row.try_get("window_end_us")?,
-            })
-        })
-        .collect()
-}
-
-async fn earliest_pending_window(pool: &PgPool, source_id: &str) -> Result<Option<i64>> {
-    sqlx::query_scalar(
-        r#"
-        SELECT MIN(window_end_us)
-        FROM cta_theoretical_nav_pending
-        WHERE source_id = $1
-        "#,
-    )
-    .bind(source_id)
-    .fetch_one(pool)
-    .await
-    .context("failed to load earliest pending theoretical NAV window")
-}
-
-async fn materialize_marks_until(
-    pool: &PgPool,
-    twap: &TwapStore,
-    source_id: &str,
-    exclusive_end_us: i64,
-    now_us: i64,
-) -> Result<bool> {
-    let mut last_mark_ts_us = load_or_initialize_mark_checkpoint(pool, source_id, exclusive_end_us)
-        .await
-        .with_context(|| format!("failed to initialize theoretical mark cursor for {source_id}"))?;
-    let last_due_mark_ts_us = mark_strictly_before(exclusive_end_us);
-    if last_due_mark_ts_us <= last_mark_ts_us {
-        return Ok(true);
-    }
-    if !has_open_position(pool, source_id).await? {
-        advance_mark_checkpoint(pool, source_id, last_due_mark_ts_us).await?;
-        return Ok(true);
-    }
-    let mut completed = 0usize;
-    loop {
-        let next_mark_ts_us = last_mark_ts_us.saturating_add(MARK_INTERVAL_US);
-        if next_mark_ts_us >= exclusive_end_us {
-            return Ok(true);
-        }
-        if completed == MAX_MARKS_PER_CALL {
-            return Ok(false);
-        }
-        if !materialize_mark_tick(pool, twap, source_id, next_mark_ts_us, now_us).await? {
-            return Ok(false);
-        }
-        last_mark_ts_us = next_mark_ts_us;
-        completed += 1;
-    }
-}
-
-async fn load_or_initialize_mark_checkpoint(
-    pool: &PgPool,
-    source_id: &str,
-    anchor_ts_us: i64,
-) -> Result<i64> {
-    let initial = mark_strictly_before(anchor_ts_us);
-    sqlx::query(
-        r#"
-        INSERT INTO cta_theoretical_nav_mark_checkpoints (
-            source_id, last_mark_ts_us
-        ) VALUES ($1, $2)
-        ON CONFLICT (source_id) DO NOTHING
-        "#,
-    )
-    .bind(source_id)
-    .bind(initial)
-    .execute(pool)
-    .await?;
-    sqlx::query_scalar(
-        r#"
-        SELECT last_mark_ts_us
-        FROM cta_theoretical_nav_mark_checkpoints
-        WHERE source_id = $1
-        "#,
-    )
-    .bind(source_id)
-    .fetch_one(pool)
-    .await
-    .context("failed to load theoretical NAV mark checkpoint")
-}
-
-fn mark_strictly_before(ts_us: i64) -> i64 {
-    ts_us.saturating_sub(1).div_euclid(MARK_INTERVAL_US) * MARK_INTERVAL_US
-}
-
-async fn has_open_position(pool: &PgPool, source_id: &str) -> Result<bool> {
-    sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM cta_theoretical_nav_symbol_states
-            WHERE source_id = $1 AND abs(net_quantity) > $2
-        )
-        "#,
-    )
-    .bind(source_id)
-    .bind(ZERO_EPSILON)
-    .fetch_one(pool)
-    .await
-    .context("failed to check theoretical open positions")
-}
-
-async fn advance_mark_checkpoint(pool: &PgPool, source_id: &str, mark_ts_us: i64) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE cta_theoretical_nav_mark_checkpoints
-        SET last_mark_ts_us = $2, updated_at = now()
-        WHERE source_id = $1 AND last_mark_ts_us < $2
-        "#,
-    )
-    .bind(source_id)
-    .bind(mark_ts_us)
-    .execute(pool)
-    .await
-    .context("failed to advance flat theoretical mark checkpoint")?;
-    Ok(())
-}
-
-async fn materialize_mark_tick(
-    pool: &PgPool,
-    twap: &TwapStore,
-    source_id: &str,
-    mark_ts_us: i64,
-    now_us: i64,
-) -> Result<bool> {
-    let mut tx = pool
-        .begin()
-        .await
-        .context("failed to begin theoretical NAV mark transaction")?;
-    let rows = sqlx::query(
-        r#"
-        SELECT symbol, venue, mark_price
-        FROM cta_theoretical_nav_symbol_states
-        WHERE source_id = $1 AND abs(net_quantity) > $2
-        ORDER BY symbol, venue
-        FOR UPDATE
-        "#,
-    )
-    .bind(source_id)
-    .bind(ZERO_EPSILON)
-    .fetch_all(&mut *tx)
-    .await
-    .context("failed to lock open theoretical positions for marking")?;
-    let mut changed = false;
-    for row in &rows {
-        let symbol: String = row.try_get("symbol")?;
-        let venue: String = row.try_get("venue")?;
-        let previous_mark: Option<f64> = row.try_get("mark_price")?;
-        let bars = twap.scan_bars(
-            &symbol,
-            &venue,
-            mark_ts_us.saturating_sub(MARK_LOOKBACK_US).max(1),
-            mark_ts_us.saturating_add(1),
-        )?;
-        let mark = completed_mark_mid(&bars, mark_ts_us);
-        let Some(mark) = mark else {
-            if now_us <= mark_ts_us.saturating_add(MISSING_BAR_GRACE_US) {
-                tx.rollback().await.ok();
-                return Ok(false);
-            }
-            continue;
-        };
-        if previous_mark.is_none_or(|previous| (previous - mark).abs() > ZERO_EPSILON) {
-            changed = true;
-        }
-        sqlx::query(
-            r#"
-            UPDATE cta_theoretical_nav_symbol_states
-            SET mark_price = $4, updated_at_us = $5
-            WHERE source_id = $1 AND symbol = $2 AND venue = $3
-            "#,
-        )
-        .bind(source_id)
-        .bind(&symbol)
-        .bind(&venue)
-        .bind(mark)
-        .bind(mark_ts_us)
-        .execute(&mut *tx)
-        .await?;
-    }
-    if !rows.is_empty() && changed {
-        store_portfolio_point(&mut tx, source_id, mark_ts_us, "mark").await?;
-    }
-    sqlx::query(
-        r#"
-        UPDATE cta_theoretical_nav_mark_checkpoints
-        SET last_mark_ts_us = $2, updated_at = now()
-        WHERE source_id = $1 AND last_mark_ts_us < $2
-        "#,
-    )
-    .bind(source_id)
-    .bind(mark_ts_us)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit()
-        .await
-        .context("failed to commit theoretical NAV mark")?;
-    Ok(true)
-}
-
-async fn process_pending(
-    pool: &PgPool,
-    twap: &TwapStore,
-    key: &PendingKey,
-    now_us: i64,
-) -> Result<bool> {
-    let mut tx = pool
-        .begin()
-        .await
-        .context("failed to begin theoretical NAV materialization transaction")?;
-    let Some(pending) = lock_pending(&mut tx, key).await? else {
-        tx.rollback().await.ok();
-        return Ok(false);
-    };
-    let mut planned = Vec::new();
-    let mut wait_for_bars = false;
-    for (symbol, executed) in &pending.deltas {
-        let venue = pending.venue.clone();
-        let target = pending.targets.get(symbol).copied().unwrap_or(0.0);
-        let previous = clean_zero(target - executed);
-        let bars = twap.scan_bars(
-            symbol,
-            &venue,
-            pending.key.received_at_us.saturating_add(1),
-            pending.window_end_us.saturating_add(1),
-        )?;
-        match five_slice_prices(&bars, pending.key.received_at_us) {
-            Some(sample_mids) => planned.push(PlannedSymbol::Fill {
-                symbol: symbol.clone(),
-                venue,
-                previous_quantity: previous,
-                target_quantity: target,
-                executed_quantity: *executed,
-                twap_price: sample_mids.iter().sum::<f64>() / TWAP_SAMPLE_COUNT as f64,
-                sample_mids,
-            }),
-            None if now_us <= pending.window_end_us.saturating_add(MISSING_BAR_GRACE_US) => {
-                wait_for_bars = true;
-            }
-            None => planned.push(PlannedSymbol::Skip {
-                symbol: symbol.clone(),
-                venue,
-                reason: "missing_five_slice_mid",
-            }),
-        }
-    }
-    if wait_for_bars {
-        tx.rollback().await.ok();
-        return Ok(false);
-    }
-
-    let mut had_fill = false;
-    for item in planned {
-        match item {
-            PlannedSymbol::Fill {
-                symbol,
-                venue,
-                previous_quantity,
-                target_quantity,
-                executed_quantity,
-                twap_price,
-                sample_mids,
-            } => {
-                had_fill = true;
-                apply_fill(
-                    &mut tx,
-                    &pending,
-                    &symbol,
-                    &venue,
-                    previous_quantity,
-                    target_quantity,
-                    executed_quantity,
-                    twap_price,
-                    sample_mids,
-                )
-                .await?;
-                save_binding_position(&mut tx, &pending, &symbol, &venue, target_quantity).await?;
-            }
-            PlannedSymbol::Skip {
-                symbol,
-                venue,
-                reason,
-            } => {
-                save_skip(&mut tx, &pending, &symbol, &venue, reason).await?;
-            }
-        }
-    }
-    if had_fill {
-        store_portfolio_point(
-            &mut tx,
-            &pending.key.source_id,
-            pending.window_end_us,
-            "execution",
-        )
-        .await?;
-    }
-    delete_pending(&mut tx, &pending.key).await?;
-    tx.commit()
-        .await
-        .context("failed to commit theoretical NAV materialization")?;
-    Ok(true)
-}
-
-async fn lock_pending(
-    tx: &mut Transaction<'_, Postgres>,
-    key: &PendingKey,
-) -> Result<Option<PendingUpdate>> {
-    let row = sqlx::query(
-        r#"
-        SELECT position_strategy_name, window_end_us, venue, fee_rate, targets, deltas
-        FROM cta_theoretical_nav_pending
-        WHERE source_id = $1 AND binding_name = $2
-          AND received_at_us = $3 AND update_seq = $4
-        FOR UPDATE
-        "#,
-    )
-    .bind(&key.source_id)
-    .bind(&key.binding_name)
-    .bind(key.received_at_us)
-    .bind(key.update_seq)
-    .fetch_optional(&mut **tx)
-    .await
-    .context("failed to lock theoretical NAV pending update")?;
-    row.map(|row| {
-        let targets: serde_json::Value = row.try_get("targets")?;
-        let deltas: serde_json::Value = row.try_get("deltas")?;
-        Ok(PendingUpdate {
-            key: key.clone(),
-            position_strategy_name: row.try_get("position_strategy_name")?,
-            window_end_us: row.try_get("window_end_us")?,
-            venue: row.try_get("venue")?,
-            fee_rate: row.try_get("fee_rate")?,
-            targets: serde_json::from_value(targets)
-                .context("failed to decode theoretical NAV pending targets")?,
-            deltas: serde_json::from_value(deltas)
-                .context("failed to decode theoretical NAV pending deltas")?,
-        })
-    })
-    .transpose()
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn apply_fill(
-    tx: &mut Transaction<'_, Postgres>,
-    pending: &PendingUpdate,
-    symbol: &str,
-    venue: &str,
-    previous_quantity: f64,
-    target_quantity: f64,
-    executed_quantity: f64,
-    twap_price: f64,
-    sample_mids: [f64; TWAP_SAMPLE_COUNT],
-) -> Result<()> {
-    let already_stored: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1 FROM cta_theoretical_nav_events
-            WHERE source_id = $1 AND binding_name = $2
-              AND symbol = $3 AND venue = $4
-              AND received_at_us = $5 AND update_seq = $6
-        )
-        "#,
-    )
-    .bind(&pending.key.source_id)
-    .bind(&pending.key.binding_name)
-    .bind(symbol)
-    .bind(venue)
-    .bind(pending.key.received_at_us)
-    .bind(pending.key.update_seq)
-    .fetch_one(&mut **tx)
-    .await?;
-    if already_stored {
-        return Ok(());
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO cta_theoretical_nav_symbol_states (
-            source_id, symbol, venue, updated_at_us
-        ) VALUES ($1, $2, $3, $4)
-        ON CONFLICT (source_id, symbol, venue) DO NOTHING
-        "#,
-    )
-    .bind(&pending.key.source_id)
-    .bind(symbol)
-    .bind(venue)
-    .bind(pending.window_end_us)
-    .execute(&mut **tx)
-    .await?;
-    let state_row = sqlx::query(
-        r#"
-        SELECT net_quantity, realized_pnl_before_fee_quote,
-               estimated_trading_fee_quote, next_lot_seq
-        FROM cta_theoretical_nav_symbol_states
-        WHERE source_id = $1 AND symbol = $2 AND venue = $3
-        FOR UPDATE
-        "#,
-    )
-    .bind(&pending.key.source_id)
-    .bind(symbol)
-    .bind(venue)
-    .fetch_one(&mut **tx)
-    .await?;
-    let state = SymbolState {
-        net_quantity: state_row.try_get("net_quantity")?,
-        realized_pnl_before_fee_quote: state_row.try_get("realized_pnl_before_fee_quote")?,
-        estimated_trading_fee_quote: state_row.try_get("estimated_trading_fee_quote")?,
-        next_lot_seq: state_row.try_get("next_lot_seq")?,
-    };
-    let lot_rows = sqlx::query(
-        r#"
-        SELECT lot_seq, quantity, entry_price
-        FROM cta_theoretical_nav_fifo_lots
-        WHERE source_id = $1 AND symbol = $2 AND venue = $3
-        ORDER BY lot_seq
-        FOR UPDATE
-        "#,
-    )
-    .bind(&pending.key.source_id)
-    .bind(symbol)
-    .bind(venue)
-    .fetch_all(&mut **tx)
-    .await?;
-    let lots = lot_rows
-        .into_iter()
-        .map(|row| {
-            Ok(FifoLot {
-                seq: row.try_get("lot_seq")?,
-                quantity: row.try_get("quantity")?,
-                entry_price: row.try_get("entry_price")?,
-            })
-        })
-        .collect::<Result<VecDeque<_>>>()?;
-    let applied = evaluate_fill(state, lots, executed_quantity, twap_price, pending.fee_rate)?;
-
-    sqlx::query(
-        r#"
-        DELETE FROM cta_theoretical_nav_fifo_lots
-        WHERE source_id = $1 AND symbol = $2 AND venue = $3
-        "#,
-    )
-    .bind(&pending.key.source_id)
-    .bind(symbol)
-    .bind(venue)
-    .execute(&mut **tx)
-    .await?;
-    for lot in &applied.lots {
-        sqlx::query(
-            r#"
-            INSERT INTO cta_theoretical_nav_fifo_lots (
-                source_id, symbol, venue, lot_seq, quantity, entry_price
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
-        )
-        .bind(&pending.key.source_id)
-        .bind(symbol)
-        .bind(venue)
-        .bind(lot.seq)
-        .bind(lot.quantity)
-        .bind(lot.entry_price)
-        .execute(&mut **tx)
-        .await?;
-    }
-    sqlx::query(
-        r#"
-        UPDATE cta_theoretical_nav_symbol_states
-        SET net_quantity = $4,
-            realized_pnl_before_fee_quote = $5,
-            estimated_trading_fee_quote = $6,
-            mark_price = $7,
-            next_lot_seq = $8,
-            updated_at_us = $9
-        WHERE source_id = $1 AND symbol = $2 AND venue = $3
-        "#,
-    )
-    .bind(&pending.key.source_id)
-    .bind(symbol)
-    .bind(venue)
-    .bind(applied.net_quantity)
-    .bind(applied.realized_pnl_before_fee_quote)
-    .bind(applied.cumulative_fee_quote)
-    .bind(twap_price)
-    .bind(applied.next_lot_seq)
-    .bind(pending.window_end_us)
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO cta_theoretical_nav_events (
-            source_id, binding_name, position_strategy_name, symbol, venue,
-            received_at_us, update_seq, execution_ts_us,
-            previous_quantity, target_quantity, executed_quantity,
-            twap_price, sample_mids, fee_rate, fee_quote,
-            cumulative_realized_pnl_before_fee_quote,
-            cumulative_estimated_trading_fee_quote,
-            cumulative_floating_pnl_quote,
-            cumulative_nav_before_fee_quote,
-            cumulative_nav_after_fee_quote
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-            $12, $13, $14, $15, $16, $17, $18, $19, $20
-        )
-        "#,
-    )
-    .bind(&pending.key.source_id)
-    .bind(&pending.key.binding_name)
-    .bind(&pending.position_strategy_name)
-    .bind(symbol)
-    .bind(venue)
-    .bind(pending.key.received_at_us)
-    .bind(pending.key.update_seq)
-    .bind(pending.window_end_us)
-    .bind(previous_quantity)
-    .bind(target_quantity)
-    .bind(executed_quantity)
-    .bind(twap_price)
-    .bind(serde_json::to_value(sample_mids)?)
-    .bind(pending.fee_rate)
-    .bind(applied.fee_quote)
-    .bind(applied.realized_pnl_before_fee_quote)
-    .bind(applied.cumulative_fee_quote)
-    .bind(applied.floating_pnl_quote)
-    .bind(applied.nav_before_fee_quote)
-    .bind(applied.nav_after_fee_quote)
-    .execute(&mut **tx)
-    .await
-    .context("failed to append sparse theoretical NAV event")?;
-    Ok(())
-}
-
-async fn save_binding_position(
-    tx: &mut Transaction<'_, Postgres>,
-    pending: &PendingUpdate,
-    symbol: &str,
-    venue: &str,
-    target_quantity: f64,
-) -> Result<()> {
-    if clean_zero(target_quantity) == 0.0 {
-        sqlx::query(
-            r#"
-            DELETE FROM cta_theoretical_binding_positions
-            WHERE source_id = $1 AND binding_name = $2
-              AND symbol = $3 AND venue = $4
-            "#,
-        )
-        .bind(&pending.key.source_id)
-        .bind(&pending.key.binding_name)
-        .bind(symbol)
-        .bind(venue)
-        .execute(&mut **tx)
-        .await?;
-    } else {
-        sqlx::query(
-            r#"
-            INSERT INTO cta_theoretical_binding_positions (
-                source_id, binding_name, symbol, venue, position_strategy_name,
-                quantity, updated_at_us, update_seq
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (source_id, binding_name, symbol, venue) DO UPDATE SET
-                position_strategy_name = EXCLUDED.position_strategy_name,
-                quantity = EXCLUDED.quantity,
-                updated_at_us = EXCLUDED.updated_at_us,
-                update_seq = EXCLUDED.update_seq
-            "#,
-        )
-        .bind(&pending.key.source_id)
-        .bind(&pending.key.binding_name)
-        .bind(symbol)
-        .bind(venue)
-        .bind(&pending.position_strategy_name)
-        .bind(target_quantity)
-        .bind(pending.key.received_at_us)
-        .bind(pending.key.update_seq)
-        .execute(&mut **tx)
-        .await?;
-    }
-    Ok(())
-}
-
-async fn store_portfolio_point(
-    tx: &mut Transaction<'_, Postgres>,
-    source_id: &str,
-    ts_us: i64,
-    point_kind: &str,
-) -> Result<()> {
-    let row = sqlx::query(
-        r#"
-        SELECT
-            COALESCE(SUM(s.realized_pnl_before_fee_quote), 0)::double precision
-                AS realized,
-            COALESCE(SUM(s.estimated_trading_fee_quote), 0)::double precision
-                AS fee,
-            COALESCE(SUM(COALESCE((
-                SELECT SUM(l.quantity * (s.mark_price - l.entry_price))
-                FROM cta_theoretical_nav_fifo_lots l
-                WHERE l.source_id = s.source_id
-                  AND l.symbol = s.symbol
-                  AND l.venue = s.venue
-            ), 0)), 0)::double precision AS floating,
-            COUNT(*) FILTER (WHERE abs(s.net_quantity) > $2)::bigint
-                AS open_position_count
-        FROM cta_theoretical_nav_symbol_states s
-        WHERE s.source_id = $1
-        "#,
-    )
-    .bind(source_id)
-    .bind(ZERO_EPSILON)
-    .fetch_one(&mut **tx)
-    .await
-    .context("failed to aggregate theoretical portfolio state")?;
-    let realized: f64 = row.try_get("realized")?;
-    let fee: f64 = row.try_get("fee")?;
-    let floating: f64 = row.try_get("floating")?;
-    let open_position_count: i64 = row.try_get("open_position_count")?;
-    let nav_before = clean_zero(realized + floating);
-    let nav_after = clean_zero(nav_before - fee);
-    sqlx::query(
-        r#"
-        INSERT INTO cta_theoretical_nav_portfolio_points (
-            source_id, ts_us, point_kind, open_position_count,
-            cumulative_realized_pnl_before_fee_quote,
-            cumulative_estimated_trading_fee_quote,
-            cumulative_floating_pnl_quote,
-            cumulative_nav_before_fee_quote,
-            cumulative_nav_after_fee_quote
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT (source_id, ts_us) DO UPDATE SET
-            point_kind = EXCLUDED.point_kind,
-            open_position_count = EXCLUDED.open_position_count,
-            cumulative_realized_pnl_before_fee_quote =
-                EXCLUDED.cumulative_realized_pnl_before_fee_quote,
-            cumulative_estimated_trading_fee_quote =
-                EXCLUDED.cumulative_estimated_trading_fee_quote,
-            cumulative_floating_pnl_quote = EXCLUDED.cumulative_floating_pnl_quote,
-            cumulative_nav_before_fee_quote = EXCLUDED.cumulative_nav_before_fee_quote,
-            cumulative_nav_after_fee_quote = EXCLUDED.cumulative_nav_after_fee_quote
-        "#,
-    )
-    .bind(source_id)
-    .bind(ts_us)
-    .bind(point_kind)
-    .bind(i32::try_from(open_position_count)?)
-    .bind(realized)
-    .bind(fee)
-    .bind(floating)
-    .bind(nav_before)
-    .bind(nav_after)
-    .execute(&mut **tx)
-    .await
-    .context("failed to store theoretical portfolio NAV point")?;
-    Ok(())
-}
-
-async fn save_skip(
-    tx: &mut Transaction<'_, Postgres>,
-    pending: &PendingUpdate,
-    symbol: &str,
-    venue: &str,
-    reason: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO cta_theoretical_nav_skips (
-            source_id, binding_name, position_strategy_name, symbol, venue,
-            received_at_us, update_seq, window_end_us, reason
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT (source_id, binding_name, symbol, venue, received_at_us, update_seq)
-        DO NOTHING
-        "#,
-    )
-    .bind(&pending.key.source_id)
-    .bind(&pending.key.binding_name)
-    .bind(&pending.position_strategy_name)
-    .bind(symbol)
-    .bind(venue)
-    .bind(pending.key.received_at_us)
-    .bind(pending.key.update_seq)
-    .bind(pending.window_end_us)
-    .bind(reason)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-async fn delete_pending(tx: &mut Transaction<'_, Postgres>, key: &PendingKey) -> Result<()> {
-    sqlx::query(
-        r#"
-        DELETE FROM cta_theoretical_nav_pending
-        WHERE source_id = $1 AND binding_name = $2
-          AND received_at_us = $3 AND update_seq = $4
-        "#,
-    )
-    .bind(&key.source_id)
-    .bind(&key.binding_name)
-    .bind(key.received_at_us)
-    .bind(key.update_seq)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
 }
 
 fn apply_fifo_fill(
@@ -1408,183 +670,6 @@ fn floating_pnl_at_mark(lots: &VecDeque<FifoLot>, mark_price: f64) -> Result<f64
     Ok(floating)
 }
 
-fn five_slice_prices(bars: &[TwapBar], received_at_us: i64) -> Option<[f64; TWAP_SAMPLE_COUNT]> {
-    let first_end = first_complete_bar_end(received_at_us);
-    let mut prices = [0.0; TWAP_SAMPLE_COUNT];
-    for index in 0..TWAP_SAMPLE_COUNT {
-        let expected_end = first_end.saturating_add(index as i64 * MINUTE_US);
-        let bar = bars.iter().find(|bar| bar.end_ts_us == expected_end)?;
-        if !bar.twap.is_finite() || bar.twap <= 0.0 {
-            return None;
-        }
-        prices[index] = bar.twap;
-    }
-    Some(prices)
-}
-
-#[cfg(test)]
-fn five_slice_twap(bars: &[TwapBar], received_at_us: i64) -> Option<f64> {
-    let prices = five_slice_prices(bars, received_at_us)?;
-    Some(prices.iter().sum::<f64>() / TWAP_SAMPLE_COUNT as f64)
-}
-
-fn completed_mark_mid(bars: &[TwapBar], mark_ts_us: i64) -> Option<f64> {
-    let end = bars.partition_point(|bar| bar.end_ts_us <= mark_ts_us);
-    let bar = bars.get(..end)?.last()?;
-    let age = mark_ts_us.saturating_sub(bar.end_ts_us);
-    (age <= MARK_MAX_AGE_US && bar.twap.is_finite() && bar.twap > 0.0).then_some(bar.twap)
-}
-
-pub async fn load_timeline(
-    pool: &PgPool,
-    start_ts_us: i64,
-    end_ts_us: i64,
-    source_ids: &[String],
-    max_points: usize,
-) -> Result<TheoreticalNavTimeline> {
-    if start_ts_us < 0 || end_ts_us < start_ts_us {
-        bail!("invalid theoretical NAV timeline range");
-    }
-    let available_from_us: Option<i64> = sqlx::query_scalar(
-        r#"
-        SELECT MIN(ts_us)
-        FROM cta_theoretical_nav_portfolio_points
-        WHERE (cardinality($1::text[]) = 0 OR source_id = ANY($1))
-        "#,
-    )
-    .bind(source_ids.to_vec())
-    .fetch_one(pool)
-    .await
-    .context("failed to load theoretical NAV availability")?;
-    let Some(available_from_us) = available_from_us else {
-        return Ok(TheoreticalNavTimeline::default());
-    };
-    if available_from_us > end_ts_us {
-        return Ok(TheoreticalNavTimeline {
-            available_from_us: Some(available_from_us),
-            ..TheoreticalNavTimeline::default()
-        });
-    }
-
-    let baseline_rows = sqlx::query(
-        r#"
-        SELECT DISTINCT ON (source_id)
-            source_id, ts_us,
-            cumulative_estimated_trading_fee_quote,
-            cumulative_nav_before_fee_quote,
-            cumulative_nav_after_fee_quote
-        FROM cta_theoretical_nav_portfolio_points
-        WHERE ts_us < $1
-          AND (cardinality($2::text[]) = 0 OR source_id = ANY($2))
-        ORDER BY source_id, ts_us DESC
-        "#,
-    )
-    .bind(start_ts_us)
-    .bind(source_ids.to_vec())
-    .fetch_all(pool)
-    .await
-    .context("failed to load theoretical NAV baseline")?;
-    let point_rows = sqlx::query(
-        r#"
-        SELECT source_id, ts_us,
-               cumulative_estimated_trading_fee_quote,
-               cumulative_nav_before_fee_quote,
-               cumulative_nav_after_fee_quote
-        FROM cta_theoretical_nav_portfolio_points
-        WHERE ts_us >= $1 AND ts_us <= $2
-          AND (cardinality($3::text[]) = 0 OR source_id = ANY($3))
-        ORDER BY ts_us, source_id
-        "#,
-    )
-    .bind(start_ts_us)
-    .bind(end_ts_us)
-    .bind(source_ids.to_vec())
-    .fetch_all(pool)
-    .await
-    .context("failed to load theoretical NAV portfolio points")?;
-    let baseline = baseline_rows
-        .into_iter()
-        .map(decode_contribution)
-        .collect::<Result<Vec<_>>>()?;
-    let stored_points = point_rows
-        .into_iter()
-        .map(decode_contribution)
-        .collect::<Result<Vec<_>>>()?;
-    let latest_point_ts_us = baseline
-        .iter()
-        .chain(&stored_points)
-        .map(|row| row.ts_us)
-        .max();
-    let mut current = baseline
-        .into_iter()
-        .map(|row| (row.key.clone(), row))
-        .collect::<BTreeMap<_, _>>();
-    let baseline_totals = contribution_totals(current.values());
-    let series_start = start_ts_us.max(available_from_us);
-    let mut points = vec![TheoreticalNavPoint {
-        ts_us: series_start,
-        ..TheoreticalNavPoint::default()
-    }];
-    let mut index = 0usize;
-    while index < stored_points.len() {
-        let ts_us = stored_points[index].ts_us;
-        while index < stored_points.len() && stored_points[index].ts_us == ts_us {
-            let row = stored_points[index].clone();
-            current.insert(row.key.clone(), row);
-            index += 1;
-        }
-        let totals = contribution_totals(current.values());
-        push_or_replace_point(
-            &mut points,
-            TheoreticalNavPoint {
-                ts_us,
-                nav_change_before_fee_quote: clean_zero(totals.0 - baseline_totals.0),
-                nav_change_after_fee_quote: clean_zero(totals.1 - baseline_totals.1),
-                estimated_trading_fee_quote: clean_zero(totals.2 - baseline_totals.2),
-            },
-        );
-    }
-    let last = points.last().copied().unwrap_or_default();
-    push_or_replace_point(
-        &mut points,
-        TheoreticalNavPoint {
-            ts_us: end_ts_us,
-            ..last
-        },
-    );
-    let original_len = points.len();
-    let points = downsample_points(points, max_points.max(2));
-    Ok(TheoreticalNavTimeline {
-        available_from_us: Some(available_from_us),
-        latest_point_ts_us,
-        sampled: points.len() < original_len,
-        points,
-        ..TheoreticalNavTimeline::default()
-    })
-}
-
-fn decode_contribution(row: PgRow) -> Result<StoredContribution> {
-    Ok(StoredContribution {
-        key: row.try_get("source_id")?,
-        ts_us: row.try_get("ts_us")?,
-        nav_before_fee: row.try_get("cumulative_nav_before_fee_quote")?,
-        nav_after_fee: row.try_get("cumulative_nav_after_fee_quote")?,
-        fee: row.try_get("cumulative_estimated_trading_fee_quote")?,
-    })
-}
-
-fn contribution_totals<'a>(
-    rows: impl IntoIterator<Item = &'a StoredContribution>,
-) -> (f64, f64, f64) {
-    rows.into_iter().fold((0.0, 0.0, 0.0), |totals, row| {
-        (
-            totals.0 + row.nav_before_fee,
-            totals.1 + row.nav_after_fee,
-            totals.2 + row.fee,
-        )
-    })
-}
-
 fn push_or_replace_point(points: &mut Vec<TheoreticalNavPoint>, point: TheoreticalNavPoint) {
     if let Some(last) = points.last_mut()
         && last.ts_us == point.ts_us
@@ -1649,28 +734,168 @@ fn quantities_equal(left: f64, right: f64, scale_hint: f64) -> bool {
     (left - right).abs() <= ZERO_EPSILON * scale
 }
 
-fn unix_now_us() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros()
-        .try_into()
-        .unwrap_or(i64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn bar(end_ts_us: i64, twap: f64) -> TwapBar {
-        TwapBar {
-            end_ts_us,
-            twap,
-            sample_count: 1,
-            first_ts_us: end_ts_us - 1_000_000,
+    fn cached_market() -> (tempfile::TempDir, KlineStore, i64, Vec<crate::kline::Kline>) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = KlineStore::from_db(
+            crate::manager_db::ManagerDb::open(dir.path()).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        let start = now_us().div_euclid(MINUTE_US) * MINUTE_US - crate::kline::DAY_US;
+        let volumes = [1.0, 100.0, 1.0, 1000.0, 1.0];
+        let bars = (0..6)
+            .map(|index| {
+                let volume = if index == 0 { 1.0 } else { volumes[index - 1] };
+                let price = if index == 0 {
+                    100.0
+                } else {
+                    99.0 + index as f64
+                };
+                crate::kline::Kline {
+                    open_ts_us: start + (index as i64 - 1) * MINUTE_US,
+                    open: 100.0,
+                    high: 110.0,
+                    low: 90.0,
+                    close: if index == 0 { 100.0 } else { 105.0 },
+                    base_volume: volume,
+                    quote_volume: volume * price,
+                    trades: 10,
+                }
+            })
+            .collect::<Vec<_>>();
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, start + 5 * MINUTE_US, &bars)
+            .unwrap();
+        (dir, store, start, bars)
+    }
+    fn delta(start: i64) -> VirtualDelta {
+        VirtualDelta {
+            source_id: "test".into(),
+            binding_name: "a".into(),
+            strategy_name: "a".into(),
+            symbol: "BTCUSDT".into(),
+            venue: "binance-futures".into(),
+            received_at_us: start,
+            seq: 0,
+            delta_qty: 5.0,
+            fee_rate: 0.0002,
+            legacy_fee: false,
+            target_signal: 0,
         }
     }
-
+    #[test]
+    fn minutes_get_equal_quantity_despite_different_volume_and_later_targets_do_not_truncate() {
+        let (_dir, store, start, bars) = cached_market();
+        let first = delta(start);
+        let samples = first.prices(&store).unwrap().unwrap();
+        assert_eq!(samples, [100.0, 101.0, 102.0, 103.0, 104.0]);
+        assert_eq!(samples.iter().sum::<f64>() / 5.0, 102.0);
+        let weighted = bars[1..].iter().map(|c| c.quote_volume).sum::<f64>()
+            / bars[1..].iter().map(|c| c.base_volume).sum::<f64>();
+        assert!((weighted - 102.0).abs() > 0.5);
+        let mut second = first.clone();
+        second.received_at_us += MINUTE_US;
+        second.delta_qty = -2.0;
+        assert_eq!(first.execution_ts_us(), start + 5 * MINUTE_US);
+        assert_eq!(second.execution_ts_us(), start + 6 * MINUTE_US);
+    }
+    #[test]
+    fn missing_minute_suppresses_nav_and_cache_repair_reconstructs_without_ghost_holdings() {
+        let (_dir, store, start, bars) = cached_market();
+        let delta = delta(start);
+        let fills = (0..5)
+            .map(|slice| (start + (slice as i64 + 1) * MINUTE_US, 0, slice))
+            .collect::<Vec<_>>();
+        let mut output = TheoreticalNavTimeline::default();
+        rebuild_timeline(
+            &[delta.clone()],
+            BTreeMap::new(),
+            fills.clone(),
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            100,
+            &mut output,
+        )
+        .unwrap();
+        let final_point = output.points.last().unwrap();
+        assert_eq!(output.points[0].nav_change_before_fee_quote, 0.0);
+        assert!((final_point.nav_change_before_fee_quote - 15.0).abs() < 1e-10);
+        assert!((final_point.estimated_trading_fee_quote - 0.102).abs() < 1e-10);
+        let mut missing = bars.clone();
+        missing[3].base_volume = 0.0;
+        missing[3].quote_volume = 0.0;
+        store
+            .save_page(
+                "BTCUSDT",
+                start - MINUTE_US,
+                start + 5 * MINUTE_US,
+                &missing,
+            )
+            .unwrap();
+        assert!(delta.prices(&store).unwrap().is_none());
+        let mut unavailable = TheoreticalNavTimeline::default();
+        rebuild_timeline(
+            &[delta.clone()],
+            BTreeMap::new(),
+            fills.clone(),
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            100,
+            &mut unavailable,
+        )
+        .unwrap();
+        assert!(unavailable.points.is_empty());
+        assert!(unavailable.unavailable_reason.is_some());
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, start + 5 * MINUTE_US, &bars)
+            .unwrap();
+        let mut repaired = TheoreticalNavTimeline::default();
+        rebuild_timeline(
+            &[delta],
+            BTreeMap::new(),
+            fills,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            100,
+            &mut repaired,
+        )
+        .unwrap();
+        assert_eq!(output.points, repaired.points);
+    }
+    #[test]
+    fn carried_inventory_uses_zero_fee_mark_anchor() {
+        let (_dir, store, start, _) = cached_market();
+        let carry = BTreeMap::from([(
+            ("test".into(), "BTCUSDT".into(), "binance-futures".into()),
+            2.0,
+        )]);
+        let delta = delta(start);
+        let fills = (0..5)
+            .map(|slice| (start + (slice as i64 + 1) * MINUTE_US, 0, slice))
+            .collect();
+        let mut output = TheoreticalNavTimeline::default();
+        rebuild_timeline(
+            &[delta],
+            carry,
+            fills,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            100,
+            &mut output,
+        )
+        .unwrap();
+        let final_point = output.points.last().unwrap();
+        assert!((final_point.nav_change_before_fee_quote - 25.0).abs() < 1e-10);
+        assert!((final_point.estimated_trading_fee_quote - 0.102).abs() < 1e-10);
+    }
     fn latest_targets(targets: BTreeMap<String, f64>) -> LatestTargets {
         LatestTargets {
             position_strategy_name: "cta_a".into(),
@@ -1680,7 +905,6 @@ mod tests {
             update_seq: 0,
         }
     }
-
     #[test]
     fn repeated_target_metadata_does_not_create_an_execution() {
         let previous = latest_targets(BTreeMap::from([("BTCUSDT".into(), 1.0)]));
@@ -1732,87 +956,11 @@ mod tests {
     }
 
     #[test]
-    fn stored_zero_targets_are_equivalent_to_omitted_targets() {
-        let mut targets = BTreeMap::from([
-            ("BTCUSDT".into(), 0.0),
-            ("ETHUSDT".into(), -0.0),
-            ("SOLUSDT".into(), 3.0),
-        ]);
-        normalize_stored_targets(&mut targets).unwrap();
-        assert_eq!(targets, BTreeMap::from([("SOLUSDT".into(), 3.0)]));
-    }
-
-    #[test]
     fn fifo_quantity_check_scales_with_large_positions() {
         assert!(quantities_equal(100_000.0, 100_000.0 + 1e-8, 100_000.0));
         assert!(!quantities_equal(100_000.0, 100_000.0 + 1e-4, 100_000.0));
         assert!(quantities_equal(0.0, 1.82e-12, 50_000.0));
         assert!(!quantities_equal(1.0, 1.0 + 1e-8, 1.0));
-    }
-
-    #[test]
-    fn five_slice_twap_uses_equal_quantity_samples() {
-        let bars = (0..TWAP_SAMPLE_COUNT)
-            .flat_map(|index| {
-                let expected = FIVE_SECOND_BAR_US + index as i64 * MINUTE_US;
-                [
-                    bar(expected, 100.0 + index as f64),
-                    bar(expected + FIVE_SECOND_BAR_US, 1_000.0),
-                ]
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(five_slice_twap(&bars, 0), Some(102.0));
-        let delta = -10.0_f64;
-        let per_slice_fee = bars
-            .iter()
-            .step_by(2)
-            .map(|bar| (delta / TWAP_SAMPLE_COUNT as f64 * bar.twap).abs() * 0.0002)
-            .sum::<f64>();
-        let average_price_fee = (delta * five_slice_twap(&bars, 0).unwrap()).abs() * 0.0002;
-        assert!((per_slice_fee - average_price_fee).abs() <= f64::EPSILON);
-    }
-
-    #[test]
-    fn five_slice_twap_requires_every_sample() {
-        let bars = (0..TWAP_SAMPLE_COUNT - 1)
-            .map(|index| {
-                bar(
-                    FIVE_SECOND_BAR_US + index as i64 * MINUTE_US,
-                    100.0 + index as f64,
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(five_slice_twap(&bars, 0), None);
-    }
-
-    #[test]
-    fn five_slice_schedule_starts_with_first_complete_post_signal_bar() {
-        assert_eq!(first_complete_bar_end(0), FIVE_SECOND_BAR_US);
-        assert_eq!(first_complete_bar_end(1), 2 * FIVE_SECOND_BAR_US);
-        assert_eq!(
-            theoretical_execution_ts(1),
-            2 * FIVE_SECOND_BAR_US + 4 * MINUTE_US
-        );
-    }
-
-    #[test]
-    fn portfolio_mark_uses_a_recent_completed_five_second_mid() {
-        let bars = vec![bar(290_000_000, 99.0), bar(300_000_000, 101.0)];
-        assert_eq!(completed_mark_mid(&bars, 300_000_000), Some(101.0));
-        assert_eq!(completed_mark_mid(&bars, 301_000_000), Some(101.0));
-        assert_eq!(completed_mark_mid(&bars, 311_000_000), None);
-    }
-
-    #[test]
-    fn mark_cursor_stays_strictly_before_the_exclusive_boundary() {
-        assert_eq!(
-            mark_strictly_before(5 * MARK_INTERVAL_US),
-            4 * MARK_INTERVAL_US
-        );
-        assert_eq!(
-            mark_strictly_before(5 * MARK_INTERVAL_US + 1),
-            5 * MARK_INTERVAL_US
-        );
     }
 
     #[test]
