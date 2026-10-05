@@ -255,6 +255,15 @@ public egress in the public exclusion list too. Do not change trading bindings
 to enable Manager's Kline cache.
 `GET /api/catalog/kline-status` exposes cache/backfill progress.
 
+The minute Kline replacement was deployed to jp-meta on 2026-10-05 as release
+`20261005T144032Z`, runtime commit `9023094`. Its dedicated non-trading binding
+is `172.31.46.93`, verified public egress `18.181.48.65`; preserve the live
+TOML's 24 trading-config exclusions and 120 weight/minute budget. The two
+Manager API Nginx routes now use a 180-second timeout. A trade03 one-day query
+verified a complete theoretical curve and 18 close fallback samples across
+four deltas; a repeat made no new exchange requests. Trading/Viz/Config remained
+running, and the Exec gateway returned HTTP 200 and WebSocket 101.
+
 The 5-second BBO recorder, its `/api/catalog/execution-cost` evaluation API,
 browser page, and client command are removed. The PostgreSQL theoretical
 materializer is removed; current initialization SQL does not create its derived

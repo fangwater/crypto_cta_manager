@@ -582,6 +582,19 @@ reserved Exec Config on `127.0.0.1:18161`. At the 2026-10-05 deployment, all fou
 Do not regenerate the whole 4191 site from
 `nginx_locations.txt`; install the CTA snippet instead.
 
+On 2026-10-05, release `20261005T144032Z` (runtime commit `9023094`) was
+deployed to jp-meta with the minute Kline replacement and zero-volume close
+fallback. The existing host TOML uses `172.31.46.93` / public `18.181.48.65`
+for market-data egress, excluding all 24 trade engine configs and their public
+addresses. The request budget remains 120 weight/minute. Manager API routes
+use a 180-second Nginx timeout. A cached trade03 one-day query returned 100
+theoretical points, no missing prices, and 18 close fallback samples across
+four deltas. Repeating that query added no exchange requests. Frontend assets,
+Exec HTTP routes, and the WebSocket handshake were checked through the 4191
+gateway; trading/Viz/Config process IDs and all 24 trading TOML checksums stayed
+unchanged. Only Manager restarted, and only Manager API timeouts required an
+Nginx reload. No remote schema DDL or legacy data deletion was performed.
+
 Keep the service loopback-only like the existing Exec Viz deployment. Access it
 through an SSH tunnel:
 
