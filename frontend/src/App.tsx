@@ -749,6 +749,9 @@ function NavPage() {
           {timeline?.theoretical.unavailable_reason && (
             <div className="chart-empty" role="status">理论净值：{timeline.theoretical.unavailable_reason}</div>
           )}
+          {Boolean(timeline?.theoretical.zero_volume_fallback_sample_count) && (
+            <div className="chart-empty" role="status">无成交分钟使用收盘价补位 {timeline?.theoretical.zero_volume_fallback_sample_count} 次。</div>
+          )}
           {Boolean(timeline?.theoretical.legacy_fee_delta_count) && (
             <div className="chart-empty" role="status">部分历史信号未归档理论费率，按当前理论费率估算。</div>
           )}

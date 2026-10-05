@@ -134,7 +134,7 @@ export function AcquisitionCostPage() {
       <PageIntro
         eyebrow="Delta cost"
         title="实际成本 vs 虚拟成本"
-        description="理论 TWAP 每分钟等量执行 1/5，使用目标发布后五个完整分钟的 VWAP（成交额 ÷ 成交量）定价。按实际成交数量比较价格与费用，仅支持最近 30 天。"
+        description="理论 TWAP 每分钟等量执行 1/5，使用目标发布后五个完整分钟的 VWAP（成交额 ÷ 成交量）定价，无成交分钟使用收盘价补位。按实际成交数量比较价格与费用，仅支持最近 30 天。"
       />
 
       {error && <Alert className="mb-4">{error}</Alert>}
@@ -143,6 +143,7 @@ export function AcquisitionCostPage() {
       </div>}
       {report?.warnings.map((warning) => <Alert key={warning} className="mb-4">{warning}</Alert>)}
       {Boolean(totals?.pending_virtual_delta_count) && <Alert className="mb-4">{totals?.pending_virtual_delta_count} 个 delta 的五分钟执行窗口尚未结束。</Alert>}
+      {Boolean(totals?.zero_volume_fallback_sample_count) && <Alert className="mb-4">无成交分钟使用收盘价补位 {totals?.zero_volume_fallback_sample_count} 次，涉及 {totals?.zero_volume_fallback_delta_count} 个目标 delta。</Alert>}
       {Boolean(totals?.legacy_fee_delta_count) && <Alert className="mb-4">{totals?.legacy_fee_delta_count} 个历史 delta 未归档理论费率，按当前理论费率估算。</Alert>}
       {totals && totals.missing_virtual_delta_count > 0 && (
         <Alert className="mb-4">
@@ -219,7 +220,7 @@ export function AcquisitionCostPage() {
           <CardHeader className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
             <div>
               <CardTitle>逐 delta 成本</CardTitle>
-              <CardDescription>理论 TWAP 均价是五个分钟 VWAP 的等权平均；完成率按实际配对数量除以 delta 数量。</CardDescription>
+              <CardDescription>理论 TWAP 均价是五个分钟价格的等权平均，无成交分钟用收盘价补位；完成率按实际配对数量除以 delta 数量。</CardDescription>
             </div>
             <div className="flex items-center gap-2">
               <Button type="button" size="sm" variant="secondary" className="w-8 px-0" title="上一页" aria-label="上一页" disabled={loading || page <= 1} onClick={() => void query(page - 1)}><ChevronLeft size={15} /></Button>
@@ -231,7 +232,7 @@ export function AcquisitionCostPage() {
             <table className="min-w-full text-left text-[13px]">
               <thead className="border-b border-border-soft bg-canvas/80 text-[11px] uppercase tracking-wide text-muted">
                 <tr>
-                  <th className="px-4 py-2 font-medium">信号</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">五个分钟 VWAP</th><th className="px-4 py-2 text-right font-medium">理论 TWAP 均价</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
+                  <th className="px-4 py-2 font-medium">信号</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">五个分钟价格</th><th className="px-4 py-2 text-right font-medium">收盘价补位</th><th className="px-4 py-2 text-right font-medium">理论 TWAP 均价</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
                 </tr>
               </thead>
               <tbody>
@@ -242,6 +243,7 @@ export function AcquisitionCostPage() {
                     <td className="px-4 py-2">{side(row.delta_qty)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{quantity(Math.abs(row.delta_qty))}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right text-[11px] tabular-nums text-muted">{sampleText(row)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{row.zero_volume_fallback_sample_count} / 5</td>
                     <td className="px-4 py-2 text-right tabular-nums">{money(row.virtual_vwap)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{row.actual_vwap == null ? '--' : money(row.actual_vwap)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{(row.fill_ratio * 100).toFixed(1)}%</td>

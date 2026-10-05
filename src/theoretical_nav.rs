@@ -34,13 +34,14 @@ pub struct TheoreticalNavTimeline {
     pub unavailable_reason: Option<String>,
     pub missing_price_count: usize,
     pub legacy_fee_delta_count: usize,
+    pub zero_volume_fallback_sample_count: usize,
 }
 impl Default for TheoreticalNavTimeline {
     fn default() -> Self {
         Self {
             valuation: "quantity_fifo_window_delta",
             execution_window_secs: EXECUTION_WINDOW_SECS,
-            price_basis: "five_equal_qty_complete_1m_quote_over_base_vwap+closed_1m_close_mark",
+            price_basis: "five_equal_qty_complete_1m_quote_over_base_vwap_or_zero_volume_close+closed_1m_close_mark",
             fee_basis: "archived_theoretical_rate_or_current_rate_for_legacy_targets",
             available_from_us: None,
             latest_point_ts_us: None,
@@ -49,6 +50,7 @@ impl Default for TheoreticalNavTimeline {
             unavailable_reason: None,
             missing_price_count: 0,
             legacy_fee_delta_count: 0,
+            zero_volume_fallback_sample_count: 0,
         }
     }
 }
@@ -66,6 +68,12 @@ pub struct VirtualDelta {
     pub legacy_fee: bool,
     pub target_signal: i32,
 }
+#[derive(Debug, PartialEq)]
+pub struct VirtualPrices {
+    pub prices: [f64; SAMPLE_COUNT],
+    pub zero_volume_fallback_sample_count: usize,
+}
+
 impl VirtualDelta {
     pub fn open_ts_us(&self, index: usize) -> i64 {
         first_complete_open(self.received_at_us) + index as i64 * MINUTE_US
@@ -73,21 +81,26 @@ impl VirtualDelta {
     pub fn execution_ts_us(&self) -> i64 {
         self.open_ts_us(4) + MINUTE_US
     }
-    pub fn prices(&self, store: &KlineStore) -> Result<Option<[f64; SAMPLE_COUNT]>> {
+    pub fn prices(&self, store: &KlineStore) -> Result<Option<VirtualPrices>> {
         if self.venue != "binance-futures" {
             return Ok(None);
         }
         let mut prices = [0.0; SAMPLE_COUNT];
+        let mut zero_volume_fallback_sample_count = 0;
         for (index, price) in prices.iter_mut().enumerate() {
             let Some(candle) = store.get(&self.symbol, self.open_ts_us(index))? else {
                 return Ok(None);
             };
-            let Some(vwap) = candle.vwap() else {
+            let Some((execution_price, fallback)) = candle.execution_price() else {
                 return Ok(None);
             };
-            *price = vwap;
+            *price = execution_price;
+            zero_volume_fallback_sample_count += usize::from(fallback);
         }
-        Ok(Some(prices))
+        Ok(Some(VirtualPrices {
+            prices,
+            zero_volume_fallback_sample_count,
+        }))
     }
 }
 
@@ -96,6 +109,8 @@ struct TargetCacheState {
     cursor: Option<(i64, u32)>,
     latest: BTreeMap<(String, String), LatestTargets>,
     deltas: Vec<VirtualDelta>,
+    tail_deltas: Vec<VirtualDelta>,
+    revision: u64,
 }
 
 #[derive(Serialize)]
@@ -143,10 +158,14 @@ impl TheoreticalTargetCache {
         if self.loading.load(Ordering::Acquire) {
             return;
         }
-        if self.ready.load(Ordering::Acquire)
-            && self.state.lock().unwrap().cursor.unwrap_or((0, 0)) >= self.archive.latest_cursor()
-        {
-            return;
+        if self.ready.load(Ordering::Acquire) {
+            let state = self.state.lock().unwrap();
+            let (revision, _) = self
+                .archive
+                .target_changes_since(state.revision, state.cursor);
+            if revision == state.revision {
+                return;
+            }
         }
         if self
             .loading
@@ -165,14 +184,36 @@ impl TheoreticalTargetCache {
     }
     fn refresh_blocking(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+        let (revision, invalidated) = self
+            .archive
+            .target_changes_since(state.revision, state.cursor);
+        if invalidated {
+            *state = TargetCacheState::default();
+            self.ready.store(false, Ordering::Release);
+        }
+        // Re-read the recent tail. HTTP publications commonly complete out of
+        // timestamp order; older late inserts explicitly invalidate the base.
+        let stable_end = now_us() - 120 * 1_000_000;
         let after = state.cursor;
         self.archive
-            .visit_target_updates_after(after, now_us(), |message| {
+            .visit_target_updates_after(after, stable_end, |message| {
                 ingest_target(&self.config, &mut state, &message)?;
                 state.cursor = Some((message.received_at_us, message.seq));
                 self.processed_messages.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             })?;
+        let mut tail = TargetCacheState {
+            latest: state.latest.clone(),
+            ..Default::default()
+        };
+        self.archive
+            .visit_target_updates_after(state.cursor, now_us(), |message| {
+                ingest_target(&self.config, &mut tail, &message)?;
+                self.processed_messages.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })?;
+        state.tail_deltas = tail.deltas;
+        state.revision = revision;
         self.ready.store(true, Ordering::Release);
         Ok(())
     }
@@ -212,6 +253,7 @@ impl TheoreticalTargetCache {
             for delta in state
                 .deltas
                 .iter()
+                .chain(state.tail_deltas.iter())
                 .take_while(|delta| delta.received_at_us <= end)
             {
                 if (!source_ids.is_empty() && !source_ids.contains(&delta.source_id))
@@ -527,10 +569,11 @@ fn rebuild_timeline(
             } else {
                 None
             };
-            let Some(price) = candle.and_then(|c| c.vwap()) else {
+            let Some((price, fallback)) = candle.and_then(|c| c.execution_price()) else {
                 output.missing_price_count += 1;
                 continue;
             };
+            output.zero_volume_fallback_sample_count += usize::from(fallback);
             if delta.legacy_fee {
                 legacy.insert(index);
             }
@@ -977,6 +1020,102 @@ mod tests {
                 .await
                 .is_err()
         );
+        // An old HTTP request can finish after newer requests. It must not
+        // overwrite the existing same-time row or disappear behind the cursor.
+        let mut late_strategy = strategy.clone();
+        late_strategy.targets.get_mut("BTCUSDT").unwrap().qty = 2.0;
+        let late = cache
+            .archive
+            .append(
+                100,
+                &late_strategy,
+                Vec::new(),
+                vec![crate::position_archive::published_account(
+                    &first_source,
+                    "alpha",
+                    2.0,
+                )],
+            )
+            .unwrap();
+        assert_eq!(late.seq, 2);
+        let repaired = cache
+            .query(
+                BTreeMap::from([(first_source, 0.0008)]),
+                101,
+                &scope_a,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repaired
+                .iter()
+                .map(|delta| delta.delta_qty)
+                .collect::<Vec<_>>(),
+            [2.0, 2.0, 2.0, -6.0]
+        );
+        assert_eq!(cache.archive.latest_cursor(), (101, 1));
+    }
+
+    #[tokio::test]
+    async fn recent_late_target_rebuilds_the_tail_without_losing_its_next_delta() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive = Arc::new(
+            PositionArchive::open(crate::manager_db::ManagerDb::open(dir.path()).unwrap()).unwrap(),
+        );
+        let config: AppConfig =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        let source = config.sources[0].id.clone();
+        let cache = TheoreticalTargetCache::new(Arc::new(config), archive.clone());
+        let mut strategy = crate::strategy_catalog::PositionStrategy {
+            strategy_name: "alpha".into(),
+            targets: BTreeMap::from([(
+                "BTCUSDT".into(),
+                crate::order_config::TargetPosition {
+                    qty: 1.0,
+                    signal: 0,
+                },
+            )]),
+            symbol_order_strategy_overrides: BTreeMap::new(),
+            updated_at_us: 1,
+        };
+        let end = now_us();
+        let fees = BTreeMap::from([(source.clone(), 0.0004)]);
+        let accounts = vec![crate::position_archive::published_account(
+            &source, "alpha", 2.0,
+        )];
+        archive
+            .append(end - 20_000_000, &strategy, Vec::new(), accounts.clone())
+            .unwrap();
+        let first = cache
+            .query(fees.clone(), end, &[], None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].delta_qty, 2.0);
+        strategy.targets.get_mut("BTCUSDT").unwrap().qty = 2.0;
+        archive
+            .append(end - 30_000_000, &strategy, Vec::new(), accounts)
+            .unwrap();
+        let repaired = cache
+            .query(fees.clone(), end, &[], None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repaired
+                .iter()
+                .map(|delta| delta.delta_qty)
+                .collect::<Vec<_>>(),
+            [4.0, -2.0]
+        );
+        assert_eq!(cache.state.lock().unwrap().cursor, None);
+        assert_eq!(
+            cache.query(fees, end, &[], None).await.unwrap().unwrap(),
+            repaired
+        );
     }
 
     fn cached_market() -> (tempfile::TempDir, KlineStore, i64, Vec<crate::kline::Kline>) {
@@ -1032,7 +1171,7 @@ mod tests {
     fn minutes_get_equal_quantity_despite_different_volume_and_later_targets_do_not_truncate() {
         let (_dir, store, start, bars) = cached_market();
         let first = delta(start);
-        let samples = first.prices(&store).unwrap().unwrap();
+        let samples = first.prices(&store).unwrap().unwrap().prices;
         assert_eq!(samples, [100.0, 101.0, 102.0, 103.0, 104.0]);
         assert_eq!(samples.iter().sum::<f64>() / 5.0, 102.0);
         let weighted = bars[1..].iter().map(|c| c.quote_volume).sum::<f64>()
@@ -1043,6 +1182,40 @@ mod tests {
         second.delta_qty = -2.0;
         assert_eq!(first.execution_ts_us(), start + 5 * MINUTE_US);
         assert_eq!(second.execution_ts_us(), start + 6 * MINUTE_US);
+    }
+    #[test]
+    fn zero_volume_close_is_shared_by_cost_prices_and_nav_with_explicit_counts() {
+        let (_dir, store, start, mut bars) = cached_market();
+        bars[3].base_volume = 0.0;
+        bars[3].quote_volume = 0.0;
+        bars[3].trades = 0;
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, start + 5 * MINUTE_US, &bars)
+            .unwrap();
+        let delta = delta(start);
+        let priced = delta.prices(&store).unwrap().unwrap();
+        assert_eq!(priced.prices, [100.0, 101.0, 105.0, 103.0, 104.0]);
+        assert_eq!(priced.zero_volume_fallback_sample_count, 1);
+        let fills = (0..5)
+            .map(|slice| (start + (slice as i64 + 1) * MINUTE_US, 0, slice))
+            .collect();
+        let mut output = TheoreticalNavTimeline::default();
+        rebuild_timeline(
+            &[delta],
+            BTreeMap::new(),
+            fills,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            100,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output.zero_volume_fallback_sample_count, 1);
+        assert_eq!(output.missing_price_count, 0);
+        let last = output.points.last().unwrap();
+        assert!((last.nav_change_before_fee_quote - 12.0).abs() < 1e-10);
+        assert!((last.estimated_trading_fee_quote - 0.1026).abs() < 1e-10);
     }
     #[test]
     fn missing_minute_suppresses_nav_and_cache_repair_reconstructs_without_ghost_holdings() {
@@ -1067,9 +1240,18 @@ mod tests {
         assert_eq!(output.points[0].nav_change_before_fee_quote, 0.0);
         assert!((final_point.nav_change_before_fee_quote - 15.0).abs() < 1e-10);
         assert!((final_point.estimated_trading_fee_quote - 0.102).abs() < 1e-10);
-        let mut missing = bars.clone();
-        missing[3].base_volume = 0.0;
-        missing[3].quote_volume = 0.0;
+        let missing_dir = tempfile::TempDir::new().unwrap();
+        let store = KlineStore::from_db(
+            crate::manager_db::ManagerDb::open(missing_dir.path()).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        let missing = bars
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 3)
+            .map(|(_, bar)| bar.clone())
+            .collect::<Vec<_>>();
         store
             .save_page(
                 "BTCUSDT",

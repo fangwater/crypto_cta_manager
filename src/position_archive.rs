@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
@@ -111,9 +111,17 @@ fn archive_source(source: SourceFactualPositions) -> ArchivedSourcePositions {
     }
 }
 
+#[derive(Default)]
+struct TargetWrites {
+    revision: u64,
+    discarded_late_revision: u64,
+    late: VecDeque<(u64, (i64, u32))>,
+}
+
 pub struct PositionArchive {
     db: ManagerDb,
     last_key: Mutex<(i64, u32)>,
+    target_writes: Mutex<TargetWrites>,
 }
 
 impl PositionArchive {
@@ -130,6 +138,7 @@ impl PositionArchive {
         Ok(Self {
             db,
             last_key: Mutex::new(last_key),
+            target_writes: Mutex::new(TargetWrites::default()),
         })
     }
 
@@ -146,18 +155,40 @@ impl PositionArchive {
         strategy
             .validate()
             .map_err(|error| anyhow::anyhow!(error))?;
-        let seq = {
-            let mut last = self
-                .last_key
-                .lock()
-                .expect("position archive sequence lock poisoned");
-            let seq = if received_at_us == last.0 {
-                last.1.saturating_add(1)
-            } else {
-                0
-            };
-            *last = (received_at_us, seq);
-            seq
+        // Hold allocation through the write so the head never advertises an
+        // uncommitted message, including concurrently completed HTTP requests.
+        let mut last = self
+            .last_key
+            .lock()
+            .expect("position archive sequence lock poisoned");
+        let handle = self
+            .db
+            .db()
+            .cf_handle(POSITION_UPDATES_CF)
+            .context("position_updates column family disappeared")?;
+        let seq = if received_at_us > last.0 {
+            0
+        } else if received_at_us == last.0 {
+            last.1
+                .checked_add(1)
+                .context("position archive sequence exhausted")?
+        } else {
+            let upper = manager_db::encode_seq_key(received_at_us, u32::MAX)?;
+            let previous = self
+                .db
+                .db()
+                .iterator_cf(&handle, IteratorMode::From(&upper, Direction::Reverse))
+                .next();
+            match previous {
+                Some(Ok((key, _))) => match manager_db::decode_seq_key(&key) {
+                    Some((ts, seq)) if ts == received_at_us => seq
+                        .checked_add(1)
+                        .context("position archive sequence exhausted")?,
+                    _ => 0,
+                },
+                Some(Err(error)) => return Err(error).context("read historical target sequence"),
+                None => 0,
+            }
         };
         let msg = PositionUpdateMsg::from_strategy(
             received_at_us,
@@ -168,18 +199,43 @@ impl PositionArchive {
         );
         let key = manager_db::encode_seq_key(received_at_us, seq)?;
         let value = serde_json::to_vec(&msg).context("failed to encode position update message")?;
-        let handle = self
-            .db
-            .db()
-            .cf_handle(POSITION_UPDATES_CF)
-            .context("position_updates column family disappeared")?;
         self.db.db().put_cf(&handle, key, value).with_context(|| {
             format!(
                 "failed to append position update {} seq {seq}",
                 strategy.strategy_name
             )
         })?;
+        let key = (received_at_us, seq);
+        let mut writes = self.target_writes.lock().unwrap();
+        writes.revision = writes
+            .revision
+            .checked_add(1)
+            .context("target revision exhausted")?;
+        if key < *last {
+            let revision = writes.revision;
+            writes.late.push_back((revision, key));
+            if writes.late.len() > 1024 {
+                writes.discarded_late_revision = writes.late.pop_front().unwrap().0;
+            }
+        }
+        *last = (*last).max(key);
         Ok(msg)
+    }
+
+    pub fn target_changes_since(
+        &self,
+        revision: u64,
+        stable_cursor: Option<(i64, u32)>,
+    ) -> (u64, bool) {
+        let writes = self.target_writes.lock().unwrap();
+        let invalidated = stable_cursor.is_some_and(|cursor| {
+            revision < writes.discarded_late_revision
+                || writes
+                    .late
+                    .iter()
+                    .any(|(change, key)| *change > revision && *key <= cursor)
+        });
+        (writes.revision, invalidated)
     }
 
     pub fn latest(&self) -> Result<Option<PositionUpdateMsg>> {

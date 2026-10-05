@@ -110,7 +110,9 @@ only missing minutes with pages of at most 499; persisted candles are never
 requested again. A per-symbol in-memory async lock coalesces simultaneous misses.
 Failed or omitted minutes stay missing and are retried on the next query or
 default-symbol refresh, without separate retry records. A zero-volume candle
-is cached, but has no execution VWAP. Only closed candles are accepted.
+is cached and priced at its exchange close for theoretical execution, with
+explicit fallback sample counts on NAV, cost totals, and each delta row.
+Only closed candles are accepted. A missing candle is never filled by this rule.
 
 TOML must explicitly configure `kline.local_ip`, the assigned socket binding
 address, and `kline.public_ip`, its expected public address after NAT. The
@@ -132,6 +134,17 @@ Binance 429/418 responses pause the whole client according to Retry-After.
 `GET /api/catalog/kline-status` exposes active backfills, requests, cache hits,
 fetched candles and the latest error. Queries wait up to 10 seconds for warming;
 remaining work continues in the background and missing coverage is explicit.
+
+Target history is indexed once in the background into an in-memory delta cache,
+then updated from a stable timestamp/sequence checkpoint, re-reading the recent
+two-minute tail to include publications that complete out of order. A late
+insert before that checkpoint invalidates the cache and rebuilds from the
+durable archive. Queries keep legacy
+fee fallbacks current while preserving archived fees and shares.
+`kline-status.target_history` reports readiness, active loading, processed message
+count, and errors. During initial loading the NAV response still returns factual
+points and explains why theory is pending. This cache adds no PostgreSQL tables
+or additional durable copy of the target archive.
 
 100 symbols at 1,440 candles/day produce 144,000 records, about 10.9 MB/day
 of uncompressed key/value payload. The offline synthetic measurement produced
@@ -564,8 +577,9 @@ jp-meta uses `deploy/jp_meta/` and installs to `/home/ubuntu/crypto_cta_manager`
 That host already has system PostgreSQL, Redis, and Nginx on port `4191`;
 Manager publish is added as `/manager/` on that existing gateway instead of a
 second user Nginx. `trade01` is enabled for catalog/publish against the
-reserved Exec Config on `127.0.0.1:18161`. `trade02`/`trade03`/`trade04`
-stay reserved and disabled. Do not regenerate the whole 4191 site from
+reserved Exec Config on `127.0.0.1:18161`. At the 2026-10-05 deployment, all four
+`trade01`–`trade04` sources were enabled with their own runtime directories.
+Do not regenerate the whole 4191 site from
 `nginx_locations.txt`; install the CTA snippet instead.
 
 Keep the service loopback-only like the existing Exec Viz deployment. Access it

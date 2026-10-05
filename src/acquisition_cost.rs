@@ -18,6 +18,8 @@ pub struct AcquisitionCostTotals {
     pub missing_virtual_delta_count: usize,
     pub pending_virtual_delta_count: usize,
     pub legacy_fee_delta_count: usize,
+    pub zero_volume_fallback_sample_count: usize,
+    pub zero_volume_fallback_delta_count: usize,
     pub comparable_delta_count: usize,
     pub virtual_turnover_usdt: f64,
     pub virtual_fee_usdt: f64,
@@ -166,6 +168,7 @@ pub struct AcquisitionCostRow {
     pub virtual_execution_ts_us: i64,
     pub delta_qty: f64,
     pub sample_prices: [f64; 5],
+    pub zero_volume_fallback_sample_count: usize,
     pub virtual_vwap: f64,
     pub virtual_turnover_usdt: f64,
     pub virtual_fee_usdt: f64,
@@ -222,6 +225,7 @@ struct VirtualFill {
     execution_ts_us: i64,
     delta_qty: f64,
     sample_prices: [f64; 5],
+    zero_volume_fallback_sample_count: usize,
     virtual_vwap: f64,
     virtual_fee_usdt: f64,
     virtual_fee_rate: f64,
@@ -304,10 +308,12 @@ pub async fn report_acquisition_cost(
     let mut missing_virtual_delta_count = 0;
     let mut pending_virtual_delta_count = 0;
     let mut legacy_fee_delta_count = 0;
+    let mut zero_volume_fallback_sample_count = 0;
+    let mut zero_volume_fallback_delta_count = 0;
     for delta in deltas {
         let execution_ts_us = delta.execution_ts_us();
         let samples = delta.prices(klines)?;
-        let Some(sample_prices) = samples else {
+        let Some(priced) = samples else {
             unavailable
                 .entry((delta.source_id, delta.strategy_name, delta.symbol))
                 .or_default()
@@ -321,6 +327,12 @@ pub async fn report_acquisition_cost(
             }
             continue;
         };
+        let sample_prices = priced.prices;
+        if delta.received_at_us >= start_received_at_us {
+            zero_volume_fallback_sample_count += priced.zero_volume_fallback_sample_count;
+            zero_volume_fallback_delta_count +=
+                usize::from(priced.zero_volume_fallback_sample_count > 0);
+        }
         if delta.legacy_fee {
             legacy_fee_delta_count += 1;
         }
@@ -335,6 +347,7 @@ pub async fn report_acquisition_cost(
             execution_ts_us,
             delta_qty: delta.delta_qty,
             sample_prices,
+            zero_volume_fallback_sample_count: priced.zero_volume_fallback_sample_count,
             virtual_vwap,
             virtual_fee_usdt: delta.delta_qty.abs() * virtual_vwap * delta.fee_rate,
             virtual_fee_rate: delta.fee_rate,
@@ -364,6 +377,8 @@ pub async fn report_acquisition_cost(
         missing_virtual_delta_count,
         pending_virtual_delta_count,
         legacy_fee_delta_count,
+        zero_volume_fallback_sample_count,
+        zero_volume_fallback_delta_count,
         ..AcquisitionCostTotals::default()
     };
     let mut by_strategy = BTreeMap::<String, BreakdownAccumulator>::new();
@@ -620,6 +635,7 @@ pub async fn report_acquisition_cost(
             virtual_execution_ts_us: fill.execution_ts_us,
             delta_qty: fill.delta_qty,
             sample_prices: fill.sample_prices,
+            zero_volume_fallback_sample_count: fill.zero_volume_fallback_sample_count,
             virtual_vwap: fill.virtual_vwap,
             virtual_turnover_usdt: virtual_turnover,
             virtual_fee_usdt: fill.virtual_fee_usdt,
@@ -671,7 +687,7 @@ pub async fn report_acquisition_cost(
     fill_diagnostics.truncate(100);
     Ok(AcquisitionCostReport {
         generated_at_us,
-        price_basis: "five_equal_qty_complete_1m_quote_over_base_vwap",
+        price_basis: "five_equal_qty_complete_1m_quote_over_base_vwap_or_zero_volume_close",
         fee_basis: "actual_maker_taker_vs_archived_theoretical_rate_or_current_legacy_fallback",
         start_received_at_us,
         end_received_at_us,

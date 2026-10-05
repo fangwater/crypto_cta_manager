@@ -261,10 +261,25 @@ materializer is removed; current initialization SQL does not create its derived
 tables. Existing remote historical tables/cache files are not changed by this
 replacement and are not analysis inputs. No automatic migration or data reset.
 
+Execution delta metadata uses one disposable in-memory cache. Stream target
+inputs from the archive once in the background, omitting factual snapshots;
+resume subsequent reads after a stable `(received_at_us, seq)` key and re-read
+the recent two-minute tail. A late insert before that checkpoint must invalidate
+and rebuild the cache. Allocate sequences against existing keys and never let
+an older append move the archive head backwards or overwrite a message. Concurrent
+queries share initialization and receive an explicit loading reason while it
+runs. Freeze archived shares and fees; resolve current fee fallbacks for legacy
+messages at query time. `kline-status.target_history` exposes readiness and
+processed-message counts. Do not recreate PostgreSQL materializer tables or
+persist a second copy of this derived cache.
+
 The theoretical target model freezes `delta = target - previous distinct target`.
 Each delta executes 1/5 quantity in each of the first five complete wall-clock
 minutes after publication, excluding a partial arrival minute. Each minute price
-is Binance quote volume / base volume. The five-minute virtual price is their
+is Binance quote volume / base volume. By operator choice, a cached minute with
+zero base and quote volume uses its exchange close, and NAV, cost totals and
+individual delta rows must report fallback counts. Missing candles remain
+missing. The five-minute virtual price is their
 arithmetic mean, never weighted again by market volume. Later target changes
 own independent schedules; repeated targets and insignificant float tails must
 not add deltas. New target archives include frozen theoretical fee rates with
