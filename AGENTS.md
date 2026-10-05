@@ -328,6 +328,16 @@ must expose custom datetime-local start/end controls, `ALL`/`1D`/`7D`/`30D`
 quick ranges, aggregate and per-symbol curves, account scope, and symbol
 all/none selection.
 
+The NAV and acquisition-cost browsers select exactly one visible enabled account.
+There is no combined/all-account option. If the URL omits `source` or names an
+unavailable account, select the first visible source and update the URL before
+querying. Always send that source ID explicitly; never issue an unscoped query
+while account metadata is loading. Keep the selected account when moving between
+NAV and cost pages. The workspace lists independent account cards and account
+counts without summing account PnL or exposure. A pending health request is
+"checking", not "data delayed"; only a returned degraded health status indicates
+delayed data.
+
 The timeline also attributes each account's NAV by Exec strategy. Parse only
 stable `batch_exec:<strategy_name>` values from `from_key_text`; group all
 other fills under `__unattributed__`. Keep strategy FIFO isolated by source,

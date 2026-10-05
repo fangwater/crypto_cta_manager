@@ -146,10 +146,7 @@ function scopeStartMs(
   fallbackEndMs: number,
   pnlMode: PnlMode,
 ) {
-  const sources =
-    scope === 'all'
-      ? dashboard.report.sources
-      : dashboard.report.sources.filter((source) => source.source_id === scope)
+  const sources = dashboard.report.sources.filter((source) => source.source_id === scope)
   const starts = sources
     .map((source) => sourceStartMs(dashboard, source, pnlMode))
     .filter((value): value is number => value !== null && value <= fallbackEndMs)
@@ -157,7 +154,7 @@ function scopeStartMs(
 }
 
 function initialScope() {
-  return new URLSearchParams(window.location.search).get('source')?.trim() || 'all'
+  return readSourceId()
 }
 
 export default function App() {
@@ -214,6 +211,7 @@ function NavPage() {
   const [timelineError, setTimelineError] = useState<string | null>(null)
   const [timelineRevision, setTimelineRevision] = useState(0)
   const initialized = useRef(false)
+  const scopeReady = Boolean(dashboard?.report.sources.some((source) => source.source_id === scope))
 
   const refreshDashboard = useCallback(
     async (signal?: AbortSignal, manual = false) => {
@@ -248,7 +246,7 @@ function NavPage() {
   }, [refreshDashboard])
 
   useEffect(() => {
-    if (!dashboard || initialized.current) return
+    if (!dashboard || initialized.current || !scopeReady) return
     initialized.current = true
     const nextEnd = Date.now()
     const nextStart = Math.max(
@@ -259,30 +257,36 @@ function NavPage() {
     setEndInput(toDatetimeLocal(nextEnd))
     setStartMs(nextStart)
     setEndMs(nextEnd)
-  }, [dashboard, pnlMode, scope])
+  }, [dashboard, pnlMode, scope, scopeReady])
 
   useEffect(() => {
-    if (
-      dashboard &&
-      scope !== 'all' &&
-      !dashboard.report.sources.some((source) => source.source_id === scope)
-    ) {
-      setScope('all')
+    if (!dashboard) return
+    const nextScope = dashboard.report.sources.some((source) => source.source_id === scope)
+      ? scope
+      : dashboard.report.sources[0]?.source_id ?? ''
+    if (nextScope !== scope) {
+      setScope(nextScope)
       setSelectedSymbols(null)
+      setSelectedStrategies(null)
+      setTimeline(null)
     }
+    const url = new URL(window.location.href)
+    if (nextScope) url.searchParams.set('source', nextScope)
+    else url.searchParams.delete('source')
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
   }, [dashboard, scope])
 
   useEffect(() => {
-    if (!dashboard || startMs === null || endMs === null) return
+    if (!dashboard || !scopeReady || startMs === null || endMs === null) return
     const earliest = scopeStartMs(dashboard, scope, endMs, pnlMode)
     if (startMs >= earliest) return
     setStartInput(toDatetimeLocal(earliest))
     setStartMs(earliest)
     setTimelineError(null)
-  }, [dashboard, endMs, pnlMode, scope, startMs])
+  }, [dashboard, endMs, pnlMode, scope, scopeReady, startMs])
 
   useEffect(() => {
-    if (startMs === null || endMs === null) return
+    if (!scopeReady || startMs === null || endMs === null) return
     if (selectedSymbols?.length === 0) {
       setTimelineLoading(false)
       setTimelineError(null)
@@ -295,7 +299,7 @@ function NavPage() {
     loadTimeline({
       startMs,
       endMs,
-      sourceIds: scope === 'all' ? undefined : [scope],
+      sourceIds: [scope],
       symbols: selectedSymbols ?? undefined,
       maxPoints: 3_500,
       signal: controller.signal,
@@ -309,7 +313,7 @@ function NavPage() {
         if (!controller.signal.aborted) setTimelineLoading(false)
       })
     return () => controller.abort()
-  }, [endMs, pnlMode, scope, selectedSymbols, startMs, timelineRevision])
+  }, [endMs, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision])
 
   const selectedSource = useMemo(
     () => dashboard?.report.sources.find((source) => source.source_id === scope),
@@ -374,7 +378,7 @@ function NavPage() {
     const accounts = (dashboard?.accounts ?? []).filter(
       (account) =>
         account.enabled &&
-        (scope === 'all' || account.source_id === scope) &&
+        account.source_id === scope &&
         (timeline?.report.selected_source_ids ?? []).includes(account.source_id),
     )
     if (
@@ -441,8 +445,7 @@ function NavPage() {
   function selectScope(nextScope: string) {
     setScope(nextScope)
     const url = new URL(window.location.href)
-    if (nextScope === 'all') url.searchParams.delete('source')
-    else url.searchParams.set('source', nextScope)
+    url.searchParams.set('source', nextScope)
     window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
     setSelectedSymbols(null)
     setSelectedStrategies(null)
@@ -513,19 +516,19 @@ function NavPage() {
     <AppShell
       active="manager"
       title="CTA NAV"
-      subtitle="CTA 组合净值"
+      subtitle="CTA 账户净值"
       icon={Activity}
       className="max-w-[1240px] px-5 sm:px-6"
       actions={
         <div className="flex items-center gap-3 rounded-xl border border-border-soft bg-canvas/80 px-3 py-2">
           <span
             className={`h-2 w-2 shrink-0 rounded-full ${
-              health?.status === 'ok' ? 'bg-emerald-500' : 'bg-amber-500'
+              health?.status === 'ok' ? 'bg-emerald-500' : health || error ? 'bg-amber-500' : 'bg-slate-400'
             }`}
           />
           <div className="hidden min-w-0 sm:block">
             <p className="text-xs font-medium text-ink">
-              {health?.status === 'ok' ? '运行正常' : '数据延迟'}
+              {health ? health.status === 'ok' ? '运行正常' : '数据延迟' : error ? '连接失败' : '检查中'}
             </p>
             <time className="text-[11px] text-subtle">
               {timestampUs(
@@ -619,20 +622,13 @@ function NavPage() {
         <section className="overview" aria-labelledby="overview-title">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">PORTFOLIO</p>
+              <p className="eyebrow">ACCOUNT</p>
               <h2 id="overview-title">
-                {selectedSource?.account ?? '综合账户'}
+                {selectedSource?.account ?? '暂无可查看账户'}
               </h2>
             </div>
             <div className="control-row">
               <div className="segmented" aria-label="账户范围">
-                <button
-                  type="button"
-                  className={scope === 'all' ? 'is-active' : ''}
-                  onClick={() => selectScope('all')}
-                >
-                  综合
-                </button>
                 {dashboard?.report.sources.map((source) => (
                   <button
                     type="button"

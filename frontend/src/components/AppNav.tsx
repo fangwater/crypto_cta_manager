@@ -2,6 +2,7 @@ import { Activity, BookOpen, LayoutDashboard, LogOut, Settings, Shield, Scale, P
 import { useLayoutEffect, useRef } from 'react'
 import { useAuth } from './AuthGate'
 import { cn } from '../lib/cn'
+import { readSourceId, routes } from '../lib/routes'
 
 export type AppNavId = 'workspace' | 'manager' | 'acquisition-cost' | 'config' | 'auto-earn' | 'docs' | 'admin'
 
@@ -23,6 +24,7 @@ const links: Array<{
 export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: boolean }) {
   const { logout } = useAuth()
   const navRef = useRef<HTMLElement>(null)
+  const sourceId = readSourceId()
 
   useLayoutEffect(() => {
     if (!mobile) return
@@ -46,7 +48,7 @@ export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: 
         return (
           <a
             key={link.id}
-            href={link.href}
+            href={link.id === 'manager' ? routes.nav(sourceId) : link.id === 'acquisition-cost' ? routes.executionCost(sourceId) : link.href}
             title={link.label}
             aria-current={isActive ? 'page' : undefined}
             className={cn(

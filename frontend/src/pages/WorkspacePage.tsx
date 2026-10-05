@@ -100,32 +100,17 @@ export function WorkspacePage() {
   const activeAccounts = accounts.filter(
     (account) => account.enabled && reportsBySource.has(account.source_id),
   ).length
-  const aggregate = dashboard?.report.aggregate
-  const openSymbolCount =
-    aggregate?.symbols.filter(
-      (symbol) =>
-        Math.abs(symbol.long_position_value_quote) > 1e-9 ||
-        Math.abs(symbol.short_position_value_quote) > 1e-9,
-    ).length ?? 0
-  const grossExposure =
-    aggregate?.symbols.reduce(
-      (total, symbol) =>
-        total +
-        Math.abs(symbol.long_position_value_quote) +
-        Math.abs(symbol.short_position_value_quote),
-      0,
-    ) ?? 0
 
   return (
     <AppShell
       active="workspace"
       title="CTA Manager"
-      subtitle="综合交易工作台"
+      subtitle="独立账户工作台"
       icon={LayoutDashboard}
       actions={
         <div className="flex items-center gap-2">
-          <Badge tone={health?.status === 'ok' ? 'success' : 'warning'} className="hidden sm:inline-flex">
-            {health?.status === 'ok' ? '服务在线' : '数据延迟'}
+          <Badge tone={health?.status === 'ok' ? 'success' : health || error ? 'warning' : 'neutral'} className="hidden sm:inline-flex">
+            {health ? health.status === 'ok' ? '服务在线' : '数据延迟' : error ? '连接失败' : '检查中'}
           </Badge>
           <Button
             type="button"
@@ -159,27 +144,9 @@ export function WorkspacePage() {
         </Alert>
       )}
 
-      <div className="mb-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        <StatTile label="运行账户" value={`${activeAccounts} / ${accounts.length}`} />
-        <StatTile
-          label="累计费后净值"
-          value={aggregate ? money(aggregate.nav_change_after_fee_quote) : '--'}
-          hint={aggregate ? 'USDT' : undefined}
-        />
-        <StatTile
-          label="当前浮动盈亏"
-          value={aggregate ? money(aggregate.floating_pnl_quote) : '--'}
-          hint={aggregate ? 'USDT' : undefined}
-        />
-        <StatTile
-          label="当前总敞口"
-          value={dashboard ? money(grossExposure) : '--'}
-          hint={dashboard ? 'USDT' : undefined}
-        />
-        <StatTile
-          label="持仓 / 成交"
-          value={dashboard ? `${openSymbolCount} / ${integer(aggregate?.fill_count ?? 0)}` : '--'}
-        />
+      <div className="mb-8 grid gap-3 sm:grid-cols-2">
+        <StatTile label="运行账户" value={dashboard ? integer(activeAccounts) : '--'} />
+        <StatTile label="已配置账户" value={dashboard ? integer(accounts.length) : '--'} />
       </div>
 
       <a
@@ -249,7 +216,9 @@ function AccountCard({
     ? '待接入'
     : !report
       ? '等待数据'
-      : health?.status === 'ok'
+      : !health
+        ? '检查中'
+        : health.status === 'ok'
         ? '数据就绪'
         : '数据延迟'
   const gatewayReady = ready && account.gateway_prefix !== null
@@ -276,7 +245,7 @@ function AccountCard({
           {isOkxVenue(account.venue) && (
             <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
           )}
-          <Badge tone={ready ? 'success' : 'neutral'}>{status}</Badge>
+          <Badge tone={ready && health ? health.status === 'ok' ? 'success' : 'warning' : 'neutral'}>{status}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4 pt-0">

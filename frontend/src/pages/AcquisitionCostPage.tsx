@@ -51,7 +51,7 @@ export function AcquisitionCostPage() {
   const now = Date.now()
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
   const [snapshot, setSnapshot] = useState<AcquisitionCostSnapshot | null>(null)
-  const [scope, setScope] = useState(initialSource || 'all')
+  const [scope, setScope] = useState(initialSource)
   const [strategyName, setStrategyName] = useState('')
   const [startInput, setStartInput] = useState(toDatetimeLocal(now - 24 * 60 * 60 * 1_000))
   const [endInput, setEndInput] = useState(toDatetimeLocal(now))
@@ -59,6 +59,7 @@ export function AcquisitionCostPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cacheStatus, setCacheStatus] = useState<KlineCacheStatus | null>(null)
+  const scopeReady = Boolean(dashboard?.accounts?.some((account) => account.enabled && account.source_id === scope))
 
   useEffect(() => {
     const controller = new AbortController()
@@ -81,13 +82,34 @@ export function AcquisitionCostPage() {
   }, [])
 
   useEffect(() => {
-    if (scope !== 'all' && dashboard && !(dashboard.accounts ?? []).some((account) => account.enabled && account.source_id === scope)) {
-      setScope('all')
+    if (!dashboard) return
+    const accounts = (dashboard.accounts ?? []).filter((account) => account.enabled)
+    const nextScope = accounts.some((account) => account.source_id === scope)
+      ? scope
+      : accounts[0]?.source_id ?? ''
+    if (scope !== nextScope) {
+      setScope(nextScope)
+      setSnapshot(null)
+      setPage(1)
     }
+    const url = new URL(window.location.href)
+    if (nextScope) url.searchParams.set('source', nextScope)
+    else url.searchParams.delete('source')
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
   }, [dashboard, scope])
+
+  function selectScope(nextScope: string) {
+    setScope(nextScope)
+    setSnapshot(null)
+    setPage(1)
+    const url = new URL(window.location.href)
+    url.searchParams.set('source', nextScope)
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+  }
 
   const query = useCallback(
     async (requestedPage = 1) => {
+      if (!scopeReady) return
       const startMs = fromDatetimeLocal(startInput)
       const endMs = fromDatetimeLocal(endInput)
       if (startMs == null || endMs == null || endMs < startMs) {
@@ -100,7 +122,7 @@ export function AcquisitionCostPage() {
         const next = await getAcquisitionCost({
           startMs,
           endMs,
-          sourceIds: scope === 'all' ? undefined : [scope],
+          sourceIds: [scope],
           strategyName: strategyName.trim() || undefined,
           page: requestedPage,
           pageSize: PAGE_SIZE,
@@ -113,7 +135,7 @@ export function AcquisitionCostPage() {
         setLoading(false)
       }
     },
-    [endInput, scope, startInput, strategyName],
+    [endInput, scope, scopeReady, startInput, strategyName],
   )
 
   const report = snapshot?.report
@@ -125,7 +147,7 @@ export function AcquisitionCostPage() {
       subtitle="实际成交与分钟 VWAP 定价的理论 TWAP"
       icon={Scale}
       actions={
-        <Button type="button" size="sm" variant="primary" disabled={loading} onClick={() => void query(1)}>
+        <Button type="button" size="sm" variant="primary" disabled={loading || !scopeReady} onClick={() => void query(1)}>
           {loading ? <LoaderCircle size={15} className="animate-spin-slow" /> : <RefreshCw size={15} />}
           查询生成
         </Button>
@@ -173,8 +195,8 @@ export function AcquisitionCostPage() {
           </Label>
           <Label>
             账户
-            <Select value={scope} onChange={(event) => setScope(event.target.value)}>
-              <option value="all">全部账户</option>
+            <Select value={scope} disabled={loading || !scopeReady} onChange={(event) => selectScope(event.target.value)}>
+              {!scopeReady && <option value="">暂无可查看账户</option>}
               {(dashboard?.accounts ?? []).filter((account) => account.enabled).map((account) => (
                 <option key={account.source_id} value={account.source_id}>{account.account}</option>
               ))}
