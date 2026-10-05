@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use sqlx::postgres::PgPool;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 pub const EXECUTION_WINDOW_SECS: u64 = 300;
 const ZERO_EPSILON: f64 = 1e-12;
@@ -91,7 +92,7 @@ impl VirtualDelta {
 
 fn collect_deltas(
     config: &AppConfig,
-    messages: &[PositionUpdateMsg],
+    archive: &PositionArchive,
     fee_rates: &BTreeMap<String, f64>,
     end: i64,
     source_ids: &[String],
@@ -99,9 +100,9 @@ fn collect_deltas(
 ) -> Result<Vec<VirtualDelta>> {
     let mut latest = BTreeMap::<(String, String), LatestTargets>::new();
     let mut deltas = Vec::new();
-    for message in messages.iter().take_while(|m| m.received_at_us <= end) {
+    archive.visit_target_updates_through(end, |message| {
         if strategy.is_some_and(|name| name != message.strategy.strategy_name) {
-            continue;
+            return Ok(());
         }
         for account in &message.published_accounts {
             if !source_ids.is_empty() && !source_ids.contains(&account.source_id) {
@@ -118,7 +119,7 @@ fn collect_deltas(
             let next = LatestTargets {
                 position_strategy_name: message.strategy.strategy_name.clone(),
                 venue: source.venue.clone(),
-                targets: normalized_scaled_targets(message, account.effective_shares())?,
+                targets: normalized_scaled_targets(&message, account.effective_shares())?,
                 received_at_us: message.received_at_us,
                 update_seq: message.seq,
             };
@@ -152,8 +153,35 @@ fn collect_deltas(
             }
             latest.insert(key, next);
         }
-    }
+        Ok(())
+    })?;
     Ok(deltas)
+}
+
+async fn load_deltas(
+    config: &AppConfig,
+    archive: &Arc<PositionArchive>,
+    fee_rates: BTreeMap<String, f64>,
+    end: i64,
+    source_ids: &[String],
+    strategy: Option<&str>,
+) -> Result<Vec<VirtualDelta>> {
+    let config = config.clone();
+    let archive = archive.clone();
+    let source_ids = source_ids.to_vec();
+    let strategy = strategy.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        collect_deltas(
+            &config,
+            &archive,
+            &fee_rates,
+            end,
+            &source_ids,
+            strategy.as_deref(),
+        )
+    })
+    .await
+    .context("theoretical target reader failed")?
 }
 
 /// Detached backfills survive HTTP cancellation. Return coverage after at most
@@ -192,7 +220,7 @@ fn add_range(ranges: &mut BTreeMap<String, (i64, i64)>, symbol: &str, start: i64
 pub async fn prepare_acquisition(
     pool: &PgPool,
     config: &AppConfig,
-    archive: &PositionArchive,
+    archive: &Arc<PositionArchive>,
     store: &KlineStore,
     start: i64,
     end: i64,
@@ -203,14 +231,7 @@ pub async fn prepare_acquisition(
     ensure!(store.enabled(), "分钟 K 线理论分析未启用");
     let fees = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
     // Older target metadata establishes deltas only; no older market data is read.
-    let mut deltas = collect_deltas(
-        config,
-        &archive.scan_from(1)?,
-        &fees,
-        end,
-        source_ids,
-        strategy,
-    )?;
+    let mut deltas = load_deltas(config, archive, fees, end, source_ids, strategy).await?;
     deltas.retain(|d| d.received_at_us >= (start - 300 * 1_000_000).max(store.cutoff_us(now_us())));
     let mut ranges = BTreeMap::new();
     for delta in &deltas {
@@ -230,7 +251,7 @@ pub async fn prepare_acquisition(
 pub async fn load_timeline(
     pool: &PgPool,
     config: &AppConfig,
-    archive: &PositionArchive,
+    archive: &Arc<PositionArchive>,
     store: &KlineStore,
     start: i64,
     end: i64,
@@ -256,7 +277,7 @@ pub async fn load_timeline(
         return Ok(output);
     }
     let fees = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
-    let deltas = collect_deltas(config, &archive.scan_from(1)?, &fees, end, source_ids, None)?;
+    let deltas = load_deltas(config, archive, fees, end, source_ids, None).await?;
     // Exact inventory immediately before start follows from the frozen schedules,
     // without needing old execution prices. Carry lots use the start's mark.
     let mut carry = BTreeMap::<(String, String, String), f64>::new();

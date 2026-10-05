@@ -218,6 +218,50 @@ impl PositionArchive {
         Ok(out)
     }
 
+    /// Stream only execution inputs. Factual account snapshots can be much larger
+    /// than the targets and are not inputs to the theoretical execution model.
+    pub fn visit_target_updates_through(
+        &self,
+        end_received_at_us: i64,
+        mut visit: impl FnMut(PositionUpdateMsg) -> Result<()>,
+    ) -> Result<()> {
+        #[derive(Deserialize)]
+        struct TargetUpdate {
+            msg_type: String,
+            schema_version: u32,
+            received_at_us: i64,
+            seq: u32,
+            strategy: PositionStrategy,
+            #[serde(default)]
+            published_accounts: Vec<ArchivedPublishedAccount>,
+        }
+        let handle = self
+            .db
+            .db()
+            .cf_handle(POSITION_UPDATES_CF)
+            .context("position_updates column family disappeared")?;
+        for item in self.db.db().iterator_cf(&handle, IteratorMode::Start) {
+            let (key, value) = item.context("failed to iterate target updates")?;
+            let (received_at_us, _) =
+                manager_db::decode_seq_key(&key).context("invalid target update key")?;
+            if received_at_us > end_received_at_us {
+                break;
+            }
+            let message: TargetUpdate = serde_json::from_slice(&value)
+                .context("failed to decode archived execution targets")?;
+            visit(PositionUpdateMsg {
+                msg_type: message.msg_type,
+                schema_version: message.schema_version,
+                received_at_us: message.received_at_us,
+                seq: message.seq,
+                strategy: message.strategy,
+                published_accounts: message.published_accounts,
+                factual_positions: Vec::new(),
+            })?;
+        }
+        Ok(())
+    }
+
     /// Returns one raw JSON page from the position-update CF without rewriting
     /// individual stored messages.
     pub fn raw_json_page(&self, after: Option<(i64, u32)>, limit: usize) -> Result<Vec<u8>> {
@@ -400,6 +444,68 @@ mod tests {
         assert_eq!(latest, second);
         let scanned = archive.scan_from(1_700_000_000_000_001).unwrap();
         assert_eq!(scanned, vec![first, second]);
+    }
+
+    #[test]
+    fn target_stream_preserves_execution_inputs_and_skips_snapshots_and_future_messages() {
+        let dir = TempDir::new().unwrap();
+        let db = ManagerDb::open(dir.path()).unwrap();
+        let archive = PositionArchive::open(db.clone()).unwrap();
+        let mut account = published_account("binance_exec_trade01", "cta_a", 2.0);
+        account.legacy_leverage = Some(3.0);
+        account.theoretical_fee_rate = Some(-0.0001);
+        let first = archive
+            .append(
+                100,
+                &strategy("cta_a", 0.2, -1, 12),
+                Vec::new(),
+                vec![account],
+            )
+            .unwrap();
+        let mut stored = serde_json::to_value(&first).unwrap();
+        // Theory ignores the snapshot payload, even a legacy schema unknown to
+        // today's factual-position decoder. The stored message stays untouched.
+        stored["factual_positions"] = serde_json::json!({"legacy_snapshot": [1, 2, 3]});
+        let handle = db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
+        db.db()
+            .put_cf(
+                &handle,
+                manager_db::encode_seq_key(100, 0).unwrap(),
+                serde_json::to_vec(&stored).unwrap(),
+            )
+            .unwrap();
+        // The end bound must stop before decoding any later record.
+        db.db()
+            .put_cf(
+                &handle,
+                manager_db::encode_seq_key(101, 0).unwrap(),
+                b"invalid JSON",
+            )
+            .unwrap();
+        let mut read = Vec::new();
+        archive
+            .visit_target_updates_through(100, |message| {
+                read.push(message);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(read, vec![first]);
+        assert_eq!(read[0].published_accounts[0].effective_shares(), 6.0);
+        assert!(
+            archive
+                .visit_target_updates_through(101, |_| Ok(()))
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &db.db()
+                    .get_cf(&handle, manager_db::encode_seq_key(100, 0).unwrap())
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            stored
+        );
     }
 
     #[test]

@@ -272,7 +272,7 @@ fn finish_breakdowns(
 pub async fn report_acquisition_cost(
     pool: &PgPool,
     config: &AppConfig,
-    archive: &PositionArchive,
+    archive: &std::sync::Arc<PositionArchive>,
     klines: &crate::kline::KlineStore,
     histories: &nav::NavSourceHistories,
     start_received_at_us: i64,
