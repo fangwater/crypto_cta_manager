@@ -280,6 +280,18 @@ overflow. Workspace health shows checking while pending, then online. Exec
 trade03 Viz/snapshot/Config returned 200 and its WebSocket returned 101.
 Temporary auth sessions and browser profiles were removed after verification.
 
+The trade04 blank-theory fix was deployed as `20261005T163349Z`, commit
+`2c3290d`. Lazy backfill now triggers automatic same-query retries, cached
+queries bypass long-running historical backfills, and NAV defaults to the
+portfolio comparison. The fixed trade04 one-day range produced 98 theory
+points with no missing prices; a repeat used only cache (requests 88 → 88).
+Desktop/mobile Chromium checks confirmed both theory colors were drawn and
+both series remained selected. A simulated pending response automatically
+recovered with one retry, preserved factual NAV, and stopped retrying when
+ready. All 24 trading TOMLs and 120 trading/Viz/Config/Nginx process IDs were
+unchanged. This deployment used an isolated checkout and excludes unrelated
+in-progress changes in the shared working tree.
+
 The 5-second BBO recorder, its `/api/catalog/execution-cost` evaluation API,
 browser page, and client command are removed. The PostgreSQL theoretical
 materializer is removed; current initialization SQL does not create its derived
