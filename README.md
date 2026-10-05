@@ -84,7 +84,7 @@ Set an explicit one-segment `gateway_prefix`, such as `/exec_trade01`, for each
 account whose Exec Viz and Config services are exposed through the unified
 gateway. The dashboard never derives service paths from account names.
 
-`cta_web` keeps a host-global Manager RocksDB at `twap.rocksdb_path`, default
+`cta_web` keeps a host-global Manager RocksDB at `kline.rocksdb_path`, default
 `/home/el01/crypto_cta_manager/db`. This is not an Exec-account store, so it
 must not live under `binance_exec_trade01` and must never reuse an Exec
 `persist_manager` path. Each accepted `POST /api/catalog/position-strategies`
@@ -119,7 +119,11 @@ ipify before Binance access, and never falls back to the default route. List
 all live `trade_engine.toml` files in `kline.trade_engine_configs`; their
 `local_ips`, primary/secondary addresses and Binance whitelist IPs are excluded
 at startup and before requests. `forbidden_public_ips` lists all trading NAT
-public addresses and is required for private trading addresses. No Exec credentials are read. Templates keep Kline disabled
+addresses, including unbound engines' default public egress. A trading
+`0.0.0.0` or `::` binding is resolved to its actual local default-route address
+without sending a packet, and that address is excluded too. The public exclusion
+list is required for private or unbound trading addresses. No Exec credentials
+are read. Templates keep Kline disabled
 until dedicated egress is filled in. Existing host TOMLs must replace `[twap]`
 with `[kline]` before replacing the binary; deployment refuses the old section.
 

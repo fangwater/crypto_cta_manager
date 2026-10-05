@@ -1,6 +1,6 @@
 //! Manager-owned, closed one-minute Binance USD-M candles. Cache misses only.
 use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -597,6 +597,30 @@ fn parse_candle(raw: &serde_json::Value) -> Result<Kline> {
 }
 
 fn check_trading_ips(config: &KlineConfig) -> Result<()> {
+    check_trading_ips_with_route(config, default_route_local_ip)
+}
+
+fn default_route_local_ip(unspecified: IpAddr) -> Result<IpAddr> {
+    // UDP connect selects a route without sending a packet or using a trading API.
+    let destination: IpAddr = if unspecified.is_ipv4() {
+        "192.0.2.1".parse().unwrap()
+    } else {
+        "2001:db8::1".parse().unwrap()
+    };
+    let socket = UdpSocket::bind((unspecified, 0))?;
+    socket.connect((destination, 443))?;
+    let actual = socket.local_addr()?.ip();
+    ensure!(
+        !actual.is_unspecified(),
+        "cannot resolve the trading default-route address"
+    );
+    Ok(actual)
+}
+
+fn check_trading_ips_with_route(
+    config: &KlineConfig,
+    resolve_default: impl Fn(IpAddr) -> Result<IpAddr>,
+) -> Result<()> {
     let local = config.local_ip.context("missing Kline local IP")?;
     let public = config.public_ip.context("missing Kline public IP")?;
     for path in &config.trade_engine_configs {
@@ -633,16 +657,27 @@ fn check_trading_ips(config: &KlineConfig) -> Result<()> {
             }
         }
         ensure!(
-            !ips.is_empty() && !ips.iter().any(|ip| ip.is_unspecified()),
-            "trade engine IP config must list explicit trading addresses"
+            !ips.is_empty(),
+            "trade engine IP config must list trading addresses"
         );
+        let uses_default_route = ips.iter().any(IpAddr::is_unspecified);
+        for ip in &mut ips {
+            if ip.is_unspecified() {
+                *ip = resolve_default(*ip).context("resolve unbound trading egress")?;
+                ensure!(
+                    !ip.is_unspecified(),
+                    "cannot resolve the trading default-route address"
+                );
+            }
+        }
         if ips
             .iter()
             .any(|ip| matches!(ip, IpAddr::V4(address) if address.is_private()) || matches!(ip, IpAddr::V6(address) if address.is_unique_local() || address.is_unicast_link_local()))
+            || uses_default_route
         {
             ensure!(
                 !config.forbidden_public_ips.is_empty(),
-                "trading IPs behind NAT require kline.forbidden_public_ips"
+                "NAT or default-route trading IPs require kline.forbidden_public_ips"
             );
         }
         ensure!(
@@ -816,6 +851,29 @@ mod tests {
         assert!(check_trading_ips(&config).is_ok());
         config.forbidden_public_ips.push(config.public_ip.unwrap());
         assert!(check_trading_ips(&config).is_err());
+    }
+    #[test]
+    fn unbound_trading_ips_exclude_the_resolved_route_and_require_public_exclusions() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("trade_engine.toml");
+        std::fs::write(&path, "local_ips = [\"0.0.0.0\", \"0.0.0.0\"]").unwrap();
+        let mut config = KlineConfig {
+            local_ip: Some("10.1.1.2".parse().unwrap()),
+            public_ip: Some("198.51.100.4".parse().unwrap()),
+            trade_engine_configs: vec![path],
+            forbidden_public_ips: vec!["198.51.100.99".parse().unwrap()],
+            ..Default::default()
+        };
+        let route = |_: IpAddr| Ok("10.1.1.1".parse::<IpAddr>().unwrap());
+        assert!(check_trading_ips_with_route(&config, route).is_ok());
+        config.local_ip = Some("10.1.1.1".parse().unwrap());
+        assert!(check_trading_ips_with_route(&config, route).is_err());
+        config.local_ip = Some("10.1.1.2".parse().unwrap());
+        config.forbidden_public_ips.clear();
+        assert!(check_trading_ips_with_route(&config, route).is_err());
+        config.forbidden_public_ips.push(config.public_ip.unwrap());
+        assert!(check_trading_ips_with_route(&config, route).is_err());
+        assert!(check_trading_ips_with_route(&config, |_| bail!("no route")).is_err());
     }
     #[tokio::test]
     async fn cold_backfill_is_24h_and_concurrent_queries_or_restart_do_not_refetch() {

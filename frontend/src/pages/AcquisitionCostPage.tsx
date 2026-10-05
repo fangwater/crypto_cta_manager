@@ -122,7 +122,7 @@ export function AcquisitionCostPage() {
     <AppShell
       active="acquisition-cost"
       title="持仓成本"
-      subtitle="实际成交与五切片虚拟成交"
+      subtitle="实际成交与分钟 VWAP 定价的理论 TWAP"
       icon={Scale}
       actions={
         <Button type="button" size="sm" variant="primary" disabled={loading} onClick={() => void query(1)}>
@@ -134,7 +134,7 @@ export function AcquisitionCostPage() {
       <PageIntro
         eyebrow="Delta cost"
         title="实际成本 vs 虚拟成本"
-        description="每次目标变化冻结 delta，使用发布后五个完整分钟的成交均价（成交额 ÷ 成交量），每分钟执行 1/5。按实际成交数量比较价格与费用，仅支持最近 30 天。"
+        description="理论 TWAP 每分钟等量执行 1/5，使用目标发布后五个完整分钟的 VWAP（成交额 ÷ 成交量）定价。按实际成交数量比较价格与费用，仅支持最近 30 天。"
       />
 
       {error && <Alert className="mb-4">{error}</Alert>}
@@ -219,7 +219,7 @@ export function AcquisitionCostPage() {
           <CardHeader className="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
             <div>
               <CardTitle>逐 delta 成本</CardTitle>
-              <CardDescription>虚拟价格保存全部五个分钟均价；完成率按实际配对数量除以 delta 数量。</CardDescription>
+              <CardDescription>理论 TWAP 均价是五个分钟 VWAP 的等权平均；完成率按实际配对数量除以 delta 数量。</CardDescription>
             </div>
             <div className="flex items-center gap-2">
               <Button type="button" size="sm" variant="secondary" className="w-8 px-0" title="上一页" aria-label="上一页" disabled={loading || page <= 1} onClick={() => void query(page - 1)}><ChevronLeft size={15} /></Button>
@@ -231,7 +231,7 @@ export function AcquisitionCostPage() {
             <table className="min-w-full text-left text-[13px]">
               <thead className="border-b border-border-soft bg-canvas/80 text-[11px] uppercase tracking-wide text-muted">
                 <tr>
-                  <th className="px-4 py-2 font-medium">信号</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">五个分钟均价</th><th className="px-4 py-2 text-right font-medium">虚拟均价</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
+                  <th className="px-4 py-2 font-medium">信号</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">五个分钟 VWAP</th><th className="px-4 py-2 text-right font-medium">理论 TWAP 均价</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
                 </tr>
               </thead>
               <tbody>

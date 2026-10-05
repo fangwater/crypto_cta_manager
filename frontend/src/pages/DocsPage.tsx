@@ -312,14 +312,14 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'acquisition-cost',
     group: '策略目录',
     title: '持仓成本',
-    lead: '按需比较实际成交与五个完整分钟的成交均价，仅支持最近 30 天。',
+    lead: '按需比较实际成交与分钟 VWAP 定价的五切片理论 TWAP，仅支持最近 30 天。',
     content: (
       <>
         <Endpoint method="GET" path={`${CATALOG_PATH}/acquisition-cost`} summary="归档目标与 Binance 1m K 线生成虚拟价格，再与实际成交比较" />
         <FieldRows rows={[
           { field: 'startMs / endMs', detail: '最近 30 天内的查询区间；更早的数据不支持理论分析' },
           { field: 'sourceIds / strategyName', detail: '账户或策略筛选；省略策略则比较全部策略' },
-          { field: 'sample_prices', detail: '目标发布后的五个完整分钟，每分钟成交额 ÷ 成交量，各执行 delta 的 1/5' },
+          { field: 'sample_prices', detail: '目标发布后的五个完整分钟 VWAP：每分钟成交额 ÷ 成交量，各执行 delta 的 1/5；理论 TWAP 均价是五份价格的等权平均' },
           { field: 'price_shortfall_usdt', detail: '实际有符号成交数量 × (实际成交价 − 五个分钟均价的等权平均)' },
         ]} />
         <Note>分钟 K 线存入 Manager 自己的 RocksDB。已缓存的分钟不重复请求，其他币对按查询缺口向前补拉 24 小时。缺失数据明确显示覆盖不足，不产生虚假的理论净值。</Note>
@@ -484,7 +484,7 @@ curl --noproxy '*' -sS -X PUT \\
             },
             {
               field: 'theoretical_twap_fee_rate',
-              detail: '理论五切片 TWAP 成交费率；省略时取本次 Maker/Taker 平均值，可按账户修改',
+              detail: '分钟 VWAP 定价的理论 TWAP 成交费率；省略时取本次 Maker/Taker 平均值，可按账户修改',
             },
             {
               field: 'exec_order_rate_limit_per_min / exec_order_rate_limit_10s',

@@ -82,8 +82,9 @@ for a live local URL or browser-render verification.
 ## Database Topology
 
 Each CTA host owns a local PostgreSQL instance for Manager catalogs,
-permissions, fee settings, symbol indexes, immutable position snapshots, and
-theoretical-analysis results. Actual orders and fills remain in each Exec's
+permissions, fee settings, symbol indexes, and immutable position snapshots.
+Theoretical analysis is rebuilt on demand from Manager's archive and minute
+Kline cache. Actual orders and fills remain in each Exec's
 `persist_manager` RocksDB; Manager must not maintain a PostgreSQL order copy.
 The unused RocksDB-to-PostgreSQL order-ingestion worker was removed by operator
 request on 2026-10-05. el01 uses user-managed PostgreSQL; jp-meta uses the
@@ -248,7 +249,11 @@ Binance access. Read only the IP fields from every configured live trade engine
 TOML and reject collisions with local_ips, primary/secondary or Binance whitelist
 IPs. For private trading addresses also require their public NAT addresses in
 `forbidden_public_ips`. Dedicated market-data egress must never share a trading
-public address. `GET /api/catalog/kline-status` exposes cache/backfill progress.
+public address. Resolve a trading `0.0.0.0`/`::` binding to its actual default-route
+local address without sending packets, exclude that address, and require its
+public egress in the public exclusion list too. Do not change trading bindings
+to enable Manager's Kline cache.
+`GET /api/catalog/kline-status` exposes cache/backfill progress.
 
 The 5-second BBO recorder, its `/api/catalog/execution-cost` evaluation API,
 browser page, and client command are removed. The PostgreSQL theoretical

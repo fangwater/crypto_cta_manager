@@ -191,7 +191,7 @@ export function AccountOverviewPage() {
                 <div>
                   <CardTitle className="text-base">估算费率</CardTitle>
                   <CardDescription className="mt-1">
-                    按账户设置事实成交和理论 TWAP 的估算费率，不改交易所与 Exec 下单。保存后立即写入
+                    按账户设置事实成交和理论 TWAP 的估算费率。理论 TWAP 使用分钟 VWAP 定价，每分钟等量执行 1/5。保存后立即写入
                     PostgreSQL，无需重启。
                   </CardDescription>
                 </div>
