@@ -264,6 +264,15 @@ verified a complete theoretical curve and 18 close fallback samples across
 four deltas; a repeat made no new exchange requests. Trading/Viz/Config remained
 running, and the Exec gateway returned HTTP 200 and WebSocket 101.
 
+The traded-minute weighting change was deployed to jp-meta as release
+`20261005T154639Z`, runtime commit `0a99d6e`. The same fixed trade03 one-day
+query produced 100 theoretical points, no missing prices, three skipped-minute
+samples and three all-empty targets (15 close samples). A repeated query made
+zero new exchange requests. All 24 trading TOMLs and 120 trading/Viz/Config/Nginx
+process IDs remained unchanged; only `cta_web` restarted. The four affected
+`rbf_small` targets involve contracts settled and delisted on October 5;
+see `docs/jp_meta_zero_volume_minutes_20261005.md` for the read-only evidence.
+
 The 5-second BBO recorder, its `/api/catalog/execution-cost` evaluation API,
 browser page, and client command are removed. The PostgreSQL theoretical
 materializer is removed; current initialization SQL does not create its derived
