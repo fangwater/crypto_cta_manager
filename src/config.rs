@@ -273,12 +273,8 @@ impl KlineConfig {
             bail!("invalid kline refresh, timeout, concurrency or weight budget");
         }
         for symbol in &self.default_symbols {
-            if symbol.is_empty()
-                || !symbol
-                    .bytes()
-                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
-            {
-                bail!("kline.default_symbols must contain uppercase exchange symbols");
+            if symbol.len() >= 256 || crate::order_config::validate_exec_symbol(symbol).is_err() {
+                bail!("kline.default_symbols must contain valid exchange symbols under 256 bytes");
             }
         }
         if self.enabled {

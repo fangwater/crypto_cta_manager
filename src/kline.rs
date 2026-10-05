@@ -102,11 +102,7 @@ impl Kline {
 
 fn prefix(symbol: &str) -> Result<Vec<u8>> {
     ensure!(
-        !symbol.is_empty()
-            && symbol.len() < 256
-            && symbol
-                .bytes()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+        symbol.len() < 256 && crate::order_config::validate_exec_symbol(symbol).is_ok(),
         "invalid Binance symbol"
     );
     let mut key = vec![symbol.len() as u8];
@@ -733,6 +729,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct MockState {
         calls: Arc<Mutex<Vec<(i64, i64)>>>,
+        symbols: Arc<Mutex<Vec<String>>>,
         omit: Option<i64>,
     }
     async fn mock_candles(
@@ -744,6 +741,7 @@ mod tests {
         let end = (params["endTime"].parse::<i64>().unwrap() + 1) * 1000;
         let limit = params["limit"].parse::<usize>().unwrap();
         state.calls.lock().unwrap().push((start, end));
+        state.symbols.lock().unwrap().push(params["symbol"].clone());
         let mut result = Vec::new();
         let mut ts = start;
         while ts < end && result.len() < limit {
@@ -876,31 +874,37 @@ mod tests {
         assert!(check_trading_ips_with_route(&config, |_| bail!("no route")).is_err());
     }
     #[tokio::test]
-    async fn cold_backfill_is_24h_and_concurrent_queries_or_restart_do_not_refetch() {
+    async fn unicode_symbol_backfill_is_24h_and_concurrent_queries_or_restart_do_not_refetch() {
         let (dir, store, state, server) = fixture(None).await;
         let end = now_us().div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
         let start = end - 10 * MINUTE_US;
+        let symbol = "龙虾USDT";
         let (a, b, c) = tokio::join!(
-            store.ensure_range("BTCUSDT", start, end),
-            store.ensure_range("BTCUSDT", start, end),
-            store.ensure_range("BTCUSDT", start, end)
+            store.ensure_range(symbol, start, end),
+            store.ensure_range(symbol, start, end),
+            store.ensure_range(symbol, start, end)
         );
         a.unwrap();
         b.unwrap();
         c.unwrap();
         assert_eq!(state.calls.lock().unwrap().len(), 3);
-        assert_eq!(
-            store.scan("BTCUSDT", end - DAY_US, end).unwrap().len(),
-            1440
+        assert!(
+            state
+                .symbols
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|value| value == symbol)
         );
+        assert_eq!(store.scan(symbol, end - DAY_US, end).unwrap().len(), 1440);
         let handle = store.inner.db.db().cf_handle(CANDLES_CF).unwrap();
         store
             .inner
             .db
             .db()
-            .delete_cf(&handle, key("BTCUSDT", start).unwrap())
+            .delete_cf(&handle, key(symbol, start).unwrap())
             .unwrap();
-        store.ensure_range("BTCUSDT", start, end).await.unwrap();
+        store.ensure_range(symbol, start, end).await.unwrap();
         assert_eq!(
             *state.calls.lock().unwrap().last().unwrap(),
             (start, start + MINUTE_US)
@@ -912,7 +916,7 @@ mod tests {
         let config = KlineConfig::default();
         let reopened =
             KlineStore::from_db(ManagerDb::open(&dir.path().join("db")).unwrap(), config).unwrap();
-        assert_eq!(reopened.scan("BTCUSDT", start, end).unwrap().len(), 10);
+        assert_eq!(reopened.scan(symbol, start, end).unwrap().len(), 10);
         assert_eq!(state.calls.lock().unwrap().len(), 4);
         server.abort();
     }
