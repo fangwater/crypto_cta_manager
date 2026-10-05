@@ -166,7 +166,6 @@ export function AcquisitionCostPage() {
       {report?.warnings.map((warning) => <Alert key={warning} className="mb-4">{warning}</Alert>)}
       {Boolean(totals?.pending_virtual_delta_count) && <Alert className="mb-4">{totals?.pending_virtual_delta_count} 个 delta 的五分钟执行窗口尚未结束。</Alert>}
       {Boolean(totals?.zero_volume_fallback_sample_count) && <Alert className="mb-4">无成交分钟使用收盘价补位 {totals?.zero_volume_fallback_sample_count} 次，涉及 {totals?.zero_volume_fallback_delta_count} 个目标 delta。</Alert>}
-      {Boolean(totals?.legacy_fee_delta_count) && <Alert className="mb-4">{totals?.legacy_fee_delta_count} 个历史 delta 未归档理论费率，按当前理论费率估算。</Alert>}
       {totals && totals.missing_virtual_delta_count > 0 && (
         <Alert className="mb-4">
           {totals.missing_virtual_delta_count} 个 delta 缺少完整五点行情，未进入可比成本。

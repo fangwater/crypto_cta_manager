@@ -748,9 +748,6 @@ function NavPage() {
           {Boolean(timeline?.theoretical.zero_volume_fallback_sample_count) && (
             <div className="chart-notice" role="status">无成交分钟使用收盘价补位 {timeline?.theoretical.zero_volume_fallback_sample_count} 次。</div>
           )}
-          {Boolean(timeline?.theoretical.legacy_fee_delta_count) && (
-            <div className="chart-notice" role="status">历史理论手续费按当前账户费率估算（{integer(timeline?.theoretical.legacy_fee_delta_count ?? 0)} 个旧目标缺少当时费率）。</div>
-          )}
           <div className="chart-body has-picker">
             <div className="chart-stage">
               {timeline &&

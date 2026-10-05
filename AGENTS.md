@@ -340,6 +340,9 @@ delayed data.
 Keep theoretical-data notices in normal document flow above the chart.
 `chart-empty` and `chart-loading` are absolute overlays and must only appear
 inside a positioned `chart-stage`, never as page-level fee/cache notices.
+The operator accepts using the current theoretical fee for legacy targets with
+no archived rate. Keep that estimation metadata in the API, but do not show
+missing historical fee counts as a NAV or cost-page warning.
 
 The timeline also attributes each account's NAV by Exec strategy. Parse only
 stable `batch_exec:<strategy_name>` values from `from_key_text`; group all

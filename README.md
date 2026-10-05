@@ -141,6 +141,8 @@ two-minute tail to include publications that complete out of order. A late
 insert before that checkpoint invalidates the cache and rebuilds from the
 durable archive. Queries keep legacy
 fee fallbacks current while preserving archived fees and shares.
+The operator accepts current-rate estimates for legacy targets; the browser
+does not display missing historical fee counts as warnings.
 `kline-status.target_history` reports readiness, active loading, processed message
 count, and errors. During initial loading the NAV response still returns factual
 points and explains why theory is pending. This cache adds no PostgreSQL tables
