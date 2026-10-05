@@ -293,7 +293,14 @@ the recent two-minute tail. A late insert before that checkpoint must invalidate
 and rebuild the cache. Allocate sequences against existing keys and never let
 an older append move the archive head backwards or overwrite a message. Concurrent
 queries share initialization and receive an explicit loading reason while it
-runs. Freeze archived shares and fees; resolve current fee fallbacks for legacy
+runs. The timeline exposes `theoretical.loading` for target-history loading or
+pending Kline backfills. While true, the NAV browser repeats the same scoped
+query after ten seconds without covering the factual chart; cancel the timer
+and request on scope/range changes and stop after completion or a permanent
+unavailable result. Default to the portfolio NAV comparison so both theoretical
+series are visible. A cache hit must bypass any symbol lock held by a larger
+historical backfill; double-check a miss after acquiring that lock.
+Freeze archived shares and fees; resolve current fee fallbacks for legacy
 messages at query time. `kline-status.target_history` exposes readiness and
 processed-message counts. Do not recreate PostgreSQL materializer tables or
 persist a second copy of this derived cache.

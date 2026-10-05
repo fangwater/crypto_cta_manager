@@ -296,6 +296,7 @@ export interface TheoreticalNavPoint {
 }
 
 export interface TheoreticalNavTimeline {
+  loading: boolean
   unavailable_reason: string | null
   missing_price_count: number
   legacy_fee_delta_count: number

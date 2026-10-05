@@ -103,6 +103,13 @@ open time; each value is 56 bytes (OHLC, base/quote volume, trade count).
 Retention is configurable from 1 to 30 days, never more. Only the Kline cache
 is pruned; archived target publications remain intact.
 
+NAV starts with the account's portfolio comparison, including both theoretical
+fee series. If a query needs target-history loading or Kline backfill, its
+`theoretical.loading` flag makes the browser repeat that same query every ten
+seconds until ready, preserving the factual chart. Changing accounts/ranges
+cancels the old retry. Permanent unsupported ranges do not loop. Already cached
+minutes can be read immediately while older backfills for that symbol continue.
+
 The default symbols are BNBUSDT, XRPUSDT, ETHUSDT, BTCUSDT and SOLUSDT.
 Every 300 seconds only these five are maintained. Queries warm other symbols
 on demand, backwards in 24-hour blocks capped at retention. Each block requests

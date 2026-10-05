@@ -188,7 +188,7 @@ function NavPage() {
   const [pnlMode, setPnlMode] = useState<PnlMode>('strategy')
   const [feeMode, setFeeMode] = useState<FeeMode>('after')
   const [chartMode, setChartMode] =
-    useState<TimelineChartMode>('strategies')
+    useState<TimelineChartMode>('portfolio')
   const [visibleSeries, setVisibleSeries] = useState<NavSeriesKey[]>([
     'nav_change_before_fee_quote',
     'nav_change_after_fee_quote',
@@ -293,10 +293,11 @@ function NavPage() {
       return
     }
     const controller = new AbortController()
+    let retryTimer: number | undefined
     setTimelineLoading(true)
     setTimelineError(null)
     const loadTimeline = pnlMode === 'account' ? getAccountTimeline : getTimeline
-    loadTimeline({
+    const load = () => loadTimeline({
       startMs,
       endMs,
       sourceIds: [scope],
@@ -304,7 +305,11 @@ function NavPage() {
       maxPoints: 3_500,
       signal: controller.signal,
     })
-      .then(setTimeline)
+      .then((next) => {
+        if (controller.signal.aborted) return
+        setTimeline(next)
+        if (next.theoretical.loading) retryTimer = window.setTimeout(() => void load(), 10_000)
+      })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
         setTimelineError(reason instanceof Error ? reason.message : String(reason))
@@ -312,7 +317,11 @@ function NavPage() {
       .finally(() => {
         if (!controller.signal.aborted) setTimelineLoading(false)
       })
-    return () => controller.abort()
+    void load()
+    return () => {
+      controller.abort()
+      window.clearTimeout(retryTimer)
+    }
   }, [endMs, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision])
 
   const selectedSource = useMemo(

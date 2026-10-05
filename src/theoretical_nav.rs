@@ -31,6 +31,7 @@ pub struct TheoreticalNavTimeline {
     pub latest_point_ts_us: Option<i64>,
     pub points: Vec<TheoreticalNavPoint>,
     pub sampled: bool,
+    pub loading: bool,
     pub unavailable_reason: Option<String>,
     pub missing_price_count: usize,
     pub legacy_fee_delta_count: usize,
@@ -48,6 +49,7 @@ impl Default for TheoreticalNavTimeline {
             latest_point_ts_us: None,
             points: Vec::new(),
             sampled: false,
+            loading: false,
             unavailable_reason: None,
             missing_price_count: 0,
             legacy_fee_delta_count: 0,
@@ -357,9 +359,15 @@ fn ingest_target(
     Ok(())
 }
 
+#[derive(Default)]
+struct KlineWarmResult {
+    errors: Vec<String>,
+    pending: bool,
+}
+
 /// Detached backfills survive HTTP cancellation. Return coverage after at most
 /// 10s of waiting; a later query reuses the cache rather than restarting pulls.
-pub async fn warm_ranges(store: &KlineStore, ranges: BTreeMap<String, (i64, i64)>) -> Vec<String> {
+async fn warm_ranges(store: &KlineStore, ranges: BTreeMap<String, (i64, i64)>) -> KlineWarmResult {
     let store = store.clone();
     let mut task = tokio::spawn(async move {
         let mut jobs = tokio::task::JoinSet::new();
@@ -376,9 +384,18 @@ pub async fn warm_ranges(store: &KlineStore, ranges: BTreeMap<String, (i64, i64)
         errors
     });
     match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
-        Ok(Ok(errors)) => errors,
-        Ok(Err(error)) => vec![error.to_string()],
-        Err(_) => vec!["分钟 K 线正在后台补齐，请稍后重新查询".into()],
+        Ok(Ok(errors)) => KlineWarmResult {
+            errors,
+            pending: false,
+        },
+        Ok(Err(error)) => KlineWarmResult {
+            errors: vec![error.to_string()],
+            pending: false,
+        },
+        Err(_) => KlineWarmResult {
+            errors: vec!["分钟 K 线正在后台补齐".into()],
+            pending: true,
+        },
     }
 }
 fn add_range(ranges: &mut BTreeMap<String, (i64, i64)>, symbol: &str, start: i64, end: i64) {
@@ -421,8 +438,8 @@ pub async fn prepare_acquisition(
             );
         }
     }
-    let errors = warm_ranges(store, ranges).await;
-    Ok((deltas, errors))
+    let warm = warm_ranges(store, ranges).await;
+    Ok((deltas, warm.errors))
 }
 
 pub async fn load_timeline(
@@ -454,13 +471,15 @@ pub async fn load_timeline(
     }
     let fees = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
     let Some(deltas) = targets.query(fees, end, source_ids, None).await? else {
-        output.unavailable_reason = Some("目标历史正在后台读取，请稍后重新查询".into());
+        output.loading = true;
+        output.unavailable_reason = Some("目标历史正在后台读取，完成后自动更新曲线".into());
         return Ok(output);
     };
     // The quantity per traded minute is known only after all five minutes
     // close. Bound the curve so every displayed execution has a full schedule.
     let end = end.min(now_us().div_euclid(MINUTE_US) * MINUTE_US - 4 * MINUTE_US);
     if end < start {
+        output.loading = true;
         output.unavailable_reason = Some("五分钟理论执行窗口尚未完整收盘，请稍后查询".into());
         return Ok(output);
     }
@@ -501,7 +520,7 @@ pub async fn load_timeline(
             add_range(&mut ranges, symbol, baseline_open, end);
         }
     }
-    let errors = warm_ranges(store, ranges).await;
+    let warm = warm_ranges(store, ranges).await;
     fills.sort_by_key(|(ts, delta, slice)| {
         (
             *ts,
@@ -521,8 +540,16 @@ pub async fn load_timeline(
         max_points,
         &mut output,
     )?;
-    if !errors.is_empty() && output.points.is_empty() {
-        output.unavailable_reason = Some(errors.join("; "));
+    if output.points.is_empty() {
+        output.loading = warm.pending;
+        if warm.pending {
+            output.unavailable_reason = Some(format!(
+                "分钟 K 线正在后台补齐，完成后自动更新曲线（{} 处缺失）",
+                output.missing_price_count
+            ));
+        } else if !warm.errors.is_empty() {
+            output.unavailable_reason = Some(warm.errors.join("; "));
+        }
     }
     Ok(output)
 }

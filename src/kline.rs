@@ -340,6 +340,11 @@ impl KlineStore {
         if start >= end {
             return Ok(());
         }
+        // Cached queries must not wait behind a larger historical backfill.
+        if self.scan(symbol, start, end)?.len() == ((end - start) / MINUTE_US) as usize {
+            self.inner.status.lock().unwrap().cache_hits += 1;
+            return Ok(());
+        }
         let lock = self
             .inner
             .markets
@@ -874,6 +879,34 @@ mod tests {
         config.forbidden_public_ips.push(config.public_ip.unwrap());
         assert!(check_trading_ips_with_route(&config, route).is_err());
         assert!(check_trading_ips_with_route(&config, |_| bail!("no route")).is_err());
+    }
+    #[tokio::test]
+    async fn cached_minutes_do_not_wait_for_a_different_range_backfill() {
+        let (_dir, store, state, server) = fixture(None).await;
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
+        let start = end - MINUTE_US;
+        store
+            .save_page("ETHUSDT", start, end, &[candle(start)])
+            .unwrap();
+        let lock = store
+            .inner
+            .markets
+            .lock()
+            .unwrap()
+            .entry("ETHUSDT".into())
+            .or_default()
+            .clone();
+        let _backfill = lock.lock().await;
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            store.ensure_range("ETHUSDT", start, end),
+        )
+        .await
+        .expect("cached range blocked behind an unrelated backfill")
+        .unwrap();
+        assert!(state.calls.lock().unwrap().is_empty());
+        assert_eq!(store.status().cache_hits, 1);
+        server.abort();
     }
     #[tokio::test]
     async fn unicode_symbol_backfill_is_24h_and_concurrent_queries_or_restart_do_not_refetch() {
