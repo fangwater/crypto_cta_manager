@@ -1472,6 +1472,15 @@
   border-radius: 1px;
 }
 
+.chart-notice {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .chart-loading,
 .chart-empty {
   position: absolute;

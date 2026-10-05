@@ -337,6 +337,9 @@ NAV and cost pages. The workspace lists independent account cards and account
 counts without summing account PnL or exposure. A pending health request is
 "checking", not "data delayed"; only a returned degraded health status indicates
 delayed data.
+Keep theoretical-data notices in normal document flow above the chart.
+`chart-empty` and `chart-loading` are absolute overlays and must only appear
+inside a positioned `chart-stage`, never as page-level fee/cache notices.
 
 The timeline also attributes each account's NAV by Exec strategy. Parse only
 stable `batch_exec:<strategy_name>` values from `from_key_text`; group all
