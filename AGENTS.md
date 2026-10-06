@@ -366,6 +366,18 @@ when the remaining minute budget was exhausted. Cold target indexing still took
 TOMLs remained unchanged. See the same performance document for before/after
 measurement conditions.
 
+The operator raised jp-meta's Kline budget to 600 weight/minute on 2026-10-06;
+HTTP concurrency remains 8. The current release is `20261006T041103Z`, runtime
+`dccbc39`, with the existing `3a2e6c0` frontend. Timestamp checks also aligned
+the theoretical zero start point with factual NAV for minute-aligned custom
+ranges, retaining exact-start executions in subsequent totals. In a fixed 1D
+comparison, factual/cost reports and all 1,440 subsequent theoretical points per
+account were identical. Two hundred target schedules and 200 factual fill times
+were checked; Shanghai-time browser inputs round-tripped to the expected API
+timestamps. See `docs/jp_meta_nav_timestamps_20261006.md`. Both account histories
+checked here contain USDT quotes; the generic "报价币" UI label was introduced
+by coin-margined support and does not change their currency.
+
 The theoretical target model freezes `delta = target - previous distinct target`.
 Each delta owns the first five complete wall-clock minutes after publication,
 excluding a partial arrival minute. Each traded minute price is Binance quote
