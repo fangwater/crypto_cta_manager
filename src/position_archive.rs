@@ -307,6 +307,31 @@ impl PositionArchive {
             #[serde(default)]
             published_accounts: Vec<ArchivedPublishedAccount>,
         }
+        fn decode_batch(batch: &[((i64, u32), Box<[u8]>)]) -> Result<Vec<PositionUpdateMsg>> {
+            use rayon::prelude::*;
+            crate::analysis::run(|| {
+                batch
+                    .par_iter()
+                    .map(|(cursor, value)| {
+                        let message: TargetUpdate = serde_json::from_slice(value)
+                            .context("failed to decode archived execution targets")?;
+                        anyhow::ensure!(
+                            (message.received_at_us, message.seq) == *cursor,
+                            "archived target timestamp does not match its key"
+                        );
+                        Ok(PositionUpdateMsg {
+                            msg_type: message.msg_type,
+                            schema_version: message.schema_version,
+                            received_at_us: message.received_at_us,
+                            seq: message.seq,
+                            strategy: message.strategy,
+                            published_accounts: message.published_accounts,
+                            factual_positions: Vec::new(),
+                        })
+                    })
+                    .collect()
+            })
+        }
         let handle = self
             .db
             .db()
@@ -314,6 +339,8 @@ impl PositionArchive {
             .context("position_updates column family disappeared")?;
         let start =
             manager_db::encode_seq_key(after.map_or(1, |key| key.0), after.map_or(0, |key| key.1))?;
+        let mut batch = Vec::with_capacity(256);
+        let mut batch_bytes = 0;
         for item in self
             .db
             .db()
@@ -328,21 +355,18 @@ impl PositionArchive {
             if received_at_us > end_received_at_us {
                 break;
             }
-            let message: TargetUpdate = serde_json::from_slice(&value)
-                .context("failed to decode archived execution targets")?;
-            anyhow::ensure!(
-                (message.received_at_us, message.seq) == cursor,
-                "archived target timestamp does not match its key"
-            );
-            visit(PositionUpdateMsg {
-                msg_type: message.msg_type,
-                schema_version: message.schema_version,
-                received_at_us: message.received_at_us,
-                seq: message.seq,
-                strategy: message.strategy,
-                published_accounts: message.published_accounts,
-                factual_positions: Vec::new(),
-            })?;
+            batch_bytes += value.len();
+            batch.push((cursor, value));
+            if batch.len() >= 256 || batch_bytes >= 8 * 1024 * 1024 {
+                for message in decode_batch(&batch)? {
+                    visit(message)?;
+                }
+                batch.clear();
+                batch_bytes = 0;
+            }
+        }
+        for message in decode_batch(&batch)? {
+            visit(message)?;
         }
         Ok(())
     }
@@ -699,5 +723,41 @@ mod tests {
         });
         let account: ArchivedPublishedAccount = serde_json::from_value(raw).unwrap();
         assert!((account.effective_shares() - 6.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parallel_target_batches_preserve_order_and_resume_within_same_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let archive = PositionArchive::open(ManagerDb::open(dir.path()).unwrap()).unwrap();
+        for index in 0..600 {
+            archive
+                .append(
+                    100 + index / 3,
+                    &strategy("cta_a", index as f64, 0, index),
+                    Vec::new(),
+                    vec![published_account("binance_exec_trade01", "cta_a", 2.0)],
+                )
+                .unwrap();
+        }
+        let mut seen = Vec::new();
+        archive
+            .visit_target_updates_after(Some((133, 1)), 280, |message| {
+                assert!(message.factual_positions.is_empty());
+                seen.push((
+                    message.received_at_us,
+                    message.seq,
+                    message.strategy.targets["BTCUSDT"].qty,
+                ));
+                Ok(())
+            })
+            .unwrap();
+        let expected = (0..600)
+            .filter_map(|index| {
+                let cursor = (100 + index / 3, (index % 3) as u32);
+                (cursor > (133, 1) && cursor.0 <= 280).then_some((cursor.0, cursor.1, index as f64))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(seen, expected);
+        assert!(seen.len() > 256);
     }
 }

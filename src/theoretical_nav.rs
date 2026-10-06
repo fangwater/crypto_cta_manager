@@ -192,6 +192,9 @@ impl TheoreticalTargetCache {
         });
     }
     fn refresh_blocking(&self) -> Result<()> {
+        let started = std::time::Instant::now();
+        let initial = !self.ready.load(Ordering::Acquire);
+        let processed_before = self.processed_messages.load(Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
         let (revision, invalidated) = self
             .archive
@@ -225,6 +228,16 @@ impl TheoreticalTargetCache {
         state.tail_markets = tail.markets;
         state.revision = revision;
         self.ready.store(true, Ordering::Release);
+        if initial || invalidated {
+            tracing::info!(
+                initial,
+                invalidated,
+                processed_messages =
+                    self.processed_messages.load(Ordering::Relaxed) - processed_before,
+                duration_ms = started.elapsed().as_millis(),
+                "rebuilt theoretical target index"
+            );
+        }
         Ok(())
     }
     async fn query(
@@ -367,13 +380,14 @@ fn ingest_target(
                     .get(&symbol)
                     .map(|target| target.signal)
                     .unwrap_or(0);
-                let market = (source.id.clone(), symbol.clone(), next.venue.clone());
+                let venue = crate::exec_routing::symbol_market(&next.venue, &symbol)?.to_string();
+                let market = (source.id.clone(), symbol.clone(), venue.clone());
                 let position = state.deltas.len();
                 state.deltas.push(VirtualDelta {
                     source_id: source.id.clone(),
                     binding_name: account.binding_name.clone(),
                     strategy_name: next.position_strategy_name.clone(),
-                    venue: crate::exec_routing::symbol_market(&next.venue, &symbol)?.to_string(),
+                    venue,
                     symbol,
                     received_at_us: next.received_at_us,
                     seq: next.update_seq,
@@ -403,6 +417,8 @@ struct KlineWarmResult {
 /// Detached backfills survive HTTP cancellation. Return coverage after at most
 /// 10s of waiting; a later query reuses the cache rather than restarting pulls.
 async fn warm_ranges(store: &KlineStore, ranges: BTreeMap<String, (i64, i64)>) -> KlineWarmResult {
+    let started = std::time::Instant::now();
+    let symbol_count = ranges.len();
     let store = store.clone();
     let mut task = tokio::spawn(async move {
         let mut jobs = tokio::task::JoinSet::new();
@@ -418,7 +434,7 @@ async fn warm_ranges(store: &KlineStore, ranges: BTreeMap<String, (i64, i64)>) -
         }
         errors
     });
-    match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
         Ok(Ok(errors)) => KlineWarmResult {
             errors,
             pending: false,
@@ -431,7 +447,14 @@ async fn warm_ranges(store: &KlineStore, ranges: BTreeMap<String, (i64, i64)>) -
             errors: vec!["分钟 K 线正在后台补齐".into()],
             pending: true,
         },
-    }
+    };
+    tracing::info!(
+        symbol_count,
+        duration_ms = started.elapsed().as_millis(),
+        pending = result.pending,
+        "checked theoretical Kline coverage"
+    );
+    result
 }
 fn add_range(ranges: &mut BTreeMap<String, (i64, i64)>, symbol: &str, start: i64, end: i64) {
     ranges
@@ -646,6 +669,8 @@ fn rebuild_timeline(
     max_points: usize,
     output: &mut TheoreticalNavTimeline,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
+    let virtual_slice_count = fills.len();
     let mut schedules = BTreeMap::new();
     let indices = fills
         .iter()
@@ -669,6 +694,7 @@ fn rebuild_timeline(
             usize::from(priced.all_zero_volume_fallback) * SAMPLE_COUNT;
         schedules.insert(index, priced);
     }
+    let pricing_duration_ms = started.elapsed().as_millis();
     for (_, index, slice) in fills.iter().filter(|(ts, _, _)| *ts < start) {
         if let Some(priced) = schedules.get(index)
             && priced.prices[*slice].is_some()
@@ -705,6 +731,7 @@ fn rebuild_timeline(
             .map(|(_, index, _)| deltas[*index].symbol.clone()),
     );
     let symbols = needed.into_iter().collect::<Vec<_>>();
+    let mark_scan_started = std::time::Instant::now();
     markets.extend(crate::analysis::run(|| {
         symbols
             .par_iter()
@@ -720,6 +747,8 @@ fn rebuild_timeline(
             })
             .collect::<Result<BTreeMap<_, _>>>()
     })?);
+    let mark_scan_duration_ms = mark_scan_started.elapsed().as_millis();
+    let fifo_started = std::time::Instant::now();
     let mark = |symbol: &str, ts: i64| -> Option<f64> {
         let bars = markets.get(symbol)?;
         let end = bars.partition_point(|c| c.end_ts_us() <= ts);
@@ -832,6 +861,16 @@ fn rebuild_timeline(
         output.sampled = output.points.len() > max_points;
         output.points = downsample_points(std::mem::take(&mut output.points), max_points);
     }
+    tracing::info!(
+        delta_count = deltas.len(),
+        virtual_slice_count,
+        symbol_count = markets.len(),
+        pricing_duration_ms,
+        mark_scan_duration_ms,
+        fifo_curve_duration_ms = fifo_started.elapsed().as_millis(),
+        duration_ms = started.elapsed().as_millis(),
+        "computed theoretical NAV curve"
+    );
     Ok(())
 }
 
@@ -1908,6 +1947,13 @@ mod tests {
             &source, "alpha", 2.0,
         )];
         for index in 0..180 {
+            strategy.targets.insert(
+                "BTCUSD".into(),
+                crate::order_config::TargetPosition {
+                    qty: (index % 3) as f64,
+                    signal: 0,
+                },
+            );
             strategy.targets.insert(
                 "BTCUSDT".into(),
                 crate::order_config::TargetPosition {

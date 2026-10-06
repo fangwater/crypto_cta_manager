@@ -118,6 +118,8 @@ and actual/theoretical fee settings. Queries replay from the checkpoint before
 their exact start; a fill at the start remains part of the selected window.
 Late fills, liquidity corrections, fee changes and snapshot changes rebuild the
 generation before it replaces the previous one.
+Manual and periodic refreshes share one lock so a slower old build cannot
+overwrite a newer fee/snapshot generation.
 The dashboard summary reuses the same FIFO preparation instead of replaying
 history a second time. Completed theoretical queries can return their cached
 curve before rebuilding schedules or scanning candles again.
@@ -130,6 +132,8 @@ five-minute prices are reused in memory until the 30-day retention cutoff.
 Missing minutes and incomplete curves are never retained as successful results.
 The target cache indexes cumulative quantities by account/symbol/venue so a NAV
 query can establish carried inventory without traversing every old target.
+Cold target-history reads decode bounded batches in parallel, then apply them
+in archive order; neither resume keys nor the durable JSON archive change.
 All these caches are disposable; no derived PostgreSQL tables are introduced.
 
 PostgreSQL stores account/strategy catalogs, permissions, fee settings and
@@ -140,6 +144,8 @@ fee queries for every page request. Session and permission checks still consult
 PostgreSQL so revoked access is effective immediately. Timeline logs expose
 `actual_duration_ms` and `theoretical_duration_ms`; Kline status also reports
 disk range/batch reads, decoded-candle hits and shared-pricing hits.
+Theory logs also separate coverage checks, minute pricing, mark scans and FIFO
+curve generation and include target/slice/symbol counts.
 
 The default symbols are BNBUSDT, XRPUSDT, ETHUSDT, BTCUSDT and SOLUSDT.
 Every 300 seconds only these five are maintained. Queries warm other symbols

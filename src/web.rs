@@ -197,6 +197,7 @@ struct DashboardBuild {
 #[derive(Clone)]
 struct WebState {
     cache: Arc<RwLock<CacheState>>,
+    dashboard_refresh: Arc<tokio::sync::Mutex<()>>,
     nav_history_store: Arc<std::sync::Mutex<nav::NavHistoryStore>>,
     config: Arc<AppConfig>,
     pool: PgPool,
@@ -434,6 +435,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let refresh_pool = pool.clone();
     let refresh_live = live_equity.clone();
     let refresh_nav_store = Arc::clone(&nav_history_store);
+    let dashboard_refresh = Arc::new(tokio::sync::Mutex::new(()));
+    let refresh_guard = dashboard_refresh.clone();
     tokio::spawn(async move {
         refresh_loop(
             refresh_config,
@@ -441,6 +444,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             refresh_cache,
             refresh_live,
             refresh_nav_store,
+            refresh_guard,
             refresh_interval_secs,
         )
         .await;
@@ -591,6 +595,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .with_state(WebState {
             cache,
+            dashboard_refresh,
             nav_history_store,
             config: Arc::new(config),
             pool: pool.clone(),
@@ -2673,6 +2678,7 @@ async fn save_account_fee_rates(
 }
 
 async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
+    let _refresh = state.dashboard_refresh.lock().await;
     let attempted_at_us = unix_now_us();
     let build = build_dashboard(
         &state.config,
@@ -4122,6 +4128,7 @@ async fn refresh_loop(
     cache: Arc<RwLock<CacheState>>,
     live_equity: LiveEquityHub,
     nav_history_store: Arc<std::sync::Mutex<nav::NavHistoryStore>>,
+    dashboard_refresh: Arc<tokio::sync::Mutex<()>>,
     refresh_interval_secs: u64,
 ) {
     let period = Duration::from_secs(refresh_interval_secs);
@@ -4130,6 +4137,7 @@ async fn refresh_loop(
 
     loop {
         interval.tick().await;
+        let _refresh = dashboard_refresh.lock().await;
         let attempted_at_us = unix_now_us();
         match build_dashboard(
             &config,

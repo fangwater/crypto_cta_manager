@@ -2741,6 +2741,30 @@ fn timeline_totals_by_strategy_symbol(
     totals
 }
 
+fn timeline_position_values_by_symbol(
+    runtimes: &[TimelineSourceState],
+) -> BTreeMap<String, (f64, f64)> {
+    let mut values = BTreeMap::<String, (f64, f64)>::new();
+    for runtime in runtimes {
+        for ((symbol, venue_code), state) in &runtime.states {
+            let mark = runtime
+                .latest_marks
+                .get(&(symbol.clone(), *venue_code))
+                .copied();
+            let report = state.report(mark);
+            let (gross, net) = values.entry(symbol.clone()).or_default();
+            *gross +=
+                report.long_position_value_quote.abs() + report.short_position_value_quote.abs();
+            *net += report.net_position_value_quote;
+        }
+    }
+    for (gross, net) in values.values_mut() {
+        *gross = clean_zero(*gross);
+        *net = clean_zero(*net);
+    }
+    values
+}
+
 /// NAV totals owned by `__unallocated__`: the part of the account ledger that
 /// named strategy ledgers do not explain. Under strategy allocation this
 /// matches Exec's SYSTEM_POSITION_CLOSE ledger, which holds the account
@@ -2930,6 +2954,7 @@ fn push_timeline_sample(
 ) {
     let current_by_symbol = timeline_totals_by_symbol(runtimes);
     let current_by_strategy_symbol = timeline_totals_by_strategy_symbol(runtimes);
+    let position_values_by_symbol = timeline_position_values_by_symbol(runtimes);
     let (gross_position_value_quote, net_position_value_quote) =
         timeline_position_values(runtimes, selected_symbols);
     let mut portfolio_totals = NavTotals::default();
@@ -2953,8 +2978,10 @@ fn push_timeline_sample(
     );
     for symbol in selected_symbols {
         if let Some(symbol_points) = points_by_symbol.get_mut(symbol) {
-            let (gross_position_value_quote, net_position_value_quote) =
-                timeline_position_values(runtimes, std::slice::from_ref(symbol));
+            let (gross_position_value_quote, net_position_value_quote) = position_values_by_symbol
+                .get(symbol)
+                .copied()
+                .unwrap_or_default();
             push_or_replace_timeline_point(
                 symbol_points,
                 NavTimelinePoint {
