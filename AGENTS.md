@@ -385,6 +385,10 @@ needed for cost comparison. Quantity weights require the entire five-minute
 window, so the live theoretical NAV ends four minutes before the latest closed
 minute; show its latest timestamp. Reconstruct start-boundary inventory using
 the same traded-minute weights, with no seed fees.
+For a nonzero-duration interval, both factual and theoretical curves display
+the same zero baseline at `startMs`. An execution exactly at that boundary still
+belongs to the interval and must remain in subsequent PnL and fee totals. A
+zero-duration interval keeps its one terminal point after boundary executions.
 
 Both cost analysis and theoretical NAV support only the last retained 1–30 days.
 Older requested ranges must never trigger a backfill or show theoretical data.

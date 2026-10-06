@@ -847,6 +847,15 @@ fn rebuild_timeline(
         }
         point.nav_change_after_fee_quote =
             point.nav_change_before_fee_quote - point.estimated_trading_fee_quote;
+        // Match factual NAV's pre-fill zero baseline at a normal window start.
+        // Slices exactly at start still belong to this window: the FIFO state
+        // above keeps their quantity, PnL and fees for every subsequent point.
+        if ts == start && start < end {
+            point = TheoreticalNavPoint {
+                ts_us: ts,
+                ..Default::default()
+            };
+        }
         push_or_replace_point(&mut output.points, point);
     }
     output.legacy_fee_delta_count = legacy.len();
@@ -1659,6 +1668,51 @@ mod tests {
         let last = output.points.last().unwrap();
         assert!((last.nav_change_before_fee_quote - 3.75).abs() < 1e-10);
         assert!((last.estimated_trading_fee_quote - 0.05175).abs() < 1e-10);
+    }
+    #[test]
+    fn minute_aligned_start_is_zero_without_dropping_its_execution_or_fee() {
+        let (_dir, store, start, _) = cached_market();
+        let delta = delta(start);
+        let fills = (0..5)
+            .map(|slice| (start + (slice as i64 + 1) * MINUTE_US, 0, slice))
+            .collect::<Vec<_>>();
+        let window_start = start + MINUTE_US;
+        for end in [window_start, start + 5 * MINUTE_US] {
+            let mut output = TheoreticalNavTimeline::default();
+            rebuild_timeline(
+                &[delta.clone()],
+                BTreeMap::new(),
+                fills
+                    .iter()
+                    .copied()
+                    .filter(|(ts, _, _)| *ts <= end)
+                    .collect(),
+                &store,
+                window_start,
+                end,
+                100,
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(output.missing_price_count, 0);
+            let last = output.points.last().unwrap();
+            if end > window_start {
+                assert_eq!(
+                    output.points[0],
+                    TheoreticalNavPoint {
+                        ts_us: window_start,
+                        ..Default::default()
+                    }
+                );
+                assert!((last.nav_change_before_fee_quote - 15.0).abs() < 1e-10);
+                assert!((last.estimated_trading_fee_quote - 0.102).abs() < 1e-10);
+            } else {
+                // A one-point window is also its terminal point, so retain
+                // its exact-boundary fill as factual NAV does.
+                assert!((last.nav_change_before_fee_quote - 5.0).abs() < 1e-10);
+                assert!((last.estimated_trading_fee_quote - 0.02).abs() < 1e-10);
+            }
+        }
     }
     #[test]
     fn missing_minute_suppresses_nav_and_cache_repair_reconstructs_without_ghost_holdings() {
