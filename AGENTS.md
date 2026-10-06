@@ -328,6 +328,24 @@ messages at query time. `kline-status.target_history` exposes readiness and
 processed-message counts. Do not recreate PostgreSQL materializer tables or
 persist a second copy of this derived cache.
 
+NAV performance changes were deployed to jp-meta on 2026-10-06 as release
+`20261006T032703Z`, runtime `69133c3`, frontend `3a2e6c0`. Keep sorted factual
+fills and hourly FIFO checkpoints in one immutable dashboard generation, with
+snapshots and actual/theoretical fee settings; atomically replace that generation
+on refresh. Manual and periodic builds share one refresh lock. Same-key queries
+coalesce in bounded disposable result caches. Use `dashboard.compute_threads`
+(default available CPUs capped at 16) for CPU work, independently of Binance HTTP
+concurrency/weights. Dense minute ranges use scans; sparse keys use deduplicated
+MultiGet. Reuse decoded candles and complete five-minute prices, never negative
+cache entries. Stream archive JSON in bounded parallel decode batches and apply
+messages in key order. The browser requests factual NAV first using
+`includeTheoretical=false`, then the full theoretical overlay. Fee/snapshot
+reads belong to background preparation; auth checks still consult PostgreSQL.
+Cold target-index initialization still scans the archive and must remain visible
+as loading. Preserve source/symbol/venue FIFO isolation and exact start-boundary
+behavior. See `docs/jp_meta_nav_performance_20261006.md` for measured costs and
+unchanged financial results.
+
 The theoretical target model freezes `delta = target - previous distinct target`.
 Each delta owns the first five complete wall-clock minutes after publication,
 excluding a partial arrival minute. Each traded minute price is Binance quote
