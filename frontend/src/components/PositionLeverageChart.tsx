@@ -89,7 +89,7 @@ export function PositionLeverageChart({ points, symbolPoints, mode, equityUsdt }
               const value = Number(row.value?.[1])
               const formatted = row.seriesName === '杠杆率'
                 ? `${value.toFixed(3)}x`
-                : `${money(value)} USDT`
+                : `${money(value)} 报价币`
               return `${row.marker ?? ''}${row.seriesName ?? ''}: ${formatted}`
             })
             .join('<br/>')

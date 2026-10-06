@@ -75,6 +75,17 @@ pub struct SavePositionStrategyRequest {
     pub symbol_order_strategy_overrides: BTreeMap<String, String>,
 }
 
+impl SavePositionStrategyRequest {
+    pub fn normalize_symbols(&mut self) -> Result<(), String> {
+        self.targets =
+            crate::order_config::normalize_symbol_map(std::mem::take(&mut self.targets))?;
+        self.symbol_order_strategy_overrides = crate::order_config::normalize_symbol_map(
+            std::mem::take(&mut self.symbol_order_strategy_overrides),
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SaveOrderStrategyRequest {
     pub strategy_name: String,
@@ -202,7 +213,10 @@ pub fn resolve_theoretical_twap_fee_rate(
 }
 
 pub fn validate_contract_symbol(symbol: &str) -> Result<(), String> {
-    validate_exec_symbol(symbol)
+    if symbol != symbol.trim().to_uppercase() {
+        return Err(format!("invalid symbol: {symbol}"));
+    }
+    crate::order_config::normalize_exec_symbol(symbol).map(|_| ())
 }
 
 impl PositionStrategy {
@@ -1345,6 +1359,34 @@ fn parse_execution_algorithm(value: &str) -> Result<ExecutionAlgorithm> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coin_targets_and_overrides_share_one_canonical_symbol_and_keep_base_units() {
+        let mut request: SavePositionStrategyRequest = serde_json::from_value(serde_json::json!({
+            "strategy_name": "coin",
+            "targets": {"btcUSD_perp": {"qty": 0.01, "signal": 1}},
+            "symbol_order_strategy_overrides": {"BTCUSD_PERP": "fast"}
+        }))
+        .unwrap();
+        request.normalize_symbols().unwrap();
+        validate_targets(&request.targets).unwrap();
+        validate_symbol_order_strategy_overrides(
+            &request.targets,
+            &request.symbol_order_strategy_overrides,
+        )
+        .unwrap();
+        assert_eq!(request.symbol_order_strategy_overrides["BTCUSD"], "fast");
+        assert_eq!(request.targets["BTCUSD"].qty, 0.01);
+        let scaled = scale_targets(&request.targets, 2.0);
+        assert_eq!(scaled["BTCUSD"].qty, 0.02);
+        assert_eq!(scaled["BTCUSD"].signal, 1);
+        let mut duplicate: SavePositionStrategyRequest =
+            serde_json::from_value(serde_json::json!({
+                "strategy_name": "coin", "targets": {"BTCUSD_PERP": 0.01, "BTCUSD": 0.02}
+            }))
+            .unwrap();
+        assert!(duplicate.normalize_symbols().is_err());
+    }
 
     #[test]
     fn binding_shares_are_the_only_target_multiplier() {

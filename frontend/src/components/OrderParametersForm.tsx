@@ -16,21 +16,21 @@ const algorithmOptions = [
 
 const povFields = [
   ['participation_rate', '参与率', '0.01', '0.000001'],
-  ['max_batch_usdt', '单次释放上限 (USDT)', '1', '0.01'],
-  ['max_carry_usdt', '累计额度上限 (USDT)', '1', '0.01'],
+  ['max_batch_usdt', '单次释放上限 (报价币)', '1', '0.01'],
+  ['max_carry_usdt', '累计额度上限 (报价币)', '1', '0.01'],
   ['volume_stale_ms', '成交量有效期 (ms)', '1', '1'],
   ['quote_stale_ms', '盘口有效期 (ms)', '1', '1'],
   ['duration_ms', '执行期限 (ms)', '1000', '1'],
 ] as const satisfies ReadonlyArray<[keyof PovParameters, string, string, string]>
 
 const chaseFields = [
-  ['batch_floor_usdt', '最小批次名义金额 (USDT)', '1', '0.01'],
+  ['batch_floor_usdt', '最小批次名义金额 (报价币)', '1', '0.01'],
   ['max_batch', '最大批次数', '1', '1'],
   ['max_open_batches', '最大在途批数', '1', '1'],
   ['maker_recenter_trigger_bps', '追价触发 (bps)', '0.1', '0'],
   ['maker_amend_cooldown_ms', '改单冷却 (ms)', '1', '0'],
   ['maker_timeout_sec', 'Maker 超时 (s)', '1', '1'],
-  ['target_tolerance_usdt', '目标容差 (USDT)', '1', '0'],
+  ['target_tolerance_usdt', '目标容差 (报价币)', '1', '0'],
   ['strategy_order_rate_limit_per_min', 'Chase 策略 60 秒报单上限', '1', '0'],
   ['strategy_order_rate_limit_10s', 'Chase 策略 10 秒报单上限', '1', '0'],
 ] as const satisfies ReadonlyArray<[keyof ChaseParameters, string, string, string]>

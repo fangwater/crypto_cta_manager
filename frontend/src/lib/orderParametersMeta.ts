@@ -21,7 +21,7 @@ export const orderParameterMeta: Record<
 > = {
   single_order_usdt: {
     label: '单笔名义金额',
-    hint: '每笔 maker 订单的目标 USDT 名义。Exec 会把调仓需求拆成多笔该大小的订单。',
+    hint: '每笔 maker 订单的目标报价币名义。Exec 会把调仓需求拆成多笔该大小的订单。',
     step: '1',
     min: '1',
   },
@@ -62,7 +62,7 @@ export const orderParameterMeta: Record<
     min: '0',
   },
   target_tolerance_usdt: {
-    label: '目标容差 (USDT)',
+    label: '目标容差 (报价币)',
     hint: '当前持仓与目标仓位差值低于此阈值时，Exec 认为已足够接近，不再继续下单。',
     step: '1',
     min: '0',

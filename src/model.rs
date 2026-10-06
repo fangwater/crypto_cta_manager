@@ -398,6 +398,8 @@ pub fn venue_name(value: u8) -> String {
         11 => "AsterFutures",
         12 => "HyperliquidMargin",
         13 => "HyperliquidFutures",
+        14 => "BinanceCoinFutures",
+        15 => "BitgetCoinFutures",
         _ => return format!("UNKNOWN({value})"),
     }
     .to_string()

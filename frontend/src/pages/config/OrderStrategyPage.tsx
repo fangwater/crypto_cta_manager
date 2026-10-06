@@ -60,9 +60,9 @@ export function OrderStrategyPage() {
               if (!item) return ''
               const algorithm = item.order_parameters.algorithm.toUpperCase()
               if (item.order_parameters.algorithm === 'chase') {
-                return `${algorithm} · 最小批次 ${item.order_parameters.chase.batch_floor_usdt} USDT`
+                return `${algorithm} · 最小批次 ${item.order_parameters.chase.batch_floor_usdt} 报价币`
               }
-              return `${algorithm} · ${orderParameterMeta.single_order_usdt.label} ${item.order_parameters.single_order_usdt} USDT`
+              return `${algorithm} · ${orderParameterMeta.single_order_usdt.label} ${item.order_parameters.single_order_usdt} 报价币`
             }}
           />
 

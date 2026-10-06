@@ -31,6 +31,8 @@ struct StoredExecAlgorithmSwitch {
     updated_at_us: i64,
     #[serde(default)]
     positions: BTreeMap<String, f64>,
+    #[serde(default)]
+    inverse_notionals: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,9 +155,12 @@ impl RedisRuntime {
                 );
             }
         }
-        if source.venue != "binance-futures" && source.venue != "okex-futures" {
+        if !matches!(
+            source.venue.as_str(),
+            "binance-futures" | "binance-coin-futures" | "okex-futures"
+        ) {
             bail!(
-                "source {} venue must be binance-futures or okex-futures",
+                "source {} venue must be binance-futures, binance-coin-futures or okex-futures",
                 source.id
             );
         }
@@ -164,6 +169,19 @@ impl RedisRuntime {
             "strategy_names" | "removed_strategy_names" | POSITION_CLOSE_STRATEGY_NAME
         ) {
             bail!("strategy_name is reserved");
+        }
+        if source.venue == "binance-coin-futures" {
+            for symbol in targets.keys().chain(symbol_order_parameters.keys()) {
+                crate::order_config::binance_coin_wire_symbol(symbol)
+                    .map_err(anyhow::Error::msg)?;
+            }
+        } else if source.venue == "binance-futures" {
+            for symbol in targets.keys().chain(symbol_order_parameters.keys()) {
+                anyhow::ensure!(
+                    symbol.ends_with("USDT") || symbol.ends_with("USDC"),
+                    "USD-M perpetual symbol must end with USDT or USDC: {symbol}"
+                );
+            }
         }
 
         let runtime_targets =
@@ -336,6 +354,7 @@ impl RedisRuntime {
                         requested_at_us: updated_at_us,
                         updated_at_us,
                         positions: BTreeMap::new(),
+                        inverse_notionals: BTreeMap::new(),
                     };
                     pipe.set(
                         &switch_index_key,

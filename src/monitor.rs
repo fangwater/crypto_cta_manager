@@ -1049,10 +1049,16 @@ fn is_terminal_raw_status_code(status: i16) -> bool {
 }
 
 fn normalize_symbol(raw: &str) -> String {
-    raw.chars()
+    let symbol: String = raw
+        .chars()
         .filter(|ch| *ch != '-' && *ch != '_')
         .flat_map(char::to_uppercase)
-        .collect()
+        .collect();
+    if symbol.ends_with("USDPERP") {
+        symbol[..symbol.len() - "PERP".len()].to_string()
+    } else {
+        symbol
+    }
 }
 
 fn sanitize_thread_name(value: &str) -> String {
@@ -1614,6 +1620,8 @@ mod tests {
     fn market_symbols_are_normalized() {
         assert_eq!(normalize_symbol("btc-usdt"), "BTCUSDT");
         assert_eq!(normalize_symbol("eth_usdt"), "ETHUSDT");
+        assert_eq!(normalize_symbol("BTCUSD_PERP"), "BTCUSD");
+        assert_eq!(normalize_symbol("BTCUSDC"), "BTCUSDC");
     }
 
     #[test]

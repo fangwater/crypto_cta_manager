@@ -1132,7 +1132,7 @@ function NavPage() {
                 />
                 <SourceDatum
                   label="累计费后净值"
-                  value={`${money(source.nav_change_after_fee_quote)} USDT`}
+                  value={`${money(source.nav_change_after_fee_quote)} 报价币`}
                   tone={signedClass(source.nav_change_after_fee_quote)}
                 />
                 {okx && (
@@ -1187,7 +1187,7 @@ function LiquidityExecutionAnalysis({ totals }: { totals: NavTotals }) {
           <h2 id="execution-title">区间成交执行分析</h2>
         </div>
         <span className="generation-time">
-          {integer(totals.fill_count)} 笔 · {money(totals.volume_quote)} USDT
+          {integer(totals.fill_count)} 笔 · {money(totals.volume_quote)} 报价币
         </span>
       </div>
       <div className="liquidity-analysis">
@@ -1222,7 +1222,7 @@ function LiquidityTableCell({ count, volume }: { count: number; volume: number }
   return (
     <td className="numeric mono liquidity-cell">
       <strong>{integer(count)} 笔</strong>
-      <small>{money(volume)} USDT</small>
+      <small>{money(volume)} 报价币</small>
     </td>
   )
 }
@@ -1245,7 +1245,7 @@ function SummaryItem({
         <span>{label}</span>
         <strong className={signed && value !== null ? signedClass(value) : ''}>
           {value === null ? '--' : money(value)}{' '}
-          {value !== null && <small>USDT</small>}
+          {value !== null && <small>报价币</small>}
         </strong>
       </div>
     </div>
@@ -1275,8 +1275,8 @@ function SymbolTableRow({
         >
           {selected && <Check size={13} />}
         </button>
-        <strong className="symbol-name">{row.symbol.replace(/USDT$/, '')}</strong>
-        <span className="symbol-quote">/USDT</span>
+        <strong className="symbol-name">{row.symbol.replace(/(?:USDT|USDC|USD)$/, '')}</strong>
+        <span className="symbol-quote">/{row.symbol.match(/(?:USDT|USDC|USD)$/)?.[0] ?? ''}</span>
       </td>
       <td className={`numeric mono ${signedClass(row.net_quantity)}`}>
         {quantity(row.net_quantity)}

@@ -282,10 +282,10 @@ export function AccountOverviewPage() {
                     <div className="bg-amber-500" style={{ width: `${takerRatio * 100}%` }} />
                   </div>
                   <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-                    <span>Maker {money(report?.maker_volume_quote ?? 0)} USDT / {report?.maker_fill_count ?? 0} 笔</span>
-                    <span>Taker {money(report?.taker_volume_quote ?? 0)} USDT / {report?.taker_fill_count ?? 0} 笔</span>
+                    <span>Maker {money(report?.maker_volume_quote ?? 0)} 报价币 / {report?.maker_fill_count ?? 0} 笔</span>
+                    <span>Taker {money(report?.taker_volume_quote ?? 0)} 报价币 / {report?.taker_fill_count ?? 0} 笔</span>
                     {(report?.unknown_liquidity_fill_count ?? 0) > 0 && (
-                      <span>Unknown {money(report?.unknown_liquidity_volume_quote ?? 0)} USDT / {report?.unknown_liquidity_fill_count ?? 0} 笔</span>
+                      <span>Unknown {money(report?.unknown_liquidity_volume_quote ?? 0)} 报价币 / {report?.unknown_liquidity_fill_count ?? 0} 笔</span>
                     )}
                   </div>
                 </div>
@@ -560,7 +560,7 @@ function AccountMeta({
         )}
         <span>最近成交 {timestampUs(report.last_fill_ts_us)}</span>
         <span className={signedClass(report.nav_change_after_fee_quote)}>
-          累计费后 {money(report.nav_change_after_fee_quote)} USDT
+          累计费后 {money(report.nav_change_after_fee_quote)} 报价币
         </span>
       </CardContent>
     </Card>

@@ -50,6 +50,7 @@ struct ExchangeCredentials {
     api_secret: String,
     account_mode: AccountMode,
     fapi_url: String,
+    dapi_url: String,
     papi_url: String,
     okx_base_url: String,
     okx_passphrase: Option<String>,
@@ -59,6 +60,64 @@ struct ExchangeCredentials {
 enum AccountMode {
     Standard,
     Unified,
+}
+
+struct BinanceAccountRoutes<'a> {
+    base: &'a str,
+    leverage: &'static str,
+    position_risk: &'static str,
+    account: &'static str,
+    commission: &'static str,
+}
+
+fn binance_account_routes<'a>(
+    credentials: &'a ExchangeCredentials,
+    venue: &str,
+) -> BinanceAccountRoutes<'a> {
+    match (venue == "binance-coin-futures", credentials.account_mode) {
+        (true, AccountMode::Standard) => BinanceAccountRoutes {
+            base: &credentials.dapi_url,
+            leverage: "/dapi/v1/leverage",
+            position_risk: "/dapi/v1/positionRisk",
+            account: "/dapi/v1/account",
+            commission: "/dapi/v1/commissionRate",
+        },
+        (true, AccountMode::Unified) => BinanceAccountRoutes {
+            base: &credentials.papi_url,
+            leverage: "/papi/v1/cm/leverage",
+            position_risk: "/papi/v1/cm/positionRisk",
+            account: "/papi/v1/cm/account",
+            commission: "/papi/v1/cm/commissionRate",
+        },
+        (false, AccountMode::Standard) => BinanceAccountRoutes {
+            base: &credentials.fapi_url,
+            leverage: "/fapi/v1/leverage",
+            position_risk: "/fapi/v2/positionRisk",
+            account: "/fapi/v1/accountConfig",
+            commission: "/fapi/v1/commissionRate",
+        },
+        (false, AccountMode::Unified) => BinanceAccountRoutes {
+            base: &credentials.papi_url,
+            leverage: "/papi/v1/um/leverage",
+            position_risk: "/papi/v1/um/positionRisk",
+            account: "/papi/v1/um/account",
+            commission: "/papi/v1/um/commissionRate",
+        },
+    }
+}
+
+fn binance_request_symbol(venue: &str, symbol: &str) -> Result<String> {
+    if venue == "binance-coin-futures" {
+        crate::order_config::binance_coin_wire_symbol(symbol).map_err(anyhow::Error::msg)
+    } else {
+        let symbol =
+            crate::order_config::normalize_exec_symbol(symbol).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            symbol.ends_with("USDT") || symbol.ends_with("USDC"),
+            "USD-M perpetual symbol must end with USDT or USDC: {symbol}"
+        );
+        Ok(symbol)
+    }
 }
 
 pub async fn set_symbol_contract_leverage(
@@ -75,7 +134,7 @@ pub async fn set_symbol_contract_leverage(
         .context("failed to build exchange leverage HTTP client")?;
 
     match source.venue.as_str() {
-        "binance-futures" => {
+        "binance-futures" | "binance-coin-futures" => {
             set_binance_symbol_leverage(&client, source, &credentials, request).await
         }
         "okex-futures" => set_okx_symbol_leverage(&client, source, &credentials, request).await,
@@ -90,7 +149,7 @@ pub async fn get_symbol_contract_leverage(
     source: &SourceConfig,
     symbol: &str,
 ) -> Result<SymbolContractLeverageResult> {
-    let symbol = symbol.trim().to_ascii_uppercase();
+    let symbol = crate::order_config::normalize_exec_symbol(symbol).map_err(anyhow::Error::msg)?;
     validate_contract_symbol(&symbol).map_err(anyhow::Error::msg)?;
     let credentials = load_source_credentials(source)?;
     let client = Client::builder()
@@ -100,7 +159,7 @@ pub async fn get_symbol_contract_leverage(
         .context("failed to build exchange leverage HTTP client")?;
 
     match source.venue.as_str() {
-        "binance-futures" => {
+        "binance-futures" | "binance-coin-futures" => {
             get_binance_symbol_leverage(&client, source, &credentials, &symbol).await
         }
         "okex-futures" => get_okx_symbol_leverage(&client, source, &credentials, &symbol).await,
@@ -123,7 +182,7 @@ pub async fn get_exchange_fee_rates(
         .context("failed to build exchange fee HTTP client")?;
 
     match source.venue.as_str() {
-        "binance-futures" => {
+        "binance-futures" | "binance-coin-futures" => {
             get_binance_exchange_fee_rates(&client, source, &credentials, symbol).await
         }
         "okex-futures" => get_okx_exchange_fee_rates(&client, source, &credentials, symbol).await,
@@ -140,6 +199,7 @@ pub fn required_trading_account_mode(venue: &str) -> &'static str {
         "okex-futures" => {
             "OKX unified account mode (acctLv 3 multi-currency margin or 4 portfolio margin)"
         }
+        "binance-coin-futures" => "Binance COIN-M account",
         _ => "Binance USD-M Multi-Assets Mode",
     }
 }
@@ -217,17 +277,16 @@ async fn set_binance_symbol_leverage(
     credentials: &ExchangeCredentials,
     request: &SaveSymbolContractLeverageRequest,
 ) -> Result<SymbolContractLeverageResult> {
-    let (base, path) = match credentials.account_mode {
-        AccountMode::Standard => (credentials.fapi_url.as_str(), "/fapi/v1/leverage"),
-        AccountMode::Unified => (credentials.papi_url.as_str(), "/papi/v1/um/leverage"),
-    };
+    let routes = binance_account_routes(credentials, &source.venue);
+    let (base, path) = (routes.base, routes.leverage);
+    let wire_symbol = binance_request_symbol(&source.venue, &request.symbol)?;
     let mut params = BTreeMap::new();
     params.insert(
         "leverage".to_string(),
         request.contract_leverage.to_string(),
     );
     params.insert("recvWindow".to_string(), "5000".to_string());
-    params.insert("symbol".to_string(), request.symbol.clone());
+    params.insert("symbol".to_string(), wire_symbol);
     params.insert("timestamp".to_string(), now_ms().to_string());
     let query = encode_query(&params);
     let signature = sign_hmac_hex(&credentials.api_secret, &query)?;
@@ -273,13 +332,12 @@ async fn get_binance_symbol_leverage(
     credentials: &ExchangeCredentials,
     symbol: &str,
 ) -> Result<SymbolContractLeverageResult> {
-    let (base, path) = match credentials.account_mode {
-        AccountMode::Standard => (credentials.fapi_url.as_str(), "/fapi/v2/positionRisk"),
-        AccountMode::Unified => (credentials.papi_url.as_str(), "/papi/v1/um/positionRisk"),
-    };
+    let routes = binance_account_routes(credentials, &source.venue);
+    let (base, path) = (routes.base, routes.position_risk);
+    let wire_symbol = binance_request_symbol(&source.venue, symbol)?;
     let mut params = BTreeMap::new();
     params.insert("recvWindow".to_string(), "5000".to_string());
-    params.insert("symbol".to_string(), symbol.to_string());
+    params.insert("symbol".to_string(), wire_symbol.clone());
     params.insert("timestamp".to_string(), now_ms().to_string());
     let query = encode_query(&params);
     let signature = sign_hmac_hex(&credentials.api_secret, &query)?;
@@ -307,7 +365,7 @@ async fn get_binance_symbol_leverage(
             truncate(&body, 300)
         );
     }
-    let contract_leverage = parse_binance_symbol_leverage(&body, symbol)?;
+    let contract_leverage = parse_binance_symbol_leverage(&body, &wire_symbol)?;
     Ok(SymbolContractLeverageResult {
         source_id: source.id.clone(),
         symbol: symbol.to_string(),
@@ -325,18 +383,9 @@ async fn get_binance_exchange_fee_rates(
     credentials: &ExchangeCredentials,
     symbol: &str,
 ) -> Result<ExchangeFeeRatesResult> {
-    let (base, account_path, commission_path) = match credentials.account_mode {
-        AccountMode::Standard => (
-            credentials.fapi_url.as_str(),
-            "/fapi/v1/accountConfig",
-            "/fapi/v1/commissionRate",
-        ),
-        AccountMode::Unified => (
-            credentials.papi_url.as_str(),
-            "/papi/v1/um/account",
-            "/papi/v1/um/commissionRate",
-        ),
-    };
+    let routes = binance_account_routes(credentials, &source.venue);
+    let (base, account_path, commission_path) = (routes.base, routes.account, routes.commission);
+    let wire_symbol = binance_request_symbol(&source.venue, symbol)?;
     let (account_http_status, account_body) =
         binance_signed_get(client, credentials, base, account_path, BTreeMap::new()).await?;
     if !(200..300).contains(&account_http_status) {
@@ -350,7 +399,7 @@ async fn get_binance_exchange_fee_rates(
     let vip_tier = parse_binance_fee_tier(&account_body)?;
 
     let mut commission_params = BTreeMap::new();
-    commission_params.insert("symbol".to_string(), symbol.to_string());
+    commission_params.insert("symbol".to_string(), wire_symbol.clone());
     let (commission_http_status, commission_body) = binance_signed_get(
         client,
         credentials,
@@ -619,7 +668,7 @@ fn load_source_credentials(source: &SourceConfig) -> Result<ExchangeCredentials>
         bail!("native account APIs are disabled for RapidX sources; use the RapidX Exec adapter");
     }
     match source.venue.as_str() {
-        "binance-futures" => {
+        "binance-futures" | "binance-coin-futures" => {
             let api_key = required_env(&values, "BINANCE_API_KEY")?;
             let api_secret = required_env(&values, "BINANCE_API_SECRET")?;
             let account_mode = match required_env(&values, "BINANCE_ACCOUNT_MODE")?
@@ -636,6 +685,8 @@ fn load_source_credentials(source: &SourceConfig) -> Result<ExchangeCredentials>
                 account_mode,
                 fapi_url: optional_env(&values, "BINANCE_FAPI_URL")
                     .unwrap_or_else(|| "https://fapi.binance.com".to_string()),
+                dapi_url: optional_env(&values, "BINANCE_DAPI_URL")
+                    .unwrap_or_else(|| "https://dapi.binance.com".to_string()),
                 papi_url: optional_env(&values, "BINANCE_PAPI_URL")
                     .unwrap_or_else(|| "https://papi.binance.com".to_string()),
                 okx_base_url: String::new(),
@@ -647,6 +698,7 @@ fn load_source_credentials(source: &SourceConfig) -> Result<ExchangeCredentials>
             api_secret: required_env(&values, "OKX_API_SECRET")?,
             account_mode: AccountMode::Standard,
             fapi_url: String::new(),
+            dapi_url: String::new(),
             papi_url: String::new(),
             okx_base_url: optional_env(&values, "OKX_BASE_URL")
                 .unwrap_or_else(|| "https://www.okx.com".to_string()),
@@ -1083,6 +1135,177 @@ fn truncate(value: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn binance_account_apis_route_sign_and_restore_coin_symbols() {
+        use axum::{
+            Json, Router,
+            extract::{OriginalUri, State},
+            http::{HeaderMap, Method},
+        };
+        use std::sync::{Arc, Mutex};
+        type Calls = Arc<Mutex<Vec<(String, String, String, String)>>>;
+        async fn endpoint(
+            State(calls): State<Calls>,
+            method: Method,
+            OriginalUri(uri): OriginalUri,
+            headers: HeaderMap,
+        ) -> Json<serde_json::Value> {
+            let query = uri.query().unwrap_or_default().to_string();
+            let fields: BTreeMap<String, String> = Url::parse(&format!("http://fixture/?{query}"))
+                .unwrap()
+                .query_pairs()
+                .into_owned()
+                .collect();
+            calls.lock().unwrap().push((
+                method.to_string(),
+                uri.path().to_string(),
+                query,
+                headers["X-MBX-APIKEY"].to_str().unwrap().to_string(),
+            ));
+            let symbol = fields
+                .get("symbol")
+                .map(String::as_str)
+                .unwrap_or("BTCUSDT");
+            Json(if uri.path().ends_with("positionRisk") {
+                serde_json::json!([{"symbol": symbol, "leverage": "5"}])
+            } else if uri.path().ends_with("commissionRate") {
+                serde_json::json!({"symbol": symbol, "makerCommissionRate": "0.0002", "takerCommissionRate": "0.0005"})
+            } else if uri.path().ends_with("leverage") {
+                serde_json::json!({"symbol": symbol, "leverage": 5})
+            } else {
+                serde_json::json!({"feeTier": 3})
+            })
+        }
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().fallback(endpoint).with_state(calls.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = Client::builder().no_proxy().build().unwrap();
+        for (venue, mode, prefix, position_path, account_path, canonical, wire) in [
+            (
+                "binance-coin-futures",
+                AccountMode::Standard,
+                "/dapi/v1",
+                "/dapi/v1/positionRisk",
+                "/dapi/v1/account",
+                "BTCUSD",
+                "BTCUSD_PERP",
+            ),
+            (
+                "binance-coin-futures",
+                AccountMode::Unified,
+                "/papi/v1/cm",
+                "/papi/v1/cm/positionRisk",
+                "/papi/v1/cm/account",
+                "BTCUSD",
+                "BTCUSD_PERP",
+            ),
+            (
+                "binance-futures",
+                AccountMode::Standard,
+                "/fapi/v1",
+                "/fapi/v2/positionRisk",
+                "/fapi/v1/accountConfig",
+                "BTCUSDT",
+                "BTCUSDT",
+            ),
+            (
+                "binance-futures",
+                AccountMode::Unified,
+                "/papi/v1/um",
+                "/papi/v1/um/positionRisk",
+                "/papi/v1/um/account",
+                "BTCUSDT",
+                "BTCUSDT",
+            ),
+            (
+                "binance-futures",
+                AccountMode::Standard,
+                "/fapi/v1",
+                "/fapi/v2/positionRisk",
+                "/fapi/v1/accountConfig",
+                "BTCUSDC",
+                "BTCUSDC",
+            ),
+            (
+                "binance-futures",
+                AccountMode::Unified,
+                "/papi/v1/um",
+                "/papi/v1/um/positionRisk",
+                "/papi/v1/um/account",
+                "BTCUSDC",
+                "BTCUSDC",
+            ),
+        ] {
+            let source: SourceConfig = toml::from_str(&format!("id='fixture'\naccount='fixture'\nvenue='{venue}'\nrocksdb_path='/tmp/unused-coin-api-test'\n")).unwrap();
+            let credentials = ExchangeCredentials {
+                api_key: "fixture-key".into(),
+                api_secret: "fixture-secret".into(),
+                account_mode: mode,
+                fapi_url: base.clone(),
+                dapi_url: base.clone(),
+                papi_url: base.clone(),
+                okx_base_url: String::new(),
+                okx_passphrase: None,
+            };
+            let request = SaveSymbolContractLeverageRequest {
+                symbol: canonical.into(),
+                contract_leverage: 5,
+            };
+            assert_eq!(
+                set_binance_symbol_leverage(&client, &source, &credentials, &request)
+                    .await
+                    .unwrap()
+                    .contract_leverage,
+                5
+            );
+            assert_eq!(
+                get_binance_symbol_leverage(&client, &source, &credentials, canonical)
+                    .await
+                    .unwrap()
+                    .contract_leverage,
+                5
+            );
+            let fees = get_binance_exchange_fee_rates(&client, &source, &credentials, canonical)
+                .await
+                .unwrap();
+            assert_eq!(
+                (fees.vip_tier, fees.maker_fee_rate, fees.taker_fee_rate),
+                (3, 0.0002, 0.0005)
+            );
+            let batch = std::mem::take(&mut *calls.lock().unwrap());
+            assert_eq!(batch.len(), 4);
+            assert_eq!(batch[0].0, "POST");
+            for (index, (method, path, query, api_key)) in batch.iter().enumerate() {
+                assert_eq!(
+                    path,
+                    &[
+                        format!("{prefix}/leverage"),
+                        position_path.into(),
+                        account_path.into(),
+                        format!("{prefix}/commissionRate")
+                    ][index]
+                );
+                assert_eq!(api_key, "fixture-key");
+                if index > 0 {
+                    assert_eq!(method, "GET");
+                }
+                let (unsigned, signature) = query.rsplit_once("&signature=").unwrap();
+                assert_eq!(
+                    signature,
+                    sign_hmac_hex("fixture-secret", unsigned).unwrap()
+                );
+                if index != 2 {
+                    assert!(query.contains(&format!("symbol={wire}")));
+                }
+            }
+        }
+        server.abort();
+    }
 
     #[test]
     fn parses_export_assignments_without_printing_secrets() {

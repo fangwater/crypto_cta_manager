@@ -36,7 +36,7 @@ export function ContractLeverageToolbar({
         合约
         <Input
           value={symbol}
-          placeholder="BTCUSDT"
+          placeholder="BTCUSDT / BTCUSDC / BTCUSD"
           onChange={(event) => onSymbolChange(event.target.value.toUpperCase())}
         />
       </label>

@@ -677,6 +677,28 @@ strategy without routing its fills through `SYSTEM_POSITION_CLOSE`. Manager
 keeps a reconnecting Redis long connection, writes and rereads the runtime JSON there, then notifies
 `exec-pre-trade` over iceoryx. The 30s Redis poll remains the fallback.
 
+Binance COIN-M Exec sources use `venue = "binance-coin-futures"`. Set up a
+separate source, IPC namespace, environment and Redis prefix for that market;
+changing a USD-M symbol suffix does not move an existing source to COIN-M.
+Perpetual target symbols use `BTCUSDT` for USDT margin, `BTCUSDC` for USDC
+margin and `BTCUSD` for coin margin. USD-M sources accept USDT/USDC; COIN-M
+sources accept USD. Manager stores `BTCUSD` in target and symbol-template
+override keys, restores `BTCUSD_PERP` only at Binance API boundaries, and
+rejects delivery contracts and alias collisions.
+`qty = 0.01` is 0.01 BTC. Shares still multiply only this base quantity. Exec
+converts the target gap at the current COIN-M mark into contract counts using
+Manager's `contractSize` and venue quantity step. USD is the quote currency;
+collateral and settlement are in the underlying coin. Batch, POV and Chase use
+native STANDARD DAPI or UNIFIED PAPI CM execution. COIN-M Chase amendments keep
+the contract quantity and use `/dapi/v1/order` or `/papi/v1/cm/order`.
+
+COIN-M leverage queries/updates and commission queries restore the Binance wire
+symbol and use the same DAPI/CM routes. Factual NAV matches inverse fills by USD
+face value and reports trade PnL in USD (coin PnL converted at the close/mark).
+It does not include collateral revaluation, funding or transfers. Existing
+minute-kline theoretical analysis and the USDT/BFUSD live-equity widget remain
+USD-M only; they do not fabricate a COIN-M estimate or collateral total.
+
 Before publishing any non-zero target, Manager checks that source's live account
 mode with its Exec `env.sh`. A Binance USD-M source must use Standard API mode
 with Multi-Assets Mode enabled (`/fapi/v1/accountConfig`). An OKX source must be

@@ -252,7 +252,7 @@ function AccountCard({
         <div className="grid grid-cols-2 gap-3 text-sm">
           <Metric
             label="累计费后净值"
-            value={report ? `${money(report.nav_change_after_fee_quote)} USDT` : '--'}
+            value={report ? `${money(report.nav_change_after_fee_quote)} 报价币` : '--'}
             tone={report ? signedClass(report.nav_change_after_fee_quote) : ''}
           />
           <Metric

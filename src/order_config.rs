@@ -415,6 +415,16 @@ impl ChaseParameterOverrides {
 }
 
 pub fn validate_exec_symbol(symbol: &str) -> std::result::Result<(), String> {
+    let is_delivery = symbol.len() > 9
+        && symbol.as_bytes()[symbol.len() - 6..]
+            .iter()
+            .all(u8::is_ascii_digit)
+        && symbol
+            .get(..symbol.len() - 6)
+            .is_some_and(|root| root.ends_with("USD"));
+    if is_delivery {
+        return Err(format!("only perpetual contracts are supported: {symbol}"));
+    }
     if symbol.is_empty()
         || !symbol.chars().all(|ch| {
             if ch.is_ascii() {
@@ -427,6 +437,57 @@ pub fn validate_exec_symbol(symbol: &str) -> std::result::Result<(), String> {
         return Err(format!("invalid symbol: {symbol}"));
     }
     Ok(())
+}
+
+/// Perpetual targets use USD / USDC / USDT; Binance's PERP suffix is wire-only.
+pub fn normalize_exec_symbol(raw: &str) -> std::result::Result<String, String> {
+    let symbol = raw.trim().to_uppercase();
+    let symbol = if let Some((root, suffix)) = symbol.split_once('_') {
+        if root.len() > 3
+            && root.ends_with("USD")
+            && root.bytes().all(|ch| ch.is_ascii_alphanumeric())
+            && suffix == "PERP"
+        {
+            root.to_string()
+        } else {
+            return Err(format!("invalid symbol: {raw}"));
+        }
+    } else {
+        symbol
+    };
+    let symbol = if symbol.ends_with("USDPERP") {
+        symbol[..symbol.len() - "PERP".len()].to_string()
+    } else {
+        symbol
+    };
+    validate_exec_symbol(&symbol)?;
+    Ok(symbol)
+}
+
+pub fn binance_coin_wire_symbol(symbol: &str) -> std::result::Result<String, String> {
+    let symbol = normalize_exec_symbol(symbol)?;
+    if !symbol.ends_with("USD")
+        || symbol.len() <= 3
+        || !symbol.bytes().all(|ch| ch.is_ascii_alphanumeric())
+    {
+        return Err(format!(
+            "COIN-M perpetual symbol must end with USD, e.g. BTCUSD: {symbol}"
+        ));
+    }
+    Ok(format!("{symbol}_PERP"))
+}
+
+pub fn normalize_symbol_map<T>(
+    values: BTreeMap<String, T>,
+) -> std::result::Result<BTreeMap<String, T>, String> {
+    let mut normalized = BTreeMap::new();
+    for (raw, value) in values {
+        let symbol = normalize_exec_symbol(&raw)?;
+        if normalized.insert(symbol.clone(), value).is_some() {
+            return Err(format!("duplicate normalized symbol: {symbol}"));
+        }
+    }
+    Ok(normalized)
 }
 
 pub fn validate_symbol_order_parameter_overrides(
@@ -986,6 +1047,20 @@ mod tests {
             target_tolerance_usdt: 10.0,
             ..OrderParameters::default()
         }
+    }
+
+    #[test]
+    fn coin_symbols_roundtrip_between_catalog_and_exchange_contracts() {
+        assert_eq!(normalize_exec_symbol(" btcusd_perp ").unwrap(), "BTCUSD");
+        assert_eq!(binance_coin_wire_symbol("BTCUSD").unwrap(), "BTCUSD_PERP");
+        assert_eq!(normalize_exec_symbol("btcusdc").unwrap(), "BTCUSDC");
+        assert_eq!(normalize_exec_symbol("btcusdt").unwrap(), "BTCUSDT");
+        assert!(binance_coin_wire_symbol("ETHUSD261225").is_err());
+        assert!(normalize_exec_symbol("ETHUSD_261225").is_err());
+        assert!(binance_coin_wire_symbol("BTCUSDT").is_err());
+        assert!(binance_coin_wire_symbol("BTCUSDC").is_err());
+        assert!(normalize_exec_symbol("BTC_USDT").is_err());
+        assert!(normalize_exec_symbol("BTCUSD_PERP_EXTRA").is_err());
     }
 
     #[test]

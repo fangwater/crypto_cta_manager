@@ -2084,8 +2084,11 @@ async fn save_position_strategy(
     State(state): State<WebState>,
     user: Option<Extension<AuthUser>>,
     headers: HeaderMap,
-    Json(request): Json<SavePositionStrategyRequest>,
+    Json(mut request): Json<SavePositionStrategyRequest>,
 ) -> Result<Response, ApiError> {
+    if let Err(message) = request.normalize_symbols() {
+        return Ok(bad_request(message));
+    }
     let position_strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
     let previous = position_strategies
         .iter()
@@ -2693,12 +2696,12 @@ async fn get_account_exchange_fee_rates(
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
-    let symbol = query
-        .symbol
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_uppercase();
+    let symbol = match crate::order_config::normalize_exec_symbol(
+        query.symbol.as_deref().unwrap_or_default(),
+    ) {
+        Ok(symbol) => symbol,
+        Err(error) => return Ok(bad_request(error)),
+    };
     if symbol.is_empty() {
         return Ok(bad_request("symbol is required".to_string()));
     }
@@ -2867,12 +2870,12 @@ async fn get_account_symbol_contract_leverage(
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
-    let symbol = query
-        .symbol
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_uppercase();
+    let symbol = match crate::order_config::normalize_exec_symbol(
+        query.symbol.as_deref().unwrap_or_default(),
+    ) {
+        Ok(symbol) => symbol,
+        Err(error) => return Ok(bad_request(error)),
+    };
     if symbol.is_empty() {
         return Ok(bad_request("symbol is required".to_string()));
     }
@@ -2931,7 +2934,10 @@ async fn save_account_symbol_contract_leverage(
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
-    request.symbol = request.symbol.trim().to_ascii_uppercase();
+    request.symbol = match crate::order_config::normalize_exec_symbol(&request.symbol) {
+        Ok(symbol) => symbol,
+        Err(error) => return Ok(bad_request(error)),
+    };
     if let Err(error) = strategy_catalog::validate_contract_symbol(&request.symbol) {
         return Ok(bad_request(error));
     }

@@ -14,7 +14,10 @@ import { Button } from './ui/Button'
 import { Input } from './ui/Field'
 
 function normalizeSymbol(raw: string) {
-  return raw.trim().toUpperCase()
+  const symbol = raw.trim().toUpperCase()
+  return /^[A-Z0-9]+USD_?PERP$/.test(symbol)
+    ? symbol.replace(/_?PERP$/, '')
+    : symbol
 }
 
 function directionMeta(value: number) {
@@ -141,6 +144,7 @@ export function TargetPositionsEditor({
       <div className="flex flex-col gap-3 border-b border-border-soft bg-surface/80 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-sm font-medium text-ink">目标仓位</p>
+          <p className="text-xs text-subtle">永续合约：USD 币本位，USDC / USDT 对应本位；数量使用币数量，例如 0.01 BTC。</p>
           <Badge tone="neutral">{stats.total} 品种</Badge>
           <Badge tone="brand">{stats.active} 非零</Badge>
           {stats.long > 0 && <Badge tone="success">{stats.long} 多</Badge>}
@@ -278,7 +282,7 @@ export function TargetPositionsEditor({
             <Input
               value={newSymbol}
               onChange={(event) => setNewSymbol(event.target.value.toUpperCase())}
-              placeholder="例如 BTCUSDT"
+              placeholder="例如 BTCUSDT / BTCUSDC / BTCUSD"
               className="font-mono"
             />
           </label>

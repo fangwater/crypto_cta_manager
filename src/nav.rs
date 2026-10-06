@@ -482,15 +482,23 @@ struct QuantityFifo {
     longs: VecDeque<Lot>,
     shorts: VecDeque<Lot>,
     realized_pnl: f64,
+    // Inverse contracts conserve USD face value; fill-time base quantities
+    // change with price and cannot be matched directly against each other.
+    inverse: bool,
 }
 
 impl QuantityFifo {
     fn apply_fill(&mut self, side: Side, price: f64, quantity: f64) {
-        let (realized_pnl, remaining_quantity) = match side {
-            Side::Buy => close_fifo(&mut self.shorts, price, quantity, -1.0),
-            Side::Sell => close_fifo(&mut self.longs, price, quantity, 1.0),
+        let quantity = if self.inverse {
+            quantity * price
+        } else {
+            quantity
         };
-        if remaining_quantity > 0.0 {
+        let (realized_pnl, remaining_quantity) = match side {
+            Side::Buy => close_fifo(&mut self.shorts, price, quantity, -1.0, self.inverse),
+            Side::Sell => close_fifo(&mut self.longs, price, quantity, 1.0, self.inverse),
+        };
+        if remaining_quantity > if self.inverse { 1e-10 } else { 0.0 } {
             let lot = Lot {
                 entry_price: price,
                 quantity: remaining_quantity,
@@ -506,21 +514,25 @@ impl QuantityFifo {
     fn floating_pnl(&self, mark_price: f64) -> f64 {
         self.longs
             .iter()
-            .map(|lot| (mark_price - lot.entry_price) * lot.quantity)
-            .chain(
-                self.shorts
-                    .iter()
-                    .map(|lot| (lot.entry_price - mark_price) * lot.quantity),
-            )
+            .map(|lot| {
+                (mark_price - lot.entry_price) * lot.quantity
+                    / if self.inverse { lot.entry_price } else { 1.0 }
+            })
+            .chain(self.shorts.iter().map(|lot| {
+                (lot.entry_price - mark_price) * lot.quantity
+                    / if self.inverse { lot.entry_price } else { 1.0 }
+            }))
             .sum()
     }
 
-    fn long_quantity(&self) -> f64 {
-        self.longs.iter().map(|lot| lot.quantity).sum()
+    fn long_quantity(&self, mark_price: f64) -> f64 {
+        self.longs.iter().map(|lot| lot.quantity).sum::<f64>()
+            / if self.inverse { mark_price } else { 1.0 }
     }
 
-    fn short_quantity(&self) -> f64 {
-        self.shorts.iter().map(|lot| lot.quantity).sum()
+    fn short_quantity(&self, mark_price: f64) -> f64 {
+        self.shorts.iter().map(|lot| lot.quantity).sum::<f64>()
+            / if self.inverse { mark_price } else { 1.0 }
     }
 }
 
@@ -557,7 +569,10 @@ impl VenueState {
         Self {
             venue_code: event.venue_code,
             venue: event.venue.clone(),
-            fifo: QuantityFifo::default(),
+            fifo: QuantityFifo {
+                inverse: matches!(event.venue_code, 14 | 15),
+                ..Default::default()
+            },
             initial_quantity: 0.0,
             initial_reference_price: None,
             initial_reference_price_source: None,
@@ -583,7 +598,10 @@ impl VenueState {
         reference_price: f64,
         reference_price_source: InitialReferencePriceSource,
     ) -> Self {
-        let mut fifo = QuantityFifo::default();
+        let mut fifo = QuantityFifo {
+            inverse: matches!(venue_code, 14 | 15),
+            ..Default::default()
+        };
         let side = if quantity > 0.0 {
             Side::Buy
         } else {
@@ -686,8 +704,8 @@ impl VenueState {
             None => (self.latest_fill_price, MarkPriceSource::InitialSnapshot),
         };
         let floating_pnl = self.fifo.floating_pnl(mark_price);
-        let long_quantity = self.fifo.long_quantity();
-        let short_quantity = self.fifo.short_quantity();
+        let long_quantity = self.fifo.long_quantity(mark_price);
+        let short_quantity = self.fifo.short_quantity(mark_price);
         let net_quantity = long_quantity - short_quantity;
         let realized_before_fee = self.fifo.realized_pnl;
         let realized_after_fee = realized_before_fee - self.estimated_fee_quote;
@@ -2810,6 +2828,7 @@ fn close_fifo(
     close_price: f64,
     mut quantity: f64,
     direction: f64,
+    inverse: bool,
 ) -> (f64, f64) {
     let mut realized_pnl = 0.0;
     while quantity > 0.0 {
@@ -2817,10 +2836,11 @@ fn close_fifo(
             break;
         };
         let matched_quantity = quantity.min(lot.quantity);
-        realized_pnl += direction * (close_price - lot.entry_price) * matched_quantity;
+        realized_pnl += direction * (close_price - lot.entry_price) * matched_quantity
+            / if inverse { lot.entry_price } else { 1.0 };
         quantity -= matched_quantity;
         lot.quantity -= matched_quantity;
-        if lot.quantity == 0.0 {
+        if lot.quantity == 0.0 || (inverse && lot.quantity.abs() <= 1e-10) {
             lots.pop_front();
         }
     }
@@ -3125,6 +3145,44 @@ mod tests {
             (actual - expected).abs() < 1e-9,
             "actual={actual}, expected={expected}"
         );
+    }
+
+    #[test]
+    fn inverse_fifo_closes_equal_contract_face_at_different_prices() {
+        let report = estimate(vec![
+            event(1, "BTCUSD", 14, 1, 50000.0, 100.0 / 50000.0),
+            event(2, "BTCUSD", 14, 2, 60000.0, 100.0 / 60000.0),
+        ]);
+        let venue = &report.symbols[0].venues[0];
+        assert_close(venue.totals.realized_pnl_before_fee_quote, 20.0);
+        assert_close(venue.totals.floating_pnl_quote, 0.0);
+        assert_close(venue.long_quantity, 0.0);
+        assert_close(venue.short_quantity, 0.0);
+        assert_close(venue.totals.volume_quote, 200.0);
+    }
+
+    #[test]
+    fn inverse_fifo_revalues_base_quantity_and_handles_short_reversal() {
+        let mut fifo = QuantityFifo {
+            inverse: true,
+            ..Default::default()
+        };
+        fifo.apply_fill(Side::Sell, 50000.0, 200.0 / 50000.0);
+        assert_close(fifo.short_quantity(40000.0), 200.0 / 40000.0);
+        assert_close(fifo.floating_pnl(40000.0), 40.0);
+        fifo.apply_fill(Side::Buy, 40000.0, 300.0 / 40000.0);
+        assert_close(fifo.realized_pnl, 40.0);
+        assert_close(fifo.short_quantity(60000.0), 0.0);
+        assert_close(fifo.long_quantity(60000.0), 100.0 / 60000.0);
+        assert_close(fifo.floating_pnl(60000.0), 50.0);
+        let snapshot = VenueState::from_initial_position(
+            14,
+            "BINANCE_COIN_FUTURES".to_string(),
+            100.0 / 50000.0,
+            50000.0,
+            InitialReferencePriceSource::Configured,
+        );
+        assert_close(snapshot.fifo.long_quantity(60000.0), 100.0 / 60000.0);
     }
 
     #[test]
