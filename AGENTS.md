@@ -353,6 +353,17 @@ as loading. Preserve source/symbol/venue FIFO isolation and exact start-boundary
 behavior. See `docs/jp_meta_nav_performance_20261006.md` for measured costs and
 unchanged financial results.
 
+The latest-range Kline latency fix was deployed to jp-meta on 2026-10-06 as
+release `20261006T034959Z`, runtime `6518a30`, with the existing `3a2e6c0`
+frontend. Rolling-minute budgeting replaced per-request pacing. A fresh trade04
+1D query pulled 81 requests/347 candles and returned 1,437 theoretical points
+with zero missing prices in 666 ms; repeats made no exchange requests. Desktop
+and mobile checks drew both theoretical series and verified automatic recovery
+when the remaining minute budget was exhausted. Cold target indexing still took
+139,450 ms. Only Manager restarted; 87 protected processes and all 24 trading
+TOMLs remained unchanged. See the same performance document for before/after
+measurement conditions.
+
 The theoretical target model freezes `delta = target - previous distinct target`.
 Each delta owns the first five complete wall-clock minutes after publication,
 excluding a partial arrival minute. Each traded minute price is Binance quote
