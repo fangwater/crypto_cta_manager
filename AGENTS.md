@@ -21,6 +21,17 @@ repository and follow its own `AGENTS.md`. Keep the projects operationally
 independent: do not add relative-path or shared-runtime coupling from Manager
 to `mkt_signal`.
 
+## Working Directory
+
+Work directly in `/home/fanghaizhou/crypto_cta_manager`. Make edits, run checks,
+and prepare deployments in this existing checkout. Do not create additional Git
+worktrees or alternate project checkouts unless the operator explicitly requests
+one. Preserve existing and concurrent edits; merge overlapping changes instead
+of overwriting them or resetting the working directory.
+
+Do not put project checkouts or Rust build caches under `/tmp`. Use the existing
+local `.cargo/config.toml` and its NVMe target directory for builds.
+
 ## Build And Test
 
 Use the standard Rust workflow:

@@ -1,5 +1,6 @@
 pub mod account_ipc;
 pub mod acquisition_cost;
+pub mod analysis;
 pub mod auth;
 pub mod bbo;
 pub mod bfusd_auto;

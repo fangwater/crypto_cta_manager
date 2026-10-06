@@ -4,8 +4,8 @@ use crate::config::AppConfig;
 use crate::kline::{KlineStore, MINUTE_US, first_complete_open, now_us};
 use crate::position_archive::{PositionArchive, PositionUpdateMsg};
 use anyhow::{Context, Result, bail, ensure};
+use rayon::prelude::*;
 use serde::Serialize;
-use sqlx::postgres::PgPool;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -72,24 +72,7 @@ pub struct VirtualDelta {
     pub legacy_fee: bool,
     pub target_signal: i32,
 }
-#[derive(Debug, PartialEq)]
-pub struct VirtualPrices {
-    pub prices: [Option<f64>; SAMPLE_COUNT],
-    pub zero_volume_skipped_sample_count: usize,
-    pub all_zero_volume_fallback: bool,
-}
-impl VirtualPrices {
-    pub fn priced_sample_count(&self) -> usize {
-        self.prices.iter().flatten().count()
-    }
-    pub fn average(&self) -> Option<f64> {
-        let count = self.priced_sample_count();
-        (count > 0).then(|| self.prices.iter().flatten().sum::<f64>() / count as f64)
-    }
-    pub fn first_price(&self) -> Option<f64> {
-        self.prices.iter().flatten().copied().next()
-    }
-}
+pub use crate::kline::MinutePrices as VirtualPrices;
 
 impl VirtualDelta {
     pub fn open_ts_us(&self, index: usize) -> i64 {
@@ -102,34 +85,28 @@ impl VirtualDelta {
         if self.venue != "binance-futures" {
             return Ok(None);
         }
-        let mut prices = [None; SAMPLE_COUNT];
-        let mut closes = [0.0; SAMPLE_COUNT];
-        let mut zero_volume_skipped_sample_count = 0;
-        for (index, price) in prices.iter_mut().enumerate() {
-            let Some(candle) = store.get(&self.symbol, self.open_ts_us(index))? else {
-                return Ok(None);
-            };
-            closes[index] = candle.close;
-            if candle.base_volume == 0.0 && candle.quote_volume == 0.0 {
-                zero_volume_skipped_sample_count += 1;
-                continue;
-            }
-            let Some(execution_price) = candle.vwap() else {
-                return Ok(None);
-            };
-            *price = Some(execution_price);
-        }
-        let all_zero_volume_fallback = zero_volume_skipped_sample_count == SAMPLE_COUNT;
-        if all_zero_volume_fallback {
-            prices = closes.map(Some);
-            zero_volume_skipped_sample_count = 0;
-        }
-        Ok(Some(VirtualPrices {
-            prices,
-            zero_volume_skipped_sample_count,
-            all_zero_volume_fallback,
-        }))
+        store.window_prices(&self.symbol, self.open_ts_us(0))
     }
+}
+
+#[derive(Default)]
+struct MarketDeltaIndex {
+    positions: Vec<usize>,
+    cumulative_quantity: Vec<f64>,
+}
+
+type MarketKey = (String, String, String);
+type CarriedInventory = BTreeMap<MarketKey, f64>;
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct CurveQueryKey {
+    start: i64,
+    end: i64,
+    max_points: usize,
+    sources: Vec<String>,
+    fees: Vec<(String, u64)>,
+    target_revision: u64,
+    candle_revision: u64,
 }
 
 #[derive(Default)]
@@ -138,6 +115,8 @@ struct TargetCacheState {
     latest: BTreeMap<(String, String), LatestTargets>,
     deltas: Vec<VirtualDelta>,
     tail_deltas: Vec<VirtualDelta>,
+    markets: BTreeMap<MarketKey, MarketDeltaIndex>,
+    tail_markets: BTreeMap<MarketKey, MarketDeltaIndex>,
     revision: u64,
 }
 
@@ -160,6 +139,7 @@ pub struct TheoreticalTargetCache {
     processed_messages: AtomicU64,
     error: Mutex<Option<String>>,
     changed: tokio::sync::Notify,
+    curves: crate::analysis::QueryCache<CurveQueryKey, TheoreticalNavTimeline>,
 }
 impl TheoreticalTargetCache {
     pub fn new(config: Arc<AppConfig>, archive: Arc<PositionArchive>) -> Arc<Self> {
@@ -172,6 +152,7 @@ impl TheoreticalTargetCache {
             processed_messages: AtomicU64::new(0),
             error: Mutex::new(None),
             changed: tokio::sync::Notify::new(),
+            curves: crate::analysis::QueryCache::new(16),
         })
     }
     pub fn status(&self) -> TargetHistoryStatus {
@@ -241,6 +222,7 @@ impl TheoreticalTargetCache {
                 Ok(())
             })?;
         state.tail_deltas = tail.deltas;
+        state.tail_markets = tail.markets;
         state.revision = revision;
         self.ready.store(true, Ordering::Release);
         Ok(())
@@ -252,6 +234,22 @@ impl TheoreticalTargetCache {
         source_ids: &[String],
         strategy: Option<&str>,
     ) -> Result<Option<Vec<VirtualDelta>>> {
+        Ok(self
+            .query_inputs(fee_rates, end, source_ids, strategy, None)
+            .await?
+            .map(|(deltas, _, _)| deltas))
+    }
+
+    /// Binary-search each source/market's prefix quantity rather than replaying
+    /// every old delta to establish the requested window's initial inventory.
+    async fn query_inputs(
+        self: &Arc<Self>,
+        fee_rates: BTreeMap<String, f64>,
+        end: i64,
+        source_ids: &[String],
+        strategy: Option<&str>,
+        nav_start: Option<i64>,
+    ) -> Result<Option<(Vec<VirtualDelta>, CarriedInventory, u64)>> {
         self.refresh();
         let wait = async {
             loop {
@@ -277,13 +275,42 @@ impl TheoreticalTargetCache {
         let strategy = strategy.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
             let state = cache.state.lock().unwrap();
+            let mut carry = CarriedInventory::new();
+            let mut selected = Vec::new();
+            for (tail, markets, values) in [
+                (false, &state.markets, &state.deltas),
+                (true, &state.tail_markets, &state.tail_deltas),
+            ] {
+                for (market, index) in markets {
+                    if !source_ids.is_empty() && !source_ids.contains(&market.0) {
+                        continue;
+                    }
+                    let end_index = index
+                        .positions
+                        .partition_point(|position| values[*position].received_at_us <= end);
+                    let first_index = nav_start.map_or(0, |start| {
+                        index.positions[..end_index]
+                            .partition_point(|position| values[*position].execution_ts_us() < start)
+                    });
+                    if first_index > 0 {
+                        *carry.entry(market.clone()).or_default() +=
+                            index.cumulative_quantity[first_index - 1];
+                    }
+                    selected.extend(
+                        index.positions[first_index..end_index]
+                            .iter()
+                            .map(|position| (tail, *position)),
+                    );
+                }
+            }
+            selected.sort_unstable();
             let mut deltas = Vec::new();
-            for delta in state
-                .deltas
-                .iter()
-                .chain(state.tail_deltas.iter())
-                .take_while(|delta| delta.received_at_us <= end)
-            {
+            for (tail, position) in selected {
+                let delta = if tail {
+                    &state.tail_deltas[position]
+                } else {
+                    &state.deltas[position]
+                };
                 if (!source_ids.is_empty() && !source_ids.contains(&delta.source_id))
                     || strategy
                         .as_deref()
@@ -301,7 +328,8 @@ impl TheoreticalTargetCache {
                 ensure!(delta.fee_rate.is_finite(), "invalid theoretical fee");
                 deltas.push(delta);
             }
-            Ok(Some(deltas))
+            carry.retain(|_, quantity| clean_zero(*quantity) != 0.0);
+            Ok(Some((deltas, carry, state.revision)))
         })
         .await
         .context("theoretical target reader failed")?
@@ -339,6 +367,8 @@ fn ingest_target(
                     .get(&symbol)
                     .map(|target| target.signal)
                     .unwrap_or(0);
+                let market = (source.id.clone(), symbol.clone(), next.venue.clone());
+                let position = state.deltas.len();
                 state.deltas.push(VirtualDelta {
                     source_id: source.id.clone(),
                     binding_name: account.binding_name.clone(),
@@ -352,6 +382,11 @@ fn ingest_target(
                     legacy_fee: account.theoretical_fee_rate.is_none(),
                     target_signal,
                 });
+                let index = state.markets.entry(market).or_default();
+                index.positions.push(position);
+                index
+                    .cumulative_quantity
+                    .push(index.cumulative_quantity.last().copied().unwrap_or(0.0) + quantity);
             }
         }
         state.latest.insert(key, next);
@@ -408,7 +443,7 @@ fn add_range(ranges: &mut BTreeMap<String, (i64, i64)>, symbol: &str, start: i64
         .or_insert((start, end));
 }
 pub async fn prepare_acquisition(
-    pool: &PgPool,
+    fees: BTreeMap<String, f64>,
     targets: &Arc<TheoreticalTargetCache>,
     store: &KlineStore,
     start: i64,
@@ -418,7 +453,6 @@ pub async fn prepare_acquisition(
 ) -> Result<(Vec<VirtualDelta>, Vec<String>)> {
     store.validate_range(start, end, now_us())?;
     ensure!(store.enabled(), "分钟 K 线理论分析未启用");
-    let fees = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
     // Older target metadata establishes deltas only; no older market data is read.
     let Some(mut deltas) = targets.query(fees, end, source_ids, strategy).await? else {
         return Ok((
@@ -443,7 +477,7 @@ pub async fn prepare_acquisition(
 }
 
 pub async fn load_timeline(
-    pool: &PgPool,
+    fees: BTreeMap<String, f64>,
     targets: &Arc<TheoreticalTargetCache>,
     store: &KlineStore,
     start: i64,
@@ -469,36 +503,57 @@ pub async fn load_timeline(
             Some("区间起点没有保留范围内的完整分钟基准价，请将起点后移一分钟".into());
         return Ok(output);
     }
-    let fees = crate::postgres::load_theoretical_twap_fee_rates(pool).await?;
-    let Some(deltas) = targets.query(fees, end, source_ids, None).await? else {
+    let curve_fees: Vec<_> = fees
+        .iter()
+        .map(|(source, rate)| (source.clone(), rate.to_bits()))
+        .collect();
+    let effective_end = end.min(now_us().div_euclid(MINUTE_US) * MINUTE_US - 4 * MINUTE_US);
+    if effective_end < start {
+        output.loading = true;
+        output.unavailable_reason = Some("五分钟理论执行窗口尚未完整收盘，请稍后查询".into());
+        return Ok(output);
+    }
+    let mut sources = source_ids.to_vec();
+    sources.sort();
+    sources.dedup();
+    targets.refresh();
+    if targets.ready.load(Ordering::Acquire)
+        && !targets.loading.load(Ordering::Acquire)
+        && let Ok(state) = targets.state.try_lock()
+    {
+        let (revision, _) = targets
+            .archive
+            .target_changes_since(state.revision, state.cursor);
+        if revision == state.revision
+            && let Some(curve) = targets.curves.get(&CurveQueryKey {
+                start,
+                end: effective_end,
+                max_points,
+                sources: sources.clone(),
+                fees: curve_fees.clone(),
+                target_revision: revision,
+                candle_revision: store.revision(),
+            })
+        {
+            return Ok(curve.as_ref().clone());
+        }
+    }
+    let Some((deltas, mut carry, target_revision)) = targets
+        .query_inputs(fees, end, source_ids, None, Some(start))
+        .await?
+    else {
         output.loading = true;
         output.unavailable_reason = Some("目标历史正在后台读取，完成后自动更新曲线".into());
         return Ok(output);
     };
     // The quantity per traded minute is known only after all five minutes
     // close. Bound the curve so every displayed execution has a full schedule.
-    let end = end.min(now_us().div_euclid(MINUTE_US) * MINUTE_US - 4 * MINUTE_US);
-    if end < start {
-        output.loading = true;
-        output.unavailable_reason = Some("五分钟理论执行窗口尚未完整收盘，请稍后查询".into());
-        return Ok(output);
-    }
+    let end = effective_end;
     // Exact inventory immediately before start follows from the frozen schedules,
     // without needing old execution prices. Carry lots use the start's mark.
-    let mut carry = BTreeMap::<(String, String, String), f64>::new();
     let mut fills = Vec::<(i64, usize, usize)>::new();
     let mut ranges = BTreeMap::new();
     for (index, delta) in deltas.iter().enumerate() {
-        if delta.execution_ts_us() < start {
-            *carry
-                .entry((
-                    delta.source_id.clone(),
-                    delta.symbol.clone(),
-                    delta.venue.clone(),
-                ))
-                .or_default() += delta.delta_qty;
-            continue;
-        }
         for slice in 0..SAMPLE_COUNT {
             let ts = delta.open_ts_us(slice) + MINUTE_US;
             if ts <= end {
@@ -530,16 +585,43 @@ pub async fn load_timeline(
             *slice,
         )
     });
-    rebuild_timeline(
-        &deltas,
-        carry,
-        fills,
-        store,
+    let compute_store = store.clone();
+    let key = CurveQueryKey {
         start,
         end,
         max_points,
-        &mut output,
-    )?;
+        sources,
+        fees: curve_fees,
+        target_revision,
+        candle_revision: store.revision(),
+    };
+    let compute_targets = targets.clone();
+    output = tokio::task::spawn_blocking(move || {
+        compute_targets
+            .curves
+            .get_or_compute_if(
+                key,
+                || {
+                    crate::analysis::run(|| {
+                        rebuild_timeline(
+                            &deltas,
+                            carry,
+                            fills,
+                            &compute_store,
+                            start,
+                            end,
+                            max_points,
+                            &mut output,
+                        )?;
+                        anyhow::Ok(output)
+                    })
+                },
+                |curve| !curve.points.is_empty(),
+            )
+            .map(|curve| curve.as_ref().clone())
+    })
+    .await
+    .context("theoretical NAV CPU task failed")??;
     if output.points.is_empty() {
         output.loading = warm.pending;
         if warm.pending {
@@ -565,12 +647,20 @@ fn rebuild_timeline(
     output: &mut TheoreticalNavTimeline,
 ) -> Result<()> {
     let mut schedules = BTreeMap::new();
-    for index in fills
+    let indices = fills
         .iter()
         .map(|(_, index, _)| *index)
         .collect::<BTreeSet<_>>()
-    {
-        let Some(priced) = deltas[index].prices(store)? else {
+        .into_iter()
+        .collect::<Vec<_>>();
+    let priced = crate::analysis::run(|| {
+        indices
+            .par_iter()
+            .map(|index| deltas[*index].prices(store).map(|prices| (*index, prices)))
+            .collect::<Result<Vec<_>>>()
+    })?;
+    for (index, prices) in priced {
+        let Some(priced) = prices else {
             output.missing_price_count += 1;
             continue;
         };
@@ -614,16 +704,22 @@ fn rebuild_timeline(
             .iter()
             .map(|(_, index, _)| deltas[*index].symbol.clone()),
     );
-    for symbol in needed {
-        markets.insert(
-            symbol.clone(),
-            store.scan(
-                &symbol,
-                start.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US,
-                end,
-            )?,
-        );
-    }
+    let symbols = needed.into_iter().collect::<Vec<_>>();
+    markets.extend(crate::analysis::run(|| {
+        symbols
+            .par_iter()
+            .map(|symbol| {
+                Ok((
+                    symbol.clone(),
+                    store.scan(
+                        symbol,
+                        start.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US,
+                        end,
+                    )?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()
+    })?);
     let mark = |symbol: &str, ts: i64| -> Option<f64> {
         let bars = markets.get(symbol)?;
         let end = bars.partition_point(|c| c.end_ts_us() <= ts);
@@ -1250,6 +1346,138 @@ mod tests {
             .unwrap();
         (dir, store, start, bars)
     }
+
+    #[tokio::test]
+    async fn completed_curve_cache_skips_reads_and_invalidates_on_fees_targets_and_candles() {
+        let (_fixture, _fixture_store, start, mut bars) = cached_market();
+        let mut extra = *bars.last().unwrap();
+        extra.open_ts_us += MINUTE_US;
+        bars.push(extra);
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = crate::manager_db::ManagerDb::open(dir.path()).unwrap();
+        let trading_config = dir.path().join("trade_engine.toml");
+        std::fs::write(&trading_config, "local_ips = [\"198.51.100.9\"]").unwrap();
+        let store = KlineStore::from_db(
+            db.clone(),
+            crate::config::KlineConfig {
+                enabled: true,
+                local_ip: Some("10.1.1.2".parse().unwrap()),
+                public_ip: Some("198.51.100.4".parse().unwrap()),
+                trade_engine_configs: vec![trading_config],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, start + 6 * MINUTE_US, &bars)
+            .unwrap();
+        let archive = Arc::new(PositionArchive::open(db).unwrap());
+        let config: AppConfig =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        let source = config.sources[0].id.clone();
+        let targets = TheoreticalTargetCache::new(Arc::new(config), archive.clone());
+        let mut strategy = crate::strategy_catalog::PositionStrategy {
+            strategy_name: "alpha".into(),
+            targets: BTreeMap::from([(
+                "BTCUSDT".into(),
+                crate::order_config::TargetPosition {
+                    qty: 5.0,
+                    signal: 0,
+                },
+            )]),
+            symbol_order_strategy_overrides: BTreeMap::new(),
+            updated_at_us: start,
+        };
+        let accounts = vec![crate::position_archive::published_account(
+            &source, "alpha", 1.0,
+        )];
+        archive
+            .append(start, &strategy, Vec::new(), accounts.clone())
+            .unwrap();
+        let sources = [source.clone()];
+        let rates = BTreeMap::from([(source.clone(), 0.0002)]);
+        let first = load_timeline(
+            rates.clone(),
+            &targets,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            &sources,
+            100,
+        )
+        .await
+        .unwrap();
+        assert!(!first.points.is_empty());
+        let reads = store.status();
+        let repeated = load_timeline(
+            rates.clone(),
+            &targets,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            &sources,
+            100,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.points, repeated.points);
+        assert_eq!(store.status().cache_hits, reads.cache_hits);
+        assert_eq!(store.status().pricing_cache_hits, reads.pricing_cache_hits);
+        let higher_fee = load_timeline(
+            BTreeMap::from([(source, 0.0004)]),
+            &targets,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            &sources,
+            100,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            higher_fee
+                .points
+                .last()
+                .unwrap()
+                .estimated_trading_fee_quote,
+            first.points.last().unwrap().estimated_trading_fee_quote * 2.0
+        );
+        strategy.targets.get_mut("BTCUSDT").unwrap().qty = 7.0;
+        archive
+            .append(start + 1, &strategy, Vec::new(), accounts)
+            .unwrap();
+        let late = load_timeline(
+            rates.clone(),
+            &targets,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            &sources,
+            100,
+        )
+        .await
+        .unwrap();
+        assert!(!late.points.is_empty());
+        assert_ne!(late.points, first.points);
+        bars[2].quote_volume *= 1.01;
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, start + 6 * MINUTE_US, &bars)
+            .unwrap();
+        let corrected = load_timeline(
+            rates,
+            &targets,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            &sources,
+            100,
+        )
+        .await
+        .unwrap();
+        assert!(!corrected.points.is_empty());
+        assert_ne!(corrected.points, late.points);
+        assert_eq!(store.status().requests, 0);
+    }
     fn delta(start: i64) -> VirtualDelta {
         VirtualDelta {
             source_id: "test".into(),
@@ -1657,5 +1885,113 @@ mod tests {
         );
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].nav_change_before_fee_quote, 2.0);
+    }
+
+    #[tokio::test]
+    async fn indexed_nav_inventory_matches_full_history_and_repairs_late_targets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive = Arc::new(
+            PositionArchive::open(crate::manager_db::ManagerDb::open(dir.path()).unwrap()).unwrap(),
+        );
+        let config: AppConfig =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        let source = config.sources[0].id.clone();
+        let cache = TheoreticalTargetCache::new(Arc::new(config), archive.clone());
+        let mut strategy = crate::strategy_catalog::PositionStrategy {
+            strategy_name: "alpha".into(),
+            targets: BTreeMap::new(),
+            symbol_order_strategy_overrides: BTreeMap::new(),
+            updated_at_us: 1,
+        };
+        let base = now_us().div_euclid(MINUTE_US) * MINUTE_US - crate::kline::DAY_US;
+        let accounts = vec![crate::position_archive::published_account(
+            &source, "alpha", 2.0,
+        )];
+        for index in 0..180 {
+            strategy.targets.insert(
+                "BTCUSDT".into(),
+                crate::order_config::TargetPosition {
+                    qty: (index % 11) as f64 * 0.1,
+                    signal: 0,
+                },
+            );
+            strategy.targets.insert(
+                "ETHUSDT".into(),
+                crate::order_config::TargetPosition {
+                    qty: -(index % 7) as f64,
+                    signal: 0,
+                },
+            );
+            archive
+                .append(
+                    base + index * MINUTE_US,
+                    &strategy,
+                    Vec::new(),
+                    accounts.clone(),
+                )
+                .unwrap();
+        }
+        let rates = BTreeMap::from([(source.clone(), 0.0004)]);
+        for late in [false, true] {
+            if late {
+                strategy.targets.insert(
+                    "BTCUSDT".into(),
+                    crate::order_config::TargetPosition {
+                        qty: 3.0,
+                        signal: 0,
+                    },
+                );
+                archive
+                    .append(
+                        base + 30 * MINUTE_US + 1,
+                        &strategy,
+                        Vec::new(),
+                        accounts.clone(),
+                    )
+                    .unwrap();
+            }
+            let full = cache
+                .query(
+                    rates.clone(),
+                    base + 200 * MINUTE_US,
+                    &[source.clone()],
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            for offset in [5, 60, 100, 185] {
+                let start = base + offset * MINUTE_US + MINUTE_US / 2;
+                let (actual_deltas, actual_carry, _) = cache
+                    .query_inputs(
+                        rates.clone(),
+                        base + 200 * MINUTE_US,
+                        &[source.clone()],
+                        None,
+                        Some(start),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut carry = CarriedInventory::new();
+                let mut deltas = Vec::new();
+                for delta in &full {
+                    if delta.execution_ts_us() < start {
+                        *carry
+                            .entry((
+                                delta.source_id.clone(),
+                                delta.symbol.clone(),
+                                delta.venue.clone(),
+                            ))
+                            .or_default() += delta.delta_qty;
+                    } else {
+                        deltas.push(delta.clone());
+                    }
+                }
+                carry.retain(|_, quantity| clean_zero(*quantity) != 0.0);
+                assert_eq!(actual_deltas, deltas);
+                assert_eq!(actual_carry, carry);
+            }
+        }
     }
 }

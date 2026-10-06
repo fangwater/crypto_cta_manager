@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use sqlx::postgres::PgPool;
 
 use crate::config::AppConfig;
 use crate::nav;
@@ -278,7 +277,7 @@ fn finish_breakdowns(
 }
 
 pub async fn report_acquisition_cost(
-    pool: &PgPool,
+    theoretical_fees: BTreeMap<String, f64>,
     config: &AppConfig,
     targets: &std::sync::Arc<crate::theoretical_nav::TheoreticalTargetCache>,
     klines: &crate::kline::KlineStore,
@@ -298,7 +297,7 @@ pub async fn report_acquisition_cost(
         bail!("invalid acquisition-cost pagination");
     }
     let (deltas, warnings) = crate::theoretical_nav::prepare_acquisition(
-        pool,
+        theoretical_fees,
         targets,
         klines,
         start_received_at_us,

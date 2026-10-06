@@ -1,12 +1,13 @@
 //! Manager-owned, closed one-minute Binance USD-M candles. Cache misses only.
 use std::collections::BTreeMap;
 use std::net::{IpAddr, UdpSocket};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Client, StatusCode};
-use rocksdb::{IteratorMode, WriteBatch};
+use rocksdb::{IteratorMode, ReadOptions, WriteBatch};
 use serde::Serialize;
 use tokio::sync::{Mutex as AsyncMutex, OnceCell, Semaphore};
 use tracing::warn;
@@ -19,6 +20,50 @@ pub const DAY_US: i64 = 86_400_000_000;
 pub const CANDLES_CF: &str = "klines_1m";
 pub const VALUE_BYTES: usize = 56;
 const PAGE_LIMIT: usize = 499;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MinutePrices {
+    pub prices: [Option<f64>; 5],
+    pub zero_volume_skipped_sample_count: usize,
+    pub all_zero_volume_fallback: bool,
+}
+impl MinutePrices {
+    pub fn priced_sample_count(&self) -> usize {
+        self.prices.iter().flatten().count()
+    }
+    pub fn average(&self) -> Option<f64> {
+        let count = self.priced_sample_count();
+        (count > 0).then(|| self.prices.iter().flatten().sum::<f64>() / count as f64)
+    }
+    pub fn first_price(&self) -> Option<f64> {
+        self.prices.iter().flatten().copied().next()
+    }
+}
+
+#[derive(Default)]
+struct MinuteCache {
+    candles: BTreeMap<i64, Kline>,
+    prices: BTreeMap<i64, MinutePrices>,
+}
+
+impl MinuteCache {
+    fn insert(&mut self, candle: Kline) {
+        if self
+            .candles
+            .get(&candle.open_ts_us)
+            .is_some_and(|old| *old != candle)
+        {
+            for index in 0..5 {
+                self.prices.remove(&(candle.open_ts_us - index * MINUTE_US));
+            }
+        }
+        self.candles.insert(candle.open_ts_us, candle);
+    }
+    fn prune(&mut self, cutoff: i64) {
+        self.candles = self.candles.split_off(&cutoff);
+        self.prices = self.prices.split_off(&cutoff);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Kline {
@@ -138,6 +183,10 @@ pub struct CacheStatus {
     pub cache_hits: u64,
     pub active_backfills: usize,
     pub last_error: Option<String>,
+    pub disk_range_reads: u64,
+    pub disk_batch_reads: u64,
+    pub memory_candle_hits: u64,
+    pub pricing_cache_hits: u64,
 }
 struct WeightGate {
     next: tokio::time::Instant,
@@ -149,6 +198,8 @@ struct Inner {
     client: OnceCell<Client>,
     egress_retry_at: AsyncMutex<tokio::time::Instant>,
     markets: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    minutes: Mutex<BTreeMap<String, Arc<Mutex<MinuteCache>>>>,
+    candle_revision: AtomicU64,
     permits: Semaphore,
     weight: AsyncMutex<WeightGate>,
     status: Mutex<CacheStatus>,
@@ -189,6 +240,8 @@ impl KlineStore {
                 client: OnceCell::new(),
                 egress_retry_at: AsyncMutex::new(instant),
                 markets: Mutex::new(BTreeMap::new()),
+                minutes: Mutex::new(BTreeMap::new()),
+                candle_revision: AtomicU64::new(0),
                 weight: AsyncMutex::new(WeightGate {
                     next: instant,
                     blocked_until: instant,
@@ -208,6 +261,9 @@ impl KlineStore {
     pub fn status(&self) -> CacheStatus {
         self.inner.status.lock().unwrap().clone()
     }
+    pub fn revision(&self) -> u64 {
+        self.inner.candle_revision.load(Ordering::Acquire)
+    }
     pub fn validate_range(&self, start: i64, end: i64, now: i64) -> Result<()> {
         ensure!(
             start >= self.cutoff_us(now) && end >= start && end <= now,
@@ -220,18 +276,116 @@ impl KlineStore {
         if open < self.cutoff_us(now_us()) || open + MINUTE_US > now_us() {
             return Ok(None);
         }
-        let handle = self
-            .inner
-            .db
-            .db()
-            .cf_handle(CANDLES_CF)
-            .context("minute cache disappeared")?;
+        self.read_minutes(symbol, &[open])
+            .map(|mut bars| bars.pop().flatten())
+    }
+    fn minute_cache(&self, symbol: &str) -> Arc<Mutex<MinuteCache>> {
         self.inner
-            .db
-            .db()
-            .get_cf(&handle, key(symbol, open)?)?
-            .map(|value| Kline::decode(open, &value))
-            .transpose()
+            .minutes
+            .lock()
+            .unwrap()
+            .entry(symbol.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Sparse reads deduplicate keys and use RocksDB's batched MultiGet. Missing
+    /// minutes are never cached, so later writes/queries can repair coverage.
+    pub fn read_minutes(&self, symbol: &str, opens: &[i64]) -> Result<Vec<Option<Kline>>> {
+        prefix(symbol)?;
+        let now = now_us();
+        let cutoff = self.cutoff_us(now);
+        let cache = self.minute_cache(symbol);
+        let mut cache = cache.lock().unwrap();
+        let wanted = opens
+            .iter()
+            .copied()
+            .filter(|open| *open >= cutoff && *open + MINUTE_US <= now)
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing = wanted
+            .iter()
+            .filter(|open| !cache.candles.contains_key(open))
+            .copied()
+            .collect::<Vec<_>>();
+        self.inner.status.lock().unwrap().memory_candle_hits +=
+            (wanted.len() - missing.len()) as u64;
+        if !missing.is_empty() {
+            let handle = self
+                .inner
+                .db
+                .db()
+                .cf_handle(CANDLES_CF)
+                .context("minute cache disappeared")?;
+            for chunk in missing.chunks(4096) {
+                let keys = chunk
+                    .iter()
+                    .map(|open| key(symbol, *open))
+                    .collect::<Result<Vec<_>>>()?;
+                let values = self
+                    .inner
+                    .db
+                    .db()
+                    .batched_multi_get_cf(&handle, &keys, true);
+                self.inner.status.lock().unwrap().disk_batch_reads += 1;
+                for (open, value) in chunk.iter().zip(values) {
+                    if let Some(value) = value? {
+                        cache.insert(Kline::decode(*open, &value)?);
+                    }
+                }
+            }
+        }
+        Ok(opens
+            .iter()
+            .map(|open| {
+                (*open >= cutoff && *open + MINUTE_US <= now)
+                    .then(|| cache.candles.get(open).copied())
+                    .flatten()
+            })
+            .collect())
+    }
+
+    /// Fully closed immutable five-minute schedules are shared across accounts.
+    pub fn window_prices(&self, symbol: &str, open: i64) -> Result<Option<MinutePrices>> {
+        if open < self.cutoff_us(now_us()) || open + 5 * MINUTE_US > now_us() {
+            return Ok(None);
+        }
+        let cache = self.minute_cache(symbol);
+        if let Some(priced) = cache.lock().unwrap().prices.get(&open).copied() {
+            self.inner.status.lock().unwrap().pricing_cache_hits += 1;
+            return Ok(Some(priced));
+        }
+        let opens = std::array::from_fn::<_, 5, _>(|index| open + index as i64 * MINUTE_US);
+        self.read_minutes(symbol, &opens)?;
+        let mut cache = cache.lock().unwrap();
+        let mut prices = [None; 5];
+        let mut closes = [0.0; 5];
+        let mut skipped = 0;
+        for (index, ts) in opens.iter().enumerate() {
+            let Some(candle) = cache.candles.get(ts) else {
+                return Ok(None);
+            };
+            closes[index] = candle.close;
+            if candle.base_volume == 0.0 && candle.quote_volume == 0.0 {
+                skipped += 1;
+            } else {
+                let Some(price) = candle.vwap() else {
+                    return Ok(None);
+                };
+                prices[index] = Some(price);
+            }
+        }
+        let all_empty = skipped == 5;
+        if all_empty {
+            prices = closes.map(Some);
+            skipped = 0;
+        }
+        let priced = MinutePrices {
+            prices,
+            zero_volume_skipped_sample_count: skipped,
+            all_zero_volume_fallback: all_empty,
+        };
+        cache.prices.insert(open, priced);
+        Ok(Some(priced))
     }
     pub fn scan(&self, symbol: &str, start: i64, end: i64) -> Result<Vec<Kline>> {
         let start = first_complete_open(start.max(self.cutoff_us(now_us())));
@@ -239,29 +393,62 @@ impl KlineStore {
         if start >= end {
             return Ok(Vec::new());
         }
-        let prefix = prefix(symbol)?;
-        let start_key = key(symbol, start)?;
-        let end_key = key(symbol, end)?;
+        prefix(symbol)?;
+        let cache = self.minute_cache(symbol);
+        let mut cache = cache.lock().unwrap();
+        let present = cache
+            .candles
+            .range(start..end)
+            .map(|(_, bar)| *bar)
+            .collect::<Vec<_>>();
+        self.inner.status.lock().unwrap().memory_candle_hits += present.len() as u64;
+        if present.len() == ((end - start) / MINUTE_US) as usize {
+            return Ok(present);
+        }
+        let missing = (start..end)
+            .step_by(MINUTE_US as usize)
+            .filter(|open| !cache.candles.contains_key(open))
+            .collect::<Vec<_>>();
+        if missing.len() <= 64 {
+            drop(cache);
+            self.read_minutes(symbol, &missing)?;
+            return Ok(self
+                .minute_cache(symbol)
+                .lock()
+                .unwrap()
+                .candles
+                .range(start..end)
+                .map(|(_, bar)| *bar)
+                .collect());
+        }
+        let start_key = key(symbol, missing[0])?;
+        let end_key = key(symbol, missing.last().unwrap() + MINUTE_US)?;
         let handle = self
             .inner
             .db
             .db()
             .cf_handle(CANDLES_CF)
             .context("minute cache disappeared")?;
-        let mut result = Vec::new();
-        for item in self.inner.db.db().iterator_cf(
+        let mut options = ReadOptions::default();
+        options.set_iterate_upper_bound(end_key.clone());
+        options.set_readahead_size(256 * 1024);
+        self.inner.status.lock().unwrap().disk_range_reads += 1;
+        for item in self.inner.db.db().iterator_cf_opt(
             &handle,
+            options,
             rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
         ) {
             let (key, value) = item?;
-            if !key.starts_with(&prefix) || key.as_ref() >= end_key.as_slice() {
-                break;
-            }
-            ensure!(key.len() == prefix.len() + 8, "invalid minute cache key");
-            let ts = i64::from_be_bytes(key[prefix.len()..].try_into().unwrap());
-            result.push(Kline::decode(ts, &value)?);
+            let prefix_len = symbol.len() + 1;
+            ensure!(key.len() == prefix_len + 8, "invalid minute cache key");
+            let ts = i64::from_be_bytes(key[prefix_len..].try_into().unwrap());
+            cache.insert(Kline::decode(ts, &value)?);
         }
-        Ok(result)
+        Ok(cache
+            .candles
+            .range(start..end)
+            .map(|(_, bar)| *bar)
+            .collect())
     }
     async fn client(&self) -> Result<&Client> {
         self.inner
@@ -327,6 +514,16 @@ impl KlineStore {
     }
     /// Missing requested data backfills backwards in 24h blocks. A market mutex
     /// serializes overlapping misses; cached minutes are never requested again.
+    async fn scan_async(&self, symbol: &str, start: i64, end: i64) -> Result<Vec<Kline>> {
+        let store = self.clone();
+        let symbol = symbol.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::analysis::run(|| store.scan(&symbol, start, end))
+        })
+        .await
+        .context("minute cache read task failed")?
+    }
+
     pub async fn ensure_range(&self, symbol: &str, start: i64, end: i64) -> Result<()> {
         ensure!(self.enabled(), "分钟 K 线分析未启用");
         prefix(symbol)?;
@@ -341,7 +538,8 @@ impl KlineStore {
             return Ok(());
         }
         // Cached queries must not wait behind a larger historical backfill.
-        if self.scan(symbol, start, end)?.len() == ((end - start) / MINUTE_US) as usize {
+        if self.scan_async(symbol, start, end).await?.len() == ((end - start) / MINUTE_US) as usize
+        {
             self.inner.status.lock().unwrap().cache_hits += 1;
             return Ok(());
         }
@@ -357,7 +555,8 @@ impl KlineStore {
         self.inner.status.lock().unwrap().active_backfills += 1;
         let _progress = BackfillGuard(self.clone());
         // Check the requested range first: a hit must not trigger a 24h expansion.
-        if self.scan(symbol, start, end)?.len() == ((end - start) / MINUTE_US) as usize {
+        if self.scan_async(symbol, start, end).await?.len() == ((end - start) / MINUTE_US) as usize
+        {
             self.inner.status.lock().unwrap().cache_hits += 1;
             return Ok(());
         }
@@ -371,9 +570,15 @@ impl KlineStore {
         Ok(())
     }
     async fn fill_missing(&self, symbol: &str, start: i64, end: i64) -> Result<()> {
+        let existing = self
+            .scan_async(symbol, start, end)
+            .await?
+            .into_iter()
+            .map(|bar| bar.open_ts_us)
+            .collect::<std::collections::BTreeSet<_>>();
         let mut cursor = start;
         while cursor < end {
-            if self.get(symbol, cursor)?.is_some() {
+            if existing.contains(&cursor) {
                 cursor += MINUTE_US;
                 continue;
             }
@@ -381,7 +586,7 @@ impl KlineStore {
             cursor += MINUTE_US;
             while cursor < end
                 && (cursor - first) / MINUTE_US < PAGE_LIMIT as i64
-                && self.get(symbol, cursor)?.is_none()
+                && !existing.contains(&cursor)
             {
                 cursor += MINUTE_US;
             }
@@ -477,6 +682,14 @@ impl KlineStore {
             }
         }
         self.inner.db.db().write(batch)?;
+        let cache = self.minute_cache(symbol);
+        let mut cache = cache.lock().unwrap();
+        for candle in candles.iter().filter(|bar| bar.open_ts_us >= cutoff) {
+            cache.insert(*candle);
+        }
+        if !candles.is_empty() {
+            self.inner.candle_revision.fetch_add(1, Ordering::Release);
+        }
         self.inner.status.lock().unwrap().fetched_candles += candles.len() as u64;
         Ok(())
     }
@@ -513,6 +726,12 @@ impl KlineStore {
             .db
             .db()
             .compact_range_cf(&handle, None::<&[u8]>, None::<&[u8]>);
+        for cache in self.inner.minutes.lock().unwrap().values() {
+            cache.lock().unwrap().prune(cutoff);
+        }
+        if removed > 0 {
+            self.inner.candle_revision.fetch_add(1, Ordering::Release);
+        }
         Ok(removed)
     }
     pub fn spawn_defaults(&self) {
@@ -818,6 +1037,85 @@ mod tests {
             trades: 7,
         }
     }
+
+    #[test]
+    fn sparse_minutes_use_one_deduplicated_batch_and_cache_repair_is_visible() {
+        let dir = TempDir::new().unwrap();
+        let db = ManagerDb::open(dir.path()).unwrap();
+        let start = first_complete_open(now_us() - DAY_US);
+        let store = KlineStore::from_db(db.clone(), Default::default()).unwrap();
+        let handle = db.db().cf_handle(CANDLES_CF).unwrap();
+        for index in [0, 2, 3, 4] {
+            let row = candle(start + index * MINUTE_US);
+            db.db()
+                .put_cf(
+                    &handle,
+                    key("BTCUSDT", row.open_ts_us).unwrap(),
+                    row.encode(),
+                )
+                .unwrap();
+        }
+        let opens = [start, start + 2 * MINUTE_US, start, start + MINUTE_US];
+        let rows = store.read_minutes("BTCUSDT", &opens).unwrap();
+        assert_eq!(rows[0], rows[2]);
+        assert!(rows[3].is_none());
+        assert_eq!(store.status().disk_batch_reads, 1);
+        store.read_minutes("BTCUSDT", &opens[..3]).unwrap();
+        assert_eq!(store.status().disk_batch_reads, 1);
+        assert!(store.window_prices("BTCUSDT", start).unwrap().is_none());
+        let repaired = candle(start + MINUTE_US);
+        store
+            .save_page("BTCUSDT", start, start + 5 * MINUTE_US, &[repaired])
+            .unwrap();
+        let first = store.window_prices("BTCUSDT", start).unwrap().unwrap();
+        assert_eq!(store.window_prices("BTCUSDT", start).unwrap(), Some(first));
+        assert_eq!(store.status().pricing_cache_hits, 1);
+        let mut corrected = candle(start);
+        corrected.base_volume = 0.0;
+        corrected.quote_volume = 0.0;
+        store
+            .save_page("BTCUSDT", start, start + 5 * MINUTE_US, &[corrected])
+            .unwrap();
+        let changed = store.window_prices("BTCUSDT", start).unwrap().unwrap();
+        assert_eq!(changed.zero_volume_skipped_sample_count, 1);
+        assert_ne!(changed, first);
+    }
+
+    #[test]
+    fn dense_ranges_scan_once_and_later_queries_reuse_memory() {
+        let dir = TempDir::new().unwrap();
+        let db = ManagerDb::open(dir.path()).unwrap();
+        let store = KlineStore::from_db(db.clone(), Default::default()).unwrap();
+        let start = first_complete_open(now_us() - DAY_US);
+        let handle = db.db().cf_handle(CANDLES_CF).unwrap();
+        for index in 0..120 {
+            let row = candle(start + index * MINUTE_US);
+            db.db()
+                .put_cf(
+                    &handle,
+                    key("BTCUSDT", row.open_ts_us).unwrap(),
+                    row.encode(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .scan("BTCUSDT", start, start + 120 * MINUTE_US)
+                .unwrap()
+                .len(),
+            120
+        );
+        assert_eq!(store.status().disk_range_reads, 1);
+        assert_eq!(
+            store
+                .scan("BTCUSDT", start + MINUTE_US, start + 119 * MINUTE_US)
+                .unwrap()
+                .len(),
+            118
+        );
+        assert_eq!(store.status().disk_range_reads, 1);
+        assert_eq!(store.status().disk_batch_reads, 0);
+    }
     #[test]
     fn vwap_uses_quote_over_base_not_ohlc_average_and_zero_volume_has_no_price() {
         let mut row = candle(first_complete_open(now_us() - DAY_US));
@@ -939,6 +1237,9 @@ mod tests {
             .db()
             .delete_cf(&handle, key(symbol, start).unwrap())
             .unwrap();
+        // Simulate a durable gap after the decoded symbol cache is evicted.
+        // Production writes/prunes keep both layers coherent; direct DB edits do not.
+        store.inner.minutes.lock().unwrap().remove(symbol);
         store.ensure_range(symbol, start, end).await.unwrap();
         assert_eq!(
             *state.calls.lock().unwrap().last().unwrap(),

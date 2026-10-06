@@ -6,6 +6,8 @@ max_connections = 8
 [dashboard]
 # Refresh the cached NAV report from position snapshots and read-only Exec RocksDB.
 refresh_secs = 60
+# Bounded analysis CPU pool, independent of kline.concurrency and API weights.
+compute_threads = 16
 
 [order_config]
 request_timeout_secs = 5

@@ -17,6 +17,7 @@ hmac = "0.12"
 iceoryx2 = "0.8.1"
 rocksdb = { version = "0.25", default-features = false, features = ["lz4"] }
 redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
+rayon = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

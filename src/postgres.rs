@@ -77,6 +77,33 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
 
 /// Load per-source estimated fee rates from PostgreSQL.
 /// Missing rows are omitted; callers should fall back to toml defaults.
+/// Load actual and legacy-theory fee fallbacks in one PostgreSQL statement so
+/// every immutable analysis generation uses a coherent catalog view.
+pub async fn load_analysis_fee_rates(
+    pool: &PgPool,
+) -> Result<(
+    std::collections::BTreeMap<String, FeeRates>,
+    std::collections::BTreeMap<String, f64>,
+)> {
+    let rows = sqlx::query("SELECT source_id, maker_fee_rate, taker_fee_rate, theoretical_twap_fee_rate FROM cta_order_sources")
+        .fetch_all(pool).await.context("failed to load analysis fee rates")?;
+    let mut actual = std::collections::BTreeMap::new();
+    let mut theoretical = std::collections::BTreeMap::new();
+    for row in rows {
+        let source: String = row.try_get("source_id")?;
+        let rates = FeeRates {
+            maker: row.try_get("maker_fee_rate")?,
+            taker: row.try_get("taker_fee_rate")?,
+        };
+        let theory = row.try_get("theoretical_twap_fee_rate")?;
+        validate_fee_rates(rates)?;
+        validate_theoretical_twap_fee_rate(theory)?;
+        actual.insert(source.clone(), rates);
+        theoretical.insert(source, theory);
+    }
+    Ok((actual, theoretical))
+}
+
 pub async fn load_fee_rates(pool: &PgPool) -> Result<std::collections::BTreeMap<String, FeeRates>> {
     let rows = sqlx::query(
         r#"

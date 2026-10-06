@@ -195,6 +195,7 @@ export function getHealth(signal?: AbortSignal) {
 }
 
 export interface TimelineQuery {
+  includeTheoretical?: boolean
   startMs?: number
   endMs?: number
   sourceIds?: string[]
@@ -218,6 +219,7 @@ function getTimelineFromPath(path: string, query: TimelineQuery) {
   if (query.sourceIds?.length) params.set('sourceIds', query.sourceIds.join(','))
   if (query.symbols?.length) params.set('symbols', query.symbols.join(','))
   params.set('maxPoints', String(query.maxPoints ?? 3_000))
+  if (query.includeTheoretical !== undefined) params.set('includeTheoretical', String(query.includeTheoretical))
   return requestJson<TimelineSnapshot>(`${path}?${params}`, {
     signal: query.signal,
   })

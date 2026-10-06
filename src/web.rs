@@ -177,6 +177,9 @@ struct CacheState {
     nav_histories: Arc<nav::NavSourceHistories>,
     position_snapshots: Arc<nav::SourcePositionSnapshots>,
     strategy_position_snapshots: Arc<nav::SourceStrategyPositionSnapshots>,
+    nav_timelines: Arc<nav::NavTimelineCache>,
+    theoretical_fees: Arc<BTreeMap<String, f64>>,
+    fee_rates: Arc<BTreeMap<String, FeeRates>>,
     last_attempt_at_us: i64,
     last_refresh_error: Option<String>,
 }
@@ -186,6 +189,9 @@ struct DashboardBuild {
     nav_histories: Arc<nav::NavSourceHistories>,
     position_snapshots: Arc<nav::SourcePositionSnapshots>,
     strategy_position_snapshots: Arc<nav::SourceStrategyPositionSnapshots>,
+    nav_timelines: Arc<nav::NavTimelineCache>,
+    theoretical_fees: Arc<BTreeMap<String, f64>>,
+    fee_rates: Arc<BTreeMap<String, FeeRates>>,
 }
 
 #[derive(Clone)]
@@ -214,6 +220,7 @@ struct TimelineQuery {
     source_ids: Option<String>,
     symbols: Option<String>,
     max_points: Option<usize>,
+    include_theoretical: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -382,6 +389,11 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     redis_runtime.spawn_keepalive();
     crate::market_rules::spawn(config.sources.clone(), redis_runtime.clone());
     let reload_notify = ReloadNotifyHub::spawn();
+    anyhow::ensure!(
+        (1..=256).contains(&config.dashboard.compute_threads),
+        "dashboard.compute_threads must be between 1 and 256"
+    );
+    crate::analysis::initialize(config.dashboard.compute_threads)?;
     let live_equity = LiveEquityHub::spawn(&config.sources);
     let viz_snapshot = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
     crate::kline::validate_host_configs(&config)?;
@@ -411,6 +423,9 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         nav_histories: first_build.nav_histories,
         position_snapshots: first_build.position_snapshots,
         strategy_position_snapshots: first_build.strategy_position_snapshots,
+        nav_timelines: first_build.nav_timelines,
+        theoretical_fees: first_build.theoretical_fees,
+        fee_rates: first_build.fee_rates,
         last_refresh_error: None,
     }));
 
@@ -1434,18 +1449,14 @@ async fn rebuild_timeline_snapshot(
     }
 
     let started = Instant::now();
-    let (histories, snapshots, strategy_snapshots, data_generated_at_us) = {
+    let (nav_timelines, theoretical_fees, data_generated_at_us) = {
         let cache = state.cache.read().await;
         (
-            Arc::clone(&cache.nav_histories),
-            Arc::clone(&cache.position_snapshots),
-            Arc::clone(&cache.strategy_position_snapshots),
+            Arc::clone(&cache.nav_timelines),
+            Arc::clone(&cache.theoretical_fees),
             cache.dashboard.generated_at_us,
         )
     };
-    let snapshots = selected_snapshot_map(&snapshots, &selected_source_ids);
-    let strategy_snapshots = selected_snapshot_map(&strategy_snapshots, &selected_source_ids);
-    let fee_rates = postgres::load_fee_rates(&state.pool).await?;
     let max_points = query.max_points.unwrap_or(3_000).clamp(200, 10_000);
     let request = nav::NavTimelineRequest {
         start_ts_us,
@@ -1454,24 +1465,8 @@ async fn rebuild_timeline_snapshot(
         selected_symbols,
         max_points,
     };
-    let config = Arc::clone(&state.config)
-        .as_ref()
-        .clone()
-        .with_fee_rates(&fee_rates);
     let report = tokio::task::spawn_blocking(move || {
-        if use_strategy_allocation {
-            nav::rebuild_nav_timeline_from_histories_with_strategy_snapshots(
-                &config,
-                request,
-                &snapshots,
-                &strategy_snapshots,
-                &histories,
-            )
-        } else {
-            nav::rebuild_nav_timeline_from_histories_with_snapshots(
-                &config, request, &snapshots, &histories,
-            )
-        }
+        nav_timelines.rebuild(request, use_strategy_allocation)
     })
     .await
     .context("CTA timeline rebuild task failed")?;
@@ -1482,9 +1477,11 @@ async fn rebuild_timeline_snapshot(
         }
         Err(error) => return Err(error.into()),
     };
-    let theoretical = if theoretical_symbols.is_empty() {
+    let actual_duration_ms = started.elapsed().as_millis();
+    let theoretical = if theoretical_symbols.is_empty() && query.include_theoretical.unwrap_or(true)
+    {
         crate::theoretical_nav::load_timeline(
-            &state.pool,
+            theoretical_fees.as_ref().clone(),
             &state.theoretical_targets,
             &state.klines,
             report.start_ts_us,
@@ -1500,15 +1497,27 @@ async fn rebuild_timeline_snapshot(
                 ..Default::default()
             }
         })
+    } else if theoretical_symbols.is_empty() && state.klines.enabled() {
+        crate::theoretical_nav::TheoreticalNavTimeline {
+            loading: true,
+            unavailable_reason: Some("理论曲线正在计算".into()),
+            ..Default::default()
+        }
     } else {
         crate::theoretical_nav::TheoreticalNavTimeline::default()
     };
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    info!(
+        actual_duration_ms,
+        theoretical_duration_ms = generation_duration_ms.saturating_sub(actual_duration_ms as u64),
+        generation_duration_ms,
+        "built CTA timeline"
+    );
 
     Ok(Ok(TimelineSnapshot {
         generated_at_us: data_generated_at_us,
         generation_duration_ms,
-        report,
+        report: report.as_ref().clone(),
         theoretical,
     }))
 }
@@ -1706,10 +1715,12 @@ async fn acquisition_cost(
         },
         None => unix_now_us() - crate::kline::DAY_US,
     };
-    let (histories, generated_at_us) = {
+    let (histories, fee_rates, theoretical_fees, generated_at_us) = {
         let cache = state.cache.read().await;
         (
             Arc::clone(&cache.nav_histories),
+            Arc::clone(&cache.fee_rates),
+            Arc::clone(&cache.theoretical_fees),
             cache.dashboard.generated_at_us,
         )
     };
@@ -1753,13 +1764,12 @@ async fn acquisition_cost(
         return Ok(bad_request(error.to_string()));
     }
     let started = Instant::now();
-    let fee_rates = postgres::load_fee_rates(&state.pool).await?;
     let config = Arc::clone(&state.config)
         .as_ref()
         .clone()
         .with_fee_rates(&fee_rates);
     let report = crate::acquisition_cost::report_acquisition_cost(
-        &state.pool,
+        theoretical_fees.as_ref().clone(),
         &config,
         &state.theoretical_targets,
         &state.klines,
@@ -2678,6 +2688,9 @@ async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
     cache.nav_histories = build.nav_histories;
     cache.position_snapshots = build.position_snapshots;
     cache.strategy_position_snapshots = build.strategy_position_snapshots;
+    cache.nav_timelines = build.nav_timelines;
+    cache.theoretical_fees = build.theoretical_fees;
+    cache.fee_rates = build.fee_rates;
     cache.last_refresh_error = None;
     Ok(())
 }
@@ -4140,6 +4153,9 @@ async fn refresh_loop(
                 state.nav_histories = build.nav_histories;
                 state.position_snapshots = build.position_snapshots;
                 state.strategy_position_snapshots = build.strategy_position_snapshots;
+                state.nav_timelines = build.nav_timelines;
+                state.theoretical_fees = build.theoretical_fees;
+                state.fee_rates = build.fee_rates;
                 state.last_refresh_error = None;
             }
             Err(error) => {
@@ -4161,7 +4177,8 @@ async fn build_dashboard(
 ) -> Result<DashboardBuild> {
     let started = Instant::now();
     let now_ms = unix_now_ms();
-    let fee_rates = postgres::load_fee_rates(pool).await?;
+    let (fee_rates, theoretical_fees) = postgres::load_analysis_fee_rates(pool).await?;
+    let theoretical_fees = Arc::new(theoretical_fees);
     let nav_config = config.clone().with_fee_rates(&fee_rates);
     let mut snapshots = nav::SourcePositionSnapshots::new();
     let mut strategy_snapshots = nav::SourceStrategyPositionSnapshots::new();
@@ -4219,7 +4236,7 @@ async fn build_dashboard(
         .collect();
 
     let nav_history_store = Arc::clone(nav_history_store);
-    let (report, histories, snapshots, strategy_snapshots) =
+    let (report, histories, snapshots, strategy_snapshots, nav_timelines) =
         tokio::task::spawn_blocking(move || {
             let histories = {
                 let mut store = nav_history_store
@@ -4227,14 +4244,23 @@ async fn build_dashboard(
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 store.refresh(&nav_config)?
             };
-            let report = nav::rebuild_nav_from_histories_with_strategy_snapshots(
-                &nav_config,
-                &[],
-                &snapshots,
-                &strategy_snapshots,
-                &histories,
-            )?;
-            anyhow::Ok((report, histories, snapshots, strategy_snapshots))
+            let histories = Arc::new(histories);
+            let snapshots = Arc::new(snapshots);
+            let strategy_snapshots = Arc::new(strategy_snapshots);
+            let nav_timelines = Arc::new(nav::NavTimelineCache::build(
+                nav_config,
+                snapshots.clone(),
+                strategy_snapshots.clone(),
+                histories.clone(),
+            )?);
+            let report = nav_timelines.dashboard_report();
+            anyhow::Ok((
+                report,
+                histories,
+                snapshots,
+                strategy_snapshots,
+                nav_timelines,
+            ))
         })
         .await
         .context("CTA dashboard rebuild task failed")??;
@@ -4251,9 +4277,12 @@ async fn build_dashboard(
             accounts,
             report,
         },
-        nav_histories: Arc::new(histories),
-        position_snapshots: Arc::new(snapshots),
-        strategy_position_snapshots: Arc::new(strategy_snapshots),
+        nav_histories: histories,
+        position_snapshots: snapshots,
+        strategy_position_snapshots: strategy_snapshots,
+        nav_timelines,
+        theoretical_fees,
+        fee_rates: Arc::new(fee_rates),
     })
 }
 

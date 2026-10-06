@@ -297,18 +297,20 @@ function NavPage() {
     setTimelineLoading(true)
     setTimelineError(null)
     const loadTimeline = pnlMode === 'account' ? getAccountTimeline : getTimeline
-    const load = () => loadTimeline({
+    const load = (includeTheoretical: boolean) => loadTimeline({
       startMs,
       endMs,
       sourceIds: [scope],
       symbols: selectedSymbols ?? undefined,
       maxPoints: 3_500,
+      includeTheoretical,
       signal: controller.signal,
     })
       .then((next) => {
         if (controller.signal.aborted) return
         setTimeline(next)
-        if (next.theoretical.loading) retryTimer = window.setTimeout(() => void load(), 10_000)
+        if (!includeTheoretical && next.theoretical.loading) void load(true)
+        else if (next.theoretical.loading) retryTimer = window.setTimeout(() => void load(true), 10_000)
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -317,7 +319,7 @@ function NavPage() {
       .finally(() => {
         if (!controller.signal.aborted) setTimelineLoading(false)
       })
-    void load()
+    void load(false)
     return () => {
       controller.abort()
       window.clearTimeout(retryTimer)

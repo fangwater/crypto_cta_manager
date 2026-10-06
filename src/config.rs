@@ -42,6 +42,8 @@ pub struct DatabaseConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct DashboardConfig {
     pub refresh_secs: u64,
+    /// CPU computation only; independent of Binance request concurrency/budget.
+    pub compute_threads: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,7 +186,10 @@ pub struct SourceConfig {
 
 impl Default for DashboardConfig {
     fn default() -> Self {
-        Self { refresh_secs: 60 }
+        Self {
+            refresh_secs: 60,
+            compute_threads: crate::analysis::default_threads(),
+        }
     }
 }
 
@@ -348,6 +353,9 @@ impl AppConfig {
         }
         if self.dashboard.refresh_secs == 0 {
             bail!("dashboard.refresh_secs must be greater than zero");
+        }
+        if !(1..=256).contains(&self.dashboard.compute_threads) {
+            bail!("dashboard.compute_threads must be between 1 and 256");
         }
         if self.order_config.request_timeout_secs == 0 {
             bail!("order_config.request_timeout_secs must be greater than zero");

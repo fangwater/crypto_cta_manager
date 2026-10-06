@@ -1,8 +1,10 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use rayon::prelude::*;
 use serde::Serialize;
 use tracing::info;
 
@@ -397,6 +399,281 @@ struct TimelineSourceState {
     strategy_states: BTreeMap<(String, String, i16), VenueState>,
     latest_marks: BTreeMap<(String, i16), f64>,
     strategy_allocation_active: bool,
+}
+
+#[derive(Clone, Debug)]
+struct FifoCheckpoint {
+    ts_us: i64,
+    next_fill: usize,
+    state: TimelineSourceState,
+}
+
+#[derive(Debug)]
+struct CachedTimelineSource {
+    prepared: PreparedSourceEvents,
+    checkpoints: Vec<FifoCheckpoint>,
+    symbols: BTreeMap<String, i64>,
+    strategies: BTreeMap<String, i64>,
+    report: SourceNavReport,
+}
+
+fn initial_timeline_state(
+    source: &SourceConfig,
+    prepared: &PreparedSourceEvents,
+) -> Result<TimelineSourceState> {
+    Ok(TimelineSourceState {
+        source_id: source.id.clone(),
+        fee_rates: source.nav_fee_rates()?,
+        snapshot_ts_us: prepared.snapshot_ts_us,
+        pending_initial_states: prepared
+            .snapshot_ts_us
+            .map(|_| prepared.initial_states.clone()),
+        pending_initial_strategy_states: prepared
+            .snapshot_ts_us
+            .map(|_| prepared.initial_strategy_states.clone()),
+        states: BTreeMap::new(),
+        strategy_states: BTreeMap::new(),
+        latest_marks: BTreeMap::new(),
+        strategy_allocation_active: prepared.strategy_allocation_active,
+    })
+}
+
+impl CachedTimelineSource {
+    fn build(
+        source: &SourceConfig,
+        prepared: PreparedSourceEvents,
+        initial_position_count: usize,
+    ) -> Result<Self> {
+        let mut state = initial_timeline_state(source, &prepared)?;
+        let mut checkpoints = Vec::new();
+        let mut symbols = BTreeMap::new();
+        let mut strategies = BTreeMap::new();
+        const CHECKPOINT_US: i64 = 3_600_000_000;
+        let anchor = prepared
+            .snapshot_ts_us
+            .or_else(|| prepared.fill_events.first().map(|fill| fill.fill_ts_us));
+        let mut next_checkpoint =
+            anchor.map(|ts| (ts.div_euclid(CHECKPOINT_US) + 1) * CHECKPOINT_US);
+        for (index, fill) in prepared.fill_events.iter().enumerate() {
+            symbols
+                .entry(fill.event.symbol.clone())
+                .or_insert(fill.fill_ts_us);
+            let strategy = strategy_from_from_key(&fill.event.from_key_text);
+            strategies
+                .entry(
+                    if prepared.strategy_allocation_active && is_system_position_close(&strategy) {
+                        UNALLOCATED_STRATEGY.to_string()
+                    } else {
+                        strategy
+                    },
+                )
+                .or_insert(fill.fill_ts_us);
+            if next_checkpoint.is_some_and(|ts| ts <= fill.fill_ts_us) {
+                let ts = fill.fill_ts_us.div_euclid(CHECKPOINT_US) * CHECKPOINT_US;
+                state.activate_snapshot_at(ts);
+                checkpoints.push(FifoCheckpoint {
+                    ts_us: ts,
+                    next_fill: index,
+                    state: state.clone(),
+                });
+                next_checkpoint = Some(ts.saturating_add(CHECKPOINT_US));
+            }
+            state.apply_fill(fill)?;
+        }
+        state.activate_snapshot_at(i64::MAX);
+        let mut symbol_builders = BTreeMap::<String, SymbolReportBuilder>::new();
+        for ((symbol, _), venue) in &state.states {
+            symbol_builders
+                .entry(symbol.clone())
+                .or_default()
+                .push(venue.report(None));
+        }
+        let report_symbols = symbol_builders
+            .into_iter()
+            .map(|(symbol, builder)| builder.finish(symbol))
+            .collect::<Vec<_>>();
+        let mut totals = NavTotals::default();
+        for symbol in &report_symbols {
+            totals.add(symbol.totals);
+        }
+        let report = SourceNavReport {
+            source_id: source.id.clone(),
+            account: source.display_name().to_string(),
+            configured_venue: source.venue.clone(),
+            estimated_fee_rate: state.fee_rates.taker,
+            maker_fee_rate: state.fee_rates.maker,
+            taker_fee_rate: state.fee_rates.taker,
+            initial_position_snapshot_ts_us: prepared.snapshot_ts_us,
+            initial_position_count,
+            order_event_count: prepared.order_event_count,
+            ignored_at_or_before_snapshot_event_count: prepared
+                .ignored_at_or_before_snapshot_event_count,
+            ignored_non_fill_event_count: prepared.ignored_non_fill_event_count,
+            first_fill_ts_us: prepared.fill_events.first().map(|fill| fill.fill_ts_us),
+            last_fill_ts_us: prepared.fill_events.last().map(|fill| fill.fill_ts_us),
+            totals: totals.cleaned(),
+            symbols: report_symbols,
+        };
+        Ok(Self {
+            prepared,
+            checkpoints,
+            symbols,
+            strategies,
+            report,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct TimelineCacheKey {
+    start: Option<i64>,
+    end: i64,
+    sources: Vec<String>,
+    symbols: Vec<String>,
+    max_points: usize,
+    strategy_allocation: bool,
+}
+
+/// One immutable dashboard generation. Fee/snapshot/history refreshes replace
+/// the entire object, including checkpoints and request results atomically.
+#[derive(Debug)]
+pub struct NavTimelineCache {
+    config: AppConfig,
+    snapshots: Arc<SourcePositionSnapshots>,
+    strategy_snapshots: Arc<SourceStrategyPositionSnapshots>,
+    histories: Arc<NavSourceHistories>,
+    sources: BTreeMap<(String, bool), Arc<CachedTimelineSource>>,
+    results: crate::analysis::QueryCache<TimelineCacheKey, NavTimelineReport>,
+}
+
+impl NavTimelineCache {
+    pub fn build(
+        config: AppConfig,
+        snapshots: Arc<SourcePositionSnapshots>,
+        strategy_snapshots: Arc<SourceStrategyPositionSnapshots>,
+        histories: Arc<NavSourceHistories>,
+    ) -> Result<Self> {
+        let mut work = Vec::new();
+        for source in config.sources.iter().filter(|source| source.enabled) {
+            work.push((source, false));
+            if strategy_snapshots.get(&source.id).is_some_and(|strategy| {
+                snapshots
+                    .get(&source.id)
+                    .is_none_or(|snapshot| strategy.snapshot_ts_us >= snapshot.snapshot_ts_us)
+            }) {
+                work.push((source, true));
+            }
+        }
+        let mut sources = crate::analysis::run(|| {
+            work.par_iter()
+                .map(|(source, allocation)| {
+                    let history = histories
+                        .get(&source.id)
+                        .with_context(|| format!("missing NAV history for {}", source.id))?;
+                    let strategy = allocation
+                        .then(|| strategy_snapshots.get(&source.id))
+                        .flatten();
+                    let initial_position_count =
+                        effective_position_snapshot(snapshots.get(&source.id), strategy)?
+                            .map_or(0, |snapshot| snapshot.positions.len());
+                    let prepared = prepare_source_events(
+                        source,
+                        history.events.clone(),
+                        snapshots.get(&source.id),
+                        strategy,
+                        &history.liquidity_by_order,
+                    )?;
+                    Ok((
+                        (source.id.clone(), *allocation),
+                        Arc::new(CachedTimelineSource::build(
+                            source,
+                            prepared,
+                            initial_position_count,
+                        )?),
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()
+        })?;
+        for source in config.sources.iter().filter(|source| source.enabled) {
+            if !sources.contains_key(&(source.id.clone(), true)) {
+                sources.insert(
+                    (source.id.clone(), true),
+                    sources[&(source.id.clone(), false)].clone(),
+                );
+            }
+        }
+        Ok(Self {
+            config,
+            snapshots,
+            strategy_snapshots,
+            histories,
+            sources,
+            results: crate::analysis::QueryCache::new(16),
+        })
+    }
+
+    pub fn dashboard_report(&self) -> NavReport {
+        aggregate_source_reports(
+            self.config
+                .sources
+                .iter()
+                .filter(|source| source.enabled)
+                .map(|source| self.sources[&(source.id.clone(), true)].report.clone())
+                .collect(),
+        )
+    }
+
+    pub fn rebuild(
+        &self,
+        mut request: NavTimelineRequest,
+        strategy_allocation: bool,
+    ) -> Result<Arc<NavTimelineReport>> {
+        request.selected_source_ids.sort();
+        request.selected_source_ids.dedup();
+        request.selected_symbols.sort();
+        request.selected_symbols.dedup();
+        let key = TimelineCacheKey {
+            start: request.start_ts_us,
+            end: request.end_ts_us,
+            sources: request.selected_source_ids.clone(),
+            symbols: request.selected_symbols.clone(),
+            max_points: request.max_points,
+            strategy_allocation,
+        };
+        self.results.get_or_compute(key, || {
+            crate::analysis::run(|| {
+                let snapshots = self
+                    .snapshots
+                    .iter()
+                    .filter(|(id, _)| {
+                        request.selected_source_ids.is_empty()
+                            || request.selected_source_ids.contains(id)
+                    })
+                    .map(|(id, value)| (id.clone(), value.clone()))
+                    .collect();
+                let strategies = if strategy_allocation {
+                    self.strategy_snapshots
+                        .iter()
+                        .filter(|(id, _)| {
+                            request.selected_source_ids.is_empty()
+                                || request.selected_source_ids.contains(id)
+                        })
+                        .map(|(id, value)| (id.clone(), value.clone()))
+                        .collect()
+                } else {
+                    BTreeMap::new()
+                };
+                rebuild_nav_timeline_with_cache(
+                    &self.config,
+                    request,
+                    &snapshots,
+                    &strategies,
+                    &self.histories,
+                    Some((self, strategy_allocation)),
+                )
+            })
+        })
+    }
 }
 
 impl TimelineSourceState {
@@ -1701,6 +1978,24 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
     strategy_snapshots: &SourceStrategyPositionSnapshots,
     histories: &NavSourceHistories,
 ) -> Result<NavTimelineReport> {
+    rebuild_nav_timeline_with_cache(
+        config,
+        request,
+        snapshots,
+        strategy_snapshots,
+        histories,
+        None,
+    )
+}
+
+fn rebuild_nav_timeline_with_cache(
+    config: &AppConfig,
+    request: NavTimelineRequest,
+    snapshots: &SourcePositionSnapshots,
+    strategy_snapshots: &SourceStrategyPositionSnapshots,
+    histories: &NavSourceHistories,
+    cached: Option<(&NavTimelineCache, bool)>,
+) -> Result<NavTimelineReport> {
     if request.end_ts_us < 0 {
         bail!("end timestamp must not be negative");
     }
@@ -1735,14 +2030,22 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
         let history = histories
             .get(&source.id)
             .with_context(|| format!("NAV history is missing selected source {}", source.id))?;
-        let prepared = prepare_source_events(
-            source,
-            history.events.clone(),
-            snapshots.get(&source.id),
-            strategy_snapshots.get(&source.id),
-            &history.liquidity_by_order,
-        )
-        .with_context(|| format!("failed to prepare source {} timeline", source.id))?;
+        let cached_source = cached
+            .and_then(|(cache, allocation)| cache.sources.get(&(source.id.clone(), allocation)));
+        let uncached_prepared;
+        let prepared = if let Some(cached) = cached_source {
+            &cached.prepared
+        } else {
+            uncached_prepared = prepare_source_events(
+                source,
+                history.events.clone(),
+                snapshots.get(&source.id),
+                strategy_snapshots.get(&source.id),
+                &history.liquidity_by_order,
+            )
+            .with_context(|| format!("failed to prepare source {} timeline", source.id))?;
+            &uncached_prepared
+        };
         let first_fill_ts_us = prepared
             .fill_events
             .iter()
@@ -1787,7 +2090,37 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
         if strategy_allocation_active {
             available_strategies.insert(UNALLOCATED_STRATEGY.to_string());
         }
-        for fill in prepared.fill_events {
+        let checkpoint = cached_source.and_then(|cached| {
+            request.start_ts_us.and_then(|start| {
+                cached.checkpoints.get(
+                    cached
+                        .checkpoints
+                        .partition_point(|cp| cp.ts_us <= start)
+                        .checked_sub(1)?,
+                )
+            })
+        });
+        if let Some(cached) = cached_source {
+            available_symbols.extend(
+                cached
+                    .symbols
+                    .iter()
+                    .filter(|(_, ts)| **ts <= request.end_ts_us)
+                    .map(|(symbol, _)| symbol.clone()),
+            );
+            available_strategies.extend(
+                cached
+                    .strategies
+                    .iter()
+                    .filter(|(_, ts)| **ts <= request.end_ts_us)
+                    .map(|(strategy, _)| strategy.clone()),
+            );
+        }
+        let first_fill = checkpoint.map_or(0, |cp| cp.next_fill);
+        let last_fill = prepared
+            .fill_events
+            .partition_point(|fill| fill.fill_ts_us <= request.end_ts_us);
+        for fill in &prepared.fill_events[first_fill.min(last_fill)..last_fill] {
             if fill.fill_ts_us <= request.end_ts_us {
                 available_symbols.insert(fill.event.symbol.clone());
                 let strategy = strategy_from_from_key(&fill.event.from_key_text);
@@ -1799,22 +2132,14 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
                 timeline_events.push(TimelineEvent::Fill {
                     source_index,
                     source_id: source.id.clone(),
-                    fill,
+                    fill: fill.clone(),
                 });
             }
         }
-        runtimes.push(TimelineSourceState {
-            source_id: source.id.clone(),
-            fee_rates,
-            snapshot_ts_us: prepared.snapshot_ts_us,
-            pending_initial_states: prepared.snapshot_ts_us.map(|_| prepared.initial_states),
-            pending_initial_strategy_states: prepared
-                .snapshot_ts_us
-                .map(|_| prepared.initial_strategy_states),
-            states: BTreeMap::new(),
-            strategy_states: BTreeMap::new(),
-            latest_marks: BTreeMap::new(),
-            strategy_allocation_active: prepared.strategy_allocation_active,
+        let _ = fee_rates;
+        runtimes.push(match checkpoint {
+            Some(cp) => cp.state.clone(),
+            None => initial_timeline_state(source, prepared)?,
         });
     }
 
@@ -4575,5 +4900,169 @@ mod tests {
         let histories = store.refresh(&config).unwrap();
         assert_eq!(history_event_timestamps(&histories["trade01"]), [1]);
         assert!(histories["trade02"].events.is_empty());
+    }
+
+    #[test]
+    fn cached_fifo_checkpoints_match_full_replay_at_boundaries_and_with_strategy_residuals() {
+        let config = app_config(vec![
+            source("trade01", Some(0.0002)),
+            source("trade02", Some(-0.0001)),
+        ]);
+        let mut histories = NavSourceHistories::new();
+        for (source_index, source) in config.sources.iter().enumerate() {
+            let events = (0..320)
+                .map(|index| {
+                    let ts = 1 + index * 120_000_000;
+                    let symbol = ["BTCUSDT", "ETHUSDT", "SOLUSDT"][(index % 3) as usize];
+                    let strategy = ["alpha", "beta", "system_position_close"][(index % 3) as usize];
+                    strategy_event_at(
+                        100_000_000_000 - index,
+                        ts,
+                        symbol,
+                        1,
+                        if index % 5 == 0 { 2 } else { 1 },
+                        100.0 + (index % 7) as f64,
+                        0.1 + source_index as f64,
+                        strategy,
+                    )
+                })
+                .collect::<im::Vector<_>>();
+            histories.insert(
+                source.id.clone(),
+                NavSourceHistory {
+                    events,
+                    liquidity_by_order: LiquidityByOrder::new(),
+                },
+            );
+        }
+        let snapshots = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            position_snapshot("trade01", 1, 2.0, Some(99.0)),
+        )]));
+        let strategy_snapshots = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            strategy_position_snapshot("trade01", 1, vec![("alpha", "BTCUSDT", 1.0, 99.0)]),
+        )]));
+        let histories = Arc::new(histories);
+        let cache = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategy_snapshots.clone(),
+            histories.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache.dashboard_report(),
+            rebuild_nav_from_histories_with_strategy_snapshots(
+                &config,
+                &[],
+                &snapshots,
+                &strategy_snapshots,
+                &histories,
+            )
+            .unwrap()
+        );
+        let no_strategy_snapshots = BTreeMap::new();
+        for allocation in [false, true] {
+            for start in [
+                1,
+                3_600_000_000 - 1,
+                3_600_000_000,
+                3_600_000_001,
+                9_000_000_000,
+            ] {
+                let request = timeline_request(
+                    start,
+                    start + 3_600_000_000,
+                    vec!["trade01".into(), "trade02".into()],
+                    Vec::new(),
+                );
+                let expected = rebuild_nav_timeline_from_histories_with_strategy_snapshots(
+                    &config,
+                    request.clone(),
+                    &snapshots,
+                    if allocation {
+                        &strategy_snapshots
+                    } else {
+                        &no_strategy_snapshots
+                    },
+                    &histories,
+                )
+                .unwrap();
+                let actual = cache.rebuild(request.clone(), allocation).unwrap();
+                assert_eq!(actual.as_ref(), &expected);
+                assert!(Arc::ptr_eq(
+                    &actual,
+                    &cache.rebuild(request, allocation).unwrap()
+                ));
+            }
+        }
+        assert!(
+            !cache.sources[&("trade01".into(), true)]
+                .checkpoints
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn fifo_cache_new_generation_repairs_late_fills_and_fee_changes() {
+        let mut config = app_config(vec![source("trade01", Some(0.0002))]);
+        let make_histories = |late: bool| {
+            let mut events = vec![
+                event(1, "BTCUSDT", 1, 1, 100.0, 2.0),
+                event(8_000_000_000, "BTCUSDT", 1, 2, 110.0, 1.0),
+            ];
+            if late {
+                events.push(event_at(
+                    9_000_000_000,
+                    2_000_000_000,
+                    "BTCUSDT",
+                    1,
+                    2,
+                    105.0,
+                    1.0,
+                ));
+            }
+            Arc::new(BTreeMap::from([(
+                "trade01".into(),
+                NavSourceHistory {
+                    events: events.into_iter().collect(),
+                    liquidity_by_order: LiquidityByOrder::new(),
+                },
+            )]))
+        };
+        let snapshots = Arc::new(BTreeMap::new());
+        let strategies = Arc::new(BTreeMap::new());
+        let cache = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            make_histories(false),
+        )
+        .unwrap();
+        let request = timeline_request(
+            3_600_000_000,
+            9_000_000_000,
+            vec!["trade01".into()],
+            Vec::new(),
+        );
+        let old = cache.rebuild(request.clone(), false).unwrap();
+        config.sources[0].estimated_fee_rate = Some(-0.0001);
+        let histories = make_histories(true);
+        let repaired = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+        )
+        .unwrap()
+        .rebuild(request.clone(), false)
+        .unwrap();
+        let expected = rebuild_nav_timeline_from_histories_with_snapshots(
+            &config, request, &snapshots, &histories,
+        )
+        .unwrap();
+        assert_eq!(repaired.as_ref(), &expected);
+        assert_ne!(old.summary, repaired.summary);
     }
 }

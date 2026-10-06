@@ -110,6 +110,37 @@ seconds until ready, preserving the factual chart. Changing accounts/ranges
 cancels the old retry. Permanent unsupported ranges do not loop. Already cached
 minutes can be read immediately while older backfills for that symbol continue.
 
+The browser requests factual NAV first with `includeTheoretical=false`, then
+loads the theoretical overlay. Factual retries reuse a bounded shared result
+cache within the same dashboard generation. Background refreshes prepare sorted
+fills and hourly FIFO checkpoints, atomically publishing them with the snapshots
+and actual/theoretical fee settings. Queries replay from the checkpoint before
+their exact start; a fill at the start remains part of the selected window.
+Late fills, liquidity corrections, fee changes and snapshot changes rebuild the
+generation before it replaces the previous one.
+The dashboard summary reuses the same FIFO preparation instead of replaying
+history a second time. Completed theoretical queries can return their cached
+curve before rebuilding schedules or scanning candles again.
+
+`dashboard.compute_threads` controls the bounded analysis CPU pool (default:
+available CPUs capped at 16). Source preparation, minute reads and five-minute
+pricing run in parallel. Dense Kline ranges use one range scan, sparse missing
+keys use deduplicated batched MultiGet, and decoded candles and complete
+five-minute prices are reused in memory until the 30-day retention cutoff.
+Missing minutes and incomplete curves are never retained as successful results.
+The target cache indexes cumulative quantities by account/symbol/venue so a NAV
+query can establish carried inventory without traversing every old target.
+All these caches are disposable; no derived PostgreSQL tables are introduced.
+
+PostgreSQL stores account/strategy catalogs, permissions, fee settings and
+immutable starting-position snapshots. Exec RocksDB remains the source for
+orders/fills; Manager RocksDB holds target archives and minute candles. NAV and
+acquisition-cost computation use the background fee snapshot rather than issuing
+fee queries for every page request. Session and permission checks still consult
+PostgreSQL so revoked access is effective immediately. Timeline logs expose
+`actual_duration_ms` and `theoretical_duration_ms`; Kline status also reports
+disk range/batch reads, decoded-candle hits and shared-pricing hits.
+
 The default symbols are BNBUSDT, XRPUSDT, ETHUSDT, BTCUSDT and SOLUSDT.
 Every 300 seconds only these five are maintained. Queries warm other symbols
 on demand, backwards in 24-hour blocks capped at retention. Each block requests
