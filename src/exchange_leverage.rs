@@ -126,6 +126,8 @@ pub async fn set_symbol_contract_leverage(
 ) -> Result<SymbolContractLeverageResult> {
     validate_contract_symbol(&request.symbol).map_err(anyhow::Error::msg)?;
     validate_contract_leverage(request.contract_leverage).map_err(anyhow::Error::msg)?;
+    let selected = crate::exec_routing::for_symbol(source, &request.symbol)?;
+    let source = &selected;
     let credentials = load_source_credentials(source)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
@@ -151,6 +153,8 @@ pub async fn get_symbol_contract_leverage(
 ) -> Result<SymbolContractLeverageResult> {
     let symbol = crate::order_config::normalize_exec_symbol(symbol).map_err(anyhow::Error::msg)?;
     validate_contract_symbol(&symbol).map_err(anyhow::Error::msg)?;
+    let selected = crate::exec_routing::for_symbol(source, &symbol)?;
+    let source = &selected;
     let credentials = load_source_credentials(source)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
@@ -174,6 +178,8 @@ pub async fn get_exchange_fee_rates(
     source: &SourceConfig,
     symbol: &str,
 ) -> Result<ExchangeFeeRatesResult> {
+    let selected = crate::exec_routing::for_symbol(source, symbol)?;
+    let source = &selected;
     let credentials = load_source_credentials(source)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
@@ -200,13 +206,13 @@ pub fn required_trading_account_mode(venue: &str) -> &'static str {
             "OKX unified account mode (acctLv 3 multi-currency margin or 4 portfolio margin)"
         }
         "binance-coin-futures" => "Binance COIN-M account",
-        _ => "Binance USD-M Multi-Assets Mode",
+        _ => "Binance USD-M Multi-Assets Mode or Portfolio Margin",
     }
 }
 
 /// Returns whether the account satisfies the venue mode required before
-/// Manager may publish a non-zero target. Binance USD-M requires Standard API
-/// mode with Multi-Assets Mode enabled. OKX requires unified account mode:
+/// Manager may publish a non-zero target. Binance supports Standard Multi-Assets
+/// Mode or Portfolio Margin. OKX requires unified account mode:
 /// multi-currency margin (`acctLv=3`) or portfolio margin (`acctLv=4`).
 pub async fn has_required_trading_account_mode(source: &SourceConfig) -> Result<bool> {
     match source.venue.as_str() {
@@ -218,8 +224,8 @@ pub async fn has_required_trading_account_mode(source: &SourceConfig) -> Result<
 
 async fn has_binance_multi_assets_mode(source: &SourceConfig) -> Result<bool> {
     let credentials = load_source_credentials(source)?;
-    if credentials.account_mode != AccountMode::Standard {
-        return Ok(false);
+    if credentials.account_mode == AccountMode::Unified {
+        return Ok(true);
     }
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))

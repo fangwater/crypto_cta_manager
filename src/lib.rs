@@ -5,6 +5,7 @@ pub mod bbo;
 pub mod bfusd_auto;
 pub mod config;
 pub mod exchange_leverage;
+mod exec_routing;
 pub mod kline;
 pub mod manager_db;
 pub mod market_rules;

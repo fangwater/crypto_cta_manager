@@ -677,13 +677,19 @@ strategy without routing its fills through `SYSTEM_POSITION_CLOSE`. Manager
 keeps a reconnecting Redis long connection, writes and rereads the runtime JSON there, then notifies
 `exec-pre-trade` over iceoryx. The 30s Redis poll remains the fallback.
 
-Binance COIN-M Exec sources use `venue = "binance-coin-futures"`. Set up a
-separate source, IPC namespace, environment and Redis prefix for that market;
-changing a USD-M symbol suffix does not move an existing source to COIN-M.
+A native Binance Exec source configured as `venue = "binance-futures"` supports
+USD-M and COIN-M perpetuals under the same source id, account and IPC namespace.
+No second Exec environment or Manager source is required. Manager partitions
+targets and symbol overrides into the existing per-market Redis scopes and
+commits both scopes atomically with the same `updated_at_us`. Config reads merge
+both scopes; parameter updates and removals apply to both. Rule refresh,
+leverage, commission and market monitoring follow the selected symbol market.
+`venue = "binance-coin-futures"` remains the COIN-M-only option. RapidX/LTP
+accounts support USD-M only and reject coin targets before publishing.
 Perpetual target symbols use `BTCUSDT` for USDT margin, `BTCUSDC` for USDC
-margin and `BTCUSD` for coin margin. USD-M sources accept USDT/USDC; COIN-M
-sources accept USD. Manager stores `BTCUSD` in target and symbol-template
-override keys, restores `BTCUSD_PERP` only at Binance API boundaries, and
+margin and `BTCUSD` for coin margin. Native `binance-futures` sources accept all
+three suffixes; COIN-M-only sources accept USD. Manager stores `BTCUSD` in target
+and symbol-template override keys, restores `BTCUSD_PERP` only at Binance API boundaries, and
 rejects delivery contracts and alias collisions.
 `qty = 0.01` is 0.01 BTC. Shares still multiply only this base quantity. Exec
 converts the target gap at the current COIN-M mark into contract counts using
@@ -700,9 +706,9 @@ minute-kline theoretical analysis and the USDT/BFUSD live-equity widget remain
 USD-M only; they do not fabricate a COIN-M estimate or collateral total.
 
 Before publishing any non-zero target, Manager checks that source's live account
-mode with its Exec `env.sh`. A Binance USD-M source must use Standard API mode
-with Multi-Assets Mode enabled (`/fapi/v1/accountConfig`). An OKX source must be
-a unified account: `acctLv` 3 (multi-currency margin) or 4 (portfolio margin)
+mode with its Exec `env.sh`. Native Binance accounts support STANDARD with
+Multi-Assets Mode enabled (`/fapi/v1/accountConfig`) or UNIFIED Portfolio Margin.
+An OKX source must be a unified account: `acctLv` 3 (multi-currency margin) or 4 (portfolio margin)
 from `/api/v5/account/config`. Query failures also block the publish. Complete
 zero target vectors bypass this gate so an operator can always stop a strategy
 and reduce risk. Live Maker/Taker queries use Binance `commissionRate` or OKX

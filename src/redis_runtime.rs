@@ -170,241 +170,257 @@ impl RedisRuntime {
         ) {
             bail!("strategy_name is reserved");
         }
-        if source.venue == "binance-coin-futures" {
-            for symbol in targets.keys().chain(symbol_order_parameters.keys()) {
-                crate::order_config::binance_coin_wire_symbol(symbol)
-                    .map_err(anyhow::Error::msg)?;
-            }
-        } else if source.venue == "binance-futures" {
-            for symbol in targets.keys().chain(symbol_order_parameters.keys()) {
-                anyhow::ensure!(
-                    symbol.ends_with("USDT") || symbol.ends_with("USDC"),
-                    "USD-M perpetual symbol must end with USDT or USDC: {symbol}"
-                );
-            }
+        let markets = crate::exec_routing::markets(source)?;
+        for symbol in targets.keys().chain(symbol_order_parameters.keys()) {
+            let market = crate::exec_routing::symbol_market(&source.venue, symbol)?;
+            anyhow::ensure!(
+                markets.iter().any(|venue| venue == market),
+                "source {} does not support {market}",
+                source.id
+            );
         }
 
         let runtime_targets =
             filter_runtime_target_signals(order_parameters, symbol_order_parameters, targets);
         let family = order_parameters.algorithm.family();
-        let prefix = format!(
-            "{}:{}:{}:",
-            source.id,
-            source.venue,
-            family.redis_namespace()
-        );
-        let config_key = format!("{prefix}{strategy_name}");
-        let index_key = format!("{prefix}strategy_names");
-        let removed_key = format!("{prefix}removed_strategy_names");
         let timeout = Duration::from_secs(self.request_timeout_secs().await);
 
         let stored = {
             let mut inner = self.inner.lock().await;
             let connection = inner.connection().await?;
             tokio::time::timeout(timeout, async {
-                let removed = decode_strategy_names(
-                    connection.get::<_, Option<String>>(&removed_key).await?,
-                    "removed strategy index",
-                )?;
-                if removed.iter().any(|name| name == strategy_name) {
-                    bail!("strategy removal already requested: {strategy_name}");
-                }
-
-                let mut names = decode_strategy_names(
-                    connection.get::<_, Option<String>>(&index_key).await?,
-                    "strategy index",
-                )?;
-                let current =
-                    load_stored_config(connection.get::<_, Option<String>>(&config_key).await?)?;
-                let current_version = current
-                    .as_ref()
-                    .and_then(|payload| payload.get("updated_at_us"))
-                    .and_then(serde_json::Value::as_i64);
-                let updated_at_us = next_updated_at_us(current_version);
-                let opposite = family.opposite();
-                let opposite_prefix = format!(
-                    "{}:{}:{}:",
-                    source.id,
-                    source.venue,
-                    opposite.redis_namespace()
-                );
-                let opposite_names = decode_strategy_names(
-                    connection
-                        .get::<_, Option<String>>(format!("{opposite_prefix}strategy_names"))
-                        .await?,
-                    "opposite execution-family strategy index",
-                )?;
-                let switching = opposite_names.iter().any(|name| name == strategy_name);
-                let switch_index_key =
-                    format!("{}:{}:exec_switch:strategy_names", source.id, source.venue);
-                let switch_key = format!(
-                    "{}:{}:exec_switch:{}",
-                    source.id, source.venue, strategy_name
-                );
-                let mut switch_names = decode_strategy_names(
-                    connection
-                        .get::<_, Option<String>>(&switch_index_key)
-                        .await?,
-                    "Exec algorithm switch index",
-                )?;
-                let existing_switch = connection.get::<_, Option<String>>(&switch_key).await?;
-                let reusable_completed_switch = if let Some(raw) = existing_switch.as_deref() {
-                    let existing: StoredExecAlgorithmSwitch = serde_json::from_str(&raw)
-                        .context("Exec algorithm switch is invalid JSON")?;
-                    let expected_from = opposite.redis_namespace();
-                    let expected_to = family.redis_namespace();
-                    if existing.state != "completed"
-                        && (existing.from_family != expected_from
-                            || existing.to_family != expected_to)
-                    {
-                        bail!(
-                            "algorithm switch already in progress for {strategy_name}: {} -> {} ({})",
-                            existing.from_family,
-                            existing.to_family,
-                            existing.state
-                        );
-                    }
-                    existing.state == "completed"
-                } else {
-                    false
-                };
-                if switching && names.iter().any(|name| name == strategy_name) {
-                    bail!(
-                        "strategy {strategy_name} is active in both execution families; resolve the duplicate ownership before switching"
-                    );
-                }
-                let symbol_overrides = symbol_order_parameters
-                    .iter()
-                    .filter_map(|(symbol, selected)| match family {
-                        ExecutionFamily::BatchExec => {
-                            let value =
-                                OrderParameterOverrides::from_templates(order_parameters, selected);
-                            (!value.is_empty()).then_some((symbol.clone(), value))
-                        }
-                        ExecutionFamily::ChaseExec => None,
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                let chase_symbol_overrides = symbol_order_parameters
-                    .iter()
-                    .filter_map(|(symbol, selected)| match family {
-                        ExecutionFamily::BatchExec => None,
-                        ExecutionFamily::ChaseExec => {
-                            let value = ChaseParameterOverrides::from_templates(
-                                &order_parameters.chase,
-                                &selected.chase,
-                            );
-                            (!value.is_empty()).then_some((symbol.clone(), value))
-                        }
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                let encoded = match family {
-                    ExecutionFamily::BatchExec => serde_json::to_string(&StoredBatchExecConfig {
-                        algorithm: order_parameters.algorithm,
-                        pov: &order_parameters.pov,
-                        single_order_usdt: order_parameters.single_order_usdt,
-                        orders_per_batch: order_parameters.orders_per_batch,
-                        max_batch: order_parameters.max_batch,
-                        maker_price_anchor: &order_parameters.maker_price_anchor,
-                        tick_spacing: order_parameters.tick_spacing,
-                        batch_interval_ms: order_parameters.batch_interval_ms,
-                        maker_timeout_ms: order_parameters.maker_timeout_ms,
-                        max_maker_requotes: order_parameters.max_maker_requotes,
-                        target_tolerance_usdt: order_parameters.target_tolerance_usdt,
-                        symbol_overrides: &symbol_overrides,
-                        targets: &runtime_targets,
-                        updated_at_us,
-                    }),
-                    ExecutionFamily::ChaseExec => serde_json::to_string(&StoredChaseExecConfig {
-                        batch_floor_usdt: order_parameters.chase.batch_floor_usdt,
-                        max_batch: order_parameters.chase.max_batch,
-                        max_open_batches: order_parameters.chase.max_open_batches,
-                        maker_recenter_trigger_bps: order_parameters
-                            .chase
-                            .maker_recenter_trigger_bps,
-                        maker_amend_cooldown_ms: order_parameters.chase.maker_amend_cooldown_ms,
-                        maker_timeout_sec: order_parameters.chase.maker_timeout_sec,
-                        target_tolerance_usdt: order_parameters.chase.target_tolerance_usdt,
-                        strategy_order_rate_limit_per_min: order_parameters
-                            .chase
-                            .strategy_order_rate_limit_per_min,
-                        strategy_order_rate_limit_10s: order_parameters
-                            .chase
-                            .strategy_order_rate_limit_10s,
-                        symbol_overrides: &chase_symbol_overrides,
-                        targets: &runtime_targets,
-                        updated_at_us,
-                    }),
-                }
-                .context("failed to encode Exec Redis payload")?;
-                let expected: serde_json::Value = serde_json::from_str(&encoded)
-                    .context("failed to decode encoded Exec Redis payload")?;
-
                 let mut pipe = redis::pipe();
                 pipe.atomic();
-                pipe.set(&config_key, &encoded);
-                if switching && (existing_switch.is_none() || reusable_completed_switch) {
-                    if !switch_names.iter().any(|name| name == strategy_name) {
-                        switch_names.push(strategy_name.to_string());
-                        switch_names.sort();
+                let mut confirmations = Vec::new();
+                let mut merged_overrides = serde_json::Map::new();
+                let mut previous_version = None;
+                for venue in &markets {
+                    let key = format!("{}:{}:{}:{}", source.id, venue, family.redis_namespace(), strategy_name);
+                    let current = load_stored_config(connection.get::<_, Option<String>>(&key).await?)?;
+                    let version = current.as_ref().and_then(|payload| payload.get("updated_at_us")).and_then(serde_json::Value::as_i64);
+                    previous_version = previous_version.max(version);
+                }
+                let updated_at_us = next_updated_at_us(previous_version);
+                for venue in &markets {
+                    let mut scoped_source = source.clone();
+                    scoped_source.venue = venue.clone();
+                    let source = &scoped_source;
+                    let runtime_targets = runtime_targets.iter().filter(|(symbol, _)| {
+                        crate::exec_routing::symbol_market(&source.venue, symbol).is_ok_and(|market| market == venue)
+                    }).map(|(symbol, target)| (symbol.clone(), *target)).collect::<BTreeMap<_, _>>();
+                    let symbol_order_parameters = symbol_order_parameters.iter().filter(|(symbol, _)| {
+                        crate::exec_routing::symbol_market(&source.venue, symbol).is_ok_and(|market| market == venue)
+                    }).map(|(symbol, parameters)| (symbol.clone(), parameters.clone())).collect::<BTreeMap<_, _>>();
+                    let prefix = format!(
+                        "{}:{}:{}:",
+                        source.id,
+                        source.venue,
+                        family.redis_namespace()
+                    );
+                    let config_key = format!("{prefix}{strategy_name}");
+                    let index_key = format!("{prefix}strategy_names");
+                    let removed_key = format!("{prefix}removed_strategy_names");
+                    let removed = decode_strategy_names(
+                        connection.get::<_, Option<String>>(&removed_key).await?,
+                        "removed strategy index",
+                    )?;
+                    if removed.iter().any(|name| name == strategy_name) {
+                        bail!("strategy removal already requested: {strategy_name}");
                     }
-                    let request = StoredExecAlgorithmSwitch {
-                        from_family: opposite.redis_namespace().to_string(),
-                        to_family: family.redis_namespace().to_string(),
-                        state: "requested".to_string(),
-                        requested_at_us: updated_at_us,
-                        updated_at_us,
-                        positions: BTreeMap::new(),
-                        inverse_notionals: BTreeMap::new(),
+
+                    let mut names = decode_strategy_names(
+                        connection.get::<_, Option<String>>(&index_key).await?,
+                        "strategy index",
+                    )?;
+                    let opposite = family.opposite();
+                    let opposite_prefix = format!(
+                        "{}:{}:{}:",
+                        source.id,
+                        source.venue,
+                        opposite.redis_namespace()
+                    );
+                    let opposite_names = decode_strategy_names(
+                        connection
+                            .get::<_, Option<String>>(format!("{opposite_prefix}strategy_names"))
+                            .await?,
+                        "opposite execution-family strategy index",
+                    )?;
+                    let switching = opposite_names.iter().any(|name| name == strategy_name);
+                    let switch_index_key =
+                        format!("{}:{}:exec_switch:strategy_names", source.id, source.venue);
+                    let switch_key = format!(
+                        "{}:{}:exec_switch:{}",
+                        source.id, source.venue, strategy_name
+                    );
+                    let mut switch_names = decode_strategy_names(
+                        connection
+                            .get::<_, Option<String>>(&switch_index_key)
+                            .await?,
+                        "Exec algorithm switch index",
+                    )?;
+                    let existing_switch = connection.get::<_, Option<String>>(&switch_key).await?;
+                    let reusable_completed_switch = if let Some(raw) = existing_switch.as_deref() {
+                        let existing: StoredExecAlgorithmSwitch = serde_json::from_str(&raw)
+                            .context("Exec algorithm switch is invalid JSON")?;
+                        let expected_from = opposite.redis_namespace();
+                        let expected_to = family.redis_namespace();
+                        if existing.state != "completed"
+                            && (existing.from_family != expected_from
+                                || existing.to_family != expected_to)
+                        {
+                            bail!(
+                                "algorithm switch already in progress for {strategy_name}: {} -> {} ({})",
+                                existing.from_family,
+                                existing.to_family,
+                                existing.state
+                            );
+                        }
+                        existing.state == "completed"
+                    } else {
+                        false
                     };
-                    pipe.set(
-                        &switch_index_key,
-                        serde_json::to_string(&switch_names)
-                            .context("failed to encode Exec algorithm switch index")?,
-                    )
-                    .set(
-                        &switch_key,
-                        serde_json::to_string(&request)
-                            .context("failed to encode Exec algorithm switch request")?,
-                    );
-                } else if !switching && !names.iter().any(|name| name == strategy_name) {
-                    names.push(strategy_name.to_string());
-                    names.sort();
-                    names.dedup();
-                    pipe.set(
-                        &index_key,
-                        serde_json::to_string(&names)
-                            .context("failed to encode Exec strategy index")?,
-                    );
+                    if switching && names.iter().any(|name| name == strategy_name) {
+                        bail!(
+                            "strategy {strategy_name} is active in both execution families; resolve the duplicate ownership before switching"
+                        );
+                    }
+                    let symbol_overrides = symbol_order_parameters
+                        .iter()
+                        .filter_map(|(symbol, selected)| match family {
+                            ExecutionFamily::BatchExec => {
+                                let value =
+                                    OrderParameterOverrides::from_templates(order_parameters, selected);
+                                (!value.is_empty()).then_some((symbol.clone(), value))
+                            }
+                            ExecutionFamily::ChaseExec => None,
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    let chase_symbol_overrides = symbol_order_parameters
+                        .iter()
+                        .filter_map(|(symbol, selected)| match family {
+                            ExecutionFamily::BatchExec => None,
+                            ExecutionFamily::ChaseExec => {
+                                let value = ChaseParameterOverrides::from_templates(
+                                    &order_parameters.chase,
+                                    &selected.chase,
+                                );
+                                (!value.is_empty()).then_some((symbol.clone(), value))
+                            }
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    let encoded = match family {
+                        ExecutionFamily::BatchExec => serde_json::to_string(&StoredBatchExecConfig {
+                            algorithm: order_parameters.algorithm,
+                            pov: &order_parameters.pov,
+                            single_order_usdt: order_parameters.single_order_usdt,
+                            orders_per_batch: order_parameters.orders_per_batch,
+                            max_batch: order_parameters.max_batch,
+                            maker_price_anchor: &order_parameters.maker_price_anchor,
+                            tick_spacing: order_parameters.tick_spacing,
+                            batch_interval_ms: order_parameters.batch_interval_ms,
+                            maker_timeout_ms: order_parameters.maker_timeout_ms,
+                            max_maker_requotes: order_parameters.max_maker_requotes,
+                            target_tolerance_usdt: order_parameters.target_tolerance_usdt,
+                            symbol_overrides: &symbol_overrides,
+                            targets: &runtime_targets,
+                            updated_at_us,
+                        }),
+                        ExecutionFamily::ChaseExec => serde_json::to_string(&StoredChaseExecConfig {
+                            batch_floor_usdt: order_parameters.chase.batch_floor_usdt,
+                            max_batch: order_parameters.chase.max_batch,
+                            max_open_batches: order_parameters.chase.max_open_batches,
+                            maker_recenter_trigger_bps: order_parameters
+                                .chase
+                                .maker_recenter_trigger_bps,
+                            maker_amend_cooldown_ms: order_parameters.chase.maker_amend_cooldown_ms,
+                            maker_timeout_sec: order_parameters.chase.maker_timeout_sec,
+                            target_tolerance_usdt: order_parameters.chase.target_tolerance_usdt,
+                            strategy_order_rate_limit_per_min: order_parameters
+                                .chase
+                                .strategy_order_rate_limit_per_min,
+                            strategy_order_rate_limit_10s: order_parameters
+                                .chase
+                                .strategy_order_rate_limit_10s,
+                            symbol_overrides: &chase_symbol_overrides,
+                            targets: &runtime_targets,
+                            updated_at_us,
+                        }),
+                    }
+                    .context("failed to encode Exec Redis payload")?;
+                    let expected: serde_json::Value = serde_json::from_str(&encoded)
+                        .context("failed to decode encoded Exec Redis payload")?;
+
+                    pipe.set(&config_key, &encoded);
+                    if switching && (existing_switch.is_none() || reusable_completed_switch) {
+                        if !switch_names.iter().any(|name| name == strategy_name) {
+                            switch_names.push(strategy_name.to_string());
+                            switch_names.sort();
+                        }
+                        let request = StoredExecAlgorithmSwitch {
+                            from_family: opposite.redis_namespace().to_string(),
+                            to_family: family.redis_namespace().to_string(),
+                            state: "requested".to_string(),
+                            requested_at_us: updated_at_us,
+                            updated_at_us,
+                            positions: BTreeMap::new(),
+                            inverse_notionals: BTreeMap::new(),
+                        };
+                        pipe.set(
+                            &switch_index_key,
+                            serde_json::to_string(&switch_names)
+                                .context("failed to encode Exec algorithm switch index")?,
+                        )
+                        .set(
+                            &switch_key,
+                            serde_json::to_string(&request)
+                                .context("failed to encode Exec algorithm switch request")?,
+                        );
+                    } else if !switching && !names.iter().any(|name| name == strategy_name) {
+                        names.push(strategy_name.to_string());
+                        names.sort();
+                        names.dedup();
+                        pipe.set(
+                            &index_key,
+                            serde_json::to_string(&names)
+                                .context("failed to encode Exec strategy index")?,
+                        );
+                    }
+                    if let Some(overrides) = expected.get("symbol_overrides").and_then(serde_json::Value::as_object) {
+                        merged_overrides.extend(overrides.clone());
+                    }
+                    confirmations.push((config_key, index_key, switch_key, switching, expected));
                 }
                 let _: () = pipe
                     .query_async(connection)
                     .await
                     .context("failed to commit Exec Redis write")?;
 
-                let stored =
-                    load_stored_config(connection.get::<_, Option<String>>(&config_key).await?)?
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Redis write was not readable after save: {strategy_name}"
-                            )
-                        })?;
-                if stored != expected {
-                    bail!("Redis write confirmation mismatched payload: {strategy_name}");
-                }
-                let confirmed_names = decode_strategy_names(
-                    connection.get::<_, Option<String>>(&index_key).await?,
-                    "strategy index",
-                )?;
-                if !switching && !confirmed_names.iter().any(|name| name == strategy_name) {
-                    bail!("Redis write confirmation missing strategy index: {strategy_name}");
-                }
-                if switching {
-                    let confirmed_switch: Option<String> = connection.get(&switch_key).await?;
-                    if confirmed_switch.is_none() {
-                        bail!("Redis write confirmation missing algorithm switch: {strategy_name}");
+                for (config_key, index_key, switch_key, switching, expected) in confirmations {
+                    let stored =
+                        load_stored_config(connection.get::<_, Option<String>>(&config_key).await?)?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Redis write was not readable after save: {strategy_name}"
+                                )
+                            })?;
+                    if stored != expected {
+                        bail!("Redis write confirmation mismatched payload: {strategy_name}");
+                    }
+                    let confirmed_names = decode_strategy_names(
+                        connection.get::<_, Option<String>>(&index_key).await?,
+                        "strategy index",
+                    )?;
+                    if !switching && !confirmed_names.iter().any(|name| name == strategy_name) {
+                        bail!("Redis write confirmation missing strategy index: {strategy_name}");
+                    }
+                    if switching {
+                        let confirmed_switch: Option<String> = connection.get(&switch_key).await?;
+                        if confirmed_switch.is_none() {
+                            bail!("Redis write confirmation missing algorithm switch: {strategy_name}");
+                        }
                     }
                 }
-                Ok(stored)
+                Ok(serde_json::json!({"updated_at_us": updated_at_us, "symbol_overrides": merged_overrides}))
             })
             .await
         };
@@ -461,35 +477,40 @@ impl RedisRuntime {
         family: ExecutionFamily,
     ) -> Result<()> {
         validate_strategy_name(strategy_name).map_err(anyhow::Error::msg)?;
-        let prefix = format!(
-            "{}:{}:{}:",
-            source.id,
-            source.venue,
-            family.redis_namespace()
-        );
-        let index_key = format!("{prefix}strategy_names");
-        let removed_key = format!("{prefix}removed_strategy_names");
+        let markets = crate::exec_routing::markets(source)?;
         let timeout = Duration::from_secs(self.request_timeout_secs().await);
         let removed = {
             let mut inner = self.inner.lock().await;
             let connection = inner.connection().await?;
             tokio::time::timeout(timeout, async {
-                let mut names = decode_strategy_names(
-                    connection.get::<_, Option<String>>(&index_key).await?,
-                    "strategy index",
-                )?;
-                let mut removed = decode_strategy_names(
-                    connection.get::<_, Option<String>>(&removed_key).await?,
-                    "removed strategy index",
-                )?;
-                names.retain(|name| name != strategy_name);
-                if !removed.iter().any(|name| name == strategy_name) {
-                    removed.push(strategy_name.to_string());
-                    removed.sort();
-                }
                 let mut pipe = redis::pipe();
-                pipe.atomic()
-                    .set(
+                pipe.atomic();
+                for venue in &markets {
+                    let mut scoped_source = source.clone();
+                    scoped_source.venue = venue.clone();
+                    let source = &scoped_source;
+                    let prefix = format!(
+                        "{}:{}:{}:",
+                        source.id,
+                        source.venue,
+                        family.redis_namespace()
+                    );
+                    let index_key = format!("{prefix}strategy_names");
+                    let removed_key = format!("{prefix}removed_strategy_names");
+                    let mut names = decode_strategy_names(
+                        connection.get::<_, Option<String>>(&index_key).await?,
+                        "strategy index",
+                    )?;
+                    let mut removed = decode_strategy_names(
+                        connection.get::<_, Option<String>>(&removed_key).await?,
+                        "removed strategy index",
+                    )?;
+                    names.retain(|name| name != strategy_name);
+                    if !removed.iter().any(|name| name == strategy_name) {
+                        removed.push(strategy_name.to_string());
+                        removed.sort();
+                    }
+                    pipe.set(
                         &index_key,
                         serde_json::to_string(&names)
                             .context("failed to encode Exec strategy index")?,
@@ -499,6 +520,7 @@ impl RedisRuntime {
                         serde_json::to_string(&removed)
                             .context("failed to encode removed Exec strategy index")?,
                     );
+                }
                 let _: () = pipe
                     .query_async(connection)
                     .await
@@ -622,57 +644,64 @@ impl RedisRuntime {
         &self,
         source: &SourceConfig,
     ) -> Result<ExecTargetSnapshot> {
+        let markets = crate::exec_routing::markets(source)?;
         let timeout = Duration::from_secs(self.request_timeout_secs().await);
         let loaded = {
             let mut inner = self.inner.lock().await;
             let connection = inner.connection().await?;
             tokio::time::timeout(timeout, async {
                 let mut snapshot = ExecTargetSnapshot::default();
-                for family in [ExecutionFamily::BatchExec, ExecutionFamily::ChaseExec] {
-                    let prefix = format!(
-                        "{}:{}:{}:",
-                        source.id,
-                        source.venue,
-                        family.redis_namespace()
-                    );
-                    let index_key = format!("{prefix}strategy_names");
-                    let names = decode_strategy_names(
-                        connection.get::<_, Option<String>>(&index_key).await?,
-                        "strategy index",
-                    )?;
-                    for name in &names {
-                        let config_key = format!("{prefix}{name}");
-                        let raw = connection
-                            .get::<_, Option<String>>(&config_key)
-                            .await?
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "{} strategy config missing in Redis: {name}",
-                                    family.redis_namespace()
-                                )
-                            })?;
-                        let stored: serde_json::Value =
-                            serde_json::from_str(&raw).with_context(|| {
-                                format!(
-                                    "{} Redis config is not valid JSON: {name}",
-                                    family.redis_namespace()
-                                )
-                            })?;
-                        let strategy = decode_exec_strategy_target_state(
-                            family.redis_namespace(),
-                            name,
-                            &stored,
+                for venue in &markets {
+                    for family in [ExecutionFamily::BatchExec, ExecutionFamily::ChaseExec] {
+                        let prefix = format!(
+                            "{}:{}:{}:",
+                            source.id,
+                            venue,
+                            family.redis_namespace()
+                        );
+                        let index_key = format!("{prefix}strategy_names");
+                        let names = decode_strategy_names(
+                            connection.get::<_, Option<String>>(&index_key).await?,
+                            "strategy index",
                         )?;
-                        for (symbol, qty) in &strategy.targets {
-                            *snapshot
-                                .aggregate_targets
-                                .entry(symbol.clone())
-                                .or_insert(0.0) += qty;
-                        }
-                        if snapshot.strategies.insert(name.clone(), strategy).is_some() {
-                            bail!(
-                                "Exec strategy is indexed by multiple execution families: {name}"
-                            );
+                        for name in &names {
+                            let config_key = format!("{prefix}{name}");
+                            let raw = connection
+                                .get::<_, Option<String>>(&config_key)
+                                .await?
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "{} strategy config missing in Redis: {name}",
+                                        family.redis_namespace()
+                                    )
+                                })?;
+                            let stored: serde_json::Value =
+                                serde_json::from_str(&raw).with_context(|| {
+                                    format!(
+                                        "{} Redis config is not valid JSON: {name}",
+                                        family.redis_namespace()
+                                    )
+                                })?;
+                            let strategy = decode_exec_strategy_target_state(
+                                family.redis_namespace(),
+                                name,
+                                &stored,
+                            )?;
+                            for (symbol, qty) in &strategy.targets {
+                                *snapshot
+                                    .aggregate_targets
+                                    .entry(symbol.clone())
+                                    .or_insert(0.0) += qty;
+                            }
+                            if let Some(existing) = snapshot.strategies.get_mut(name) {
+                                anyhow::ensure!(existing.family == strategy.family, "Exec strategy is indexed by multiple execution families: {name}");
+                                existing.updated_at_us = existing.updated_at_us.min(strategy.updated_at_us);
+                                for (symbol, qty) in strategy.targets {
+                                    anyhow::ensure!(existing.targets.insert(symbol.clone(), qty).is_none(), "Exec target is duplicated across markets: {name}/{symbol}");
+                                }
+                            } else {
+                                snapshot.strategies.insert(name.clone(), strategy);
+                            }
                         }
                     }
                 }
@@ -948,6 +977,157 @@ mod tests {
             max_maker_requotes: 2,
             target_tolerance_usdt: 10.0,
             ..OrderParameters::default()
+        }
+    }
+
+    // The fixture starts its own loopback server; it never connects to a deployed Redis.
+    #[tokio::test]
+    #[ignore = "requires EXEC_REDIS_TEST_SERVER_BIN pointing to a local redis-server binary"]
+    async fn mixed_market_publish_switch_and_removal_are_atomic() {
+        use std::net::TcpListener;
+        use std::process::{Child, Command, Stdio};
+        struct Server(Child);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let executable = std::env::var("EXEC_REDIS_TEST_SERVER_BIN")
+            .expect("set the isolated test server binary");
+        let _server = Server(
+            Command::new(executable)
+                .args([
+                    "--bind",
+                    "127.0.0.1",
+                    "--port",
+                    &port.to_string(),
+                    "--save",
+                    "",
+                    "--appendonly",
+                    "no",
+                    "--dir",
+                    dir.path().to_str().unwrap(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let url = format!("redis://127.0.0.1:{port}/0");
+        let client = redis::Client::open(url.clone()).unwrap();
+        let mut connection = None;
+        for _ in 0..100 {
+            if let Ok(value) = client.get_multiplexed_async_connection().await {
+                connection = Some(value);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut connection = connection.expect("isolated Redis startup");
+        let runtime = RedisRuntime::connect(RedisSettings {
+            url,
+            ..Default::default()
+        })
+        .unwrap();
+        let source: SourceConfig = toml::from_str(&format!(
+            "id='fixture'\naccount='fixture'\nvenue='binance-futures'\nrocksdb_path='{}'\n",
+            dir.path().join("data/persist_manager").display()
+        ))
+        .unwrap();
+        let mut parameters = valid_parameters();
+        let mut coin_parameters = parameters.clone();
+        coin_parameters.single_order_usdt = 250.0;
+        let overrides = BTreeMap::from([("BTCUSD".into(), coin_parameters)]);
+        let targets = BTreeMap::from([
+            (
+                "BTCUSDT".into(),
+                TargetPosition {
+                    qty: 0.2,
+                    signal: 1,
+                },
+            ),
+            (
+                "BTCUSDC".into(),
+                TargetPosition {
+                    qty: 0.3,
+                    signal: 0,
+                },
+            ),
+            (
+                "BTCUSD".into(),
+                TargetPosition {
+                    qty: 0.01,
+                    signal: -1,
+                },
+            ),
+        ]);
+        runtime
+            .publish_strategy(&source, "mixed", &parameters, &overrides, &targets)
+            .await
+            .unwrap();
+        let um_key = "fixture:binance-futures:batch_exec:mixed";
+        let cm_key = "fixture:binance-coin-futures:batch_exec:mixed";
+        let um_raw: String = connection.get(um_key).await.unwrap();
+        let cm_raw: String = connection.get(cm_key).await.unwrap();
+        let um: serde_json::Value = serde_json::from_str(&um_raw).unwrap();
+        let cm: serde_json::Value = serde_json::from_str(&cm_raw).unwrap();
+        assert_eq!(um["targets"].as_object().unwrap().len(), 2);
+        assert!(um["targets"].get("BTCUSD").is_none());
+        assert_eq!(cm["targets"]["BTCUSD"]["qty"], 0.01);
+        assert_eq!(cm["symbol_overrides"]["BTCUSD"]["single_order_usdt"], 250.0);
+        assert_eq!(um["updated_at_us"], cm["updated_at_us"]);
+        let snapshot = runtime.load_exec_target_snapshot(&source).await.unwrap();
+        assert_eq!(snapshot.strategies.len(), 1);
+        assert_eq!(snapshot.aggregate_targets.len(), 3);
+        assert_eq!(snapshot.strategies["mixed"].targets["BTCUSD"], 0.01);
+
+        let removed_key = "fixture:binance-coin-futures:batch_exec:removed_strategy_names";
+        let _: () = connection.set(removed_key, r#"["mixed"]"#).await.unwrap();
+        assert!(
+            runtime
+                .publish_strategy(&source, "mixed", &parameters, &overrides, &targets)
+                .await
+                .is_err()
+        );
+        assert_eq!(connection.get::<_, String>(um_key).await.unwrap(), um_raw);
+        assert_eq!(connection.get::<_, String>(cm_key).await.unwrap(), cm_raw);
+        let _: () = connection.del(removed_key).await.unwrap();
+        parameters.algorithm = ExecutionAlgorithm::Chase;
+        runtime
+            .publish_strategy(&source, "mixed", &parameters, &BTreeMap::new(), &targets)
+            .await
+            .unwrap();
+        for venue in ["binance-futures", "binance-coin-futures"] {
+            let switch: String = connection
+                .get(format!("fixture:{venue}:exec_switch:mixed"))
+                .await
+                .unwrap();
+            let switch: serde_json::Value = serde_json::from_str(&switch).unwrap();
+            assert_eq!(switch["from_family"], "batch_exec");
+            assert_eq!(switch["to_family"], "chase_exec");
+            assert_eq!(switch["state"], "requested");
+        }
+        runtime
+            .request_strategy_removal(&source, "mixed", ExecutionFamily::BatchExec)
+            .await
+            .unwrap();
+        for venue in ["binance-futures", "binance-coin-futures"] {
+            let prefix = format!("fixture:{venue}:batch_exec:");
+            let names: String = connection
+                .get(format!("{prefix}strategy_names"))
+                .await
+                .unwrap();
+            let removed: String = connection
+                .get(format!("{prefix}removed_strategy_names"))
+                .await
+                .unwrap();
+            assert_eq!(names, "[]");
+            assert_eq!(removed, r#"["mixed"]"#);
         }
     }
 

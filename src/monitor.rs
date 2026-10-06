@@ -300,7 +300,10 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
         .collect::<Vec<_>>();
     let venues = enabled_sources
         .iter()
-        .map(|source| source.venue.clone())
+        .flat_map(|source| crate::exec_routing::markets(source).unwrap_or_else(|error| {
+            warn!(source_id = source.id, error = %error, "market subscription account routing failed");
+            vec![source.venue.clone()]
+        }))
         .collect::<Vec<_>>();
     let market = MarketFeed::spawn(venues);
     let viz = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
@@ -474,7 +477,9 @@ fn check_market(config: &AppConfig, market: &MarketFeed, now_us: i64) -> Vec<Mon
         .sources
         .iter()
         .filter(|source| source.enabled)
-        .map(|source| source.venue.trim())
+        .flat_map(|source| {
+            crate::exec_routing::markets(source).unwrap_or_else(|_| vec![source.venue.clone()])
+        })
         .filter(|venue| !venue.is_empty())
         .collect::<HashSet<_>>();
     let symbols = config
@@ -491,7 +496,7 @@ fn check_market(config: &AppConfig, market: &MarketFeed, now_us: i64) -> Vec<Mon
     for venue in venues {
         if symbols.is_empty() {
             let age = market
-                .last_any(venue)
+                .last_any(&venue)
                 .map(|received| now_us.saturating_sub(received));
             if age.is_none_or(|age| age > stale_us) {
                 issues.push(MonitorIssue::new(
@@ -509,7 +514,19 @@ fn check_market(config: &AppConfig, market: &MarketFeed, now_us: i64) -> Vec<Mon
         // Single liveness check across the watched symbols: any fresh BBO from
         // the watched set means the feed is healthy, regardless of which
         // symbol delivered it.
-        let latest = market.latest_received(venue, &symbols);
+        let watched = symbols
+            .iter()
+            .filter(|symbol| {
+                !venue.starts_with("binance-")
+                    || crate::exec_routing::symbol_market("binance-futures", symbol)
+                        .is_ok_and(|selected| selected == venue)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if watched.is_empty() {
+            continue;
+        }
+        let latest = market.latest_received(&venue, &watched);
         if latest.is_none_or(|received| now_us.saturating_sub(received) > stale_us) {
             issues.push(MonitorIssue::new(
                 "market",
@@ -1827,6 +1844,24 @@ mod tests {
             .unwrap()
             .latest
             .insert((venue.to_string(), symbol.to_string()), received_ts_us);
+    }
+
+    #[test]
+    fn mixed_market_watch_requires_a_fresh_quote_from_each_requested_market() {
+        let config = market_test_config(&["BTCUSDT", "BTCUSDC", "BTCUSD"]);
+        let feed = MarketFeed::default();
+        let now = unix_time_us();
+        insert_quote(&feed, "binance-futures", "BTCUSDC", now);
+        let issues = check_market(&config, &feed, now);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "market:binance-coin-futures:bbo:global");
+        insert_quote(&feed, "binance-coin-futures", "BTCUSD", now);
+        assert!(check_market(&config, &feed, now).is_empty());
+        insert_quote(&feed, "binance-futures", "BTCUSDC", now - 6_000_000);
+        assert_eq!(
+            check_market(&config, &feed, now)[0].key,
+            "market:binance-futures:bbo:global"
+        );
     }
 
     #[test]

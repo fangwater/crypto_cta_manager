@@ -113,29 +113,42 @@ pub fn spawn(sources: Vec<SourceConfig>, redis: RedisRuntime) {
 
 async fn refresh_all(client: &Client, redis: &RedisRuntime, sources: &[SourceConfig]) {
     let mut native_snapshots = BTreeMap::new();
-    for source in sources.iter().filter(|source| source.enabled) {
-        let snapshot = match fetch_source_snapshot(client, source, &mut native_snapshots).await {
-            Ok(snapshot) => snapshot,
+    for account in sources.iter().filter(|source| source.enabled) {
+        let markets = match crate::exec_routing::markets(account) {
+            Ok(markets) => markets,
             Err(error) => {
-                warn!(source_id = source.id, error = %error, "market-rules refresh failed; retaining last good snapshot");
+                warn!(source_id = account.id, error = %error, "market-rules account routing failed");
                 continue;
             }
         };
-        let symbol_count = snapshot.symbols.len();
-        match redis.publish_market_rules(source, &snapshot).await {
-            Ok(()) => info!(
-                source_id = source.id,
-                venue = source.venue,
-                fetched_at_us = snapshot.fetched_at_us,
-                symbols = symbol_count,
-                "market-rules snapshot published"
-            ),
-            Err(error) => warn!(
-                source_id = source.id,
-                venue = source.venue,
-                error = %error,
-                "market-rules Redis publish failed; retaining last good snapshot"
-            ),
+        for venue in markets {
+            let mut scoped_source = account.clone();
+            scoped_source.venue = venue;
+            let source = &scoped_source;
+            let snapshot = match fetch_source_snapshot(client, source, &mut native_snapshots).await
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    warn!(source_id = source.id, error = %error, "market-rules refresh failed; retaining last good snapshot");
+                    continue;
+                }
+            };
+            let symbol_count = snapshot.symbols.len();
+            match redis.publish_market_rules(source, &snapshot).await {
+                Ok(()) => info!(
+                    source_id = source.id,
+                    venue = source.venue,
+                    fetched_at_us = snapshot.fetched_at_us,
+                    symbols = symbol_count,
+                    "market-rules snapshot published"
+                ),
+                Err(error) => warn!(
+                    source_id = source.id,
+                    venue = source.venue,
+                    error = %error,
+                    "market-rules Redis publish failed; retaining last good snapshot"
+                ),
+            }
         }
     }
 }
@@ -214,7 +227,7 @@ pub(crate) fn execution_backend(
     Ok(backend)
 }
 
-fn source_values(source: &SourceConfig) -> Result<BTreeMap<String, String>> {
+pub(crate) fn source_values(source: &SourceConfig) -> Result<BTreeMap<String, String>> {
     let path = source.env_path();
     match std::fs::metadata(&path) {
         Ok(_) => crate::exchange_leverage::parse_env_file(&path),
@@ -303,7 +316,14 @@ fn parse_binance(
         .context("Binance exchangeInfo omitted symbols")?;
     let mut symbols = BTreeMap::new();
     for row in rows {
-        let symbol = required_string(row, "symbol")?.to_uppercase();
+        if !matches!(
+            row.get("contractType").and_then(Value::as_str),
+            Some("PERPETUAL" | "TRADIFI_PERPETUAL")
+        ) {
+            continue;
+        }
+        let symbol = crate::order_config::normalize_exec_symbol(required_string(row, "symbol")?)
+            .map_err(anyhow::Error::msg)?;
         let filters = row
             .get("filters")
             .and_then(Value::as_array)
@@ -513,6 +533,7 @@ mod tests {
         let value = serde_json::json!({
             "symbols": [{
                 "symbol": "牛来USDT",
+                "contractType": "PERPETUAL",
                 "status": "TRADING",
                 "baseAsset": "牛来",
                 "quoteAsset": "USDT",
@@ -585,6 +606,7 @@ mod tests {
         let value = serde_json::json!({
             "symbols": [{
                 "symbol": "BTCUSD_PERP",
+                "contractType": "PERPETUAL",
                 "contractStatus": "TRADING",
                 "baseAsset": "BTC",
                 "quoteAsset": "USD",
@@ -593,11 +615,17 @@ mod tests {
                     {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
                     {"filterType": "LOT_SIZE", "minQty": "1", "stepSize": "1"}
                 ]
+            }, {
+                "symbol": "BTCUSD_261225",
+                "contractType": "CURRENT_QUARTER",
+                "contractStatus": "TRADING"
             }]
         });
         let symbols = parse_binance(&value, "contractStatus", true).unwrap();
+        assert_eq!(symbols.len(), 1);
+        assert!(!symbols.contains_key("BTCUSD_PERP"));
         assert_eq!(
-            symbols["BTCUSD_PERP"].contract_multiplier.as_deref(),
+            symbols["BTCUSD"].contract_multiplier.as_deref(),
             Some("100")
         );
     }
