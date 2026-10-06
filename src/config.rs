@@ -229,7 +229,7 @@ impl Default for KlineConfig {
             forbidden_public_ips: Vec::new(),
             request_timeout_secs: 15,
             concurrency: 8,
-            weight_per_minute: 120,
+            weight_per_minute: 600,
         }
     }
 }

@@ -257,8 +257,9 @@ Allow Kline requests to run concurrently within the configured weight budget;
 enforce that budget across a rolling 60-second window instead of spacing every
 request by `60 / budget` seconds. Budget exhaustion waits for enough reservations
 to expire, and exchange `Retry-After` cooldowns apply globally. Keep the existing
-HTTP concurrency cap, dedicated egress, lazy symbol loading, and 120 weight/minute
-jp-meta budget. Latest-range verification must use the current clock, since a
+HTTP concurrency cap, dedicated egress, and lazy symbol loading. By operator
+request on 2026-10-06, jp-meta's budget is 600 weight/minute (previously 120).
+Latest-range verification must use the current clock, since a
 fully cached older range does not exercise fresh minute backfills.
 
 Require explicit `kline.local_ip` and expected `kline.public_ip` in TOML; disable
@@ -276,7 +277,8 @@ to enable Manager's Kline cache.
 The minute Kline replacement was deployed to jp-meta on 2026-10-05 as release
 `20261005T144032Z`, runtime commit `9023094`. Its dedicated non-trading binding
 is `172.31.46.93`, verified public egress `18.181.48.65`; preserve the live
-TOML's 24 trading-config exclusions and 120 weight/minute budget. The two
+TOML's 24 trading-config exclusions and its explicitly configured weight budget
+(raised to 600 weight/minute on 2026-10-06 by operator request). The two
 Manager API Nginx routes now use a 180-second timeout. A trade03 one-day query
 verified a complete theoretical curve and 18 close fallback samples across
 four deltas; a repeat made no new exchange requests. Trading/Viz/Config remained

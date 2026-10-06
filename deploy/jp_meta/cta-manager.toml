@@ -32,8 +32,8 @@ trade_engine_configs = []
 forbidden_public_ips = []
 request_timeout_secs = 15
 concurrency = 8
-# Conservative shared budget for this Kline client, independent of order traffic.
-weight_per_minute = 120
+# Shared rolling-minute budget for this Kline client, independent of order traffic.
+weight_per_minute = 600
 
 [monitor]
 # Enable only after both webhook URLs are installed in the host EnvironmentFile.
