@@ -253,6 +253,13 @@ per-symbol lock. Failed/omitted minutes stay missing and are retried on a later
 query or default-symbol refresh; do not persist separate retry records.
 Cached candles must never be repeatedly downloaded.
 This path must not join the Exec order hot path.
+Allow Kline requests to run concurrently within the configured weight budget;
+enforce that budget across a rolling 60-second window instead of spacing every
+request by `60 / budget` seconds. Budget exhaustion waits for enough reservations
+to expire, and exchange `Retry-After` cooldowns apply globally. Keep the existing
+HTTP concurrency cap, dedicated egress, lazy symbol loading, and 120 weight/minute
+jp-meta budget. Latest-range verification must use the current clock, since a
+fully cached older range does not exercise fresh minute backfills.
 
 Require explicit `kline.local_ip` and expected `kline.public_ip` in TOML; disable
 HTTP environment proxies and default-route fallback. Verify public egress before

@@ -1,5 +1,5 @@
 //! Manager-owned, closed one-minute Binance USD-M candles. Cache misses only.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -189,8 +189,45 @@ pub struct CacheStatus {
     pub pricing_cache_hits: u64,
 }
 struct WeightGate {
-    next: tokio::time::Instant,
+    reservations: VecDeque<(tokio::time::Instant, u32)>,
+    used: u32,
     blocked_until: tokio::time::Instant,
+}
+impl WeightGate {
+    /// Allow concurrent requests within the budget, while enforcing it across
+    /// every rolling minute (including Binance's server-directed cooldown).
+    fn reserve(
+        &mut self,
+        now: tokio::time::Instant,
+        weight: u32,
+        budget: u32,
+    ) -> Option<tokio::time::Instant> {
+        assert!(weight <= budget);
+        let window = Duration::from_secs(60);
+        while let Some(&(at, expired)) = self.reservations.front() {
+            if at + window > now {
+                break;
+            }
+            self.reservations.pop_front();
+            self.used -= expired;
+        }
+        if self.blocked_until > now {
+            return Some(self.blocked_until);
+        }
+        if self.used + weight <= budget {
+            self.reservations.push_back((now, weight));
+            self.used += weight;
+            return None;
+        }
+        let mut remaining = self.used;
+        for &(at, reserved) in &self.reservations {
+            remaining -= reserved;
+            if remaining + weight <= budget {
+                return Some(at + window);
+            }
+        }
+        unreachable!("expiring the current reservations must release enough weight")
+    }
 }
 struct Inner {
     db: ManagerDb,
@@ -243,7 +280,8 @@ impl KlineStore {
                 minutes: Mutex::new(BTreeMap::new()),
                 candle_revision: AtomicU64::new(0),
                 weight: AsyncMutex::new(WeightGate {
-                    next: instant,
+                    reservations: VecDeque::new(),
+                    used: 0,
                     blocked_until: instant,
                 }),
                 status: Mutex::new(status),
@@ -497,19 +535,16 @@ impl KlineStore {
         loop {
             let ready = {
                 let mut gate = self.inner.weight.lock().await;
-                let now = tokio::time::Instant::now();
-                let ready = gate.next.max(gate.blocked_until);
-                if ready <= now {
-                    gate.next = now
-                        + Duration::from_secs_f64(
-                            60.0 * f64::from(weight)
-                                / f64::from(self.inner.config.weight_per_minute),
-                        );
-                    return;
-                }
-                ready
+                gate.reserve(
+                    tokio::time::Instant::now(),
+                    weight,
+                    self.inner.config.weight_per_minute,
+                )
             };
-            tokio::time::sleep_until(ready).await;
+            match ready {
+                Some(ready) => tokio::time::sleep_until(ready).await,
+                None => return,
+            }
         }
     }
     /// Missing requested data backfills backwards in 24h blocks. A market mutex
@@ -631,8 +666,10 @@ impl KlineStore {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(120)
                 .max(1);
-            self.inner.weight.lock().await.blocked_until =
-                tokio::time::Instant::now() + Duration::from_secs(seconds);
+            let mut gate = self.inner.weight.lock().await;
+            gate.blocked_until = gate
+                .blocked_until
+                .max(tokio::time::Instant::now() + Duration::from_secs(seconds));
             bail!("Binance Kline 限流，{} 秒后重试", seconds);
         }
         let raw: Vec<serde_json::Value> = response.error_for_status()?.json().await?;
@@ -1036,6 +1073,82 @@ mod tests {
             quote_volume: 202.0,
             trades: 7,
         }
+    }
+
+    #[test]
+    fn request_weight_allows_a_burst_but_never_exceeds_a_rolling_minute() {
+        let now = tokio::time::Instant::now();
+        let mut gate = WeightGate {
+            reservations: VecDeque::new(),
+            used: 0,
+            blocked_until: now,
+        };
+        for _ in 0..120 {
+            assert_eq!(gate.reserve(now, 1, 120), None);
+        }
+        let release = now + Duration::from_secs(60);
+        assert_eq!(gate.reserve(now, 1, 120), Some(release));
+        assert_eq!(
+            gate.reserve(release - Duration::from_nanos(1), 2, 120),
+            Some(release)
+        );
+        assert_eq!(gate.used, 120, "waiting must not spend weight");
+        assert_eq!(gate.reserve(release, 2, 120), None);
+        assert_eq!(gate.used, 2);
+        assert_eq!(gate.reservations.len(), 1);
+    }
+
+    #[test]
+    fn weighted_requests_wait_until_enough_of_the_window_expires() {
+        let now = tokio::time::Instant::now();
+        let mut gate = WeightGate {
+            reservations: VecDeque::new(),
+            used: 0,
+            blocked_until: now,
+        };
+        assert_eq!(gate.reserve(now, 2, 6), None);
+        assert_eq!(gate.reserve(now + Duration::from_secs(10), 1, 6), None);
+        assert_eq!(gate.reserve(now + Duration::from_secs(20), 3, 6), None);
+        assert_eq!(
+            gate.reserve(now + Duration::from_secs(30), 3, 6),
+            Some(now + Duration::from_secs(70))
+        );
+        assert_eq!(
+            gate.reserve(now + Duration::from_secs(60), 3, 6),
+            Some(now + Duration::from_secs(70))
+        );
+        assert_eq!(gate.reserve(now + Duration::from_secs(70), 3, 6), None);
+        assert_eq!(gate.used, 6);
+        gate.blocked_until = now + Duration::from_secs(150);
+        assert_eq!(
+            gate.reserve(now + Duration::from_secs(140), 1, 6),
+            Some(now + Duration::from_secs(150))
+        );
+        assert_eq!(gate.used, 0);
+        assert_eq!(gate.reserve(now + Duration::from_secs(150), 1, 6), None);
+    }
+
+    #[tokio::test]
+    async fn fresh_multi_symbol_queries_do_not_serialize_unused_request_budget() {
+        let (_dir, mut store, _state, server) = fixture(None).await;
+        Arc::get_mut(&mut store.inner)
+            .unwrap()
+            .config
+            .weight_per_minute = 120;
+        let mut jobs = tokio::task::JoinSet::new();
+        for _ in 0..83 {
+            let store = store.clone();
+            jobs.spawn(async move { store.reserve_weight(1).await });
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while let Some(result) = jobs.join_next().await {
+                result.unwrap();
+            }
+        })
+        .await
+        .expect("83 requests within budget must not be spread over 41 seconds");
+        assert_eq!(store.inner.weight.lock().await.used, 83);
+        server.abort();
     }
 
     #[test]
