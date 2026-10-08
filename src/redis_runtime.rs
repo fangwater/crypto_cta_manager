@@ -983,7 +983,7 @@ mod tests {
     // The fixture starts its own loopback server; it never connects to a deployed Redis.
     #[tokio::test]
     #[ignore = "requires EXEC_REDIS_TEST_SERVER_BIN pointing to a local redis-server binary"]
-    async fn mixed_market_publish_switch_and_removal_are_atomic() {
+    async fn independent_market_publish_switch_and_removal_never_cross_sources() {
         use std::net::TcpListener;
         use std::process::{Child, Command, Stdio};
         struct Server(Child);
@@ -1035,10 +1035,14 @@ mod tests {
         })
         .unwrap();
         let source: SourceConfig = toml::from_str(&format!(
-            "id='fixture'\naccount='fixture'\nvenue='binance-futures'\nrocksdb_path='{}'\n",
-            dir.path().join("data/persist_manager").display()
+            "id='fixture_um'\naccount='fixture'\nvenue='binance-futures'\nrocksdb_path='{}'\n",
+            dir.path().join("um/data/persist_manager").display()
         ))
         .unwrap();
+        let mut coin_source = source.clone();
+        coin_source.id = "fixture_cm".into();
+        coin_source.venue = "binance-coin-futures".into();
+        coin_source.rocksdb_path = dir.path().join("cm/data/persist_manager");
         let mut parameters = valid_parameters();
         let mut coin_parameters = parameters.clone();
         coin_parameters.single_order_usdt = 250.0;
@@ -1066,12 +1070,45 @@ mod tests {
                 },
             ),
         ]);
+        assert!(
+            runtime
+                .publish_strategy(&source, "mixed", &parameters, &overrides, &targets)
+                .await
+                .is_err()
+        );
+        let keys: Vec<String> = connection.keys("fixture_*:*").await.unwrap();
+        assert!(
+            keys.is_empty(),
+            "wrong-market targets must not write any keys"
+        );
+        let linear_targets = targets
+            .iter()
+            .filter(|(symbol, _)| symbol.ends_with("USDT") || symbol.ends_with("USDC"))
+            .map(|(symbol, target)| (symbol.clone(), *target))
+            .collect();
+        let coin_targets = BTreeMap::from([("BTCUSD".into(), targets["BTCUSD"])]);
         runtime
-            .publish_strategy(&source, "mixed", &parameters, &overrides, &targets)
+            .publish_strategy(
+                &source,
+                "shared",
+                &parameters,
+                &BTreeMap::new(),
+                &linear_targets,
+            )
             .await
             .unwrap();
-        let um_key = "fixture:binance-futures:batch_exec:mixed";
-        let cm_key = "fixture:binance-coin-futures:batch_exec:mixed";
+        runtime
+            .publish_strategy(
+                &coin_source,
+                "shared",
+                &parameters,
+                &overrides,
+                &coin_targets,
+            )
+            .await
+            .unwrap();
+        let um_key = "fixture_um:binance-futures:batch_exec:shared";
+        let cm_key = "fixture_cm:binance-coin-futures:batch_exec:shared";
         let um_raw: String = connection.get(um_key).await.unwrap();
         let cm_raw: String = connection.get(cm_key).await.unwrap();
         let um: serde_json::Value = serde_json::from_str(&um_raw).unwrap();
@@ -1080,17 +1117,28 @@ mod tests {
         assert!(um["targets"].get("BTCUSD").is_none());
         assert_eq!(cm["targets"]["BTCUSD"]["qty"], 0.01);
         assert_eq!(cm["symbol_overrides"]["BTCUSD"]["single_order_usdt"], 250.0);
-        assert_eq!(um["updated_at_us"], cm["updated_at_us"]);
         let snapshot = runtime.load_exec_target_snapshot(&source).await.unwrap();
         assert_eq!(snapshot.strategies.len(), 1);
-        assert_eq!(snapshot.aggregate_targets.len(), 3);
-        assert_eq!(snapshot.strategies["mixed"].targets["BTCUSD"], 0.01);
+        assert_eq!(snapshot.aggregate_targets.len(), 2);
+        assert!(!snapshot.aggregate_targets.contains_key("BTCUSD"));
+        let coin_snapshot = runtime
+            .load_exec_target_snapshot(&coin_source)
+            .await
+            .unwrap();
+        assert_eq!(coin_snapshot.aggregate_targets.len(), 1);
+        assert_eq!(coin_snapshot.strategies["shared"].targets["BTCUSD"], 0.01);
 
-        let removed_key = "fixture:binance-coin-futures:batch_exec:removed_strategy_names";
-        let _: () = connection.set(removed_key, r#"["mixed"]"#).await.unwrap();
+        let removed_key = "fixture_cm:binance-coin-futures:batch_exec:removed_strategy_names";
+        let _: () = connection.set(removed_key, r#"["shared"]"#).await.unwrap();
         assert!(
             runtime
-                .publish_strategy(&source, "mixed", &parameters, &overrides, &targets)
+                .publish_strategy(
+                    &coin_source,
+                    "shared",
+                    &parameters,
+                    &overrides,
+                    &coin_targets
+                )
                 .await
                 .is_err()
         );
@@ -1099,36 +1147,54 @@ mod tests {
         let _: () = connection.del(removed_key).await.unwrap();
         parameters.algorithm = ExecutionAlgorithm::Chase;
         runtime
-            .publish_strategy(&source, "mixed", &parameters, &BTreeMap::new(), &targets)
+            .publish_strategy(
+                &coin_source,
+                "shared",
+                &parameters,
+                &BTreeMap::new(),
+                &coin_targets,
+            )
             .await
             .unwrap();
-        for venue in ["binance-futures", "binance-coin-futures"] {
-            let switch: String = connection
-                .get(format!("fixture:{venue}:exec_switch:mixed"))
+        let switch: String = connection
+            .get("fixture_cm:binance-coin-futures:exec_switch:shared")
+            .await
+            .unwrap();
+        let switch: serde_json::Value = serde_json::from_str(&switch).unwrap();
+        assert_eq!(switch["from_family"], "batch_exec");
+        assert_eq!(switch["to_family"], "chase_exec");
+        assert_eq!(switch["state"], "requested");
+        assert_eq!(
+            connection
+                .get::<_, Option<String>>("fixture_um:binance-futures:exec_switch:shared")
                 .await
-                .unwrap();
-            let switch: serde_json::Value = serde_json::from_str(&switch).unwrap();
-            assert_eq!(switch["from_family"], "batch_exec");
-            assert_eq!(switch["to_family"], "chase_exec");
-            assert_eq!(switch["state"], "requested");
-        }
+                .unwrap(),
+            None
+        );
         runtime
-            .request_strategy_removal(&source, "mixed", ExecutionFamily::BatchExec)
+            .request_strategy_removal(&coin_source, "shared", ExecutionFamily::BatchExec)
             .await
             .unwrap();
-        for venue in ["binance-futures", "binance-coin-futures"] {
-            let prefix = format!("fixture:{venue}:batch_exec:");
-            let names: String = connection
-                .get(format!("{prefix}strategy_names"))
+        let names: String = connection
+            .get("fixture_cm:binance-coin-futures:batch_exec:strategy_names")
+            .await
+            .unwrap();
+        let removed: String = connection.get(removed_key).await.unwrap();
+        assert_eq!(names, "[]");
+        assert_eq!(removed, r#"["shared"]"#);
+        assert_eq!(connection.get::<_, String>(um_key).await.unwrap(), um_raw);
+        assert_eq!(
+            connection
+                .get::<_, String>("fixture_um:binance-futures:batch_exec:strategy_names")
                 .await
-                .unwrap();
-            let removed: String = connection
-                .get(format!("{prefix}removed_strategy_names"))
-                .await
-                .unwrap();
-            assert_eq!(names, "[]");
-            assert_eq!(removed, r#"["mixed"]"#);
-        }
+                .unwrap(),
+            r#"["shared"]"#
+        );
+        let foreign_keys: Vec<String> = connection
+            .keys("fixture_cm:binance-futures:*")
+            .await
+            .unwrap();
+        assert!(foreign_keys.is_empty());
     }
 
     #[test]

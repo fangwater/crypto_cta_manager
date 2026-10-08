@@ -25,6 +25,7 @@ import { FieldHint, Input, Label, Select } from '../../components/ui/Field'
 import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { readSourceId, routes } from '../../lib/routes'
+import { executionMarketLabel, executionSymbolPlaceholder, symbolMatchesExecMarket } from '../../format'
 import type { AccountStudio, DashboardSnapshot, ExecOrderRateLimits } from '../../types'
 
 const MAX_EXEC_ORDER_RATE_LIMIT = 2_147_483_647
@@ -70,15 +71,17 @@ export function AccountBindingsPage() {
     () => new Set((studio?.bindings ?? []).map((binding) => binding.position_strategy_name)),
     [studio],
   )
+  const selectedAccount = accounts.find((account) => account.source_id === sourceId)
 
   // New bindings require the strategy's configure grant; the access list is
   // already filtered to configurable strategies for non-admin sessions.
   const availablePositions = useMemo(
     () =>
       positions.filter(
-        (item) => !boundNames.has(item.strategy_name) && bindableStrategies.has(item.strategy_name),
+        (item) => !boundNames.has(item.strategy_name) && bindableStrategies.has(item.strategy_name)
+          && !!selectedAccount && Object.keys(item.targets).every((symbol) => symbolMatchesExecMarket(selectedAccount.venue, symbol)),
       ),
-    [boundNames, positions, bindableStrategies],
+    [boundNames, positions, bindableStrategies, selectedAccount],
   )
   const parsedNewShares = Number(newShares)
   const validNewShares =
@@ -202,6 +205,7 @@ export function AccountBindingsPage() {
         <strong className="font-medium">逻辑说明：</strong>
         先在「仓位策略」里定义目标仓位 → 在「下单策略」里维护执行算法模板（如 default_order）→
         在这里为每条策略配置份数。发布数量 = 原始 qty × 份数。
+        {selectedAccount && ` 当前账户只管理${executionMarketLabel(selectedAccount.venue)}合约，新增绑定只列出对应市场的仓位策略。`}
       </Alert>
 
       {loading || catalogLoading ? (
@@ -312,6 +316,7 @@ export function AccountBindingsPage() {
           <ContractLeveragePanel
             toolbar={
               <ContractLeverageToolbar
+                symbolPlaceholder={executionSymbolPlaceholder(selectedAccount?.venue ?? '')}
                 symbol={contractSymbol}
                 contractLeverage={contractLeverage}
                 queriedLeverage={queriedContractLeverage}

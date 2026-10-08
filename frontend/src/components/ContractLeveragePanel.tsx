@@ -9,6 +9,7 @@ export function ContractLeverageToolbar({
   queriedLeverage,
   saving,
   readOnly = false,
+  symbolPlaceholder = 'BTCUSDT / BTCUSDC',
   onSymbolChange,
   onContractLeverageChange,
   onQuery,
@@ -19,6 +20,7 @@ export function ContractLeverageToolbar({
   queriedLeverage?: string | null
   saving?: boolean
   readOnly?: boolean
+  symbolPlaceholder?: string
   onSymbolChange: (value: string) => void
   onContractLeverageChange: (value: string) => void
   onQuery: () => void
@@ -36,7 +38,7 @@ export function ContractLeverageToolbar({
         合约
         <Input
           value={symbol}
-          placeholder="BTCUSDT / BTCUSDC / BTCUSD"
+          placeholder={symbolPlaceholder}
           onChange={(event) => onSymbolChange(event.target.value.toUpperCase())}
         />
       </label>

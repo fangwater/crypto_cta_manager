@@ -273,6 +273,7 @@ function buildChapters(gateway: string): Chapter[] {
         />
         <p className="text-sm text-subtle">
           只交易永续合约：USDT 表示 USDT 本位，USDC 表示 USDC 本位，USD 表示币本位。
+          每个 Exec 部署只管理一种市场：U 本位只接受 USDT / USDC，币本位只接受 USD；两类部署使用独立 source_id、IPC namespace、RocksDB、Viz 和 Config 入口。
           目标 qty 使用币数量，例如 BTCUSD 的 qty=0.01 表示 0.01 BTC；
           Exec 按标记价格和合约面值换算、按交易所步长取整。价格变化会改变持有合约对应的币数量。
         </p>

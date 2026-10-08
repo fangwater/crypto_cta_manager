@@ -2116,6 +2116,25 @@ async fn save_position_strategy(
         return Ok(forbidden(message));
     }
     let created_by = user.map(|Extension(user)| user.user_id);
+    for source_id in strategy_catalog::list_active_binding_source_ids_for_position(
+        &state.pool,
+        &request.strategy_name,
+    )
+    .await?
+    {
+        if let Some(source) = state
+            .config
+            .sources
+            .iter()
+            .find(|source| source.id == source_id)
+        {
+            for symbol in request.targets.keys() {
+                if let Err(error) = crate::exec_routing::symbol_market(&source.venue, symbol) {
+                    return Ok(bad_request(format!("source {source_id}: {error}")));
+                }
+            }
+        }
+    }
     match strategy_catalog::upsert_position_strategy(
         &state.pool,
         &request,
@@ -3016,9 +3035,10 @@ async fn save_account_binding(
     headers: HeaderMap,
     Json(request): Json<SaveBindingRequest>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
-        return Ok(response);
-    }
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
     let existing =
         strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.binding_name)
             .await?;
@@ -3062,6 +3082,21 @@ async fn save_account_binding(
             "strategy configure permission required to bind this position strategy",
         ));
     }
+    if let Some(position) = strategy_catalog::list_position_strategies(&state.pool)
+        .await?
+        .into_iter()
+        .find(|position| position.strategy_name == request.position_strategy_name)
+    {
+        for symbol in position
+            .targets
+            .keys()
+            .chain(position.symbol_order_strategy_overrides.keys())
+        {
+            if let Err(error) = crate::exec_routing::symbol_market(&source.venue, symbol) {
+                return Ok(bad_request(error.to_string()));
+            }
+        }
+    }
     let updated_at_us = unix_now_us();
     let studio = match strategy_catalog::save_binding(
         &state.pool,
@@ -3089,11 +3124,25 @@ async fn save_account_binding_shares(
     headers: HeaderMap,
     Json(request): Json<SaveBindingSharesRequest>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
-        return Ok(response);
-    }
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
     let existing =
         strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name).await?;
+    if request.shares > 0.0
+        && let Some((position, _, _, _)) = &existing
+    {
+        for symbol in position
+            .targets
+            .keys()
+            .chain(position.symbol_order_strategy_overrides.keys())
+        {
+            if let Err(error) = crate::exec_routing::symbol_market(&source.venue, symbol) {
+                return Ok(bad_request(error.to_string()));
+            }
+        }
+    }
     let enables_experimental = existing.as_ref().is_some_and(|(_, order, _, shares)| {
         experimental_binding_change_requires_token(
             Some(order.order_parameters.algorithm),
@@ -3332,6 +3381,18 @@ async fn publish_binding(
             message: "binding was not found".to_string(),
         });
     };
+    for symbol in position
+        .targets
+        .keys()
+        .chain(symbol_order_parameters.keys())
+    {
+        crate::exec_routing::symbol_market(&source.venue, symbol).map_err(|error| {
+            PublishFailure {
+                status: StatusCode::BAD_REQUEST,
+                message: error.to_string(),
+            }
+        })?;
+    }
     let targets = strategy_catalog::scale_targets(&position.targets, shares);
     if targets_require_trading_account_mode(&targets) {
         match crate::exchange_leverage::has_required_trading_account_mode(source).await {

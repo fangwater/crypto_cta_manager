@@ -380,7 +380,8 @@ fn ingest_target(
                     .get(&symbol)
                     .map(|target| target.signal)
                     .unwrap_or(0);
-                let venue = crate::exec_routing::symbol_market(&next.venue, &symbol)?.to_string();
+                let venue =
+                    crate::exec_routing::archived_symbol_market(&next.venue, &symbol)?.to_string();
                 let market = (source.id.clone(), symbol.clone(), venue.clone());
                 let position = state.deltas.len();
                 state.deltas.push(VirtualDelta {

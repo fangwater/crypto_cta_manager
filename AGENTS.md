@@ -125,8 +125,15 @@ as `binance_exec_trade01` and `binance_exec_trade02`. Treat each deployment as
 an independent source with a stable, globally unique `source_id`; never infer
 identity only from an account label, path, process name, or array position.
 
-Order histories and position ledgers must include `source_id`. Source paths
-must be absolute and two enabled sources must not point at the same RocksDB.
+Order histories and position ledgers must include `source_id`. Runtime market
+ownership is deployment-specific: `binance-futures` Execs
+manage only USDT/USDC perpetuals, and `binance-coin-futures` Execs manage only USD
+coin-margined perpetuals. Never expand a native U-margined source to both markets.
+Keep one Manager with independent sources, namespaces, Exec RocksDB stores and
+Viz/Config gateways. Each Exec Viz declares its explicit venue and serves the
+corresponding separately maintained frontend. Preserve historical archive identity;
+never relabel old fills or targets to a newly provisioned source.
+Source paths must be absolute and two enabled sources must not point at the same RocksDB.
 Readers must not write into Exec RocksDB or require stopping a live trading
 process. Retain NAV history's read-only incremental scans and overlap window.
 `[dashboard].refresh_secs` controls the cached NAV report's refresh interval;

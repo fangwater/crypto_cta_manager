@@ -29,7 +29,7 @@ import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
-import { feeBps, formatUniMmr, isOkxVenue, money, signedClass, timestampUs } from '../format'
+import { executionMarketLabel, executionSymbolPlaceholder, feeBps, formatUniMmr, isOkxVenue, money, signedClass, timestampUs } from '../format'
 import { FieldHint, Input, Label } from '../components/ui/Field'
 import { readSourceId, routes } from '../lib/routes'
 import { cn } from '../lib/cn'
@@ -295,6 +295,7 @@ export function AccountOverviewPage() {
             <ContractLeveragePanel
               toolbar={
                 <ContractLeverageToolbar
+                  symbolPlaceholder={executionSymbolPlaceholder(account?.venue ?? '')}
                   symbol={contractSymbol}
                   contractLeverage={contractLeverage}
                   queriedLeverage={queriedContractLeverage}
@@ -547,6 +548,7 @@ function AccountMeta({
           </span>
           <code className="text-[11px]">{sourceId}</code>
         </span>
+        <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
         {isOkxVenue(account.venue) && (
           <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
         )}

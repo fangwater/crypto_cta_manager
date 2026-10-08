@@ -518,7 +518,7 @@ fn check_market(config: &AppConfig, market: &MarketFeed, now_us: i64) -> Vec<Mon
             .iter()
             .filter(|symbol| {
                 !venue.starts_with("binance-")
-                    || crate::exec_routing::symbol_market("binance-futures", symbol)
+                    || crate::exec_routing::symbol_market(&venue, symbol)
                         .is_ok_and(|selected| selected == venue)
             })
             .cloned()
@@ -1847,8 +1847,11 @@ mod tests {
     }
 
     #[test]
-    fn mixed_market_watch_requires_a_fresh_quote_from_each_requested_market() {
-        let config = market_test_config(&["BTCUSDT", "BTCUSDC", "BTCUSD"]);
+    fn independent_market_sources_require_their_own_fresh_quote() {
+        let mut config = market_test_config(&["BTCUSDT", "BTCUSDC", "BTCUSD"]);
+        let mut coin = test_source("binance-coin-futures");
+        coin.id = "coin_exec".into();
+        config.sources.push(coin);
         let feed = MarketFeed::default();
         let now = unix_time_us();
         insert_quote(&feed, "binance-futures", "BTCUSDC", now);
@@ -1862,6 +1865,15 @@ mod tests {
             check_market(&config, &feed, now)[0].key,
             "market:binance-futures:bbo:global"
         );
+    }
+
+    #[test]
+    fn linear_exec_does_not_require_an_unconfigured_coin_feed() {
+        let config = market_test_config(&["BTCUSDT", "BTCUSD"]);
+        let feed = MarketFeed::default();
+        let now = unix_time_us();
+        insert_quote(&feed, "binance-futures", "BTCUSDT", now);
+        assert!(check_market(&config, &feed, now).is_empty());
     }
 
     #[test]

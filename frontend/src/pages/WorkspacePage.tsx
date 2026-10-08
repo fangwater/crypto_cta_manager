@@ -15,7 +15,7 @@ import { AppShell, PageIntro, StatTile } from '../components/AppShell'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
-import { feeBps, formatUniMmr, integer, isOkxVenue, money, signedClass, timestampUs } from '../format'
+import { executionMarketLabel, feeBps, formatUniMmr, integer, isOkxVenue, money, signedClass, timestampUs } from '../format'
 import { cn } from '../lib/cn'
 import { routes } from '../lib/routes'
 import type {
@@ -242,6 +242,7 @@ function AccountCard({
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
           {isOkxVenue(account.venue) && (
             <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
           )}

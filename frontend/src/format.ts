@@ -59,6 +59,20 @@ export function isOkxVenue(venue: string) {
   return normalized.includes('okx') || normalized.includes('okex')
 }
 
+export function executionMarketLabel(venue: string) {
+  return venue === 'binance-coin-futures' ? '币本位' : 'U 本位'
+}
+
+export function executionSymbolPlaceholder(venue: string) {
+  return venue === 'binance-coin-futures' ? 'BTCUSD / ETHUSD' : 'BTCUSDT / BTCUSDC'
+}
+
+export function symbolMatchesExecMarket(venue: string, symbol: string) {
+  if (venue === 'binance-coin-futures') return /^[A-Z0-9]+USD$/.test(symbol)
+  if (venue === 'binance-futures') return symbol.endsWith('USDT') || symbol.endsWith('USDC')
+  return venue === 'okex-futures'
+}
+
 export function formatUniMmr(value: number | null | undefined) {
   if (value == null || !Number.isFinite(value)) return '--'
   return value.toLocaleString('zh-CN', {
