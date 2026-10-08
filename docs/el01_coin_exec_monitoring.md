@@ -162,3 +162,23 @@ protected process identities, and 49 configuration hashes remained unchanged.
 No trading process started. Recovery binaries are in each environment's
 `backups/zero_display_20261008T083101Z`; `VIZ-RELEASE.json` records source and hash.
 Viz SHA-256: `604fe9626071a6723a39c92158c6c5b3e2e6f340159b23d9807ab87a231537de`.
+
+## Account identity and query-mode audit
+
+After the operator questioned the query scope, additional read-only checks used
+each deployment's existing credentials and existing private-account egress.
+Both API keys reported `enableReading=true`, `enableFutures=true`,
+`enablePortfolioMarginTrading=false`, and IP restrictions enabled.
+`GET /papi/v1/account`, `/papi/v1/cm/positionRisk`, and `/papi/v1/cm/account`
+returned HTTP 401 / -2015. Those are access failures, not empty-position results.
+`GET /sapi/v1/portfolio/account` returned HTTP 400 / -21001 (not a Portfolio
+Margin account for that endpoint). The successful ordinary COIN-M account and
+position responses establish emptiness only in the queried account scope.
+They must not be presented as proof that every possible account mode is empty.
+
+A successful read-only `/api/v3/account` request returned exchange UIDs for both
+configured keys. The operator was asked to match those UIDs against the intended
+subaccounts; Manager aliases alone cannot establish key ownership. No secrets
+were printed or credentials/account modes changed. In particular, the Spot
+endpoint's `accountType=SPOT` describes that endpoint and is not used to infer
+the global derivatives account mode.
