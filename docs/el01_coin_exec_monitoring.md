@@ -182,3 +182,13 @@ subaccounts; Manager aliases alone cannot establish key ownership. No secrets
 were printed or credentials/account modes changed. In particular, the Spot
 endpoint's `accountType=SPOT` describes that endpoint and is not used to infer
 the global derivatives account mode.
+
+The subsequent read-only USD-M cross-check changed the interpretation:
+`GET /fapi/v3/positionRisk` succeeded for both configured keys and returned
+**12 nonzero USD-M positions per account**, including BTCUSDT, ETHUSDT and
+XRPUSDT. Therefore these API accounts are not globally empty. Earlier wording
+about zero balances/positions applies only to the ordinary COIN-M scope.
+No USD-M positions were fed into the coin Exec, no targets were published and
+no account's trading mode was changed. Resolving whether the intended subaccount
+keys or the intended futures market differ requires operator identity/scope
+confirmation; keep the independent source/venue boundary intact.
