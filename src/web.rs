@@ -416,6 +416,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         refresh_interval_secs,
         &live_equity,
         &nav_history_store,
+        None,
     )
     .await?;
     let cache = Arc::new(RwLock::new(CacheState {
@@ -2699,12 +2700,14 @@ async fn save_account_fee_rates(
 async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
     let _refresh = state.dashboard_refresh.lock().await;
     let attempted_at_us = unix_now_us();
+    let previous = state.cache.read().await.nav_timelines.clone();
     let build = build_dashboard(
         &state.config,
         &state.pool,
         state.refresh_interval_secs,
         &state.live_equity,
         &state.nav_history_store,
+        Some(previous),
     )
     .await?;
     let mut cache = state.cache.write().await;
@@ -4200,12 +4203,14 @@ async fn refresh_loop(
         interval.tick().await;
         let _refresh = dashboard_refresh.lock().await;
         let attempted_at_us = unix_now_us();
+        let previous = cache.read().await.nav_timelines.clone();
         match build_dashboard(
             &config,
             &pool,
             refresh_interval_secs,
             &live_equity,
             &nav_history_store,
+            Some(previous),
         )
         .await
         {
@@ -4243,6 +4248,7 @@ async fn build_dashboard(
     refresh_interval_secs: u64,
     live_equity: &LiveEquityHub,
     nav_history_store: &Arc<std::sync::Mutex<nav::NavHistoryStore>>,
+    previous: Option<Arc<nav::NavTimelineCache>>,
 ) -> Result<DashboardBuild> {
     let started = Instant::now();
     let now_ms = unix_now_ms();
@@ -4316,11 +4322,12 @@ async fn build_dashboard(
             let histories = Arc::new(histories);
             let snapshots = Arc::new(snapshots);
             let strategy_snapshots = Arc::new(strategy_snapshots);
-            let nav_timelines = Arc::new(nav::NavTimelineCache::build(
+            let nav_timelines = Arc::new(nav::NavTimelineCache::refresh(
                 nav_config,
                 snapshots.clone(),
                 strategy_snapshots.clone(),
                 histories.clone(),
+                previous.as_deref(),
             )?);
             let report = nav_timelines.dashboard_report();
             anyhow::Ok((

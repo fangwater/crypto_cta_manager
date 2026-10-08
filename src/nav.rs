@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -21,21 +22,79 @@ pub type SourceMarkOverrides = BTreeMap<String, VenueMarkOverrides>;
 pub type SourcePositionSnapshots = BTreeMap<String, PositionSnapshot>;
 pub type SourceStrategyPositionSnapshots = BTreeMap<String, StrategyPositionSnapshot>;
 
+/// Disposable analysis projection. Raw order records stay in Exec RocksDB;
+/// BBO payloads, status strings and unused timestamps need not stay in RAM.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NavEvent {
+    pub record_key: String,
+    pub event_ts_us: i64,
+    pub update_ts_us: i64,
+    pub signal_ts_us: i64,
+    pub symbol: String,
+    pub client_order_id: i64,
+    pub venue_code: i16,
+    pub venue: String,
+    pub order_type_code: i16,
+    pub side_code: i16,
+    pub price: f64,
+    pub amount_update: f64,
+    pub from_key_text: String,
+    pub fill_liquidity: Option<crate::model::FillLiquidity>,
+}
+
+impl From<UniformOrderEvent> for NavEvent {
+    fn from(event: UniformOrderEvent) -> Self {
+        Self {
+            record_key: event.record_key,
+            event_ts_us: event.event_ts_us,
+            update_ts_us: event.update_ts_us,
+            signal_ts_us: event.signal_ts_us,
+            symbol: event.symbol,
+            client_order_id: event.client_order_id,
+            venue_code: event.venue_code,
+            venue: event.venue,
+            order_type_code: event.order_type_code,
+            side_code: event.side_code,
+            price: event.price,
+            amount_update: event.amount_update,
+            from_key_text: event.from_key_text,
+            fill_liquidity: event.fill_liquidity,
+        }
+    }
+}
+
+impl From<UniformOrderEvent> for Arc<NavEvent> {
+    fn from(event: UniformOrderEvent) -> Self {
+        Arc::new(event.into())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct NavSourceHistory {
-    events: im::Vector<UniformOrderEvent>,
+    events: im::Vector<Arc<NavEvent>>,
     liquidity_by_order: LiquidityByOrder,
+    revision: u64,
+    change: Option<Arc<HistoryChange>>,
+}
+
+static HISTORY_REVISION: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+struct HistoryChange {
+    previous_revision: u64,
+    events: Vec<Arc<NavEvent>>,
+    earliest_liquidity_fill_ts_us: Option<i64>,
 }
 
 impl NavSourceHistory {
-    pub(crate) fn events(&self) -> &im::Vector<UniformOrderEvent> {
+    pub(crate) fn events(&self) -> &im::Vector<Arc<NavEvent>> {
         &self.events
     }
 
     pub(crate) fn estimated_fee_quote(
         &self,
         source: &SourceConfig,
-        event: &UniformOrderEvent,
+        event: &NavEvent,
     ) -> Result<f64> {
         let rates = source.nav_fee_rates()?;
         let rate = match liquidity_role_for_event(event, &self.liquidity_by_order) {
@@ -50,7 +109,7 @@ impl NavSourceHistory {
         Ok(fee)
     }
 
-    pub(crate) fn liquidity_role_name(&self, event: &UniformOrderEvent) -> &'static str {
+    pub(crate) fn liquidity_role_name(&self, event: &NavEvent) -> &'static str {
         match liquidity_role_for_event(event, &self.liquidity_by_order) {
             LiquidityRole::Maker => "maker",
             LiquidityRole::Taker => "taker",
@@ -321,7 +380,7 @@ type LiquidityByOrder = im::OrdMap<LiquidityOrderKey, LiquidityRole>;
 
 #[derive(Clone, Debug)]
 struct PreparedFill {
-    event: UniformOrderEvent,
+    event: Arc<NavEvent>,
     side: Side,
     fill_ts_us: i64,
     liquidity: LiquidityRole,
@@ -333,10 +392,26 @@ struct PreparedSourceEvents {
     initial_states: BTreeMap<(String, i16), VenueState>,
     initial_strategy_states: BTreeMap<(String, String, i16), VenueState>,
     strategy_allocation_active: bool,
-    fill_events: Vec<PreparedFill>,
+    fill_events: im::Vector<PreparedFill>,
     order_event_count: u64,
     ignored_at_or_before_snapshot_event_count: u64,
     ignored_non_fill_event_count: u64,
+}
+
+fn fill_partition_point(
+    fills: &im::Vector<PreparedFill>,
+    mut predicate: impl FnMut(&PreparedFill) -> bool,
+) -> usize {
+    let (mut low, mut high) = (0, fills.len());
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if predicate(&fills[mid]) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
 }
 
 #[derive(Clone, Debug)]
@@ -395,9 +470,9 @@ struct TimelineSourceState {
     snapshot_ts_us: Option<i64>,
     pending_initial_states: Option<BTreeMap<(String, i16), VenueState>>,
     pending_initial_strategy_states: Option<BTreeMap<(String, String, i16), VenueState>>,
-    states: BTreeMap<(String, i16), VenueState>,
-    strategy_states: BTreeMap<(String, String, i16), VenueState>,
-    latest_marks: BTreeMap<(String, i16), f64>,
+    states: im::OrdMap<(String, i16), VenueState>,
+    strategy_states: im::OrdMap<(String, String, i16), VenueState>,
+    latest_marks: im::OrdMap<(String, i16), f64>,
     strategy_allocation_active: bool,
 }
 
@@ -411,10 +486,13 @@ struct FifoCheckpoint {
 #[derive(Debug)]
 struct CachedTimelineSource {
     prepared: PreparedSourceEvents,
-    checkpoints: Vec<FifoCheckpoint>,
+    checkpoints: Vec<Arc<FifoCheckpoint>>,
     symbols: BTreeMap<String, i64>,
     strategies: BTreeMap<String, i64>,
     report: SourceNavReport,
+    end_state: TimelineSourceState,
+    next_checkpoint: Option<i64>,
+    replayed_fills: usize,
 }
 
 fn initial_timeline_state(
@@ -431,9 +509,9 @@ fn initial_timeline_state(
         pending_initial_strategy_states: prepared
             .snapshot_ts_us
             .map(|_| prepared.initial_strategy_states.clone()),
-        states: BTreeMap::new(),
-        strategy_states: BTreeMap::new(),
-        latest_marks: BTreeMap::new(),
+        states: im::OrdMap::new(),
+        strategy_states: im::OrdMap::new(),
+        latest_marks: im::OrdMap::new(),
         strategy_allocation_active: prepared.strategy_allocation_active,
     })
 }
@@ -444,17 +522,175 @@ impl CachedTimelineSource {
         prepared: PreparedSourceEvents,
         initial_position_count: usize,
     ) -> Result<Self> {
-        let mut state = initial_timeline_state(source, &prepared)?;
-        let mut checkpoints = Vec::new();
-        let mut symbols = BTreeMap::new();
-        let mut strategies = BTreeMap::new();
-        const CHECKPOINT_US: i64 = 3_600_000_000;
+        let state = initial_timeline_state(source, &prepared)?;
         let anchor = prepared
             .snapshot_ts_us
-            .or_else(|| prepared.fill_events.first().map(|fill| fill.fill_ts_us));
-        let mut next_checkpoint =
-            anchor.map(|ts| (ts.div_euclid(CHECKPOINT_US) + 1) * CHECKPOINT_US);
-        for (index, fill) in prepared.fill_events.iter().enumerate() {
+            .or_else(|| prepared.fill_events.front().map(|fill| fill.fill_ts_us));
+        let next_checkpoint = anchor.map(|ts| (ts.div_euclid(CHECKPOINT_US) + 1) * CHECKPOINT_US);
+        Self::replay(
+            source,
+            prepared,
+            initial_position_count,
+            0,
+            state,
+            Vec::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            next_checkpoint,
+        )
+    }
+
+    fn refresh(
+        &self,
+        source: &SourceConfig,
+        history: &NavSourceHistory,
+        initial_position_count: usize,
+    ) -> Result<Option<Self>> {
+        let Some(change) = &history.change else {
+            return Ok(None);
+        };
+        let mut prepared = self.prepared.clone();
+        let mut added = Vec::new();
+        for event in &change.events {
+            prepared.order_event_count += 1;
+            if prepared
+                .snapshot_ts_us
+                .is_some_and(|ts| fifo_ts_us(event) <= ts)
+            {
+                prepared.ignored_at_or_before_snapshot_event_count += 1;
+            } else if let Some(side) = validated_fill_side(source, event)? {
+                added.push(PreparedFill {
+                    event: event.clone(),
+                    side,
+                    fill_ts_us: fifo_ts_us(event),
+                    liquidity: liquidity_role_for_event(event, &history.liquidity_by_order),
+                });
+            } else {
+                prepared.ignored_non_fill_event_count += 1;
+            }
+        }
+        added.sort_by(fill_order);
+        let old_len = prepared.fill_events.len();
+        let earliest_added = added.first().map(|fill| fill.fill_ts_us);
+        // A newly discovered first reference fill can change the immutable
+        // snapshot's valuation basis. Rebuild that source rather than reuse it.
+        if earliest_added.is_some_and(|ts| {
+            self.prepared
+                .fill_events
+                .last()
+                .is_some_and(|last| ts <= last.fill_ts_us)
+        }) && prepared.initial_states.values().any(|state| {
+            state.initial_reference_price_source == Some(InitialReferencePriceSource::FirstFill)
+        }) {
+            return Ok(None);
+        }
+        let first_changed_ts = earliest_added
+            .into_iter()
+            .chain(change.earliest_liquidity_fill_ts_us)
+            .min();
+        let append_only = change.earliest_liquidity_fill_ts_us.is_none()
+            && added.first().is_none_or(|first| {
+                prepared
+                    .fill_events
+                    .last()
+                    .is_none_or(|last| fill_order(last, first) != Ordering::Greater)
+            });
+        if append_only {
+            for fill in added {
+                prepared.fill_events.push_back(fill);
+            }
+            // Empty sources choose their first hour from the first actual fill.
+            let next_checkpoint = self.next_checkpoint.or_else(|| {
+                prepared
+                    .fill_events
+                    .front()
+                    .map(|fill| (fill.fill_ts_us.div_euclid(CHECKPOINT_US) + 1) * CHECKPOINT_US)
+            });
+            return Self::replay(
+                source,
+                prepared,
+                initial_position_count,
+                old_len,
+                self.end_state.clone(),
+                self.checkpoints.clone(),
+                self.symbols.clone(),
+                self.strategies.clone(),
+                next_checkpoint,
+            )
+            .map(Some);
+        }
+        let Some(first_changed_ts) = first_changed_ts else {
+            return Ok(None);
+        };
+        let prefix_len = fill_partition_point(&prepared.fill_events, |fill| {
+            fill.fill_ts_us < first_changed_ts
+        });
+        let mut tail = prepared
+            .fill_events
+            .iter()
+            .skip(prefix_len)
+            .cloned()
+            .collect::<Vec<_>>();
+        if change.earliest_liquidity_fill_ts_us.is_some() {
+            for fill in &mut tail {
+                fill.liquidity = liquidity_role_for_event(&fill.event, &history.liquidity_by_order);
+            }
+        }
+        tail.extend(added);
+        tail.sort_by(fill_order);
+        prepared.fill_events.truncate(prefix_len);
+        for fill in tail {
+            prepared.fill_events.push_back(fill);
+        }
+        let checkpoint_count = self
+            .checkpoints
+            .partition_point(|cp| cp.ts_us <= first_changed_ts);
+        let mut checkpoints = self.checkpoints[..checkpoint_count].to_vec();
+        if let Some(cp) = checkpoints.last().cloned() {
+            let first_fill = cp.next_fill;
+            let symbols = self
+                .symbols
+                .iter()
+                .filter(|(_, ts)| **ts < cp.ts_us)
+                .map(|(key, ts)| (key.clone(), *ts))
+                .collect();
+            let strategies = self
+                .strategies
+                .iter()
+                .filter(|(_, ts)| **ts < cp.ts_us)
+                .map(|(key, ts)| (key.clone(), *ts))
+                .collect();
+            Self::replay(
+                source,
+                prepared,
+                initial_position_count,
+                first_fill,
+                cp.state.clone(),
+                std::mem::take(&mut checkpoints),
+                symbols,
+                strategies,
+                Some(cp.ts_us.saturating_add(CHECKPOINT_US)),
+            )
+            .map(Some)
+        } else {
+            Self::build(source, prepared, initial_position_count).map(Some)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replay(
+        source: &SourceConfig,
+        prepared: PreparedSourceEvents,
+        initial_position_count: usize,
+        first_fill: usize,
+        mut state: TimelineSourceState,
+        mut checkpoints: Vec<Arc<FifoCheckpoint>>,
+        mut symbols: BTreeMap<String, i64>,
+        mut strategies: BTreeMap<String, i64>,
+        mut next_checkpoint: Option<i64>,
+    ) -> Result<Self> {
+        let replayed_fills = prepared.fill_events.len() - first_fill;
+        for (index, fill) in prepared.fill_events.iter().enumerate().skip(first_fill) {
             symbols
                 .entry(fill.event.symbol.clone())
                 .or_insert(fill.fill_ts_us);
@@ -471,11 +707,11 @@ impl CachedTimelineSource {
             if next_checkpoint.is_some_and(|ts| ts <= fill.fill_ts_us) {
                 let ts = fill.fill_ts_us.div_euclid(CHECKPOINT_US) * CHECKPOINT_US;
                 state.activate_snapshot_at(ts);
-                checkpoints.push(FifoCheckpoint {
+                checkpoints.push(Arc::new(FifoCheckpoint {
                     ts_us: ts,
                     next_fill: index,
                     state: state.clone(),
-                });
+                }));
                 next_checkpoint = Some(ts.saturating_add(CHECKPOINT_US));
             }
             state.apply_fill(fill)?;
@@ -509,7 +745,7 @@ impl CachedTimelineSource {
             ignored_at_or_before_snapshot_event_count: prepared
                 .ignored_at_or_before_snapshot_event_count,
             ignored_non_fill_event_count: prepared.ignored_non_fill_event_count,
-            first_fill_ts_us: prepared.fill_events.first().map(|fill| fill.fill_ts_us),
+            first_fill_ts_us: prepared.fill_events.front().map(|fill| fill.fill_ts_us),
             last_fill_ts_us: prepared.fill_events.last().map(|fill| fill.fill_ts_us),
             totals: totals.cleaned(),
             symbols: report_symbols,
@@ -520,8 +756,29 @@ impl CachedTimelineSource {
             symbols,
             strategies,
             report,
+            end_state: state,
+            next_checkpoint,
+            replayed_fills,
         })
     }
+}
+
+const CHECKPOINT_US: i64 = 3_600_000_000;
+
+fn fill_order(left: &PreparedFill, right: &PreparedFill) -> Ordering {
+    left.fill_ts_us
+        .cmp(&right.fill_ts_us)
+        .then_with(|| left.event.event_ts_us.cmp(&right.event.event_ts_us))
+        .then_with(|| left.event.record_key.cmp(&right.event.record_key))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TimelineSourceInputs {
+    snapshot: Option<PositionSnapshot>,
+    strategy: Option<StrategyPositionSnapshot>,
+    fees: FeeRates,
+    account: String,
+    venue: String,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -535,7 +792,7 @@ struct TimelineCacheKey {
 }
 
 /// One immutable dashboard generation. Fee/snapshot/history refreshes replace
-/// the entire object, including checkpoints and request results atomically.
+/// the entire object atomically, sharing unchanged checkpoints and results.
 #[derive(Debug)]
 pub struct NavTimelineCache {
     config: AppConfig,
@@ -543,7 +800,8 @@ pub struct NavTimelineCache {
     strategy_snapshots: Arc<SourceStrategyPositionSnapshots>,
     histories: Arc<NavSourceHistories>,
     sources: BTreeMap<(String, bool), Arc<CachedTimelineSource>>,
-    results: crate::analysis::QueryCache<TimelineCacheKey, NavTimelineReport>,
+    inputs: BTreeMap<(String, bool), TimelineSourceInputs>,
+    results: Arc<crate::analysis::QueryCache<TimelineCacheKey, NavTimelineReport>>,
 }
 
 impl NavTimelineCache {
@@ -552,6 +810,16 @@ impl NavTimelineCache {
         snapshots: Arc<SourcePositionSnapshots>,
         strategy_snapshots: Arc<SourceStrategyPositionSnapshots>,
         histories: Arc<NavSourceHistories>,
+    ) -> Result<Self> {
+        Self::refresh(config, snapshots, strategy_snapshots, histories, None)
+    }
+
+    pub fn refresh(
+        config: AppConfig,
+        snapshots: Arc<SourcePositionSnapshots>,
+        strategy_snapshots: Arc<SourceStrategyPositionSnapshots>,
+        histories: Arc<NavSourceHistories>,
+        previous: Option<&Self>,
     ) -> Result<Self> {
         let mut work = Vec::new();
         for source in config.sources.iter().filter(|source| source.enabled) {
@@ -564,7 +832,7 @@ impl NavTimelineCache {
                 work.push((source, true));
             }
         }
-        let mut sources = crate::analysis::run(|| {
+        let built = crate::analysis::run(|| {
             work.par_iter()
                 .map(|(source, allocation)| {
                     let history = histories
@@ -573,9 +841,42 @@ impl NavTimelineCache {
                     let strategy = allocation
                         .then(|| strategy_snapshots.get(&source.id))
                         .flatten();
+                    let key = (source.id.clone(), *allocation);
+                    let inputs = TimelineSourceInputs {
+                        snapshot: snapshots.get(&source.id).cloned(),
+                        strategy: strategy.cloned(),
+                        fees: source.nav_fee_rates()?,
+                        account: source.display_name().to_string(),
+                        venue: source.venue.clone(),
+                    };
                     let initial_position_count =
                         effective_position_snapshot(snapshots.get(&source.id), strategy)?
                             .map_or(0, |snapshot| snapshot.positions.len());
+                    if let Some(previous) = previous
+                        && previous.inputs.get(&key) == Some(&inputs)
+                        && let Some(old) = previous.sources.get(&key)
+                        && let Some(old_history) = previous.histories.get(&source.id)
+                    {
+                        let unchanged = Arc::ptr_eq(&histories, &previous.histories)
+                            || (history.revision != 0 && history.revision == old_history.revision);
+                        if unchanged {
+                            return Ok((key, old.clone(), inputs));
+                        }
+                        if history.change.as_ref().is_some_and(|change| {
+                            change.previous_revision == old_history.revision
+                                && (old_history.revision != 0 || old_history.events.is_empty())
+                        }) && let Some(updated) =
+                            old.refresh(source, history, initial_position_count)?
+                        {
+                            info!(
+                                source_id = source.id,
+                                replayed_fills = updated.replayed_fills,
+                                total_fills = updated.prepared.fill_events.len(),
+                                "updated NAV FIFO tail"
+                            );
+                            return Ok((key, Arc::new(updated), inputs));
+                        }
+                    }
                     let prepared = prepare_source_events(
                         source,
                         history.events.clone(),
@@ -584,31 +885,57 @@ impl NavTimelineCache {
                         &history.liquidity_by_order,
                     )?;
                     Ok((
-                        (source.id.clone(), *allocation),
+                        key,
                         Arc::new(CachedTimelineSource::build(
                             source,
                             prepared,
                             initial_position_count,
                         )?),
+                        inputs,
                     ))
                 })
-                .collect::<Result<BTreeMap<_, _>>>()
+                .collect::<Result<Vec<_>>>()
         })?;
+        let mut sources = BTreeMap::new();
+        let mut inputs = BTreeMap::new();
+        for (key, source, input) in built {
+            sources.insert(key.clone(), source);
+            inputs.insert(key, input);
+        }
         for source in config.sources.iter().filter(|source| source.enabled) {
             if !sources.contains_key(&(source.id.clone(), true)) {
                 sources.insert(
                     (source.id.clone(), true),
                     sources[&(source.id.clone(), false)].clone(),
                 );
+                inputs.insert(
+                    (source.id.clone(), true),
+                    inputs[&(source.id.clone(), false)].clone(),
+                );
             }
         }
+        let results = previous
+            .filter(|previous| {
+                previous.sources.len() == sources.len()
+                    && sources.iter().all(|(key, source)| {
+                        previous
+                            .sources
+                            .get(key)
+                            .is_some_and(|old| Arc::ptr_eq(old, source))
+                    })
+            })
+            .map_or_else(
+                || Arc::new(crate::analysis::QueryCache::new(16)),
+                |previous| previous.results.clone(),
+            );
         Ok(Self {
             config,
             snapshots,
             strategy_snapshots,
             histories,
             sources,
-            results: crate::analysis::QueryCache::new(16),
+            inputs,
+            results,
         })
     }
 
@@ -688,14 +1015,14 @@ impl TimelineSourceState {
                     .iter()
                     .map(|(key, state)| (key.clone(), state.latest_fill_price)),
             );
-            self.states = initial_states;
+            self.states = initial_states.into_iter().collect();
         }
         if self
             .snapshot_ts_us
             .is_some_and(|snapshot_ts| snapshot_ts <= ts_us)
             && let Some(initial_states) = self.pending_initial_strategy_states.take()
         {
-            self.strategy_states = initial_states;
+            self.strategy_states = initial_states.into_iter().collect();
         }
     }
 
@@ -756,8 +1083,8 @@ struct Lot {
 
 #[derive(Clone, Debug, Default)]
 struct QuantityFifo {
-    longs: VecDeque<Lot>,
-    shorts: VecDeque<Lot>,
+    longs: im::Vector<Lot>,
+    shorts: im::Vector<Lot>,
     realized_pnl: f64,
     // Inverse contracts conserve USD face value; fill-time base quantities
     // change with price and cannot be matched directly against each other.
@@ -842,7 +1169,7 @@ struct FirstFillReference {
 }
 
 impl VenueState {
-    fn new(event: &UniformOrderEvent) -> Self {
+    fn new(event: &NavEvent) -> Self {
         Self {
             venue_code: event.venue_code,
             venue: event.venue.clone(),
@@ -909,7 +1236,7 @@ impl VenueState {
 
     fn apply_fill(
         &mut self,
-        event: &UniformOrderEvent,
+        event: &NavEvent,
         side: Side,
         fee_rates: FeeRates,
         liquidity: LiquidityRole,
@@ -1176,9 +1503,9 @@ impl NavTotals {
     }
 }
 
-fn prepare_source_events(
+fn prepare_source_events<E: Into<Arc<NavEvent>>>(
     source: &SourceConfig,
-    events: impl IntoIterator<Item = UniformOrderEvent>,
+    events: impl IntoIterator<Item = E>,
     snapshot: Option<&PositionSnapshot>,
     strategy_snapshot: Option<&StrategyPositionSnapshot>,
     liquidity_by_order: &LiquidityByOrder,
@@ -1214,7 +1541,7 @@ fn prepare_source_events(
         None => snapshot.cloned(),
     };
 
-    let mut events = events.into_iter().collect::<Vec<_>>();
+    let mut events = events.into_iter().map(Into::into).collect::<Vec<_>>();
     events.sort_by(|left, right| {
         fifo_ts_us(left)
             .cmp(&fifo_ts_us(right))
@@ -1363,7 +1690,7 @@ fn prepare_source_events(
         initial_states,
         initial_strategy_states,
         strategy_allocation_active: strategy_snapshot.is_some(),
-        fill_events,
+        fill_events: fill_events.into_iter().collect(),
         order_event_count,
         ignored_at_or_before_snapshot_event_count,
         ignored_non_fill_event_count,
@@ -1371,7 +1698,7 @@ fn prepare_source_events(
 }
 
 fn liquidity_role_for_event(
-    event: &UniformOrderEvent,
+    event: &NavEvent,
     liquidity_by_order: &LiquidityByOrder,
 ) -> LiquidityRole {
     if event.order_type_code == INTERNAL_CROSS_ORDER_TYPE_CODE {
@@ -1412,7 +1739,8 @@ fn merge_liquidity_records(
     roles: &mut LiquidityByOrder,
     source: &SourceConfig,
     records: BTreeMap<String, Vec<rocks_source::RawRocksRecord>>,
-) -> Result<()> {
+) -> Result<BTreeSet<LiquidityOrderKey>> {
+    let mut changed = BTreeSet::new();
     for (column_family, records) in records {
         for record in records {
             let event = decode_trade_update(&record.key, &record.value).with_context(|| {
@@ -1435,16 +1763,20 @@ fn merge_liquidity_records(
             match roles.get_mut(&key) {
                 Some(role) => {
                     if *role != observed {
-                        *role = LiquidityRole::Unknown;
+                        if *role != LiquidityRole::Unknown {
+                            *role = LiquidityRole::Unknown;
+                            changed.insert(key.clone());
+                        }
                     }
                 }
                 None => {
-                    roles.insert(key, observed);
+                    roles.insert(key.clone(), observed);
+                    changed.insert(key);
                 }
             }
         }
     }
-    Ok(())
+    Ok(changed)
 }
 
 fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
@@ -1473,7 +1805,7 @@ fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
     let decode_started = Instant::now();
     let mut events = Vec::with_capacity(uniform_record_count);
     for record in uniform_records {
-        events.push(
+        events.push(Arc::<NavEvent>::from(
             decode_uniform_order(&record.key, &record.value).with_context(|| {
                 format!(
                     "source {} contains an undecodable uniform order at key {:?}",
@@ -1481,7 +1813,7 @@ fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
                     String::from_utf8_lossy(&record.key)
                 )
             })?,
-        );
+        ));
     }
     let liquidity_by_order = decode_liquidity_by_order(source, records)?;
     let decode_ms = decode_started.elapsed().as_millis();
@@ -1496,6 +1828,7 @@ fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
     Ok(NavSourceHistory {
         events: events.into_iter().collect(),
         liquidity_by_order,
+        ..Default::default()
     })
 }
 
@@ -1553,6 +1886,7 @@ struct IncrementalSourceHistory {
     db_identity: Option<Vec<u8>>,
     checkpoints: BTreeMap<String, ColumnFamilyCheckpoint>,
     history: NavSourceHistory,
+    legacy_fill_times: im::OrdMap<LiquidityOrderKey, i64>,
 }
 
 /// Incremental NAV history cache. Each refresh opens every enabled source
@@ -1647,7 +1981,7 @@ impl IncrementalSourceHistory {
                     continue;
                 }
                 if column_family == crate::model::UNIFORM_ORDERS_CF {
-                    new_events.push(
+                    new_events.push(Arc::<NavEvent>::from(
                         decode_uniform_order(&record.key, &record.value).with_context(|| {
                             format!(
                                 "source {} contains an undecodable uniform order at key {:?}",
@@ -1655,7 +1989,7 @@ impl IncrementalSourceHistory {
                                 String::from_utf8_lossy(&record.key)
                             )
                         })?,
-                    );
+                    ));
                 } else {
                     new_trade_records
                         .entry(column_family.clone())
@@ -1671,11 +2005,21 @@ impl IncrementalSourceHistory {
             scanned.insert(column_family, (scanned_keys, last_ts));
         }
 
-        merge_liquidity_records(
-            &mut self.history.liquidity_by_order,
-            source,
-            new_trade_records,
-        )?;
+        let mut roles = self.history.liquidity_by_order.clone();
+        let changed_roles = merge_liquidity_records(&mut roles, source, new_trade_records)?;
+        let earliest_liquidity_fill_ts_us = changed_roles
+            .iter()
+            .filter_map(|key| self.legacy_fill_times.get(key).copied())
+            .min();
+        if !new_events.is_empty() || !changed_roles.is_empty() {
+            self.history.change = Some(Arc::new(HistoryChange {
+                previous_revision: self.history.revision,
+                events: new_events.clone(),
+                earliest_liquidity_fill_ts_us,
+            }));
+            self.history.revision = HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        self.history.liquidity_by_order = roles;
         let out_of_order = self
             .history
             .events
@@ -1683,6 +2027,17 @@ impl IncrementalSourceHistory {
             .zip(new_events.first())
             .is_some_and(|(last, first)| first.record_key < last.record_key);
         for event in new_events {
+            if event.fill_liquidity.is_none() && event.amount_update > 0.0 {
+                let ts = fifo_ts_us(&event);
+                self.legacy_fill_times
+                    .entry((
+                        event.symbol.clone(),
+                        event.venue_code,
+                        event.client_order_id,
+                    ))
+                    .and_modify(|old| *old = (*old).min(ts))
+                    .or_insert(ts);
+            }
             self.history.events.push_back(event);
         }
         if out_of_order {
@@ -1741,9 +2096,9 @@ pub fn estimate_source_events_with_snapshot(
     )
 }
 
-fn estimate_source_events_with_snapshot_and_liquidity(
+fn estimate_source_events_with_snapshot_and_liquidity<E: Into<Arc<NavEvent>>>(
     source: &SourceConfig,
-    events: impl IntoIterator<Item = UniformOrderEvent>,
+    events: impl IntoIterator<Item = E>,
     mark_overrides: &VenueMarkOverrides,
     snapshot: Option<&PositionSnapshot>,
     liquidity_by_order: &LiquidityByOrder,
@@ -1841,7 +2196,7 @@ fn estimate_source_events_with_snapshot_and_liquidity(
     })
 }
 
-fn validated_fill_side(source: &SourceConfig, event: &UniformOrderEvent) -> Result<Option<Side>> {
+fn validated_fill_side(source: &SourceConfig, event: &NavEvent) -> Result<Option<Side>> {
     if !event.amount_update.is_finite() || event.amount_update < 0.0 {
         bail!(
             "source {} record {} has invalid amount_update {}",
@@ -2117,10 +2472,15 @@ fn rebuild_nav_timeline_with_cache(
             );
         }
         let first_fill = checkpoint.map_or(0, |cp| cp.next_fill);
-        let last_fill = prepared
+        let last_fill = fill_partition_point(&prepared.fill_events, |fill| {
+            fill.fill_ts_us <= request.end_ts_us
+        });
+        for fill in prepared
             .fill_events
-            .partition_point(|fill| fill.fill_ts_us <= request.end_ts_us);
-        for fill in &prepared.fill_events[first_fill.min(last_fill)..last_fill] {
+            .iter()
+            .skip(first_fill.min(last_fill))
+            .take(last_fill.saturating_sub(first_fill))
+        {
             if fill.fill_ts_us <= request.end_ts_us {
                 available_symbols.insert(fill.event.symbol.clone());
                 let strategy = strategy_from_from_key(&fill.event.from_key_text);
@@ -2446,20 +2806,20 @@ pub fn rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
         pending_initial_strategy_states: prepared
             .snapshot_ts_us
             .map(|_| prepared.initial_strategy_states),
-        states: BTreeMap::new(),
-        strategy_states: BTreeMap::new(),
-        latest_marks: BTreeMap::new(),
+        states: im::OrdMap::new(),
+        strategy_states: im::OrdMap::new(),
+        latest_marks: im::OrdMap::new(),
         strategy_allocation_active: prepared.strategy_allocation_active,
     };
 
     runtime.activate_snapshot_at(request.start_ts_us);
-    let window_start = prepared
-        .fill_events
-        .partition_point(|fill| fill.fill_ts_us < request.start_ts_us);
-    let window_end = prepared
-        .fill_events
-        .partition_point(|fill| fill.fill_ts_us <= request.end_ts_us);
-    for fill in &prepared.fill_events[..window_start] {
+    let window_start = fill_partition_point(&prepared.fill_events, |fill| {
+        fill.fill_ts_us < request.start_ts_us
+    });
+    let window_end = fill_partition_point(&prepared.fill_events, |fill| {
+        fill.fill_ts_us <= request.end_ts_us
+    });
+    for fill in prepared.fill_events.iter().take(window_start) {
         runtime.apply_fill(fill)?;
     }
     let baseline = strategy_totals(&runtime, &request.strategy_name);
@@ -2472,7 +2832,12 @@ pub fn rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
         totals: NavTotals::default(),
     }];
 
-    for fill in &prepared.fill_events[window_start..window_end] {
+    for fill in prepared
+        .fill_events
+        .iter()
+        .skip(window_start)
+        .take(window_end - window_start)
+    {
         let fill_strategy = strategy_from_from_key(&fill.event.from_key_text);
         let is_strategy_fill = fill_strategy == request.strategy_name
             || (runtime.strategy_allocation_active
@@ -3176,7 +3541,7 @@ fn aggregate_source_reports(sources: Vec<SourceNavReport>) -> NavReport {
 }
 
 fn close_fifo(
-    lots: &mut VecDeque<Lot>,
+    lots: &mut im::Vector<Lot>,
     close_price: f64,
     mut quantity: f64,
     direction: f64,
@@ -3199,7 +3564,7 @@ fn close_fifo(
     (realized_pnl, quantity)
 }
 
-pub(crate) fn fifo_ts_us(event: &UniformOrderEvent) -> i64 {
+pub(crate) fn fifo_ts_us(event: &NavEvent) -> i64 {
     if event.update_ts_us > 0 {
         event.update_ts_us
     } else {
@@ -3655,9 +4020,14 @@ mod tests {
         let history = load_source_history(&source).unwrap();
         assert_eq!(history.events.len(), 3);
         assert!(history.liquidity_by_order.is_empty());
-        assert_eq!(history.liquidity_role_name(&canceled), "unclassified");
+        assert_eq!(
+            history.liquidity_role_name(&NavEvent::from(canceled.clone())),
+            "unclassified"
+        );
         assert_close(
-            history.estimated_fee_quote(&source, &canceled).unwrap(),
+            history
+                .estimated_fee_quote(&source, &NavEvent::from(canceled.clone()))
+                .unwrap(),
             0.02,
         );
 
@@ -3680,7 +4050,7 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(
-            liquidity_role_for_event(&canceled, &guessed_maker),
+            liquidity_role_for_event(&NavEvent::from(canceled), &guessed_maker),
             LiquidityRole::Unknown
         );
     }
@@ -4036,8 +4406,10 @@ mod tests {
                     strategy_event_at(4, 4, "BTCUSDT", 1, 1, 120.0, 1.0, strategy_b),
                 ]
                 .into_iter()
+                .map(Arc::<NavEvent>::from)
                 .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
+                ..Default::default()
             },
         )]);
 
@@ -4148,8 +4520,10 @@ mod tests {
                     strategy_event_at(20, 20, "BTCUSDT", 1, 2, 120.0, 1.0, "system_position_close"),
                 ]
                 .into_iter()
+                .map(Arc::<NavEvent>::from)
                 .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
+                ..Default::default()
             },
         )]);
         let snapshots = SourcePositionSnapshots::from([(
@@ -4243,8 +4617,10 @@ mod tests {
                     "system_position_close",
                 )]
                 .into_iter()
+                .map(Arc::<NavEvent>::from)
                 .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
+                ..Default::default()
             },
         )]);
         let strategy_snapshots = SourceStrategyPositionSnapshots::from([(
@@ -4312,8 +4688,10 @@ mod tests {
                     "system_position_close",
                 )]
                 .into_iter()
+                .map(Arc::<NavEvent>::from)
                 .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
+                ..Default::default()
             },
         )]);
         let strategy_snapshots = SourceStrategyPositionSnapshots::from([(
@@ -4376,8 +4754,10 @@ mod tests {
                     "system_position_close",
                 )]
                 .into_iter()
+                .map(Arc::<NavEvent>::from)
                 .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
+                ..Default::default()
             },
         )]);
         let strategy_snapshots = SourceStrategyPositionSnapshots::from([(
@@ -4439,8 +4819,10 @@ mod tests {
                     strategy_event_at(16, 16, "BTCUSDT", 1, 1, 105.0, 5.0, "cta_a"),
                 ]
                 .into_iter()
+                .map(Arc::<NavEvent>::from)
                 .collect(),
                 liquidity_by_order: LiquidityByOrder::new(),
+                ..Default::default()
             },
         )]);
         let strategy_snapshots = SourceStrategyPositionSnapshots::from([(
@@ -4953,12 +5335,14 @@ mod tests {
                         strategy,
                     )
                 })
+                .map(Arc::<NavEvent>::from)
                 .collect::<im::Vector<_>>();
             histories.insert(
                 source.id.clone(),
                 NavSourceHistory {
                     events,
                     liquidity_by_order: LiquidityByOrder::new(),
+                    ..Default::default()
                 },
             );
         }
@@ -5053,8 +5437,9 @@ mod tests {
             Arc::new(BTreeMap::from([(
                 "trade01".into(),
                 NavSourceHistory {
-                    events: events.into_iter().collect(),
+                    events: events.into_iter().map(Arc::<NavEvent>::from).collect(),
                     liquidity_by_order: LiquidityByOrder::new(),
+                    ..Default::default()
                 },
             )]))
         };
@@ -5091,5 +5476,483 @@ mod tests {
         .unwrap();
         assert_eq!(repaired.as_ref(), &expected);
         assert_ne!(old.summary, repaired.summary);
+    }
+
+    #[test]
+    #[ignore = "opt-in memory and refresh benchmark"]
+    fn nav_cache_refresh_benchmark() {
+        let config = app_config(vec![source("trade01", Some(0.0002))]);
+        let events = (0..60_000)
+            .map(|index| {
+                strategy_event_at(
+                    1 + index * 10_000_000,
+                    1 + index * 10_000_000,
+                    ["BTCUSDT", "ETHUSDT", "SOLUSDT"][(index % 3) as usize],
+                    1,
+                    1,
+                    100.0 + (index % 7) as f64,
+                    0.1,
+                    ["alpha", "beta", "gamma", "delta"][(index % 4) as usize],
+                )
+            })
+            .map(Arc::<NavEvent>::from)
+            .collect();
+        let histories = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            NavSourceHistory {
+                events,
+                ..Default::default()
+            },
+        )]));
+        let snapshots = Arc::new(BTreeMap::new());
+        let strategies = Arc::new(BTreeMap::new());
+        let started = Instant::now();
+        let first = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+        )
+        .unwrap();
+        let first_ms = started.elapsed().as_millis();
+        let started = Instant::now();
+        let second =
+            NavTimelineCache::refresh(config, snapshots, strategies, histories, Some(&first))
+                .unwrap();
+        let refresh_ms = started.elapsed().as_millis();
+        assert_eq!(first.dashboard_report(), second.dashboard_report());
+        let memory = std::fs::read_to_string("/proc/self/status").unwrap();
+        println!(
+            "first_build_ms={first_ms} refresh_ms={refresh_ms} {}",
+            memory
+                .lines()
+                .filter(|line| line.starts_with("VmRSS:") || line.starts_with("VmHWM:"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
+    fn assert_refreshed_cache_matches_full(
+        cache: &NavTimelineCache,
+        config: &AppConfig,
+        snapshots: &Arc<SourcePositionSnapshots>,
+        strategies: &Arc<SourceStrategyPositionSnapshots>,
+        histories: &Arc<NavSourceHistories>,
+    ) {
+        let full = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+        )
+        .unwrap();
+        assert_eq!(cache.dashboard_report(), full.dashboard_report());
+        for allocation in [false, true] {
+            for start in [
+                1,
+                CHECKPOINT_US - 1,
+                CHECKPOINT_US,
+                CHECKPOINT_US + 1,
+                7 * CHECKPOINT_US,
+            ] {
+                for symbols in [Vec::new(), vec!["BTCUSDT".into()]] {
+                    let request = timeline_request(
+                        start,
+                        18 * CHECKPOINT_US,
+                        vec!["trade01".into()],
+                        symbols,
+                    );
+                    match (
+                        cache.rebuild(request.clone(), allocation),
+                        full.rebuild(request, allocation),
+                    ) {
+                        (Ok(cached), Ok(rebuilt)) => assert_eq!(cached.as_ref(), rebuilt.as_ref()),
+                        (Err(cached), Err(rebuilt)) => {
+                            assert_eq!(cached.to_string(), rebuilt.to_string())
+                        }
+                        results => panic!("incremental/full result mismatch: {results:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fifo_refresh_shares_fixed_history_and_replays_appends_and_late_fills() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = app_config(vec![source_at("trade01", temp.path(), 0.0002)]);
+        let events = (0..360)
+            .map(|index| {
+                strategy_event_at(
+                    2 + index * 120_000_000,
+                    2 + index * 120_000_000,
+                    ["BTCUSDT", "ETHUSDT"][(index % 2) as usize],
+                    1,
+                    if index % 5 == 0 { 2 } else { 1 },
+                    100.0 + (index % 13) as f64,
+                    0.3,
+                    ["alpha", "beta", "system_position_close"][(index % 3) as usize],
+                )
+            })
+            .collect::<Vec<_>>();
+        write_events(temp.path(), &events);
+        let snapshots = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            position_snapshot("trade01", 1, 2.0, Some(99.0)),
+        )]));
+        let strategies = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            strategy_position_snapshot("trade01", 1, vec![("alpha", "BTCUSDT", 2.0, 99.0)]),
+        )]));
+        let mut store = NavHistoryStore::default();
+        let histories = Arc::new(store.refresh(&config).unwrap());
+        let original = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories,
+        )
+        .unwrap();
+        let original_report = original.dashboard_report();
+        let histories = Arc::new(store.refresh(&config).unwrap());
+        let unchanged = NavTimelineCache::refresh(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories,
+            Some(&original),
+        )
+        .unwrap();
+        for allocation in [false, true] {
+            assert!(Arc::ptr_eq(
+                &original.sources[&("trade01".into(), allocation)],
+                &unchanged.sources[&("trade01".into(), allocation)]
+            ));
+        }
+        assert!(Arc::ptr_eq(&original.results, &unchanged.results));
+
+        write_events(
+            temp.path(),
+            &[strategy_event_at(
+                16 * CHECKPOINT_US,
+                16 * CHECKPOINT_US,
+                "BTCUSDT",
+                1,
+                2,
+                120.0,
+                0.7,
+                "alpha",
+            )],
+        );
+        let histories = Arc::new(store.refresh(&config).unwrap());
+        let appended = NavTimelineCache::refresh(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+            Some(&unchanged),
+        )
+        .unwrap();
+        assert_refreshed_cache_matches_full(
+            &appended,
+            &config,
+            &snapshots,
+            &strategies,
+            &histories,
+        );
+        for allocation in [false, true] {
+            let key = ("trade01".into(), allocation);
+            assert_eq!(appended.sources[&key].replayed_fills, 1);
+            assert!(Arc::ptr_eq(
+                &original.sources[&key].checkpoints[0],
+                &appended.sources[&key].checkpoints[0]
+            ));
+        }
+
+        write_events(
+            temp.path(),
+            &[strategy_event_at(
+                17 * CHECKPOINT_US,
+                7 * CHECKPOINT_US,
+                "BTCUSDT",
+                1,
+                2,
+                108.0,
+                0.25,
+                "beta",
+            )],
+        );
+        let histories = Arc::new(store.refresh(&config).unwrap());
+        let repaired = NavTimelineCache::refresh(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+            Some(&appended),
+        )
+        .unwrap();
+        assert_refreshed_cache_matches_full(
+            &repaired,
+            &config,
+            &snapshots,
+            &strategies,
+            &histories,
+        );
+        for allocation in [false, true] {
+            let key = ("trade01".into(), allocation);
+            assert!(
+                repaired.sources[&key].replayed_fills
+                    < repaired.sources[&key].prepared.fill_events.len()
+            );
+            for (old, new) in appended.sources[&key]
+                .checkpoints
+                .iter()
+                .zip(&repaired.sources[&key].checkpoints)
+            {
+                if old.ts_us <= 7 * CHECKPOINT_US {
+                    assert!(Arc::ptr_eq(old, new));
+                }
+            }
+        }
+        assert_eq!(original.dashboard_report(), original_report);
+        let mut fees = config.clone();
+        fees.sources[0].maker_fee_rate = Some(-0.0001);
+        let revalued = NavTimelineCache::refresh(
+            fees.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+            Some(&repaired),
+        )
+        .unwrap();
+        assert_refreshed_cache_matches_full(&revalued, &fees, &snapshots, &strategies, &histories);
+        assert!(!Arc::ptr_eq(
+            &repaired.sources[&("trade01".into(), false)].checkpoints[0],
+            &revalued.sources[&("trade01".into(), false)].checkpoints[0]
+        ));
+    }
+
+    #[test]
+    fn fifo_refresh_rebuilds_implicit_snapshot_reference_for_an_earlier_fill() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = app_config(vec![source_at("trade01", temp.path(), 0.0002)]);
+        write_events(
+            temp.path(),
+            &[event_at(
+                4 * CHECKPOINT_US,
+                4 * CHECKPOINT_US,
+                "BTCUSDT",
+                1,
+                1,
+                100.0,
+                1.0,
+            )],
+        );
+        let snapshots = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            position_snapshot("trade01", 1, 2.0, None),
+        )]));
+        let strategies = Arc::new(BTreeMap::new());
+        let mut store = NavHistoryStore::default();
+        let original = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            Arc::new(store.refresh(&config).unwrap()),
+        )
+        .unwrap();
+        write_events(
+            temp.path(),
+            &[event_at(
+                5 * CHECKPOINT_US,
+                CHECKPOINT_US,
+                "BTCUSDT",
+                1,
+                1,
+                90.0,
+                1.0,
+            )],
+        );
+        let histories = Arc::new(store.refresh(&config).unwrap());
+        let updated = NavTimelineCache::refresh(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+            Some(&original),
+        )
+        .unwrap();
+        assert_refreshed_cache_matches_full(&updated, &config, &snapshots, &strategies, &histories);
+        assert_eq!(
+            updated.dashboard_report().sources[0].symbols[0].venues[0].initial_reference_price,
+            Some(90.0)
+        );
+    }
+    #[test]
+    fn fifo_refresh_handles_role_corrections_skipped_generations_and_database_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = app_config(vec![source_at("trade01", temp.path(), 0.0005)]);
+        config.sources[0].maker_fee_rate = Some(-0.0001);
+        let snapshots = Arc::new(BTreeMap::new());
+        let strategies = Arc::new(BTreeMap::new());
+        let mut store = NavHistoryStore::default();
+        let mut previous = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            Arc::new(store.refresh(&config).unwrap()),
+        )
+        .unwrap();
+        // An initially absent database becomes populated. Receive keys increase
+        // while fill timestamps may be late or exactly on a checkpoint.
+        for (index, fill_hour) in [1, 3, 5, 7, 9, 11, 7, 13].into_iter().enumerate() {
+            let mut event = strategy_event_at(
+                (index as i64 + 1) * CHECKPOINT_US,
+                fill_hour * CHECKPOINT_US,
+                "BTCUSDT",
+                1,
+                if index % 3 == 0 { 2 } else { 1 },
+                100.0 + index as f64,
+                0.3,
+                "alpha",
+            );
+            if index == 4 {
+                event.fill_liquidity = Some(crate::model::FillLiquidity::Maker);
+            }
+            write_events(temp.path(), &[event]);
+            let histories = Arc::new(store.refresh(&config).unwrap());
+            // Skip publishing a generation, as when a subsequent dashboard
+            // preparation step fails after the history scan has succeeded.
+            if index == 2 {
+                continue;
+            }
+            let next = NavTimelineCache::refresh(
+                config.clone(),
+                snapshots.clone(),
+                strategies.clone(),
+                histories.clone(),
+                Some(&previous),
+            )
+            .unwrap();
+            assert_refreshed_cache_matches_full(
+                &next,
+                &config,
+                &snapshots,
+                &strategies,
+                &histories,
+            );
+            previous = next;
+        }
+        // Late raw exchange reports override legacy LIMIT fallback, but never
+        // override an explicit uniform fill role. Conflicting reports become
+        // Unknown, preserving the existing classification rule.
+        for (index, client_hour, maker) in [(0, 4, false), (1, 4, true), (2, 5, false)] {
+            {
+                let mut options = Options::default();
+                options.create_missing_column_families(true);
+                let db = DB::open_cf(
+                    &options,
+                    temp.path(),
+                    ["default", UNIFORM_ORDERS_CF, TRADE_UPDATES_CF],
+                )
+                .unwrap();
+                let ts = (20 + index) * CHECKPOINT_US;
+                let mut payload = Vec::new();
+                for value in [ts, ts, ts] {
+                    payload.extend_from_slice(&value.to_le_bytes());
+                }
+                payload.extend_from_slice(&7_u32.to_le_bytes());
+                payload.extend_from_slice(b"BTCUSDT");
+                payload.extend_from_slice(&1_i64.to_le_bytes());
+                payload.extend_from_slice(&(client_hour * CHECKPOINT_US).to_le_bytes());
+                payload.push(1);
+                payload.extend_from_slice(&100_f64.to_le_bytes());
+                payload.extend_from_slice(&[u8::from(maker), 1]);
+                payload.extend_from_slice(&0.3_f64.to_le_bytes());
+                payload.push(0);
+                db.put_cf(
+                    db.cf_handle(TRADE_UPDATES_CF).unwrap(),
+                    format!("{ts:020}"),
+                    payload,
+                )
+                .unwrap();
+            }
+            let histories = Arc::new(store.refresh(&config).unwrap());
+            let next = NavTimelineCache::refresh(
+                config.clone(),
+                snapshots.clone(),
+                strategies.clone(),
+                histories.clone(),
+                Some(&previous),
+            )
+            .unwrap();
+            assert_refreshed_cache_matches_full(
+                &next,
+                &config,
+                &snapshots,
+                &strategies,
+                &histories,
+            );
+            assert!(Arc::ptr_eq(
+                &previous.sources[&("trade01".into(), false)].checkpoints[0],
+                &next.sources[&("trade01".into(), false)].checkpoints[0],
+            ));
+            previous = next;
+        }
+        let changed_snapshots = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            position_snapshot("trade01", 4 * CHECKPOINT_US, 2.0, Some(90.0)),
+        )]));
+        let histories = Arc::new(store.refresh(&config).unwrap());
+        let next = NavTimelineCache::refresh(
+            config.clone(),
+            changed_snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+            Some(&previous),
+        )
+        .unwrap();
+        assert_refreshed_cache_matches_full(
+            &next,
+            &config,
+            &changed_snapshots,
+            &strategies,
+            &histories,
+        );
+        // Replacing the source must not reuse a prior nonempty history even
+        // when it happens to contain the same number of refreshes or records.
+        DB::destroy(&Options::default(), temp.path()).unwrap();
+        write_events(
+            temp.path(),
+            &[event_at(
+                CHECKPOINT_US,
+                CHECKPOINT_US,
+                "BTCUSDT",
+                1,
+                1,
+                50.0,
+                2.0,
+            )],
+        );
+        let histories = Arc::new(store.refresh(&config).unwrap());
+        let replacement = NavTimelineCache::refresh(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+            Some(&previous),
+        )
+        .unwrap();
+        assert_refreshed_cache_matches_full(
+            &replacement,
+            &config,
+            &snapshots,
+            &strategies,
+            &histories,
+        );
+        assert_eq!(
+            replacement.dashboard_report().sources[0].order_event_count,
+            1
+        );
     }
 }

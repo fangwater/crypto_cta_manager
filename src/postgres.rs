@@ -5,6 +5,7 @@ use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
 use crate::config::{FeeRates, SourceConfig, validate_fee_rates};
+#[cfg(test)]
 use crate::model::UniformOrderEvent;
 use crate::snapshot::{
     PositionSnapshot, SnapshotPosition, StrategyPositionSnapshot, StrategySnapshotPosition,
@@ -589,7 +590,7 @@ struct SourceSymbolIndex {
 async fn upsert_symbol_index<'a>(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     source_id: &str,
-    events: impl IntoIterator<Item = &'a UniformOrderEvent>,
+    events: impl IntoIterator<Item = &'a crate::nav::NavEvent>,
 ) -> Result<()> {
     for ((symbol, venue_code), index) in symbol_index_deltas(events) {
         sqlx::query(
@@ -637,7 +638,12 @@ pub async fn refresh_source_symbol_index(
         .await
         .context("failed to begin symbol index transaction")?;
     for (source_id, history) in histories {
-        upsert_symbol_index(&mut transaction, source_id, history.events()).await?;
+        upsert_symbol_index(
+            &mut transaction,
+            source_id,
+            history.events().iter().map(AsRef::as_ref),
+        )
+        .await?;
     }
     transaction
         .commit()
@@ -646,7 +652,7 @@ pub async fn refresh_source_symbol_index(
 }
 
 fn symbol_index_deltas<'a>(
-    events: impl IntoIterator<Item = &'a UniformOrderEvent>,
+    events: impl IntoIterator<Item = &'a crate::nav::NavEvent>,
 ) -> std::collections::BTreeMap<(String, i16), SourceSymbolIndex> {
     let mut index = std::collections::BTreeMap::<(String, i16), SourceSymbolIndex>::new();
     for event in events {
@@ -762,10 +768,10 @@ mod tests {
     #[test]
     fn symbol_index_keeps_earliest_event_and_fill_bounds() {
         let index = symbol_index_deltas(&[
-            event("BTCUSDT", 1, 10, 12, 1.0),
-            event("BTCUSDT", 1, 5, 0, 0.0),
-            event("BTCUSDT", 1, 8, 7, 2.0),
-            event("ETHUSDT", 1, 3, 0, 0.0),
+            event("BTCUSDT", 1, 10, 12, 1.0).into(),
+            event("BTCUSDT", 1, 5, 0, 0.0).into(),
+            event("BTCUSDT", 1, 8, 7, 2.0).into(),
+            event("ETHUSDT", 1, 3, 0, 0.0).into(),
         ]);
 
         let btc = &index[&("BTCUSDT".to_string(), 1)];
