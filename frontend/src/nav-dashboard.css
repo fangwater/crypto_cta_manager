@@ -1178,6 +1178,28 @@
   box-shadow: 0 1px 2px rgba(25, 31, 40, 0.1);
 }
 
+.segmented.segmented--accounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  max-width: none;
+  margin-top: 16px;
+  padding: 6px;
+  overflow: visible;
+}
+
+.segmented--accounts button {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  line-height: 1.4;
+}
+
 .summary-strip {
   min-height: 84px;
   margin-top: 22px;
@@ -1772,6 +1794,7 @@ tbody tr.is-selected td {
 }
 
 .source-identity strong {
+  overflow-wrap: anywhere;
   font-size: 12px;
 }
 
@@ -1967,7 +1990,7 @@ tbody tr.is-selected td {
 
   .source-row {
     padding: 14px;
-    grid-template-columns: minmax(170px, 1.4fr) minmax(120px, 1fr);
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
     gap: 12px;
   }
 

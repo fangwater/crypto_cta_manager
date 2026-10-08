@@ -37,10 +37,10 @@ export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: 
   }, [active, mobile])
 
   return (
-    <div className={cn('flex items-center gap-2', mobile ? 'w-full md:hidden' : '')}>
+    <div className={cn('flex items-center gap-2', mobile ? 'w-full lg:hidden' : '')}>
       <nav className={cn(
         'items-center gap-1',
-        mobile ? 'flex w-full overflow-x-auto' : 'hidden rounded-xl border border-border bg-canvas/80 p-1 md:flex',
+        mobile ? 'flex w-full overflow-x-auto' : 'hidden rounded-xl border border-border bg-canvas/80 p-1 lg:flex',
       )} aria-label="主导航" ref={navRef}>
         {links.map((link) => {
         const Icon = link.icon
@@ -68,7 +68,7 @@ export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: 
           <LogOut size={16} />
         </button>}
       </nav>
-      {!mobile && <button type="button" onClick={() => void logout()} className="hidden rounded-lg border border-border bg-surface px-3 py-2 text-xs text-muted hover:text-ink md:inline-flex">退出</button>}
+      {!mobile && <button type="button" onClick={() => void logout()} className="hidden rounded-lg border border-border bg-surface px-3 py-2 text-xs text-muted hover:text-ink lg:inline-flex">退出</button>}
     </div>
   )
 }

@@ -38,7 +38,7 @@ export function AppShell({
             {actions}
           </div>
         </div>
-        <div className="border-t border-border px-4 py-1 sm:px-6 md:hidden">
+        <div className="border-t border-border px-4 py-1 sm:px-6 lg:hidden">
           <AppNav active={active} mobile />
         </div>
       </header>

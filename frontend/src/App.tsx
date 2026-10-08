@@ -639,18 +639,6 @@ function NavPage() {
               </h2>
             </div>
             <div className="control-row">
-              <div className="segmented" aria-label="账户范围">
-                {dashboard?.report.sources.map((source) => (
-                  <button
-                    type="button"
-                    className={scope === source.source_id ? 'is-active' : ''}
-                    key={source.source_id}
-                    onClick={() => selectScope(source.source_id)}
-                  >
-                    {source.account}
-                  </button>
-                ))}
-              </div>
               <div className="segmented segmented--compact" aria-label="费率口径">
                 <button
                   type="button"
@@ -668,6 +656,20 @@ function NavPage() {
                 </button>
               </div>
             </div>
+          </div>
+
+          <div className="segmented segmented--accounts" role="group" aria-label="账户范围">
+            {dashboard?.report.sources.map((source) => (
+              <button
+                type="button"
+                className={scope === source.source_id ? 'is-active' : ''}
+                aria-pressed={scope === source.source_id}
+                key={source.source_id}
+                onClick={() => selectScope(source.source_id)}
+              >
+                {source.account}
+              </button>
+            ))}
           </div>
 
           <div className="summary-strip">
