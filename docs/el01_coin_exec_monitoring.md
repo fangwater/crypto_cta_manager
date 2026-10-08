@@ -138,3 +138,27 @@ A future account NAV curve needs a separate native-coin balance history,
 valuation marks and external-flow adjustment. These were not silently added to
 the existing trade-PnL curve. mkt_signal's living `docs/coin_exec_monitoring.md`
 records the read-only transport and unit contract.
+
+## Zero-balance visibility correction
+
+The operator reported no visible data. At 08:28 UTC both live account snapshots
+still advanced normally. Browser inspection reproduced zero visible asset rows
+because every balance was zero and the default filter hid zero balances.
+Checking the existing checkbox revealed all 51 rows. Independent signed read-only
+`GET /dapi/v1/positionRisk` requests for each existing API account returned HTTP
+200, 30 contract records and no nonzero positions, agreeing with account snapshots.
+
+Deployed Viz `dbe66bf2` at 08:31 UTC. Zero balances now display by default, BTC/ETH
+appear ahead of other zero assets, the asset table scrolls without pushing the
+position section far down, and a summary shows received and visible asset counts.
+The hide/show control remains available. Valid empty asset snapshots are explicitly
+distinguished from hidden rows and missing account data.
+
+All six Viz tests and the release build passed. Authenticated desktop/mobile
+Chromium checks on both gateways verified 51 visible rows, BTC first, working
+zero filtering, advancing account data and no horizontal overflow or JS errors.
+Only the two Viz processes restarted; account-monitor and Config PIDs, 57 other
+protected process identities, and 49 configuration hashes remained unchanged.
+No trading process started. Recovery binaries are in each environment's
+`backups/zero_display_20261008T083101Z`; `VIZ-RELEASE.json` records source and hash.
+Viz SHA-256: `604fe9626071a6723a39c92158c6c5b3e2e6f340159b23d9807ab87a231537de`.
