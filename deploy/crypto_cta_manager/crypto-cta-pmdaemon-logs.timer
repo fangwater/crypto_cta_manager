@@ -1,0 +1,11 @@
+[Unit]
+Description=Check selected Exec pmdaemon log limits every minute
+
+[Timer]
+OnStartupSec=1min
+OnUnitActiveSec=1min
+AccuracySec=1s
+Unit=crypto-cta-pmdaemon-logs.service
+
+[Install]
+WantedBy=timers.target
