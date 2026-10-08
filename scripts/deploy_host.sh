@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Build Manager locally, then deploy one independent host stack.
-# Usage: scripts/deploy_host.sh --target el01|jp-meta [--skip-build]
+# Usage: scripts/deploy_host.sh --target el01|jp-meta [--skip-build] [--manager-only]
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET=""
 SKIP_BUILD=0
+MANAGER_ONLY=0
 NODE_BIN="${CTA_NODE_BIN:-}"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/deploy_host.sh --target el01|jp-meta [--skip-build]
+Usage: scripts/deploy_host.sh --target el01|jp-meta [--skip-build] [--manager-only]
 
 Compile cta_web and the frontend on this machine, then upload to one
 independent host. el01 and jp-meta do not share binaries, config,
@@ -19,6 +20,8 @@ PostgreSQL, Redis, Nginx, or Exec accounts.
   --target el01      SSH cta_exec, /home/el01/crypto_cta_manager
   --target jp-meta   SSH jp-meta-elvpn, /home/ubuntu/crypto_cta_manager
   --skip-build       Reuse the already-built local artifacts
+  --manager-only     Update Manager API, frontend and analysis tools;
+                     leave Nginx and the monitor unchanged
 EOF
 }
 
@@ -30,6 +33,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-build)
             SKIP_BUILD=1
+            shift
+            ;;
+        --manager-only)
+            MANAGER_ONLY=1
             shift
             ;;
         -h|--help)
@@ -115,15 +122,17 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
 fi
 
 require_local_file "$LOCAL_RELEASE_DIR/cta_web"
-require_local_file "$LOCAL_RELEASE_DIR/cta_monitor"
 require_local_file "$LOCAL_RELEASE_DIR/nav_rebuild"
 require_local_file "$LOCAL_RELEASE_DIR/nav_snapshot"
 require_local_file "$LOCAL_RELEASE_DIR/nav_strategy_snapshot"
 require_local_file "$ROOT/frontend/dist/index.html"
 require_local_file "$DEPLOY_DIR/cta-manager.toml"
 require_local_file "$DEPLOY_DIR/crypto-cta-manager-web.service"
-require_local_file "$ROOT/scripts/start_monitor.sh"
-require_local_file "$ROOT/scripts/stop_monitor.sh"
+if [[ $MANAGER_ONLY -eq 0 ]]; then
+    require_local_file "$LOCAL_RELEASE_DIR/cta_monitor"
+    require_local_file "$ROOT/scripts/start_monitor.sh"
+    require_local_file "$ROOT/scripts/stop_monitor.sh"
+fi
 require_local_file "$ROOT/scripts/manager_publish_client.py"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -137,7 +146,10 @@ cleanup_local() {
 }
 trap cleanup_local EXIT
 
-BINARIES=(cta_web cta_monitor nav_rebuild nav_snapshot nav_strategy_snapshot)
+BINARIES=(cta_web nav_rebuild nav_snapshot nav_strategy_snapshot)
+if [[ $MANAGER_ONLY -eq 0 ]]; then
+    BINARIES+=(cta_monitor)
+fi
 for name in "${BINARIES[@]}"; do
     read -r artifact_hash _ < <(sha256sum "$LOCAL_RELEASE_DIR/$name")
     printf '%s  bin/%s.next.%s\n' "$artifact_hash" "$name" "$STAMP" >>"$STAGE_CHECKSUMS"
@@ -184,32 +196,25 @@ remote "install -d -m 0755 '${REMOTE_ROOT}/bin' '${REMOTE_ROOT}/config' '${REMOT
 
 echo "uploading binaries and frontend to ${TARGET}"
 # Upload beside the live binaries. Overwriting a running cta_web fails.
-scp -q \
-    "$LOCAL_RELEASE_DIR/cta_web" \
+scp -q "$LOCAL_RELEASE_DIR/cta_web" \
     "${SSH_HOST}:${REMOTE_ROOT}/bin/cta_web.next.${STAMP}"
-scp -q \
-    "$LOCAL_RELEASE_DIR/cta_monitor" \
-    "${SSH_HOST}:${REMOTE_ROOT}/bin/cta_monitor.next.${STAMP}"
-scp -q \
-    "$LOCAL_RELEASE_DIR/nav_rebuild" \
-    "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_rebuild.next.${STAMP}"
-scp -q \
-    "$LOCAL_RELEASE_DIR/nav_snapshot" \
-    "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_snapshot.next.${STAMP}"
-scp -q \
-    "$LOCAL_RELEASE_DIR/nav_strategy_snapshot" \
-    "${SSH_HOST}:${REMOTE_ROOT}/bin/nav_strategy_snapshot.next.${STAMP}"
+for name in "${BINARIES[@]:1}"; do
+    scp -q "$LOCAL_RELEASE_DIR/$name" \
+        "${SSH_HOST}:${REMOTE_ROOT}/bin/$name.next.${STAMP}"
+done
 scp -q \
     "$DEPLOY_DIR/crypto-cta-manager-web.service" \
     "${SSH_HOST}:${REMOTE_ROOT}/"
-scp -q \
-    "$ROOT/scripts/start_monitor.sh" \
-    "$ROOT/scripts/stop_monitor.sh" \
-    "${SSH_HOST}:${REMOTE_ROOT}/"
-if [[ $TARGET == el01 ]]; then
+if [[ $MANAGER_ONLY -eq 0 ]]; then
+    scp -q \
+        "$ROOT/scripts/start_monitor.sh" \
+        "$ROOT/scripts/stop_monitor.sh" \
+        "${SSH_HOST}:${REMOTE_ROOT}/"
+fi
+if [[ $MANAGER_ONLY -eq 0 && $TARGET == el01 ]]; then
     scp -q "$DEPLOY_DIR/nginx.conf" "${SSH_HOST}:${REMOTE_ROOT}/nginx/nginx.conf.next"
     scp -q "$DEPLOY_DIR/crypto-cta-nginx.service" "${SSH_HOST}:${REMOTE_ROOT}/"
-else
+elif [[ $MANAGER_ONLY -eq 0 ]]; then
     scp -q "$DEPLOY_DIR/crypto-cta-nginx-snippet.conf" "${SSH_HOST}:${REMOTE_ROOT}/"
 fi
 # Do not overwrite the live host toml. New keys stay in the template.
@@ -229,12 +234,10 @@ remote "bash -s" <<EOF
 set -Eeuo pipefail
 umask 0022
 cd '${REMOTE_ROOT}'
-chmod 0755 bin/cta_web.next.${STAMP} bin/cta_monitor.next.${STAMP} bin/nav_rebuild.next.${STAMP} bin/nav_snapshot.next.${STAMP} bin/nav_strategy_snapshot.next.${STAMP}
-mv -f bin/cta_web.next.${STAMP} bin/cta_web
-mv -f bin/cta_monitor.next.${STAMP} bin/cta_monitor
-mv -f bin/nav_rebuild.next.${STAMP} bin/nav_rebuild
-mv -f bin/nav_snapshot.next.${STAMP} bin/nav_snapshot
-mv -f bin/nav_strategy_snapshot.next.${STAMP} bin/nav_strategy_snapshot
+for name in ${BINARIES[*]}; do
+    chmod 0755 "bin/\$name.next.${STAMP}"
+    mv -f "bin/\$name.next.${STAMP}" "bin/\$name"
+done
 ln -sfn '${RELEASE}' webroot.next
 mv -Tf webroot.next webroot
 test -f webroot/manager/index.html
@@ -247,6 +250,7 @@ systemctl --user restart '${UNIT_NAME}'
 systemctl --user --quiet is-active '${UNIT_NAME}'
 # The monitor runs under pmdaemon, not systemd. Retire a stale systemd unit
 # and remember whether monitoring was live so it can be restarted below.
+if [[ $MANAGER_ONLY -eq 0 ]]; then
 chmod 0755 start_monitor.sh stop_monitor.sh
 MONITOR_WAS_RUNNING=0
 if systemctl --user --quiet is-active crypto-cta-manager-monitor.service 2>/dev/null; then
@@ -264,9 +268,10 @@ fi
 if [[ \$MONITOR_WAS_RUNNING -eq 1 ]] || { [[ -n "\$PMDAEMON" ]] && "\$PMDAEMON" info cta_monitor >/dev/null 2>&1; }; then
     ./start_monitor.sh
 fi
+fi
 EOF
 
-if [[ $RESTART_NGINX -eq 1 ]]; then
+if [[ $MANAGER_ONLY -eq 0 && $RESTART_NGINX -eq 1 ]]; then
     remote "bash -s" <<'EOF'
 set -Eeuo pipefail
 cd /home/el01/crypto_cta_manager
@@ -283,7 +288,7 @@ fi
 EOF
 fi
 
-if [[ $TARGET == jp-meta ]]; then
+if [[ $MANAGER_ONLY -eq 0 && $TARGET == jp-meta ]]; then
     echo "refreshing jp-meta 4191 nginx snippet + mapping"
     "$ROOT/scripts/install_jp_meta_nginx.sh" --ssh "$SSH_HOST"
 fi

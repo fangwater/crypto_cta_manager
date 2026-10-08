@@ -600,6 +600,10 @@ cd frontend && npm install && npm run lint && npm run build
 ../scripts/deploy_host.sh --target el01 --skip-build
 ```
 
+Use `--manager-only` to update the Manager API, frontend and analysis tools
+without publishing or restarting the monitor or changing Nginx. Only the
+Manager web service restarts; Exec processes and configuration are untouched.
+
 `el01` and `jp-meta` are two physical machines with two independent
 stacks. The same local artifacts can be copied to either host. They do
 not share PostgreSQL, Redis, Nginx, Manager RocksDB, or Exec accounts.
