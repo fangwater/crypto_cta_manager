@@ -2,6 +2,11 @@
 
 Last updated: 2026-10-08 UTC.
 
+Current state after the operator clarified that the constraint is **no orders**:
+both account monitors are running independently alongside Viz and Config.
+Execution processes remain stopped. The initial empty-page deployment below is
+historical; the account observation upgrade is documented at the end.
+
 The operator identified two empty accounts as Binance COIN-M and authorized
 republishing their programs and pages, explicitly requiring trading to remain
 stopped while inspecting monitoring.
@@ -67,3 +72,69 @@ and `/home/el01/crypto_cta_manager` contains
 binaries, scripts, config, and private env file (mode 0600 inside a mode 0700
 backup directory). Manager backup contains its prior binary, TOML, and webroot
 pointer. Recovery must retain the operator's stopped-trading requirement.
+
+## Independent account observation upgrade
+
+At 08:14 UTC, deployed account-monitor/Viz changes from mkt_signal `6460e8fc`
+(on `arbmm`, pushed to origin). The monitor now publishes complete sanitized
+STANDARD COIN-M account snapshots; Viz subscribes directly without pre-trade.
+The existing CM wallet poll cycle fetches the account endpoint every 5 seconds.
+The page separates native-coin assets from factual contract positions and
+strategy execution rows. It never sums BTC and ETH quantities or fabricates a
+USD account valuation. Failed observations keep their original timestamp;
+after 30 seconds the browser indicates delayed account data.
+
+Each target received only the account-monitor and Viz binaries. Config, Manager,
+Nginx, other account processes and all 49 audited configuration hashes stayed
+unchanged. Existing binaries are backed up in each target's
+`backups/account_observation_20261008T081254Z`. Account-monitor PIDs are 419197
+and 419432; Viz PIDs are 419071 and 419306. Config retained PIDs 211356/211522.
+No pre-trade, trade engine, signal or persistence process was started.
+No targets, orders, cancellations, transfers or leverage changes were submitted.
+
+Verification observed advancing snapshots for both namespaces, with 51 asset
+rows, zero nonzero assets and zero actual positions, STANDARD account mode.
+The authenticated gateways returned coin pages, Config and WebSocket 101.
+Chromium at 1440/390 pixels reported `账户监控正常`, zero assets/positions,
+no JavaScript errors or horizontal overflow. Temporary sessions were removed.
+Unit tests: all 11 account-monitor and 6 Viz tests passed; checks, formatting
+and release builds passed. Browser fixtures additionally checked BTC/ETH native
+units, signed contract counts, full-snapshot clearing, venue isolation and
+staleness. This verifies empty-account monitoring, not live execution.
+
+Artifact checksums:
+
+- account_monitor: `0ce787b6759a269376f6f3ac6dd4bd05110f09664861de1ab1df944b1e07b563`
+- viz_server: `10beafe6caa73df285bf2e38a6027bd1a51922d2b4ea56d72076a9059eace7af`
+
+The Viz build also contained a concurrent working-tree log-verbosity change in
+its subscriber loop (normal periodic statistics DEBUG, drops WARN). That change
+was preserved and excluded from this task's commit. Its isolated build delta is
+recorded locally at `.cache/cta-manager-ops/coin_account_viz_build_delta.patch`,
+SHA-256 `2fb8414905f17267bce4b059435ec5e9e8c98fa845ca0b4e5d400970ab0c1d52`.
+Each target's `ACCOUNT-MONITOR-RELEASE.json` records this provenance.
+
+## NAV and position interpretation
+
+Exec's inverse position ledger conserves contract USD face, converting it to
+base-coin quantity at a common reference price. A target is still expressed in
+coins, so a fixed coin target differs from a fixed number of contracts.
+Manager's rule cache supplies contract size, quantity steps and other limits.
+Strategy/source/venue positions remain isolated.
+
+For signed USD face F, inverse coin PnL is `F * (1/entry - 1/exit)`.
+Ten 100-USD BTC contracts bought at 50,000 and sold at 60,000 earn
+0.0033333333 BTC before fees, or 200 USD at exit. Manager's existing inverse
+FIFO matches USD face and reports execution PnL in USD; realized coin proceeds
+are translated at each close and are not subsequently marked as wallet coins.
+Estimated fees remain face times Maker/Taker rate. Remaining open positions use
+the latest fill mark. The factual NAV does not include collateral FX, funding,
+deposits/withdrawals or full account-ledger movements. The theoretical Kline
+model still supports only USD-M. Neither is a complete COIN-M account NAV.
+
+The new page displays exchange-reported native `walletBalance`,
+`unrealizedProfit`, `marginBalance`, available balance and margin requirements.
+A future account NAV curve needs a separate native-coin balance history,
+valuation marks and external-flow adjustment. These were not silently added to
+the existing trade-PnL curve. mkt_signal's living `docs/coin_exec_monitoring.md`
+records the read-only transport and unit contract.
