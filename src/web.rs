@@ -388,7 +388,11 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let exec_config = ExecConfigClient::new(config.order_config.request_timeout_secs)?;
     let redis_runtime = RedisRuntime::connect(config.redis.clone())?;
     redis_runtime.spawn_keepalive();
-    crate::market_rules::spawn(config.sources.clone(), redis_runtime.clone());
+    crate::market_rules::spawn(
+        config.sources.clone(),
+        redis_runtime.clone(),
+        config.kline.local_ip,
+    );
     let reload_notify = ReloadNotifyHub::spawn();
     anyhow::ensure!(
         (1..=256).contains(&config.dashboard.compute_threads),

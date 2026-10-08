@@ -93,9 +93,14 @@ fn validate_positive_decimal(symbol: &str, field: &str, value: &str) -> Result<(
     Ok(())
 }
 
-pub fn spawn(sources: Vec<SourceConfig>, redis: RedisRuntime) {
+pub fn spawn(sources: Vec<SourceConfig>, redis: RedisRuntime, local_ip: Option<std::net::IpAddr>) {
     tokio::spawn(async move {
-        let client = match Client::builder().timeout(REQUEST_TIMEOUT).build() {
+        let client = match Client::builder()
+            .no_proxy()
+            .local_address(local_ip)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+        {
             Ok(client) => client,
             Err(error) => {
                 warn!(error = %error, "failed to build market-rules HTTP client");
