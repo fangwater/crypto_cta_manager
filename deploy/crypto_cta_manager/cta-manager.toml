@@ -15,9 +15,10 @@ request_timeout_secs = 2
 reconnect_interval_ms = 500
 
 [treasury]
-# Required for BFUSD and BNB management; never use a trading source address.
+# Operator choice: reuse each account's existing source addresses.
+# Default-route bindings are resolved without packets and then bound explicitly.
 # BNB remains disabled / dry-run until enabled per account through Manager.
-local_ip = "154.197.32.9"
+use_account_ip_rotation = true
 
 [kline]
 # Enable only after assigning a dedicated non-trading market-data egress.
@@ -212,20 +213,32 @@ taker_fee_rate = 0.0003
 ipc_namespace = "binance_exec_trade04"
 account_ipc_service = "account_pubs/binance_pm"
 
-# Provisioned but intentionally disabled until the operator starts trade05.
+# Retired prc source: preserve its historical identity and archived order store.
 [[sources]]
 id = "binance_exec_trade05"
 account = "trade05"
 alias = "prc"
 venue = "binance-futures"
-rocksdb_path = "/home/el01/binance_exec_trade05/data/persist_manager"
+rocksdb_path = "/home/el01/binance_exec_trade05/archive/prc/persist_manager"
 enabled = false
+monitor_enabled = false
+
+# xy_lxy21 replaces the trade05 slot with a fresh source and namespace.
+[[sources]]
+id = "binance_exec_xy_lxy21_05"
+account = "trade05"
+alias = "xy_lxy21"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_xy_lxy21_05/data/persist_manager"
+env_path = "/home/el01/binance_exec_xy_lxy21_05/env.sh"
+enabled = true
+monitor_enabled = false
 gateway_prefix = "/exec_trade05"
 exec_config_url = "http://127.0.0.1:18165/"
 exec_viz_url = "http://127.0.0.1:10045/"
 maker_fee_rate = 0.00018
 taker_fee_rate = 0.0005
-ipc_namespace = "binance_exec_trade05"
+ipc_namespace = "binance_exec_xy_lxy21_05"
 account_ipc_service = "account_pubs/binance_pm"
 
 [[sources]]

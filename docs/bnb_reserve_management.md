@@ -183,7 +183,7 @@ address remains available, for example on el01:
 local_ip = "154.197.32.9"
 ```
 
-By operator choice, jp-meta instead reuses each account's existing addresses:
+By operator choice, jp-meta and el01 instead reuse each account's existing addresses:
 
 ```toml
 [treasury]
@@ -194,12 +194,17 @@ The two settings are mutually exclusive. Rotation reads only the source's
 `trade_engine.toml local_ips`; it does not modify that file or add any address.
 BNB and BFUSD share a per-source round cursor. Each complete round uses one
 explicit bound address, then the next round advances to the other address.
-No ambiguous financial submission is retried on a different IP. Unspecified,
-loopback and empty address lists are rejected. There is no default-route fallback,
-and clients disable HTTP environment proxies. With fixed dedicated egress, the
+No ambiguous financial submission is retried on a different IP. An existing
+`0.0.0.0` / `::` trading binding is resolved through the kernel route without
+sending a packet, then the client explicitly binds the resulting local address.
+Failure to resolve, unspecified results, loopback and empty lists are rejected;
+there is no unbound HTTP fallback. Clients disable HTTP environment proxies.
+With fixed dedicated egress, the
 existing trading-IP collision checks and el01 reserved-address checks still apply.
 On jp-meta the selected rotation is `.228` / `.234`, while the separate Kline
 client retains `.93` and its own public-egress exclusions and 600/min budget.
+On el01, bahll202210 resolves to `154.197.32.6`, explicitly selected by the
+operator on October 9. Kline retains its separate `154.197.32.10` binding.
 
 All BFUSD and BNB HTTP clients share process-wide rate-limit state by bound
 local IP and API origin, across accounts and repeated client creation. Rolling

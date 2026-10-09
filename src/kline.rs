@@ -857,7 +857,7 @@ fn check_trading_ips(config: &KlineConfig) -> Result<()> {
     check_trading_ips_with_route(config, default_route_local_ip)
 }
 
-fn default_route_local_ip(unspecified: IpAddr) -> Result<IpAddr> {
+pub(crate) fn default_route_local_ip(unspecified: IpAddr) -> Result<IpAddr> {
     // UDP connect selects a route without sending a packet or using a trading API.
     let destination: IpAddr = if unspecified.is_ipv4() {
         "192.0.2.1".parse().unwrap()

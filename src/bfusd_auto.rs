@@ -519,6 +519,14 @@ fn round_amount_cents(
 }
 
 fn load_rotation_ips(source: &SourceConfig) -> Result<Vec<IpAddr>> {
+    load_source_ips(source, false, crate::kline::default_route_local_ip)
+}
+
+fn load_source_ips(
+    source: &SourceConfig,
+    include_fallbacks: bool,
+    resolve_default: impl Fn(IpAddr) -> Result<IpAddr>,
+) -> Result<Vec<IpAddr>> {
     let path = source
         .env_path()
         .parent()
@@ -532,24 +540,44 @@ fn load_rotation_ips(source: &SourceConfig) -> Result<Vec<IpAddr>> {
         .get("local_ips")
         .and_then(toml::Value::as_array)
         .context("trade_engine.toml local_ips is missing")?;
-    let ips = ips
-        .iter()
-        .map(|v| -> Result<IpAddr> {
-            let ip: IpAddr = v
-                .as_str()
-                .context("local_ips entry is not a string")?
-                .parse()
-                .context("invalid local_ips entry")?;
-            if ip.is_unspecified() || ip.is_loopback() {
-                bail!("rotation requires explicit non-loopback local_ips");
-            }
-            Ok(ip)
-        })
-        .collect::<Result<Vec<_>>>()?;
     if ips.is_empty() {
         bail!("trade_engine.toml local_ips is empty");
     }
-    Ok(ips)
+    let mut addresses = ips
+        .iter()
+        .map(|value| value.as_str().context("local_ips entry is not a string"))
+        .collect::<Result<Vec<_>>>()?;
+    if include_fallbacks {
+        for field in [
+            "primary_local_ip",
+            "secondary_local_ip",
+            "binance_um_whitelist_ip",
+            "binance_um_ip_whitelist_ip",
+        ] {
+            if let Some(address) = value
+                .get(field)
+                .and_then(toml::Value::as_str)
+                .filter(|v| !v.trim().is_empty())
+            {
+                addresses.push(address);
+            }
+        }
+    }
+    addresses
+        .into_iter()
+        .map(|address| {
+            let mut ip: IpAddr = address.trim().parse().context("invalid trading IP field")?;
+            if ip.is_unspecified() {
+                // Match the account's existing route, then bind it explicitly.
+                // Resolution sends no packet and never changes the trading TOML.
+                ip = resolve_default(ip).context("resolve account default-route egress")?;
+            }
+            if ip.is_unspecified() || ip.is_loopback() {
+                bail!("account egress must resolve to a non-loopback source address");
+            }
+            Ok(ip)
+        })
+        .collect()
 }
 
 pub(crate) fn validate_treasury_ip(source: &SourceConfig, ip: IpAddr) -> Result<()> {
@@ -568,54 +596,7 @@ pub(crate) fn validate_treasury_ip(source: &SourceConfig, ip: IpAddr) -> Result<
 }
 
 fn load_account_ips(source: &SourceConfig) -> Result<Vec<IpAddr>> {
-    let path = source
-        .env_path()
-        .parent()
-        .context("source env file has no parent")?
-        .join("trade_engine.toml");
-    let value: toml::Value = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {} trade_engine.toml", source.id))?
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid trade_engine.toml"))?;
-    let ips = value
-        .get("local_ips")
-        .and_then(toml::Value::as_array)
-        .context("trade_engine.toml local_ips is missing")?;
-    let mut parsed: Vec<IpAddr> = ips
-        .iter()
-        .map(|ip| {
-            let text = ip.as_str().context("local_ips entry is not a string")?;
-            let parsed: IpAddr = text.parse().context("invalid local_ips entry")?;
-            if parsed.is_unspecified() {
-                bail!("local_ips must contain explicit source addresses");
-            }
-            Ok(parsed)
-        })
-        .collect::<Result<_>>()?;
-    for field in [
-        "primary_local_ip",
-        "secondary_local_ip",
-        "binance_um_whitelist_ip",
-        "binance_um_ip_whitelist_ip",
-    ] {
-        if let Some(address) = value
-            .get(field)
-            .and_then(toml::Value::as_str)
-            .filter(|v| !v.trim().is_empty())
-        {
-            let address: IpAddr = address.trim().parse().context("invalid trading IP field")?;
-            if address.is_unspecified() {
-                bail!("trading IP fields must be explicit before enabling treasury");
-            }
-            if !parsed.contains(&address) {
-                parsed.push(address);
-            }
-        }
-    }
-    if parsed.is_empty() {
-        bail!("trade_engine.toml local_ips is empty");
-    }
-    Ok(parsed)
+    load_source_ips(source, true, crate::kline::default_route_local_ip)
 }
 
 pub(crate) fn number(value: &Value, key: &str) -> Result<f64> {
@@ -1282,9 +1263,37 @@ mod tests {
             "172.31.35.228"
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
-        fs::write(&path, "local_ips = ['0.0.0.0']\n").unwrap();
-        assert!(bnb.select(&source).await.is_err());
         fs::write(&path, "local_ips = []\n").unwrap();
         assert!(bnb.select(&source).await.is_err());
+    }
+
+    #[test]
+    fn account_default_route_is_bound_explicitly_without_rewriting_trading_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trade_engine.toml");
+        let original = "local_ips = ['0.0.0.0', '0.0.0.0']\nsecondary_local_ip = '::'\n";
+        fs::write(&path, original).unwrap();
+        let source: SourceConfig = toml::from_str(&format!(
+            "id='trade01'\naccount='trade01'\nvenue='binance-futures'\nrocksdb_path='/tmp/data/persist_manager'\nenv_path='{}'",
+            dir.path().join("env.sh").display()
+        )).unwrap();
+        let route = |ip: IpAddr| -> Result<IpAddr> {
+            Ok(if ip.is_ipv4() {
+                "154.197.32.6"
+            } else {
+                "2001:db8::6"
+            }
+            .parse()?)
+        };
+        let rotation = load_source_ips(&source, false, route).unwrap();
+        assert_eq!(rotation, vec!["154.197.32.6".parse::<IpAddr>().unwrap(); 2]);
+        let all = load_source_ips(&source, true, route).unwrap();
+        assert!(all.contains(&"2001:db8::6".parse().unwrap()));
+        assert!(all.contains(&"154.197.32.6".parse().unwrap()));
+        assert!(!all.contains(&"154.197.32.9".parse().unwrap()));
+        assert!(load_source_ips(&source, false, |_| bail!("no route")).is_err());
+        assert!(load_source_ips(&source, false, |_| Ok("0.0.0.0".parse().unwrap())).is_err());
+        assert!(load_source_ips(&source, false, |_| Ok("127.0.0.1".parse().unwrap())).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 }
