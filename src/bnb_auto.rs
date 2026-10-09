@@ -1187,6 +1187,11 @@ fn hedge_step_settled(
     row: Option<&crate::viz_snapshot::ExecStateRowSnapshot>,
     tolerance: f64,
 ) -> bool {
+    // Fresh, position-ready Exec snapshots omit fully idle zero positions.
+    // A nonzero target must always have an explicit completed row.
+    if row.is_none() {
+        return target.abs() <= EPS;
+    }
     row.is_some_and(|r| {
         r.execution_complete
             && r.position_allocated == Some(true)
@@ -1446,6 +1451,18 @@ mod tests {
             0.02
         ));
         assert!(!hedge_step_settled(-0.5, None, 0.02));
+        assert!(hedge_step_settled(0., None, 0.02));
+        assert!(!hedge_step_settled(
+            0.,
+            Some(&crate::viz_snapshot::ExecStateRowSnapshot {
+                target_qty: Some(0.),
+                current_qty: Some(0.),
+                pending_qty: Some(0.),
+                execution_complete: false,
+                ..row.clone()
+            }),
+            0.02
+        ));
         for incomplete in [
             crate::viz_snapshot::ExecStateRowSnapshot {
                 current_qty: Some(-0.1),
