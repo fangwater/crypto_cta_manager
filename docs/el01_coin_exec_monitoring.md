@@ -11,6 +11,8 @@ account xy_lxy21 has a new source/namespace (`binance_exec_xy_lxy21_05`) and now
 runs trading on the operator's later instruction, following c40 at multiplier
 116. Matching initial account/strategy PnL anchors are now stored at the successful
 startup time; both ordinary users' desktop/mobile strategy views are verified.
+The live account IPC subscription is enabled and the workspace equity card is
+also verified for both users at desktop/mobile widths.
 Manager includes the USDT reserve, Virtual
 editor and owned/delegated Virtual permissions.
 The latest verification is at the end; the COIN-M sections below are historical.
@@ -442,3 +444,40 @@ ignored in this run. All 67 protected Manager/Exec process identities remained
 unchanged throughout; trading continues. Recovery snapshots, old binary,
 historical candles, dry-run output and API/browser verification are retained in
 `/home/el01/crypto_cta_manager/backups/xy_initial_pnl_20261009T124955Z`.
+
+## xy_lxy21 workspace live equity
+
+The operator reported that the workspace's “实时权益” field remained blank after
+the strategy PnL repair. Its live TOML still had `monitor_enabled = false` from
+the account's prepared, stopped state. This flag skips the Manager live account
+IPC subscriber as well as Exec health checks; enabling the account and starting
+Exec alone had not enabled that subscriber. Exec Viz already had a positive
+equity, while the Manager dashboard returned null live equity/status. The prior
+browser checks covered NAV, bindings and Viz, but not this workspace card.
+
+After backing up the exact live TOML and process identities, changed only this
+source's `monitor_enabled` to true and restarted
+`crypto-cta-manager-web.service`. All other parsed configuration fields were
+checked for equality before the atomic replacement. No binary, frontend,
+database, Exec configuration or trading process changed. The Manager now
+subscribes to
+`binance_exec_xy_lxy21_05/account_pubs/binance_pm`, and live dashboard/exchange
+NAV responses report positive equity with status `ok`. The existing initial
+account/strategy anchors still report `1791542845000000` us. Manager health is
+`ok` with no refresh error.
+
+Chromium verified the actual workspace card as shaokai and dzy at 1440×1000
+and 390×1100. Displayed equity matched the corresponding dashboard response
+to the displayed cent; observations included 450,935.72 and 450,970.11 USDT as
+the live feed updated. Refresh succeeded in all four cases, with no JavaScript
+errors, failed HTTP responses or horizontal overflow. The values are measured
+observations, not fixed balances. Screenshots were visually inspected and then
+removed, along with temporary sessions and browser staging.
+
+Only Manager's PID changed (1982449 to 3788666).
+All 70 other protected Exec/Config/monitor/Nginx process identities and start
+times were unchanged. No build or new tests were needed for this configuration
+repair; parsed-config equality, live API status and browser rendering provide
+the verification. The recoverable TOML, before/after API records and browser
+verification are retained at
+`/home/el01/crypto_cta_manager/backups/xy_live_equity_20261009T130714Z`.
