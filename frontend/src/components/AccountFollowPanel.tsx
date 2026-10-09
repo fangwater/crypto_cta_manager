@@ -57,7 +57,7 @@ export function AccountFollowPanel({ sourceId, studio, onChange }: {
     <CardContent className="space-y-4">
       {(error || readError) && <Alert tone="error">{error || readError}</Alert>}
       {notice && <Alert tone="success">{notice}</Alert>}
-      <form className="grid items-end gap-3 md:grid-cols-4" onSubmit={(event) => {
+      <form onSubmit={(event) => {
         event.preventDefault()
         if (!valid) return
         void withWrite(async () => {
@@ -68,20 +68,26 @@ export function AccountFollowPanel({ sourceId, studio, onChange }: {
           return next.pending_publishes.length ? '配置已保存，正在同步到 Exec。' : '配置模式已保存。'
         })
       }}>
-        <Label>模式<Select value={mode} onChange={(event) => setMode(event.target.value)}>
-          <option value="independent">独立配置</option><option value="follow">Follow virtual</option>
+        <fieldset disabled={saving || !studio} className={mode === 'follow'
+          ? 'grid min-w-0 items-end gap-4 sm:grid-cols-2 xl:grid-cols-[12rem_minmax(0,1fr)_8rem_auto]'
+          : 'grid min-w-0 items-end gap-4 sm:grid-cols-[minmax(0,20rem)_auto] sm:justify-start'}>
+        <Label className="min-w-0">配置模式<Select value={mode} onChange={(event) => setMode(event.target.value)}>
+          <option value="independent">独立配置</option><option value="follow">跟随 Virtual</option>
         </Select></Label>
         {mode === 'follow' && <>
-          <Label>Virtual 账户<Select value={virtualId} onChange={(event) => setVirtualId(event.target.value)}>
+          <Label className="min-w-0">Virtual 账户<Select className="min-w-0" value={virtualId} onChange={(event) => setVirtualId(event.target.value)}>
             <option value="">请选择</option>
             {followedId && !accounts.some((a) => a.virtual_id === followedId) && <option value={followedId}>{followedId}（无查看权限）</option>}
             {accounts.map((a) => <option key={a.virtual_id} value={a.virtual_id}>{a.virtual_id} · {a.name}</option>)}
           </Select></Label>
-          <Label>跟随倍率<Input value={multiplier} inputMode="decimal" onChange={(event) => setMultiplier(event.target.value)} /></Label>
+          <Label className="min-w-0">跟随倍率<Input value={multiplier} inputMode="decimal" onChange={(event) => setMultiplier(event.target.value)} /></Label>
         </>}
-        <Button type="submit" variant="primary" disabled={saving || !studio || !valid}>保存模式</Button>
+        <Button type="submit" variant="primary" disabled={!valid}>{saving ? '正在保存…' : '保存模式'}</Button>
+        </fieldset>
       </form>
-      <FieldHint>Follow 会替换本账户的策略组合，移除的策略发送零目标。生效份数 = virtual 份数 × 倍率；倍率 0 停止全部策略。切回独立配置会保留当前组合。</FieldHint>
+      <FieldHint>{mode === 'follow'
+        ? '跟随会替换本账户的策略组合。生效份数 = Virtual 份数 × 跟随倍率；倍率 0 停止全部策略，移除的策略也会同步停止。'
+        : '独立维护本账户的策略组合。从跟随模式切回独立配置时，会保留当前组合。'}</FieldHint>
       <a href={routes.virtualAccounts} className="text-sm text-brand">管理 Virtual 账户 →</a>
       {pending.length > 0 ? <Alert tone={'warning'}>
         待同步 {pending.length} 条，失败会自动重试。
