@@ -4,10 +4,12 @@ Last updated: 2026-10-09 UTC.
 
 Current state: zy_group26 (`binance_exec_trade10`) and zy_group29
 (`binance_exec_trade11`) use Binance USD-M futures, following the operator's
-correction on October 9. Those deployments and bahll202210
-(`binance_exec_trade01`) have the latest Exec binaries and run only account
-monitoring, Viz and Config. Trading remains stopped in all three deployments.
-Manager is also republished with the USDT reserve and Virtual editor changes.
+correction on October 9. Trade10/11 have the latest Exec binaries and run only
+account monitoring, Viz and Config. Bahll202210 (`binance_exec_trade01`) resumed
+trading on the operator's subsequent instruction. The replacement trade05
+account xy_lxy21 has a new source/namespace (`binance_exec_xy_lxy21_05`) and all
+its Exec processes remain stopped. Manager includes the USDT reserve, Virtual
+editor and owned/delegated Virtual permissions.
 The latest verification is at the end; the COIN-M sections below are historical.
 
 The operator identified two empty accounts as Binance COIN-M and authorized
@@ -271,3 +273,69 @@ Manager retains the full PostgreSQL dump, exact additive maintenance SQL,
 Exec backups retain old binaries, scripts, config and privately protected env
 files. Credentials were not copied to this repository or logs. Publish staging
 files and verification scripts are cleaned after success; recovery backups remain.
+
+## Earn configuration, trade01 restart and retired prc replacement
+
+The operator subsequently authorized trading for bahll202210 only. Its existing
+USD-M stack was started through `scripts/start-exec.sh` from synchronized
+`mkt_signal/arbmm`, with per-component health checks. Persistence, trade engine,
+account monitor, pre-trade, Viz and Config are running; the signal generator
+remains stopped. Factual positions are ready, all displayed rows have prices,
+and the Manager timeline observed 40 post-restart fill records. No new target,
+leverage or account-mode change was submitted by verification. Trade10/11 remain
+in observation-only mode.
+
+Bahll202210 Earn retains 8,000 USDT and triggers above 2,000 USDT of available
+excess, with a 3,600-second interval and 5,000-USDT automatic round cap. The
+operator explicitly chose its existing public trading egress `154.197.32.6`.
+`treasury.use_account_ip_rotation = true` resolves existing `0.0.0.0` bindings
+through the kernel without packets, then explicitly binds each financial round;
+trading TOMLs stay unchanged. Kline retains its separate `.10` address.
+The first round subscribed 5,000 USDT into 5,000 BFUSD with zero purchase fee.
+On a further manual instruction, a temporary cap allowed another 34,879.04 USDT
+subscription, then the automatic cap was restored. Verified futures wallets:
+USDT `8000.00042283`, BFUSD `39879.04000000`. This is a point-in-time balance;
+live executions and account movements can subsequently change it.
+
+The retired prc deployment (`binance_exec_trade05`) was stopped but had a
+569,602,976-byte order store, 5 bindings and both account/strategy snapshots.
+Its old RocksDB moved to `binance_exec_trade05/archive/prc/persist_manager`;
+historical PostgreSQL rows and archived targets retain their original source ID.
+Its active data directory is empty and env.sh blocks accidental starts; historical
+credentials remain only in the protected replacement backup. A fresh prepared
+deployment `/home/el01/binance_exec_xy_lxy21_05` reuses the trade05 gateway/ports
+10045/18165 with a new source ID, namespace and Redis prefix. New API credentials
+were validated read-only against USD-M; this account has 15 nonzero positions.
+It has zero inherited bindings/snapshots and an empty order store. All six current
+Exec binaries were published and SHA-256 verified, with no process started.
+The operator explicitly reiterated that xy_lxy21 must remain stopped.
+Nginx's existing trade05 auth route now checks the new source ID.
+
+Manager backend `0ce67dd` fixed Treasury route resolution. Subsequent release
+`20261009T095926Z`, source `25e2776`, adds Virtual creators and delegated
+managers in the API and frontend. Any logged-in user can create an owned Virtual;
+editing/deleting requires ownership, delegation or admin status. Only the owner
+or an admin manages grants. Account/strategy permissions remain independent.
+Legacy ownerless Virtuals remain admin-managed. The additive owner column and
+manager-grant table were explicitly maintained in one transaction after a fresh
+PostgreSQL backup; startup still performs no DDL.
+
+Validation: 280 crate tests and 6 snapshot-binary tests passed, all 7 isolated
+PostgreSQL tests passed, frontend build/lint passed with existing warnings.
+Live gateway sessions for ordinary users dzy and shaokai verified separate
+creation, mutual grants, delegated edits, denial of further delegation and
+immediate revocation. Unrelated edits/deletes were rejected. Verification
+templates/grants and temporary sessions were removed. After the final Manager
+publication, 63 protected runtime processes, the PostgreSQL/Nginx masters and
+all 12 existing trading TOMLs were unchanged. Trade10/11 still have three
+observation services each, while xy_lxy21 has no running process.
+All four Manager page routes and served HTML/JS/CSS hashes were verified after
+correcting the release's `webroot/manager/` directory layout. External gateway
+checks also returned HTTP 200. The last trade01 interval check observed 69 fills;
+its USDT wallet subsequently read `7998.64875784` following continued executions,
+while BFUSD remained `39879.04000000`. The reserve prevents further subscriptions
+from spending the retained amount; it does not replenish USDT consumed by trading.
+Rollback config, binaries, PostgreSQL dumps and financial results are in
+`backups/earn_replace_20261009T093037Z`, including the `virtual_permissions`
+subdirectory. Retired prc's private config backup is
+`binance_exec_trade05/backups/prc_replaced_20261009T093037Z`.
