@@ -281,6 +281,16 @@ public egress in the public exclusion list too. Do not change trading bindings
 to enable Manager's Kline cache.
 `GET /api/catalog/kline-status` exposes cache/backfill progress.
 
+By operator instruction on 2026-10-08, el01's public addresses
+`154.197.32.9` and `154.197.32.10` are reserved for public Kline queries,
+data retrieval, order/order-history retrieval, wealth-management (Earn)
+operations, transfers, and other special-purpose operations. Both are bound to
+`ens18` as `/28`, with persistence in
+`/etc/netplan/90-el01-extra-public-ips.yaml`; their public egress was verified.
+Clients performing these operations must explicitly bind one of these addresses.
+Never use either address for normal trading order submission or include it in
+normal trade-engine egress bindings (`local_ips`, primary/secondary addresses).
+
 The minute Kline replacement was deployed to jp-meta on 2026-10-05 as release
 `20261005T144032Z`, runtime commit `9023094`. Its dedicated non-trading binding
 is `172.31.46.93`, verified public egress `18.181.48.65`; preserve the live

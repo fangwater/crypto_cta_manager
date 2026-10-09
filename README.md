@@ -603,6 +603,8 @@ cd frontend && npm install && npm run lint && npm run build
 Use `--manager-only` to update the Manager API, frontend and analysis tools
 without publishing or restarting the monitor or changing Nginx. Only the
 Manager web service restarts; Exec processes and configuration are untouched.
+On el01, Nginx must use `Wants` rather than `Requires` for the Manager service;
+the deployment refuses a strong dependency that would restart the gateway.
 
 `el01` and `jp-meta` are two physical machines with two independent
 stacks. The same local artifacts can be copied to either host. They do
@@ -801,3 +803,18 @@ jp-meta  http://13.115.227.29:4191/manager/api/manager_publish_client.py
 ```
 
 Do not POST targets or full configs to Exec Config.
+
+BNB reserve management is available beside BFUSD automation, with independently
+configurable refill trigger/target quantities, fee-wallet reserves, Flexible Earn
+and a protected Exec hedge. Refills only use direct BFUSD → BNB Convert and run
+independently of USDT/BFUSD subscriptions. Shared egress clients enforce rolling
+request weights and exchange cooldowns. It is disabled and dry-run by default. Both asset
+controllers require explicit `[treasury]` egress: a dedicated `local_ip` or
+operator-selected `use_account_ip_rotation`; see
+[BNB reserve management](docs/bnb_reserve_management.md) before enabling.
+The hedge contract is BNBUSDC, reserved for the system strategy on
+the adopting account. This separates contract positions from CTA BNBUSDT but
+does not isolate collateral in Multi-Assets Mode. Normal updates require both a
+quantity change above the configured tolerance and a minimum interval (default
+300 seconds); existing BNBUSDT reserve shorts migrate in bounded steps. The
+jp-meta deployment still uses BNBUSDT pending the combined virtual-account release.

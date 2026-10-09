@@ -215,6 +215,7 @@ struct WebState {
     viz_snapshot: VizSnapshotClient,
     refresh_interval_secs: u64,
     auto_earn: AutoEarnHub,
+    bnb: crate::bnb_auto::BnbManager,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -387,8 +388,6 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let database_url = config.database_url()?;
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
     postgres::register_sources(&pool, &config.sources).await?;
-    let auto_earn = AutoEarnHub::new(&config)?;
-    auto_earn.spawn(config.sources.clone());
     let exec_config = ExecConfigClient::new(config.order_config.request_timeout_secs)?;
     let redis_runtime = RedisRuntime::connect(config.redis.clone())?;
     redis_runtime.spawn_keepalive();
@@ -398,6 +397,17 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         config.kline.local_ip,
     );
     let reload_notify = ReloadNotifyHub::spawn();
+    let funds_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let treasury_egress = crate::bfusd_auto::TreasuryEgress::new(config.treasury.clone());
+    let bnb = crate::bnb_auto::BnbManager::new(
+        &config,
+        funds_gate.clone(),
+        treasury_egress.clone(),
+        redis_runtime.clone(),
+        reload_notify.clone(),
+    )?;
+    let auto_earn = AutoEarnHub::new(&config, funds_gate, treasury_egress)?;
+    let treasury_sources = config.sources.clone();
     anyhow::ensure!(
         (1..=256).contains(&config.dashboard.compute_threads),
         "dashboard.compute_threads must be between 1 and 256"
@@ -481,7 +491,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         klines,
         viz_snapshot,
         refresh_interval_secs,
-        auto_earn,
+        auto_earn: auto_earn.clone(),
+        bnb: bnb.clone(),
     };
 
     let app = Router::new()
@@ -571,6 +582,22 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .route("/api/catalog/accounts/{source_id}", get(get_account_studio))
         .route(
+            "/api/catalog/accounts/{source_id}/bnb-auto",
+            get(get_account_bnb).put(save_account_bnb),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bnb-auto/run",
+            post(run_account_bnb),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bnb-auto/preview",
+            post(preview_account_bnb),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bnb-auto/acknowledge",
+            post(acknowledge_account_bnb),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/bfusd-auto",
             get(get_account_bfusd_auto).put(save_account_bfusd_auto),
         )
@@ -643,7 +670,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind CTA web API to {bind}"))?;
+    // Do not start financial automation until all initialization and binding succeed.
     spawn_configuration_publisher(state);
+    bnb.spawn(treasury_sources.clone());
+    auto_earn.spawn(treasury_sources);
     info!(%bind, refresh_interval_secs, "CTA web API started");
 
     axum::serve(
@@ -2869,6 +2899,93 @@ fn bfusd_error(error: anyhow::Error) -> Response {
     (status, Json(ErrorResponse { error: message })).into_response()
 }
 
+async fn get_account_bnb(State(state): State<WebState>, Path(source_id): Path<String>) -> Response {
+    if let Err(response) = bfusd_source(&state.config, &source_id) {
+        return response;
+    }
+    (NO_STORE, Json(state.bnb.status(&source_id).await)).into_response()
+}
+async fn save_account_bnb(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+    Json(settings): Json<crate::bnb_auto::Settings>,
+) -> Response {
+    let source = match bfusd_source(&state.config, &source_id) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if let Err(e) = state.auto_earn.verify_token(bfusd_token(&headers)).await {
+        return bfusd_error(e);
+    }
+    if let Err(e) = settings.validate() {
+        return bad_request(e.to_string());
+    }
+    match state.bnb.save(source, settings).await {
+        Ok(s) => (NO_STORE, Json(s)).into_response(),
+        Err(e) => bfusd_error(e),
+    }
+}
+async fn run_account_bnb(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    bnb_run_response(&state, &source_id, &headers, false).await
+}
+async fn preview_account_bnb(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    bnb_run_response(&state, &source_id, &headers, true).await
+}
+async fn bnb_run_response(
+    state: &WebState,
+    source_id: &str,
+    headers: &HeaderMap,
+    preview: bool,
+) -> Response {
+    let source = match bfusd_source(&state.config, source_id) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if let Err(e) = state.auto_earn.verify_token(bfusd_token(headers)).await {
+        return bfusd_error(e);
+    }
+    match state.bnb.run(source, preview).await {
+        Ok(result) => (NO_STORE, Json(serde_json::json!({"result":result}))).into_response(),
+        Err(e) => bfusd_error(e),
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BnbAcknowledgeRequest {
+    pending_at_ms: u64,
+    exchange_outcome_verified: bool,
+}
+async fn acknowledge_account_bnb(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<BnbAcknowledgeRequest>,
+) -> Response {
+    let source = match bfusd_source(&state.config, &source_id) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if let Err(e) = state.auto_earn.verify_token(bfusd_token(&headers)).await {
+        return bfusd_error(e);
+    }
+    if !request.exchange_outcome_verified {
+        return bad_request("先核对交易所记录、待处理订单和余额".into());
+    }
+    match state.bnb.acknowledge(source, request.pending_at_ms).await {
+        Ok(s) => (NO_STORE, Json(s)).into_response(),
+        Err(e) => bfusd_error(e),
+    }
+}
+
 async fn get_account_bfusd_auto(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
@@ -3131,6 +3248,13 @@ async fn save_account_binding(
         .into_iter()
         .find(|position| position.strategy_name == request.position_strategy_name)
     {
+        if request.shares > 0.0
+            && let Err(error) = state
+                .redis_runtime
+                .validate_cta_targets(&source_id, &position.targets)
+        {
+            return Ok(bad_request(error.to_string()));
+        }
         for symbol in position
             .targets
             .keys()
@@ -3178,6 +3302,12 @@ async fn save_account_binding_shares(
     if request.shares > 0.0
         && let Some((position, _, _, _)) = &existing
     {
+        if let Err(error) = state
+            .redis_runtime
+            .validate_cta_targets(&source_id, &position.targets)
+        {
+            return Ok(bad_request(error.to_string()));
+        }
         for symbol in position
             .targets
             .keys()
@@ -3455,6 +3585,13 @@ async fn publish_binding(
         })?;
     }
     let targets = strategy_catalog::scale_targets(&position.targets, shares);
+    state
+        .redis_runtime
+        .validate_cta_targets(source_id, &targets)
+        .map_err(|error| PublishFailure {
+            status: StatusCode::BAD_REQUEST,
+            message: error.to_string(),
+        })?;
     if targets_require_trading_account_mode(&targets) {
         match crate::exchange_leverage::has_required_trading_account_mode(source).await {
             Ok(true) => {}
@@ -4826,6 +4963,7 @@ mod tests {
             redis: crate::config::RedisSettings::default(),
             kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
+            treasury: crate::config::TreasuryConfig::default(),
             sources: vec![crate::config::SourceConfig {
                 id: "binance_exec_trade01".into(),
                 account: "trade01".into(),
@@ -4909,6 +5047,7 @@ mod tests {
             redis: crate::config::RedisSettings::default(),
             kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
+            treasury: crate::config::TreasuryConfig::default(),
             sources: vec![source],
         };
         let sources = resolve_sources(&config, &[]).unwrap();

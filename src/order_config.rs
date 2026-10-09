@@ -1011,6 +1011,13 @@ async fn decode_response<T: for<'de> Deserialize<'de>>(
 }
 
 pub fn validate_strategy_name(name: &str) -> std::result::Result<(), String> {
+    if name == crate::bnb_auto::HEDGE_STRATEGY {
+        return Err("strategy_name is reserved for BNB reserve management".into());
+    }
+    validate_runtime_strategy_name(name)
+}
+
+pub(crate) fn validate_runtime_strategy_name(name: &str) -> std::result::Result<(), String> {
     let valid_len = !name.is_empty() && name.len() <= 256;
     let mut bytes = name.bytes();
     let valid_first = bytes

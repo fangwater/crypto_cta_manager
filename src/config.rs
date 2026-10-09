@@ -26,7 +26,18 @@ pub struct AppConfig {
     pub kline: KlineConfig,
     #[serde(default)]
     pub monitor: MonitorConfig,
+    #[serde(default)]
+    pub treasury: TreasuryConfig,
     pub sources: Vec<SourceConfig>,
+}
+
+/// Explicit egress selection for BFUSD and BNB asset management.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TreasuryConfig {
+    pub local_ip: Option<IpAddr>,
+    /// Explicit operator opt-in to the source account's existing local_ips.
+    pub use_account_ip_rotation: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -345,6 +356,9 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.treasury.use_account_ip_rotation && self.treasury.local_ip.is_some() {
+            bail!("treasury.local_ip and use_account_ip_rotation are mutually exclusive");
+        }
         if self.database.url_env.trim().is_empty() {
             bail!("database.url_env must not be empty");
         }
@@ -801,6 +815,7 @@ mod tests {
             redis: RedisSettings::default(),
             kline: KlineConfig::default(),
             monitor: MonitorConfig::default(),
+            treasury: crate::config::TreasuryConfig::default(),
             sources,
         }
     }

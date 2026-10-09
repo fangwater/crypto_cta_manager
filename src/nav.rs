@@ -3827,6 +3827,7 @@ mod tests {
             redis: crate::config::RedisSettings::default(),
             kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
+            treasury: crate::config::TreasuryConfig::default(),
             sources,
         }
     }
@@ -5181,6 +5182,7 @@ mod tests {
             redis: crate::config::RedisSettings::default(),
             kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
+            treasury: crate::config::TreasuryConfig::default(),
             sources: vec![source],
         };
 

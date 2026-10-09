@@ -26,6 +26,10 @@ struct Args {
     /// Initialize a new, empty Manager database, register sources, and exit.
     #[arg(long)]
     init_db: bool,
+
+    /// Read-only BNB balance/settings preview; does not start Manager or trading.
+    #[arg(long, conflicts_with = "init_db")]
+    bnb_preview_source: Option<String>,
 }
 
 #[tokio::main]
@@ -39,6 +43,11 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let config = AppConfig::load(&args.config)?;
+    if let Some(source_id) = &args.bnb_preview_source {
+        let status = crypto_cta_manager::bnb_auto::preview_source(&config, source_id).await?;
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
     if args.init_db {
         let database_url = config.database_url()?;
         let pool = postgres::connect(&database_url, config.database.max_connections).await?;

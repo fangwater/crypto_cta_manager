@@ -94,6 +94,7 @@ pub struct ExecOrderRateLimits {
 #[derive(Clone)]
 pub struct RedisRuntime {
     inner: Arc<Mutex<RedisRuntimeInner>>,
+    bnb_reserve_sources: Arc<std::sync::RwLock<std::collections::BTreeSet<String>>>,
 }
 
 struct RedisRuntimeInner {
@@ -108,6 +109,7 @@ impl RedisRuntime {
         let client = redis::Client::open(settings.url.clone())
             .with_context(|| format!("invalid redis.url {}", settings.url))?;
         Ok(Self {
+            bnb_reserve_sources: Arc::new(std::sync::RwLock::new(Default::default())),
             inner: Arc::new(Mutex::new(RedisRuntimeInner {
                 settings,
                 client,
@@ -115,6 +117,32 @@ impl RedisRuntime {
                 last_reconnect_error_at: None,
             })),
         })
+    }
+
+    pub(crate) fn reserve_bnb_symbol(&self, source_id: &str) {
+        self.bnb_reserve_sources
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(source_id.into());
+    }
+
+    pub(crate) fn validate_cta_targets(
+        &self,
+        source_id: &str,
+        targets: &BTreeMap<String, TargetPosition>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self
+                .bnb_reserve_sources
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(source_id)
+                || targets
+                    .get(crate::bnb_auto::HEDGE_SYMBOL)
+                    .is_none_or(|t| t.qty == 0.),
+            "BNBUSDC is reserved for BNB reserve management on source {source_id}; ordinary CTA targets are forbidden"
+        );
+        Ok(())
     }
 
     pub fn spawn_keepalive(&self) {
@@ -143,6 +171,54 @@ impl RedisRuntime {
         targets: &BTreeMap<String, TargetPosition>,
     ) -> Result<OrderStrategyView> {
         validate_strategy_name(strategy_name).map_err(anyhow::Error::msg)?;
+        self.validate_cta_targets(&source.id, targets)?;
+        self.publish_strategy_inner(
+            source,
+            strategy_name,
+            order_parameters,
+            symbol_order_parameters,
+            targets,
+        )
+        .await
+    }
+
+    pub(crate) async fn publish_bnb_hedge(
+        &self,
+        source: &SourceConfig,
+        parameters: &OrderParameters,
+        targets: &BTreeMap<String, TargetPosition>,
+    ) -> Result<OrderStrategyView> {
+        anyhow::ensure!(
+            (1..=2).contains(&targets.len())
+                && targets.contains_key(crate::bnb_auto::HEDGE_SYMBOL)
+                && targets.iter().all(|(symbol, t)| matches!(
+                    symbol.as_str(),
+                    "BNBUSDC" | "BNBUSDT"
+                ) && t.qty.is_finite()
+                    && t.qty <= 0.0
+                    && t.signal == 0),
+            "invalid BNB reserve target"
+        );
+        self.publish_strategy_inner(
+            source,
+            crate::bnb_auto::HEDGE_STRATEGY,
+            parameters,
+            &BTreeMap::new(),
+            targets,
+        )
+        .await
+    }
+
+    async fn publish_strategy_inner(
+        &self,
+        source: &SourceConfig,
+        strategy_name: &str,
+        order_parameters: &OrderParameters,
+        symbol_order_parameters: &BTreeMap<String, OrderParameters>,
+        targets: &BTreeMap<String, TargetPosition>,
+    ) -> Result<OrderStrategyView> {
+        crate::order_config::validate_runtime_strategy_name(strategy_name)
+            .map_err(anyhow::Error::msg)?;
         order_parameters.validate().map_err(anyhow::Error::msg)?;
         for (symbol, selected) in symbol_order_parameters {
             validate_exec_symbol(symbol).map_err(anyhow::Error::msg)?;
@@ -902,7 +978,7 @@ fn decode_strategy_names(raw: Option<String>, label: &str) -> Result<Vec<String>
         serde_json::from_str(&raw).with_context(|| format!("{label} is not valid JSON"))?;
     let mut seen = BTreeMap::new();
     for name in names {
-        validate_strategy_name(&name).map_err(anyhow::Error::msg)?;
+        crate::order_config::validate_runtime_strategy_name(&name).map_err(anyhow::Error::msg)?;
         if seen.insert(name.clone(), ()).is_some() {
             bail!("{label} contains duplicate names");
         }
@@ -964,6 +1040,23 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[test]
+    fn bnbusdc_reservation_is_shared_and_source_scoped_and_allows_clear() {
+        let runtime = RedisRuntime::connect(RedisSettings::default()).unwrap();
+        let targets = BTreeMap::from([("BNBUSDC".into(), TargetPosition { qty: 1., signal: 0 })]);
+        assert!(runtime.validate_cta_targets("trade03", &targets).is_ok());
+        runtime.reserve_bnb_symbol("trade03");
+        assert!(
+            runtime
+                .clone()
+                .validate_cta_targets("trade03", &targets)
+                .is_err()
+        );
+        assert!(runtime.validate_cta_targets("trade04", &targets).is_ok());
+        let zero = BTreeMap::from([("BNBUSDC".into(), TargetPosition { qty: 0., signal: 0 })]);
+        assert!(runtime.validate_cta_targets("trade03", &zero).is_ok());
+    }
 
     fn valid_parameters() -> OrderParameters {
         OrderParameters {
@@ -1288,6 +1381,12 @@ mod tests {
             decode_strategy_names(Some(r#"["CTA_B","CTA_A"]"#.to_string()), "strategy index")
                 .unwrap();
         assert_eq!(names, vec!["CTA_A".to_string(), "CTA_B".to_string()]);
+        let system_names = decode_strategy_names(
+            Some(r#"["SYSTEM_BNB_RESERVE","CTA_A"]"#.into()),
+            "strategy index",
+        )
+        .unwrap();
+        assert_eq!(system_names, vec!["CTA_A", "SYSTEM_BNB_RESERVE"]);
         assert!(
             decode_strategy_names(Some(r#"["CTA_A","CTA_A"]"#.to_string()), "strategy index")
                 .is_err()

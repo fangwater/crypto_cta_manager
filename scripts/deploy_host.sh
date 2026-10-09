@@ -169,6 +169,16 @@ printf '%s  %s/manager/index.html\n' "$frontend_hash" "$RELEASE" >>"$FINAL_CHECK
 echo "checking ${TARGET} as ${EXPECTED_USER}@${SSH_HOST}"
 remote "test \"\$(id -un)\" = '${EXPECTED_USER}'"
 remote "test -d '${REMOTE_ROOT}'"
+if [[ $MANAGER_ONLY -eq 1 && $TARGET == el01 ]]; then
+    remote "bash -s" <<'EOF'
+set -Eeuo pipefail
+dependencies="$(systemctl --user show crypto-cta-nginx.service --property=Requires,BindsTo,PartOf --value)"
+if [[ " $dependencies " == *crypto-cta-manager-web.service* ]]; then
+    echo "Nginx still has a strong dependency on Manager; replace it with Wants and reload systemd before a Manager-only deployment" >&2
+    exit 1
+fi
+EOF
+fi
 echo "checking host config for removed PostgreSQL order-ingestion settings"
 remote "python3 - '${REMOTE_ROOT}/config/cta-manager.toml'" <<'PY'
 import sys

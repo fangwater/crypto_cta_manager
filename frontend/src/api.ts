@@ -596,6 +596,51 @@ export function publishAccountBinding(sourceId: string, bindingName: string) {
   )
 }
 
+export interface BnbSettings {
+  enabled: boolean
+  dry_run: boolean
+  required_bnb: number
+  refill_trigger_bnb: number
+  refill_target_bnb: number
+  futures_trigger_bnb: number
+  futures_target_bnb: number
+  futures_sweep_bnb: number
+  earn_min_bnb: number
+  hedge_tolerance_bnb: number
+  hedge_min_interval_secs: number
+  interval_secs: number
+  max_conversion_usdt: number
+  max_quote_deviation_bps: number
+}
+export interface BnbStatus {
+  settings: BnbSettings
+  balances: null | {
+    at_ms: number
+    spot_bnb: number
+    futures_bnb: number
+    earn_bnb: number
+    spot_bfusd: number
+    futures_bfusd: number
+  }
+  pending: null | { at_ms: number; action: string }
+  refill_target: number | null
+  last_result: string | null
+  hedge_qty: number | null
+  hedge_error: string | null
+  hedge_symbol: string
+  legacy_hedge_qty: number | null
+  audit: { at_ms: number; action: string; result: string }[]
+}
+const bnbPath = (sourceId: string) => `/catalog/accounts/${encodeURIComponent(sourceId)}/bnb-auto`
+export const getBnbSettings = (sourceId: string, signal?: AbortSignal) =>
+  requestJson<BnbStatus>(bnbPath(sourceId), { signal })
+export const saveBnbSettings = (sourceId: string, settings: BnbSettings, token: string) =>
+  requestJson<BnbStatus>(bnbPath(sourceId), { method: 'PUT', headers: { 'X-BFUSD-Operation-Token': token }, body: settings })
+export const runBnbManagement = (sourceId: string, action: 'preview' | 'run', token: string) =>
+  requestJson<{ result: string }>(`${bnbPath(sourceId)}/${action}`, { method: 'POST', headers: { 'X-BFUSD-Operation-Token': token } })
+export const acknowledgeBnbOperation = (sourceId: string, pendingAtMs: number, token: string) =>
+  requestJson<BnbStatus>(`${bnbPath(sourceId)}/acknowledge`, { method: 'POST', headers: { 'X-BFUSD-Operation-Token': token }, body: { pending_at_ms: pendingAtMs, exchange_outcome_verified: true } })
+
 export function listVirtualAccounts(signal?: AbortSignal) {
   return requestJson<VirtualAccount[]>('/catalog/virtual-accounts', { signal })
 }

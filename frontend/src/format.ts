@@ -88,6 +88,7 @@ export function signedClass(value: number) {
 }
 
 export function strategyLabel(strategy: string) {
+  if (strategy === 'SYSTEM_BNB_RESERVE') return 'BNB 储备对冲'
   if (strategy === '__initial_position__') return '初始仓位（未归属）'
   if (strategy === '__unallocated__') return '未分配仓位'
   if (strategy === '__unattributed__') return '未归属成交'

@@ -18,6 +18,12 @@ url = "redis://127.0.0.1:6379/0"
 request_timeout_secs = 2
 reconnect_interval_ms = 500
 
+[treasury]
+# Choose dedicated egress or explicitly opt into the account's existing local_ips.
+# BNB remains disabled / dry-run until enabled per account through Manager.
+# local_ip = "DEDICATED_NON_TRADING_LOCAL_IP"
+# use_account_ip_rotation = true # mutually exclusive with local_ip
+
 [kline]
 # Enable only after assigning a dedicated non-trading market-data egress.
 enabled = false

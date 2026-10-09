@@ -1,8 +1,7 @@
 [Unit]
 Description=User Nginx for Crypto CTA Manager
 After=network-online.target crypto-cta-manager-web.service
-Wants=network-online.target
-Requires=crypto-cta-manager-web.service
+Wants=network-online.target crypto-cta-manager-web.service
 
 [Service]
 Type=simple

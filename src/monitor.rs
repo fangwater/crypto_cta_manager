@@ -1662,6 +1662,7 @@ mod tests {
                 market_symbols: symbols.iter().map(|s| s.to_string()).collect(),
                 ..MonitorConfig::default()
             },
+            treasury: Default::default(),
             sources: vec![test_source("binance-futures")],
         }
     }

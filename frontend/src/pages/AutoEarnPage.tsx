@@ -23,6 +23,7 @@ import { AppShell, PageIntro } from '../components/AppShell'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Input, Label, Select } from '../components/ui/Field'
+import { BnbManagement } from '../components/BnbManagement'
 import { readSourceId } from '../lib/routes'
 import type { DashboardAccount } from '../types'
 
@@ -155,7 +156,7 @@ export function AutoEarnPage() {
 
   return (
     <AppShell active="auto-earn" title="自动理财" subtitle="Binance STANDARD" icon={PiggyBank}>
-      <PageIntro eyebrow="BFUSD" title="自动理财" />
+      <PageIntro eyebrow="资产管理" title="自动理财与 BNB 管理" />
       {error && <Alert tone="error" className="mb-5">{error}</Alert>}
       {notice && <Alert tone="success" className="mb-5">{notice}</Alert>}
       <div className="border-y border-border bg-surface px-4 py-4 sm:px-6">
@@ -177,6 +178,7 @@ export function AutoEarnPage() {
           </div>
         </div>
       </div>
+      {!loading && sourceId && <BnbManagement key={sourceId} sourceId={sourceId} configurable={configurable} />}
       {!loading && !sourceId && <Alert tone="warning" className="mt-6">没有可用的 Binance 账户</Alert>}
       {sourceId && settingsLoading && !savedSettings ? (
         <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted">
@@ -185,12 +187,12 @@ export function AutoEarnPage() {
       ) : sourceId && !savedSettings ? (
         <Alert tone="warning" className="mt-6">账户设置暂不可用</Alert>
       ) : sourceId && (
-        <div className="grid gap-8 py-7 lg:grid-cols-[minmax(0,1fr)_minmax(250px,320px)] lg:gap-10">
+        <div className="mt-6 grid gap-8 rounded-2xl border border-border bg-surface p-5 shadow-sm sm:p-7 lg:grid-cols-[minmax(0,1fr)_minmax(250px,320px)] lg:gap-10">
           <section className="min-w-0" aria-labelledby="auto-earn-settings">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-5">
               <div className="flex items-center gap-2.5">
                 <Settings2 size={17} className="text-brand" />
-                <h3 id="auto-earn-settings" className="text-sm font-semibold text-ink">运行配置</h3>
+                <h3 id="auto-earn-settings" className="text-sm font-semibold text-ink">BFUSD 自动理财</h3>
               </div>
               <label className="inline-flex cursor-pointer items-center gap-3 text-sm font-medium text-ink">
                 自动申购与收益划转
