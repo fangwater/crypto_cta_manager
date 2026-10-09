@@ -7,8 +7,9 @@ Current state: zy_group26 (`binance_exec_trade10`) and zy_group29
 correction on October 9. Trade10/11 have the latest Exec binaries and run only
 account monitoring, Viz and Config. Bahll202210 (`binance_exec_trade01`) resumed
 trading on the operator's subsequent instruction. The replacement trade05
-account xy_lxy21 has a new source/namespace (`binance_exec_xy_lxy21_05`) and all
-its Exec processes remain stopped. Manager includes the USDT reserve, Virtual
+account xy_lxy21 has a new source/namespace (`binance_exec_xy_lxy21_05`) and now
+runs trading on the operator's later instruction, following c40 at multiplier
+116. Manager includes the USDT reserve, Virtual
 editor and owned/delegated Virtual permissions.
 The latest verification is at the end; the COIN-M sections below are historical.
 
@@ -339,3 +340,40 @@ Rollback config, binaries, PostgreSQL dumps and financial results are in
 `backups/earn_replace_20261009T093037Z`, including the `virtual_permissions`
 subdirectory. Retired prc's private config backup is
 `binance_exec_trade05/backups/prc_replaced_20261009T093037Z`.
+
+## xy_lxy21 c40 activation
+
+The operator subsequently requested trading, superseding the earlier stopped
+state, and specified `virtual01` (`c40t12_group1`) at multiplier 116. The enabled
+source was initially invisible to ordinary users because its fresh identity had
+no account grants. Manager's account-grants API now gives shaokai and dzy
+`configure` access, which includes visibility. No retired prc permissions were
+copied, and neither user's role changed.
+
+The Follow configuration was saved through the Nginx Manager API before starting
+Exec. Its two 0.5-share bindings materialized as 58 shares each; the durable
+publish queue drained and both complete 40-symbol target vectors were confirmed
+in the new account's Redis namespace. The first startup stopped at the missing
+new-source risk hash. The existing Exec `sync_exec_risk_params.py` initialized
+only that empty hash with its standard five parameters: 10 total live limit
+orders, 10 per side, 400 orders/minute and 200 orders/10 seconds. No target or
+order-history key was copied from prc.
+
+The synchronized `arbmm` `start-exec.sh` then passed all six component checks.
+Persistence, trade engine, account monitor, pre-trade, Viz and Config are live;
+trade_signal remains stopped. The standard account-mode gate passed and startup
+cancelled the account's existing USD-M orders. Subsequent Viz state reported
+positions ready, both named strategies fully allocated and 12 displayed position
+rows each. All 24 named-strategy rows completed their current execution; three
+system residual rows also reported completion. A source-scoped factual timeline
+observed 94 Maker fill records after this successful startup. This is a measured
+interval, not a guarantee about later target updates.
+
+Ordinary sessions for both shaokai and dzy verified account visibility, configure
+access, Follow state, gateway snapshots and Config bootstrap. All 62 preexisting
+protected processes remained unchanged; Manager was not restarted. Trading IPs,
+leverage, account mode, old prc archives and PostgreSQL snapshots were preserved.
+No manual balance-based snapshot was created: the operator chose live Exec
+allocation instead. Recoverable catalog/risk/runtime evidence is under the new
+environment's `backups/follow_c40_start_20261009T104355Z`; its `EXEC-RELEASE.json`
+records the authorized running state and correct environment identity.
