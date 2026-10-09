@@ -1193,7 +1193,9 @@ fn hedge_step_settled(
             && r.current_qty
                 .is_some_and(|q| (q - target).abs() <= tolerance)
             && r.target_qty.is_some_and(|q| (q - target).abs() <= EPS)
-            && r.pending_qty.is_some_and(|q| q.abs() <= EPS)
+            // Exec keeps the unfilled target residual as pending_qty even
+            // after completing within tolerance. Live orders must still be zero.
+            && r.pending_qty.is_some_and(|q| q.abs() <= tolerance)
             && r.live_order_qty.is_some_and(|q| q.abs() <= EPS)
     })
 }
@@ -1428,6 +1430,21 @@ mod tests {
             account_position_qty: Some(-0.5),
         };
         assert!(hedge_step_settled(-0.5, Some(&row), 0.02));
+        let dust = crate::viz_snapshot::ExecStateRowSnapshot {
+            current_qty: Some(-0.509),
+            pending_qty: Some(0.009),
+            completion_reason: "target_tolerance".into(),
+            ..row.clone()
+        };
+        assert!(hedge_step_settled(-0.5, Some(&dust), 0.02));
+        assert!(!hedge_step_settled(
+            -0.5,
+            Some(&crate::viz_snapshot::ExecStateRowSnapshot {
+                live_order_qty: Some(0.009),
+                ..dust
+            }),
+            0.02
+        ));
         assert!(!hedge_step_settled(-0.5, None, 0.02));
         for incomplete in [
             crate::viz_snapshot::ExecStateRowSnapshot {
