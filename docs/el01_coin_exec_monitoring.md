@@ -1,11 +1,14 @@
-# el01 coin-margined Exec monitoring
+# el01 Exec market configuration and monitoring
 
-Last updated: 2026-10-08 UTC.
+Last updated: 2026-10-09 UTC.
 
-Current state after the operator clarified that the constraint is **no orders**:
-both account monitors are running independently alongside Viz and Config.
-Execution processes remain stopped. The initial empty-page deployment below is
-historical; the account observation upgrade is documented at the end.
+Current state: zy_group26 (`binance_exec_trade10`) and zy_group29
+(`binance_exec_trade11`) use Binance USD-M futures, following the operator's
+correction on October 9. Those deployments and bahll202210
+(`binance_exec_trade01`) have the latest Exec binaries and run only account
+monitoring, Viz and Config. Trading remains stopped in all three deployments.
+Manager is also republished with the USDT reserve and Virtual editor changes.
+The latest verification is at the end; the COIN-M sections below are historical.
 
 The operator identified two empty accounts as Binance COIN-M and authorized
 republishing their programs and pages, explicitly requiring trading to remain
@@ -192,3 +195,79 @@ No USD-M positions were fed into the coin Exec, no targets were published and
 no account's trading mode was changed. Resolving whether the intended subaccount
 keys or the intended futures market differ requires operator identity/scope
 confirmation; keep the independent source/venue boundary intact.
+
+## USD-M correction and latest Manager/Exec publication
+
+On 2026-10-09 UTC the operator corrected trade10 and trade11 to USD-M and
+requested the latest Exec for both accounts and bahll202210, with trading
+remaining stopped. Trade01 was executing before this task; its environment-local
+stop wrappers stopped the deployment before files were replaced. Trade10/11 had
+only their three observation services running. Each target was fully stopped
+before the publish wrapper's checks and atomic replacements.
+
+All six Exec binaries and current component scripts were built locally from
+synchronized production branch `arbmm`, source
+`8a263e04ed3190636ba1787ea65e9a9e69c45998`, and published with
+`scripts/publish-exec.sh --venue binance-futures --skip-build`. Installed hashes
+were checked again after publication. A temporary SSH transport failure before
+trade10 publication was retried successfully. Runtime source files had no local
+edits; concurrent CME/FR edits were preserved and excluded from task commits.
+The local Cargo.lock has concurrent dependency additions; its build hash is
+`121321c8f88715f8189a56516d3915ef5e763d9aac3c067c87f31d636cfc00a5`.
+Each target's `EXEC-RELEASE.json` records the source, lock hash and six binary
+hashes; this full release supersedes the earlier component-only release records.
+
+The two corrected accounts keep their source IDs, namespaces, ports, credentials,
+account modes, trading IP bindings and fee settings. Only `EXEC_VENUE`/`VENUE`,
+Config venue, Viz venue and the matching Manager source venue change to
+`binance-futures`. Trade01's Viz configuration now explicitly declares the same
+USD-M venue; its env file is unchanged. Before correction, trade10/11 had empty
+order stores, zero Manager snapshot entries and zero strategy bindings. No
+historical fill, target or snapshot was relabeled or removed.
+
+Manager release `20261009T080509Z`, source `61fc1cd`, contains the configurable
+USDT reserve, automatic Virtual numbering/aliases and corrected editor layout.
+The live TOML retains all other settings. Four missing Virtual configuration
+tables were added explicitly in one transaction after a full PostgreSQL backup,
+using their definitions from the current schema. No automatic migration,
+initialization/reset or removal of legacy tables was run.
+
+After publication only each target's `start_account_monitor.sh`,
+`start_exec_viz_server.sh` and `start_exec_config_server.sh` ran. No
+`exec-pre-trade`, `trade_engine`, `trade_signal` or `persist_manager` was started.
+No order, cancellation, strategy target, leverage or exchange-account-mode change
+was submitted by deployment checks. Missing execution-state observations while
+pre-trade is stopped must not be interpreted as zero factual account holdings.
+
+Verification:
+
+- The six Exec and four Manager release binaries built successfully; all 11
+  account-monitor tests, 6 Viz tests and 4 Manager deployment-layout tests passed.
+- Manager health reports `ok`, 11 enabled sources, and no refresh error.
+  The three target accounts are USD-M in its dashboard. Manager's PID changed
+  from 214461 to 939354.
+- All three gateways show `U 本位 Exec 执行监控`, return HTTP 200 for page,
+  snapshot and Config, and return WebSocket 101. Config bootstraps report
+  `binance-futures` with separate source-specific Redis prefixes.
+- Each target's current Manager-published USD-M rule snapshot has 920 symbol
+  records, includes BTCUSDT and excludes BTCUSD_PERP. All snapshots were refreshed
+  recently. This count includes inactive contracts, which remain blocked by status.
+- Virtual creation, automatic numbering, alias modification and deletion passed
+  against the newly maintained database. The temporary template and auth session
+  were removed. The three queried accounts expose `reserve_usdt = 0`.
+- Served Manager HTML/JS/CSS hashes match the release; assets are
+  `index-D606wdPE.js` and `index-CAgHSgfj.css`.
+- 52 other protected process IDs and start times remain unchanged, including
+  other accounts, Nginx and the monitor. Of 51 audited configuration files,
+  the only changed TOMLs are the three target Viz files and Manager live TOML.
+  All 12 trading TOMLs retain their original hashes. The two Config env files
+  changed only their venue; private env files changed only the allowed market
+  fields, with all remaining content checked for equality.
+
+Recovery backups and verification records use
+`backups/usdm_exec_manager_20261009T075516Z` under Manager and each target Exec.
+Manager retains the full PostgreSQL dump, exact additive maintenance SQL,
+`BASELINE.json`, `VERIFICATION.json`, old binaries/config and old webroot pointer.
+Exec backups retain old binaries, scripts, config and privately protected env
+files. Credentials were not copied to this repository or logs. Publish staging
+files and verification scripts are cleaned after success; recovery backups remain.
