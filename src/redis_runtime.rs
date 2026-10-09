@@ -191,12 +191,14 @@ impl RedisRuntime {
         anyhow::ensure!(
             (1..=2).contains(&targets.len())
                 && targets.contains_key(crate::bnb_auto::HEDGE_SYMBOL)
-                && targets.iter().all(|(symbol, t)| matches!(
-                    symbol.as_str(),
-                    "BNBUSDC" | "BNBUSDT"
-                ) && t.qty.is_finite()
-                    && t.qty <= 0.0
-                    && t.signal == 0),
+                && targets
+                    .iter()
+                    .all(
+                        |(symbol, t)| ((symbol == crate::bnb_auto::HEDGE_SYMBOL && t.qty <= 0.0)
+                            || (symbol == "BNBUSDT" && t.qty == 0.0))
+                            && t.qty.is_finite()
+                            && t.signal == 0
+                    ),
             "invalid BNB reserve target"
         );
         self.publish_strategy_inner(

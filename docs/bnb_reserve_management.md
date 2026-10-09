@@ -18,8 +18,8 @@ VIP offsets:
 | `futures_target_bnb` | 1.5 | Fee wallet refill target |
 | `futures_sweep_bnb` | 1.8 | Sweep excess futures BNB toward Flexible Earn |
 | `earn_min_bnb` | 0.1 | Minimum surplus subscription |
-| `hedge_tolerance_bnb` | 0.02 | Minimum reserve quantity change for a new hedge target |
-| `hedge_min_interval_secs` | 300 | Minimum interval between normal hedge target updates |
+| `hedge_tolerance_bnb` | 0.5 | Minimum factual net exposure for a new hedge target; configurable at or above 0.5 |
+| `hedge_min_interval_secs` | 3600 | Minimum interval between hedge target updates; configurable from 1 to 24 hours |
 | `interval_secs` | 60 | Normal balance check interval |
 | `max_conversion_usdt` | 10000 | Per-conversion cost cap |
 | `max_quote_deviation_bps` | 100 | Maximum quote cost above the spot BNB reference |
@@ -92,10 +92,10 @@ VIP 门槛与补足阈值、USD-M 手续费备用金及 Flexible Earn 分配继�
 release 为 `20261009T053323Z`（`1b285b5`），配套 Exec/公共行情为 `8a263e04`。
 BNBUSDC 的报价、杠杆初始化和实际成交已验证。
 切换时须先检查
-该账户已有的 BNBUSDC CTA 目标、挂单和事实持仓，协调旧 BNBUSDT 系统空头
-退出与新 BNBUSDC 空头建立；只处理储备系统策略的份额，保留原 CTA 的
-BNBUSDT 目标与持仓归属。迁移应按实际成交进度控制总对冲量，避免重复全额
-做空，并明确显示迁移期间的剩余敞口。仅修改说明或保存原配置不会迁移仓位。
+该账户已有的 BNBUSDC CTA 目标、挂单和事实持仓。trade03 已完成旧 BNBUSDT
+系统空头退出与新 BNBUSDC 空头建立，自动迁移代码已删除；原 CTA 的 BNBUSDT
+目标与持仓归属仍独立。其他账户若仍有非零旧系统目标，必须先显式完成切换，
+常态对冲不会自动接管或迁移这些仓位。
 
 ### 对冲执行与频率控制
 
@@ -110,19 +110,22 @@ CTA target changes never zero this hedge. Disabling BNB automation freezes its
 last hedge target rather than silently closing the hedge.
 
 Balance checks default to once per 60 seconds. A normal hedge update requires
-both a reserve change above 0.02 BNB and at least 300 seconds since the last
-target publication (at most 12 normal updates per hour). A price change alone
+both factual net exposure of at least 0.5 BNB and at least 3600 seconds since the last
+target publication (at most one update per hour). A price change alone
 does not change the quantity target of this linear hedge. The configurable
-minimum interval is 60–3600 seconds; manual rounds and restarts do not bypass
+minimum interval is 3600–86400 seconds (shown as hours in the UI); manual rounds and restarts do not bypass
 the persisted interval or the Redis target timestamp. An incomplete prior target,
 pending order, missing allocation or stale Viz snapshot blocks further updates.
 Reserve replenishment still runs before the hedge and is not delayed by its
 cooldown. HTTP weight limits and exchange cooldowns apply independently.
 
-Existing BNBUSDT reserve targets migrate in steps. With a stable reserve, each
-step transfers at most 0.5 BNB from the old short to the new short and preserves
-the combined target quantity. Steps are at least 60 seconds apart and wait for
-both previous legs to complete within quantity tolerance without live orders.
+There is one steady-state USDC hedge path, with no automatic legacy migration
+or separate short-interval exception. Existing nonzero BNBUSDT reserve targets
+block updates until an explicit switch is completed. The adjustment threshold
+is independent of the VIP refill cushion and of execution precision: when an
+update triggers, the USDC target is the full negative reserve quantity, not
+increments of 0.5 BNB. Previous targets must complete within 0.02 BNB, without
+live orders; account/strategy ownership uses the same strict settlement bound.
 Exec may retain a small unfilled residual as `pending_qty` after completion;
 this must remain within tolerance. A fresh, position-ready snapshot may omit
 a fully idle zero position; missing nonzero targets still block progress.
@@ -130,12 +133,10 @@ Completed zero-target `SYSTEM_POSITION_CLOSE` rows may contain f32 account-IPC
 rounding differences against f64 fill allocations. Only these idle rows may
 ignore quantities within two relative f32 epsilon units, capped at 0.00001 BNB;
 other strategies and active orders retain strict ownership checks.
-This is a one-time migration cadence; normal BNBUSDC adjustments use the longer configured interval.
-An explicit zero BNBUSDT target remains after migration. This transfer is not
-atomic at the exchange: temporary exposure can occur within a step. Status reports
-both factual legs and the browser includes both when calculating net exposure.
+An existing explicit zero BNBUSDT target remains to prevent its resurrection.
+Status reports any factual legacy fill tail and includes it in net exposure.
 Existing other-strategy BNBUSDC targets, holdings or orders, and unexplained
-account holdings defer migration instead of taking ownership of those positions.
+account holdings defer adjustment instead of taking ownership of those positions.
 
 Reserve execution uses one order per batch, a 500 quote-unit baseline order size,
 at most two batches, a five-second batch interval, a ten-second maker timeout and

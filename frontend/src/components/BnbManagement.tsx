@@ -43,10 +43,9 @@ export function BnbManagement({ sourceId, configurable }: { sourceId: string; co
   const valid = !!settings && Object.entries(settings).every(([, v]) => typeof v !== 'number' || Number.isFinite(v))
     && settings.required_bnb > 0 && settings.required_bnb < settings.refill_trigger_bnb && settings.refill_trigger_bnb < settings.refill_target_bnb
     && 1 < settings.futures_trigger_bnb && settings.futures_trigger_bnb < settings.futures_target_bnb && settings.futures_target_bnb < settings.futures_sweep_bnb
-    && settings.futures_target_bnb < settings.refill_target_bnb && settings.hedge_tolerance_bnb > 0
-    && settings.hedge_tolerance_bnb < settings.refill_trigger_bnb - settings.required_bnb
+    && settings.futures_target_bnb < settings.refill_target_bnb && settings.hedge_tolerance_bnb >= 0.5
     && settings.interval_secs >= 10 && settings.interval_secs <= 3600 && settings.earn_min_bnb > 0
-    && settings.hedge_min_interval_secs >= 60 && settings.hedge_min_interval_secs <= 3600
+    && Number.isInteger(settings.hedge_min_interval_secs) && settings.hedge_min_interval_secs >= 3600 && settings.hedge_min_interval_secs <= 86400
     && settings.max_conversion_usdt > 0 && settings.max_conversion_usdt <= 1_000_000
     && settings.max_quote_deviation_bps > 0 && settings.max_quote_deviation_bps <= 500
 
@@ -81,12 +80,12 @@ export function BnbManagement({ sourceId, configurable }: { sourceId: string; co
   const stale = b ? Date.now() - b.at_ms > Math.max(180_000, (status?.settings.interval_secs ?? 60) * 3000) : false
   const label = !status ? '读取中' : status.pending ? '等待确认' : dirty ? '未保存' : !status.settings.enabled ? '未启用' : status.settings.dry_run ? '试运行' : '已启用'
   const tone = status?.pending || dirty ? 'warning' : status?.settings.enabled ? 'brand' : 'neutral'
-  const field = (key: keyof BnbSettings, title: string, unit = 'BNB', hint?: string, prominent = false) => settings && (
+  const field = (key: keyof BnbSettings, title: string, unit = 'BNB', hint?: string, prominent = false, scale = 1) => settings && (
     <Label className="min-w-0">
       {title}
       <div className="relative">
-        <Input type="number" inputMode="decimal" min="0" step="any" value={Number(settings[key])}
-          disabled={disabled} onChange={(event) => setSettings({ ...settings, [key]: Number(event.target.value) })}
+        <Input type="number" inputMode="decimal" min="0" step="any" value={Number(settings[key]) / scale}
+          disabled={disabled} onChange={(event) => setSettings({ ...settings, [key]: Number(event.target.value) * scale })}
           className={`pr-16 tabular-nums ${prominent ? 'h-14 text-2xl font-semibold tracking-tight' : 'h-10'}`} />
         <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-[11px] font-medium text-subtle">{unit}</span>
       </div>
@@ -142,14 +141,14 @@ export function BnbManagement({ sourceId, configurable }: { sourceId: string; co
             <div className="mb-4 flex items-center justify-between"><h3 className="text-sm font-semibold text-ink">运行状态</h3><Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void act('refresh')} aria-label="刷新 BNB 状态"><RefreshCw size={14} className={busy === 'refresh' ? 'animate-spin' : ''} /></Button></div>
             <dl className="space-y-4 text-xs">
               <div className="flex justify-between gap-3"><dt className="text-muted">当前对冲合约</dt><dd className="font-medium text-ink">{status?.hedge_symbol || '—'} 永续</dd></div>
-              {status?.legacy_hedge_qty != null && Math.abs(status.legacy_hedge_qty) > 0.00000001 && <div className="flex justify-between gap-3"><dt className="text-muted">旧 BNBUSDT 对冲待迁移</dt><dd className="font-medium tabular-nums text-ink">{amount(status.legacy_hedge_qty)} BNB</dd></div>}
+              {status?.legacy_hedge_qty != null && Math.abs(status.legacy_hedge_qty) > 0.00000001 && <div className="flex justify-between gap-3"><dt className="text-muted">旧 BNBUSDT 对冲尾差</dt><dd className="font-medium tabular-nums text-ink">{amount(status.legacy_hedge_qty)} BNB</dd></div>}
               <div className="flex justify-between gap-3"><dt className="text-muted">BFUSD 持有余额</dt><dd className="text-right font-medium tabular-nums text-ink">{b ? amount(b.spot_bfusd + b.futures_bfusd) : '—'} BFUSD</dd></div>
               <div className="flex justify-between gap-3"><dt className="text-muted">现货 BNB</dt><dd className="font-medium tabular-nums text-ink">{amount(b?.spot_bnb)} BNB</dd></div>
-              <div className="flex justify-between gap-3"><dt className="text-muted">对冲偏差容忍量</dt><dd className="font-medium tabular-nums text-ink">{amount(settings.hedge_tolerance_bnb)} BNB</dd></div>
-              <div className="flex justify-between gap-3"><dt className="text-muted">对冲最小调整间隔</dt><dd className="font-medium tabular-nums text-ink">{settings.hedge_min_interval_secs} 秒</dd></div>
+              <div className="flex justify-between gap-3"><dt className="text-muted">对冲调整阈值</dt><dd className="font-medium tabular-nums text-ink">{amount(settings.hedge_tolerance_bnb)} BNB</dd></div>
+              <div className="flex justify-between gap-3"><dt className="text-muted">对冲最小调整间隔</dt><dd className="font-medium tabular-nums text-ink">{amount(settings.hedge_min_interval_secs / 3600)} 小时</dd></div>
               <div className="flex justify-between gap-3"><dt className="text-muted">当前净敞口</dt><dd className="font-medium tabular-nums text-ink">{amount(total != null && (status?.hedge_qty != null || status?.legacy_hedge_qty != null) ? total + (status?.hedge_qty ?? 0) + (status?.legacy_hedge_qty ?? 0) : null)} BNB</dd></div>
             </dl>
-            <p className="mt-4 text-[11px] leading-5 text-subtle">BNBUSDC 专用于 BNB 储备对冲，普通 CTA 禁用。偏差超过阈值且达到最小间隔才调整；迁移每分钟最多转移 0.5 BNB，等待两边成交后继续。多资产模式下仍与 CTA 共享保证金。</p>
+            <p className="mt-4 text-[11px] leading-5 text-subtle">BNBUSDC 专用于 BNB 储备对冲，普通 CTA 禁用。实际净敞口达到阈值且达到最小间隔才调整；调仓触发阈值不影响成交精度。多资产模式下仍与 CTA 共享保证金。</p>
             <div className="mt-6 border-t border-border pt-5">
               <p className="text-[11px] font-medium text-muted">最近检查</p>
               <p className="mt-2 break-words text-xs leading-6 text-ink">{status?.last_result || '尚无检查记录，可先运行检查读取账户余额。'}</p>
@@ -165,12 +164,12 @@ export function BnbManagement({ sourceId, configurable }: { sourceId: string; co
         <details className="group border-t border-border px-5 sm:px-7">
           <summary className="flex cursor-pointer list-none items-center gap-2 py-4 text-xs font-medium text-muted [&::-webkit-details-marker]:hidden"><SlidersHorizontal size={15} /> 高级参数 <ChevronDown size={15} className="ml-auto transition-transform group-open:rotate-180" /></summary>
           <div className="grid gap-4 pb-6 sm:grid-cols-2 xl:grid-cols-3">
-            {field('futures_sweep_bnb', '合约余额转出上限')}{field('earn_min_bnb', '活期最小申购量')}{field('hedge_tolerance_bnb', '对冲调整阈值')}
+            {field('futures_sweep_bnb', '合约余额转出上限')}{field('earn_min_bnb', '活期最小申购量')}{field('hedge_tolerance_bnb', '对冲调整阈值', 'BNB', '至少 0.5 BNB；与 VIP 补仓阈值独立。')}
             {field('interval_secs', '检查间隔', '秒')}{field('max_conversion_usdt', '单次兑换金额上限', 'USDT')}{field('max_quote_deviation_bps', '最大报价偏差', 'bps')}
-            {field('hedge_min_interval_secs', '对冲最小调整间隔', '秒', '60–3600 秒；检查余额不代表每次都调仓。')}
+            {field('hedge_min_interval_secs', '对冲最小调整间隔', '小时', '1–24 小时；检查余额不代表每次都调仓。', false, 3600)}
           </div>
         </details>
-        {!valid && <Alert tone="warning" className="mx-5 mb-5 sm:mx-7">请检查参数：VIP 门槛 &lt; 补买触发量 &lt; 补足目标量；手续费备用金需满足 1 &lt; 下限 &lt; 目标 &lt; 转出上限。检查间隔为 10–3600 秒，报价偏差不超过 500 bps。</Alert>}
+        {!valid && <Alert tone="warning" className="mx-5 mb-5 sm:mx-7">请检查参数：VIP 门槛 &lt; 补买触发量 &lt; 补足目标量；手续费备用金需满足 1 &lt; 下限 &lt; 目标 &lt; 转出上限。对冲间隔为 1–24 小时，调整阈值至少 0.5 BNB；余额检查间隔为 10–3600 秒，报价偏差不超过 500 bps。</Alert>}
         {configurable && <div className="space-y-5 border-t border-border bg-canvas/40 px-5 py-5 sm:px-7">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div><p className="text-xs font-semibold text-ink">执行模式</p><p className="mt-1 text-[11px] text-subtle">试运行只检查；关闭自动管理会保留当前对冲仓位。</p></div>

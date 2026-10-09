@@ -24,8 +24,8 @@ use tokio::sync::Mutex;
 pub const HEDGE_STRATEGY: &str = "SYSTEM_BNB_RESERVE";
 pub const HEDGE_SYMBOL: &str = "BNBUSDC";
 const LEGACY_HEDGE_SYMBOL: &str = "BNBUSDT";
-const MIGRATION_STEP_BNB: f64 = 0.5;
-const MIGRATION_INTERVAL_SECS: u64 = 60;
+// Adjustment hysteresis must not loosen fill completion or ownership checks.
+const HEDGE_SETTLEMENT_TOLERANCE_BNB: f64 = 0.02;
 
 /// Deployment preflight: only reads exchange balances, without starting web,
 /// Earn workers, database initialization or hedge publication.
@@ -60,6 +60,7 @@ pub struct Settings {
     pub futures_target_bnb: f64,
     pub futures_sweep_bnb: f64,
     pub earn_min_bnb: f64,
+    /// Minimum factual net exposure that triggers an adjustment, not fill tolerance.
     pub hedge_tolerance_bnb: f64,
     pub hedge_min_interval_secs: u64,
     pub interval_secs: u64,
@@ -78,8 +79,8 @@ impl Default for Settings {
             futures_target_bnb: 1.5,
             futures_sweep_bnb: 1.8,
             earn_min_bnb: 0.1,
-            hedge_tolerance_bnb: 0.02,
-            hedge_min_interval_secs: 300,
+            hedge_tolerance_bnb: 0.5,
+            hedge_min_interval_secs: 3600,
             interval_secs: 60,
             max_conversion_usdt: 10_000.,
             max_quote_deviation_bps: 100.,
@@ -87,12 +88,6 @@ impl Default for Settings {
     }
 }
 impl Settings {
-    fn target(&self) -> f64 {
-        self.refill_target_bnb
-    }
-    fn trigger(&self) -> f64 {
-        self.refill_trigger_bnb
-    }
     pub fn validate(&self) -> Result<()> {
         let values = [
             self.required_bnb,
@@ -119,7 +114,7 @@ impl Settings {
             1. < self.futures_trigger_bnb
                 && self.futures_trigger_bnb < self.futures_target_bnb
                 && self.futures_target_bnb < self.futures_sweep_bnb
-                && self.futures_target_bnb < self.target(),
+                && self.futures_target_bnb < self.refill_target_bnb,
             "BNB futures thresholds must satisfy 1 < trigger < target < sweep and target < total target"
         );
         ensure!(
@@ -127,13 +122,15 @@ impl Settings {
             "BNB interval must be between 10 and 3600 seconds"
         );
         ensure!(
-            (60..=3600).contains(&self.hedge_min_interval_secs),
-            "BNB hedge minimum interval must be between 60 and 3600 seconds"
+            (3600..=86_400).contains(&self.hedge_min_interval_secs),
+            "BNB hedge minimum interval must be between 3600 and 86400 seconds"
         );
         ensure!(
-            self.max_quote_deviation_bps <= 500.
-                && self.hedge_tolerance_bnb < self.refill_trigger_bnb - self.required_bnb
-                && self.max_conversion_usdt <= 1_000_000.,
+            self.hedge_tolerance_bnb >= 0.5,
+            "BNB hedge adjustment threshold must be at least 0.5 BNB"
+        );
+        ensure!(
+            self.max_quote_deviation_bps <= 500. && self.max_conversion_usdt <= 1_000_000.,
             "BNB quote, hedge or conversion limits are invalid"
         );
         Ok(())
@@ -487,8 +484,8 @@ impl BnbManager {
             return Ok(format!(
                 "preview: total {:.8} BNB, trigger {:.8}, target {:.8}, buy {:.8}; futures {:.8} → {:.8}; hedge target {:.8}. No mutations or quote acceptance.",
                 b.total(),
-                a.settings.trigger(),
-                a.settings.target(),
+                a.settings.refill_trigger_bnb,
+                a.settings.refill_target_bnb,
                 refill_quantity(&a.settings, a.refill_target, b.total()),
                 b.futures_bnb,
                 a.settings.futures_target_bnb,
@@ -544,13 +541,13 @@ impl BnbManager {
             && b.futures_bnb <= a.settings.futures_trigger_bnb
             && b.total() - fee_refill <= a.settings.required_bnb
         {
-            a.refill_target = Some(a.settings.target());
+            a.refill_target = Some(a.settings.refill_target_bnb);
             self.commit(state, &source.id, a.clone())?;
         }
         let qty = refill_quantity(&a.settings, a.refill_target, b.total());
         if qty > EPS {
             if a.refill_target.is_none() {
-                a.refill_target = Some(a.settings.target());
+                a.refill_target = Some(a.settings.refill_target_bnb);
                 self.commit(state, &source.id, a.clone())?;
             }
             if a.route.is_none() {
@@ -1059,6 +1056,13 @@ impl BnbManager {
                         && *qty <= EPS),
                 "BNB reserved strategy has unexpected ownership/targets"
             );
+            ensure!(
+                current
+                    .targets
+                    .get(LEGACY_HEDGE_SYMBOL)
+                    .is_none_or(|qty| qty.abs() <= EPS),
+                "BNB reserve still has a legacy BNBUSDT target; finish the USDC switch before adjusting"
+            );
         }
         ensure!(
             !snapshot
@@ -1069,7 +1073,7 @@ impl BnbManager {
                         .targets
                         .get(HEDGE_SYMBOL)
                         .is_some_and(|qty| qty.abs() > EPS)),
-            "BNBUSDC is already used by a CTA strategy; reserve migration deferred"
+            "BNBUSDC is already used by a CTA strategy; reserve hedge deferred"
         );
         let viz = VizSnapshotClient::new(5)?;
         let base = source
@@ -1087,7 +1091,7 @@ impl BnbManager {
                 && (r.current_qty.is_some_and(|q| q.abs() > EPS)
                     || r.pending_qty.is_some_and(|q| q.abs() > EPS)
                     || r.live_order_qty.is_some_and(|q| q.abs() > EPS))),
-            "BNBUSDC has other strategy holdings/orders; reserve migration deferred"
+            "BNBUSDC has other strategy holdings/orders; reserve hedge deferred"
         );
         let row = |symbol: &str| {
             live.rows
@@ -1105,37 +1109,34 @@ impl BnbManager {
         ensure!(
             current.is_some_and(|c| c.targets.contains_key(HEDGE_SYMBOL))
                 || b.bnbusdc_position_qty.abs() <= EPS,
-            "BNBUSDC has an existing account position; reserve migration deferred"
+            "BNBUSDC has an existing account position; reserve hedge deferred"
         );
         let published_ms = current
             .map(|c| (c.updated_at_us.max(0) as u64) / 1000)
             .unwrap_or(0)
             .max(account.last_hedge_publish_ms);
         let old_targets = current.map(|c| c.targets.clone()).unwrap_or_default();
-        // Advance a transfer only after both legs of the previous target settled.
+        // Keep the previous execution settled before changing its target.
         let settled = old_targets.iter().all(|(symbol, target)| {
-            hedge_step_settled(*target, row(symbol), account.settings.hedge_tolerance_bnb)
+            hedge_settled(*target, row(symbol), HEDGE_SETTLEMENT_TOLERANCE_BNB)
         });
-        let migrating = old_targets
-            .get(LEGACY_HEDGE_SYMBOL)
-            .is_some_and(|qty| qty.abs() > EPS)
-            || legacy_actual.is_some_and(|qty| qty.abs() > account.settings.hedge_tolerance_bnb);
-        let interval = if migrating {
-            MIGRATION_INTERVAL_SECS
-        } else {
-            account.settings.hedge_min_interval_secs
-        };
-        if !settled || !hedge_due(now_ms(), published_ms, interval) {
+        if !settled
+            || !hedge_due(
+                now_ms(),
+                published_ms,
+                account.settings.hedge_min_interval_secs,
+            )
+        {
             return Ok((actual, legacy_actual));
         }
         ensure!(
-            (b.bnbusdc_position_qty - actual.unwrap_or(0.)).abs()
-                <= account.settings.hedge_tolerance_bnb,
+            (b.bnbusdc_position_qty - actual.unwrap_or(0.)).abs() <= HEDGE_SETTLEMENT_TOLERANCE_BNB,
             "BNBUSDC account and reserved-strategy quantities differ; reconcile before adjusting"
         );
         let targets = next_hedge_targets(
             &old_targets,
             b.total(),
+            actual.unwrap_or(0.) + legacy_actual.unwrap_or(0.),
             account.settings.hedge_tolerance_bnb,
         );
         if old_targets == targets {
@@ -1152,8 +1153,7 @@ impl BnbManager {
             batch_interval_ms: 5_000,
             maker_timeout_ms: 10_000,
             max_maker_requotes: 1,
-            target_tolerance_usdt: (account.settings.hedge_tolerance_bnb * b.bnb_price_usdt)
-                .max(1.),
+            target_tolerance_usdt: (HEDGE_SETTLEMENT_TOLERANCE_BNB * b.bnb_price_usdt).max(1.),
             ..Default::default()
         };
         let positions = targets
@@ -1200,7 +1200,7 @@ fn hedge_close_is_rounding_residual(r: &crate::viz_snapshot::ExecStateRowSnapsho
         && r.pending_qty.is_some_and(|q| q.abs() <= precision)
 }
 
-fn hedge_step_settled(
+fn hedge_settled(
     target: f64,
     row: Option<&crate::viz_snapshot::ExecStateRowSnapshot>,
     tolerance: f64,
@@ -1230,37 +1230,23 @@ fn hedge_due(now: u64, last: u64, interval_secs: u64) -> bool {
 fn next_hedge_targets(
     old: &BTreeMap<String, f64>,
     total: f64,
+    actual: f64,
     tolerance: f64,
 ) -> BTreeMap<String, f64> {
-    let legacy = old.get(LEGACY_HEDGE_SYMBOL).copied().unwrap_or(0.);
-    if legacy < -EPS {
-        // Keep the combined short at the reserve quantity; each leg changes by
-        // at most half a BNB for a stable reserve. The next step waits for fills.
-        let next_legacy = (legacy + MIGRATION_STEP_BNB).min(0.).max(-total);
-        return BTreeMap::from([
-            (LEGACY_HEDGE_SYMBOL.into(), next_legacy),
-            (HEDGE_SYMBOL.into(), (-total - next_legacy).min(0.)),
-        ]);
-    }
-    if old
-        .get(HEDGE_SYMBOL)
-        .is_some_and(|qty| (qty + total).abs() <= tolerance)
-    {
+    if (actual + total).abs() < tolerance {
         return old.clone();
     }
-    let mut targets = BTreeMap::from([(HEDGE_SYMBOL.into(), -total)]);
-    if old.contains_key(LEGACY_HEDGE_SYMBOL) {
-        // Retain an explicit zero so restart cannot resurrect the old hedge.
-        targets.insert(LEGACY_HEDGE_SYMBOL.into(), 0.);
-    }
+    // Preserve the old explicit zero; only the dedicated USDC target changes.
+    let mut targets = old.clone();
+    targets.insert(HEDGE_SYMBOL.into(), -total);
     targets
 }
 
 fn refill_quantity(settings: &Settings, latched: Option<f64>, total: f64) -> f64 {
     if let Some(target) = latched {
-        (target.max(settings.target()) - total).max(0.)
-    } else if total <= settings.trigger() + EPS {
-        (settings.target() - total).max(0.)
+        (target.max(settings.refill_target_bnb) - total).max(0.)
+    } else if total <= settings.refill_trigger_bnb + EPS {
+        (settings.refill_target_bnb - total).max(0.)
     } else {
         0.
     }
@@ -1497,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn hedge_transfer_waits_for_both_legs_and_fresh_target_without_live_orders() {
+    fn hedge_adjustment_waits_for_completed_target_without_live_orders() {
         let row = crate::viz_snapshot::ExecStateRowSnapshot {
             strategy_name: HEDGE_STRATEGY.into(),
             symbol: HEDGE_SYMBOL.into(),
@@ -1514,15 +1500,15 @@ mod tests {
             completion_reason: "target_reached".into(),
             account_position_qty: Some(-0.5),
         };
-        assert!(hedge_step_settled(-0.5, Some(&row), 0.02));
+        assert!(hedge_settled(-0.5, Some(&row), 0.02));
         let dust = crate::viz_snapshot::ExecStateRowSnapshot {
             current_qty: Some(-0.509),
             pending_qty: Some(0.009),
             completion_reason: "target_tolerance".into(),
             ..row.clone()
         };
-        assert!(hedge_step_settled(-0.5, Some(&dust), 0.02));
-        assert!(!hedge_step_settled(
+        assert!(hedge_settled(-0.5, Some(&dust), 0.02));
+        assert!(!hedge_settled(
             -0.5,
             Some(&crate::viz_snapshot::ExecStateRowSnapshot {
                 live_order_qty: Some(0.009),
@@ -1530,9 +1516,9 @@ mod tests {
             }),
             0.02
         ));
-        assert!(!hedge_step_settled(-0.5, None, 0.02));
-        assert!(hedge_step_settled(0., None, 0.02));
-        assert!(!hedge_step_settled(
+        assert!(!hedge_settled(-0.5, None, 0.02));
+        assert!(hedge_settled(0., None, 0.02));
+        assert!(!hedge_settled(
             0.,
             Some(&crate::viz_snapshot::ExecStateRowSnapshot {
                 target_qty: Some(0.),
@@ -1569,39 +1555,39 @@ mod tests {
                 ..row
             },
         ] {
-            assert!(!hedge_step_settled(-0.5, Some(&incomplete), 0.02));
+            assert!(!hedge_settled(-0.5, Some(&incomplete), 0.02));
         }
     }
 
     #[test]
-    fn hedge_migration_keeps_total_and_limits_each_transfer() {
-        let mut old = BTreeMap::from([(LEGACY_HEDGE_SYMBOL.into(), -5.8)]);
-        for _ in 0..12 {
-            let next = next_hedge_targets(&old, 5.8, 0.02);
-            assert!((next.values().sum::<f64>() + 5.8).abs() < EPS);
-            assert!(next[LEGACY_HEDGE_SYMBOL] <= 0.);
-            assert!(
-                (next[LEGACY_HEDGE_SYMBOL] - old[LEGACY_HEDGE_SYMBOL]).abs()
-                    <= MIGRATION_STEP_BNB + EPS
-            );
-            old = next;
-        }
-        assert_eq!(old[LEGACY_HEDGE_SYMBOL], 0.);
-        assert!((old[HEDGE_SYMBOL] + 5.8).abs() < EPS);
-        assert_eq!(next_hedge_targets(&old, 5.79, 0.02), old);
-        assert!((next_hedge_targets(&old, 6., 0.02)[HEDGE_SYMBOL] + 6.).abs() < EPS);
+    fn hedge_adjustment_uses_actual_exposure_and_preserves_legacy_zero() {
+        let old = BTreeMap::from([
+            (LEGACY_HEDGE_SYMBOL.into(), 0.),
+            (HEDGE_SYMBOL.into(), -5.5),
+        ]);
+        assert_eq!(next_hedge_targets(&old, 5.99, -5.5, 0.5), old);
+        let next = next_hedge_targets(&old, 6., -5.5, 0.5);
+        assert_eq!(next[HEDGE_SYMBOL], -6.);
+        assert_eq!(next[LEGACY_HEDGE_SYMBOL], 0.);
+        // A completed fill tail may put factual exposure over the threshold
+        // even when the difference against the published target is smaller.
+        assert_eq!(
+            next_hedge_targets(&old, 5.99, -5.49, 0.5)[HEDGE_SYMBOL],
+            -5.99
+        );
+        assert_eq!(next_hedge_targets(&old, 5., -5.5, 0.5)[HEDGE_SYMBOL], -5.);
     }
 
     #[test]
     fn hedge_cooldown_survives_clock_rollback_and_legacy_settings() {
-        assert!(hedge_due(1, 0, 300));
-        assert!(!hedge_due(299_999, 1, 300));
-        assert!(!hedge_due(1, 300_000, 300));
-        assert!(hedge_due(300_001, 1, 300));
+        assert!(hedge_due(1, 0, 3600));
+        assert!(!hedge_due(3_600_000, 1, 3600));
+        assert!(!hedge_due(1, 3_600_000, 3600));
+        assert!(hedge_due(3_600_001, 1, 3600));
         let settings: Settings = serde_json::from_value(json!({"interval_secs":60})).unwrap();
-        assert_eq!(settings.hedge_min_interval_secs, 300);
+        assert_eq!(settings.hedge_min_interval_secs, 3600);
         let invalid = Settings {
-            hedge_min_interval_secs: 59,
+            hedge_min_interval_secs: 3599,
             ..settings
         };
         assert!(invalid.validate().is_err());
@@ -1623,6 +1609,10 @@ mod tests {
         assert!(custom.validate().is_ok());
         assert!((refill_quantity(&custom, None, 25.4) - 1.6).abs() < EPS);
         for bad in [
+            Settings {
+                hedge_tolerance_bnb: 0.49,
+                ..s.clone()
+            },
             Settings {
                 refill_trigger_bnb: 5.,
                 ..s.clone()
