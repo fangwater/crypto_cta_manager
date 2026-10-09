@@ -18,6 +18,7 @@ export const routes = {
       : '/manager/acquisition-cost/',
   configPosition: '/manager/config/position/',
   configOrder: '/manager/config/order/',
+  virtualAccounts: '/manager/virtual/',
   autoEarn: '/manager/auto-earn/',
   configBindings: (sourceId?: string) =>
     sourceId
@@ -27,7 +28,7 @@ export const routes = {
   admin: '/manager/admin/',
 } as const
 
-export type ConfigSection = 'position' | 'order' | 'bindings'
+export type ConfigSection = 'position' | 'order' | 'bindings' | 'virtual'
 
 export const configNav: Array<{
   id: ConfigSection
@@ -47,6 +48,7 @@ export const configNav: Array<{
     label: '下单策略',
     hint: '执行算法参数模板',
   },
+  { id: 'virtual', href: routes.virtualAccounts, label: 'Virtual 账户', hint: '管理供实际账户跟随的策略组合' },
   {
     id: 'bindings',
     href: routes.configBindings(),

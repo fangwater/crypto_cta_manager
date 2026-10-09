@@ -51,6 +51,8 @@ pub struct AccountStudio {
     /// Fee rate frozen onto newly staged theoretical TWAP executions.
     pub theoretical_twap_fee_rate: f64,
     pub bindings: Vec<AccountBinding>,
+    pub configuration: crate::virtual_accounts::AccountConfiguration,
+    pub pending_publishes: Vec<crate::virtual_accounts::PendingPublish>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +247,8 @@ impl AccountStudio {
             taker_fee_rate: fee_rates.taker,
             theoretical_twap_fee_rate,
             bindings,
+            configuration: Default::default(),
+            pending_publishes: Vec::new(),
         }
     }
 }
@@ -991,12 +995,15 @@ pub async fn load_account_studio(pool: &PgPool, source_id: &str) -> Result<Accou
             .ok_or_else(|| {
                 anyhow::anyhow!("source {source_id} is not registered in cta_order_sources")
             })?;
-    Ok(AccountStudio::from_parts(
+    let mut studio = AccountStudio::from_parts(
         source_id.to_string(),
         fee_rates,
         theoretical_twap_fee_rate,
         bindings,
-    ))
+    );
+    studio.configuration = crate::virtual_accounts::configuration(pool, source_id).await?;
+    studio.pending_publishes = crate::virtual_accounts::pending(pool, source_id).await?;
+    Ok(studio)
 }
 
 pub async fn save_symbol_contract_leverage(
@@ -1062,6 +1069,7 @@ pub async fn save_binding(
     request: &SaveBindingRequest,
     updated_at_us: i64,
 ) -> Result<AccountStudio> {
+    crate::virtual_accounts::require_independent(pool, source_id).await?;
     validate_strategy_name(&request.binding_name).map_err(|error| anyhow::anyhow!(error))?;
     validate_strategy_name(&request.position_strategy_name)
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -1122,6 +1130,7 @@ pub async fn save_binding_shares(
     request: &SaveBindingSharesRequest,
     updated_at_us: i64,
 ) -> Result<AccountStudio> {
+    crate::virtual_accounts::require_independent(pool, source_id).await?;
     validate_strategy_name(binding_name).map_err(|error| anyhow::anyhow!(error))?;
     validate_nonnegative_multiplier(request.shares, "shares")
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -1146,6 +1155,7 @@ pub async fn save_binding_shares(
 }
 
 pub async fn delete_binding(pool: &PgPool, source_id: &str, binding_name: &str) -> Result<bool> {
+    crate::virtual_accounts::require_independent(pool, source_id).await?;
     let result = sqlx::query(
         r#"
         DELETE FROM cta_account_strategy_bindings
@@ -1275,7 +1285,7 @@ async fn load_symbol_order_parameters(
     Ok(resolved)
 }
 
-async fn list_bindings(pool: &PgPool, source_id: &str) -> Result<Vec<AccountBinding>> {
+pub(crate) async fn list_bindings(pool: &PgPool, source_id: &str) -> Result<Vec<AccountBinding>> {
     let rows = sqlx::query(
         r#"
         SELECT

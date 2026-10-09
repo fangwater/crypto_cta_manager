@@ -19,6 +19,7 @@ import { WorkspacePage } from './pages/WorkspacePage'
 import { AccountOverviewPage } from './pages/AccountOverviewPage'
 import { PositionStrategyPage } from './pages/config/PositionStrategyPage'
 import { OrderStrategyPage } from './pages/config/OrderStrategyPage'
+import { VirtualAccountsPage } from './pages/VirtualAccountsPage'
 import { AccountBindingsPage } from './pages/config/AccountBindingsPage'
 import { DocsPage } from './pages/DocsPage'
 import { AcquisitionCostPage } from './pages/AcquisitionCostPage'
@@ -172,6 +173,11 @@ function AuthenticatedApp() {
   }
   if (path === '/manager/config/position') return <PositionStrategyPage />
   if (path === '/manager/config/order') return <OrderStrategyPage />
+  if (path === '/manager/virtual') return <VirtualAccountsPage />
+  if (path === '/manager/config/virtual') {
+    window.location.replace(routes.virtualAccounts)
+    return null
+  }
   if (path === '/manager/config/bindings') return <AccountBindingsPage />
   if (path === '/manager/docs') return <DocsPage />
   if (path === '/manager/acquisition-cost') return <AcquisitionCostPage />

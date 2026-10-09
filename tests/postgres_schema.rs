@@ -180,3 +180,260 @@ async fn manager_operations_ignore_old_migration_history() -> Result<()> {
     );
     database.remove().await
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -> Result<()> {
+    use crypto_cta_manager::order_config::OrderParameters;
+    use crypto_cta_manager::strategy_catalog::{
+        self, SaveBindingRequest, SaveOrderStrategyRequest,
+    };
+    use crypto_cta_manager::virtual_accounts::{
+        self, AccountConfiguration, SaveVirtualAccount, VirtualBinding,
+    };
+    let db = TestDatabase::create().await?;
+    postgres::initialize(&db.pool).await?;
+    seed_business_data(&db.pool).await?;
+    sqlx::raw_sql("INSERT INTO cta_position_strategies (strategy_name,updated_at_us) VALUES ('second',1), ('third',1); INSERT INTO cta_order_sources (source_id,account_label,venue_label,rocksdb_path) VALUES ('other-source','other','binance-futures','/tmp/other-exec')")
+        .execute(&db.pool).await?;
+    for name in ["order-a", "order-b"] {
+        strategy_catalog::upsert_order_strategy(
+            &db.pool,
+            &SaveOrderStrategyRequest {
+                strategy_name: name.into(),
+                order_parameters: OrderParameters::default(),
+            },
+            1,
+        )
+        .await?;
+    }
+    let independent = SaveBindingRequest {
+        binding_name: "second".into(),
+        position_strategy_name: "second".into(),
+        order_strategy_name: "order-a".into(),
+        shares: 9.0,
+    };
+    strategy_catalog::save_binding(&db.pool, "test-source", &independent, 1).await?;
+    let template = |shares, order: &str| SaveVirtualAccount {
+        name: "Model".into(),
+        bindings: vec![VirtualBinding {
+            binding_name: "test-strategy".into(),
+            position_strategy_name: "test-strategy".into(),
+            order_strategy_name: order.into(),
+            shares,
+        }],
+    };
+    virtual_accounts::save(&db.pool, "model", &template(2.0, "order-a"), 2).await?;
+    // Virtual identity never enters the Exec account catalog.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM cta_order_sources WHERE source_id = 'model'"
+        )
+        .fetch_one(&db.pool)
+        .await?,
+        0
+    );
+    for (source, multiplier) in [("test-source", 3.0), ("other-source", 0.5)] {
+        virtual_accounts::set_configuration(
+            &db.pool,
+            source,
+            &AccountConfiguration::Follow {
+                virtual_id: "model".into(),
+                multiplier,
+            },
+            3,
+        )
+        .await?;
+    }
+    let virtual_list = virtual_accounts::list(&db.pool).await?;
+    assert_eq!(virtual_list[0].followers.len(), 2);
+    assert!(
+        virtual_list[0]
+            .followers
+            .iter()
+            .any(|f| f.source_id == "test-source"
+                && f.multiplier == 3.0
+                && f.pending_publishes.len() == 2)
+    );
+    let studio = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
+    assert_eq!(
+        studio
+            .bindings
+            .iter()
+            .find(|b| b.binding_name == "test-strategy")
+            .unwrap()
+            .shares,
+        6.0
+    );
+    assert_eq!(
+        studio
+            .bindings
+            .iter()
+            .find(|b| b.binding_name == "second")
+            .unwrap()
+            .shares,
+        0.0
+    );
+    assert_eq!(studio.pending_publishes.len(), 2);
+    sqlx::query("DELETE FROM cta_follow_publish_queue WHERE source_id = 'test-source'")
+        .execute(&db.pool)
+        .await?;
+    virtual_accounts::set_configuration(
+        &db.pool,
+        "test-source",
+        &AccountConfiguration::Follow {
+            virtual_id: "model".into(),
+            multiplier: 3.0,
+        },
+        3,
+    )
+    .await?;
+    // Explicit follow application republishes even unchanged desired bindings
+    // and retained zero stops, repairing any pre-existing runtime divergence.
+    assert_eq!(
+        virtual_accounts::pending(&db.pool, "test-source")
+            .await?
+            .len(),
+        2
+    );
+    assert!(
+        strategy_catalog::save_binding(&db.pool, "test-source", &independent, 4)
+            .await
+            .is_err()
+    );
+    assert!(virtual_accounts::delete(&db.pool, "model").await.is_err());
+    // Persist failure status, then read it through a newly connected pool.
+    sqlx::query("UPDATE cta_follow_publish_queue SET archived = true, error = 'runtime unavailable' WHERE source_id = 'test-source' AND binding_name = 'test-strategy'").execute(&db.pool).await?;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*db.pool.connect_options()).clone())
+        .await?;
+    assert!(
+        virtual_accounts::pending(&restarted_pool, "test-source")
+            .await?
+            .iter()
+            .any(|p| p.error.as_deref() == Some("runtime unavailable"))
+    );
+    restarted_pool.close().await;
+    virtual_accounts::save(&db.pool, "model", &template(4.0, "order-b"), 5).await?;
+    let studio = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
+    let active = studio
+        .bindings
+        .iter()
+        .find(|b| b.binding_name == "test-strategy")
+        .unwrap();
+    assert_eq!(active.shares, 12.0);
+    assert_eq!(active.order_strategy_name, "order-b");
+    assert_eq!(
+        strategy_catalog::load_account_studio(&db.pool, "other-source")
+            .await?
+            .bindings[0]
+            .shares,
+        2.0
+    );
+    assert!(!sqlx::query_scalar::<_, bool>("SELECT archived FROM cta_follow_publish_queue WHERE source_id = 'test-source' AND binding_name = 'test-strategy'").fetch_one(&db.pool).await?);
+    // An incompatible replacement must roll back every follower and the template.
+    let incompatible = SaveVirtualAccount {
+        name: "bad".into(),
+        bindings: vec![VirtualBinding {
+            binding_name: "test-strategy".into(),
+            position_strategy_name: "third".into(),
+            order_strategy_name: "order-a".into(),
+            shares: 7.0,
+        }],
+    };
+    assert!(
+        virtual_accounts::save(&db.pool, "model", &incompatible, 6)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        virtual_accounts::list(&db.pool).await?[0].bindings[0].position_strategy_name,
+        "test-strategy"
+    );
+    assert_eq!(
+        strategy_catalog::load_account_studio(&db.pool, "test-source")
+            .await?
+            .bindings
+            .iter()
+            .find(|b| b.binding_name == "test-strategy")
+            .unwrap()
+            .shares,
+        12.0
+    );
+    virtual_accounts::set_configuration(
+        &db.pool,
+        "test-source",
+        &AccountConfiguration::Follow {
+            virtual_id: "model".into(),
+            multiplier: 0.0,
+        },
+        7,
+    )
+    .await?;
+    assert!(
+        strategy_catalog::load_account_studio(&db.pool, "test-source")
+            .await?
+            .bindings
+            .iter()
+            .all(|b| b.shares == 0.0)
+    );
+    virtual_accounts::set_configuration(
+        &db.pool,
+        "test-source",
+        &AccountConfiguration::Independent,
+        8,
+    )
+    .await?;
+    assert!(matches!(
+        virtual_accounts::configuration(&db.pool, "test-source").await?,
+        AccountConfiguration::Independent
+    ));
+    // Pending stops cannot be deleted before delivery; detaching preserves them.
+    assert!(
+        strategy_catalog::delete_binding(&db.pool, "test-source", "test-strategy")
+            .await
+            .is_err()
+    );
+    virtual_accounts::save(
+        &db.pool,
+        "model",
+        &SaveVirtualAccount {
+            name: "Model".into(),
+            bindings: vec![],
+        },
+        9,
+    )
+    .await?;
+    assert_eq!(
+        strategy_catalog::load_account_studio(&db.pool, "other-source")
+            .await?
+            .bindings[0]
+            .shares,
+        0.0
+    );
+    virtual_accounts::set_configuration(
+        &db.pool,
+        "other-source",
+        &AccountConfiguration::Independent,
+        10,
+    )
+    .await?;
+    assert!(virtual_accounts::delete(&db.pool, "model").await?);
+    // Acknowledging deliveries makes the retained independent bindings editable.
+    sqlx::query("DELETE FROM cta_follow_publish_queue")
+        .execute(&db.pool)
+        .await?;
+    strategy_catalog::save_binding(&db.pool, "test-source", &independent, 11).await?;
+    assert_eq!(
+        strategy_catalog::load_account_studio(&db.pool, "test-source")
+            .await?
+            .bindings
+            .iter()
+            .find(|b| b.binding_name == "second")
+            .unwrap()
+            .shares,
+        9.0
+    );
+    db.remove().await
+}

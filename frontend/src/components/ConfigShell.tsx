@@ -9,6 +9,7 @@ const sectionIcons = {
   position: Layers3,
   order: SlidersHorizontal,
   bindings: Link2,
+  virtual: Layers3,
 } as const
 
 export function ConfigShell({

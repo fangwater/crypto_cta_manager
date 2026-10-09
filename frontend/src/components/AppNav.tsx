@@ -1,10 +1,10 @@
-import { Activity, BookOpen, LayoutDashboard, LogOut, Settings, Shield, Scale, PiggyBank } from 'lucide-react'
+import { Activity, BookOpen, LayoutDashboard, LogOut, Settings, Shield, Scale, PiggyBank, Layers3 } from 'lucide-react'
 import { useLayoutEffect, useRef } from 'react'
 import { useAuth } from './AuthGate'
 import { cn } from '../lib/cn'
 import { readSourceId, routes } from '../lib/routes'
 
-export type AppNavId = 'workspace' | 'manager' | 'acquisition-cost' | 'config' | 'auto-earn' | 'docs' | 'admin'
+export type AppNavId = 'workspace' | 'manager' | 'acquisition-cost' | 'config' | 'virtual' | 'auto-earn' | 'docs' | 'admin'
 
 const links: Array<{
   id: AppNavId
@@ -16,6 +16,7 @@ const links: Array<{
   { id: 'manager', href: '/manager/', label: '净值', icon: Activity },
   { id: 'acquisition-cost', href: '/manager/acquisition-cost/', label: '成本', icon: Scale },
   { id: 'config', href: '/manager/config/position/', label: '策略', icon: Settings },
+  { id: 'virtual', href: routes.virtualAccounts, label: 'Virtual', icon: Layers3 },
   { id: 'auto-earn', href: '/manager/auto-earn/', label: '自动理财', icon: PiggyBank },
   { id: 'docs', href: '/manager/docs/', label: '文档', icon: BookOpen },
   { id: 'admin', href: '/manager/admin/', label: '权限', icon: Shield },
@@ -50,6 +51,7 @@ export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: 
             key={link.id}
             href={link.id === 'manager' ? routes.nav(sourceId) : link.id === 'acquisition-cost' ? routes.executionCost(sourceId) : link.href}
             title={link.label}
+            aria-label={link.label}
             aria-current={isActive ? 'page' : undefined}
             className={cn(
               'inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
@@ -59,7 +61,7 @@ export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: 
             )}
           >
             <Icon size={15} strokeWidth={2.1} />
-            <span>{link.label}</span>
+            <span className={mobile ? undefined : 'hidden xl:inline'}>{link.label}</span>
           </a>
         )
         })}

@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::virtual_accounts::{self, AccountConfiguration, SaveVirtualAccount};
 use anyhow::{Context, Result};
 use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_ipc::{
@@ -19,6 +20,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPool;
+use sqlx::{Connection, Row};
 use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
@@ -198,6 +200,8 @@ struct DashboardBuild {
 struct WebState {
     cache: Arc<RwLock<CacheState>>,
     dashboard_refresh: Arc<tokio::sync::Mutex<()>>,
+    configuration_lock: Arc<tokio::sync::Mutex<()>>,
+    configuration_notify: Arc<tokio::sync::Notify>,
     nav_history_store: Arc<std::sync::Mutex<nav::NavHistoryStore>>,
     config: Arc<AppConfig>,
     pool: PgPool,
@@ -460,6 +464,26 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .iter()
         .map(|source| source.id.clone())
         .collect::<BTreeSet<_>>();
+    let state = WebState {
+        cache,
+        dashboard_refresh,
+        configuration_lock: Arc::new(tokio::sync::Mutex::new(())),
+        configuration_notify: Arc::new(tokio::sync::Notify::new()),
+        nav_history_store,
+        config: Arc::new(config),
+        pool: pool.clone(),
+        exec_config,
+        redis_runtime,
+        reload_notify,
+        live_equity,
+        position_archive,
+        theoretical_targets,
+        klines,
+        viz_snapshot,
+        refresh_interval_secs,
+        auto_earn,
+    };
+
     let app = Router::new()
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/register", post(auth_register))
@@ -582,6 +606,15 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             "/api/catalog/accounts/{source_id}/contract-leverage",
             get(get_account_symbol_contract_leverage).put(save_account_symbol_contract_leverage),
         )
+        .route("/api/catalog/virtual-accounts", get(list_virtual_accounts))
+        .route(
+            "/api/catalog/virtual-accounts/{virtual_id}",
+            put(save_virtual_account).delete(delete_virtual_account),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/configuration",
+            put(save_account_configuration),
+        )
         .route(
             "/api/catalog/accounts/{source_id}/bindings",
             post(save_account_binding),
@@ -598,23 +631,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             "/api/catalog/accounts/{source_id}/bindings/{binding_name}/publish",
             post(publish_account_binding),
         )
-        .with_state(WebState {
-            cache,
-            dashboard_refresh,
-            nav_history_store,
-            config: Arc::new(config),
-            pool: pool.clone(),
-            exec_config,
-            redis_runtime,
-            reload_notify,
-            live_equity,
-            position_archive,
-            theoretical_targets,
-            klines,
-            viz_snapshot,
-            refresh_interval_secs,
-            auto_earn,
-        })
+        .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             AuthMiddlewareState {
                 pool: pool.clone(),
@@ -626,6 +643,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind CTA web API to {bind}"))?;
+    spawn_configuration_publisher(state);
     info!(%bind, refresh_interval_secs, "CTA web API started");
 
     axum::serve(
@@ -1942,6 +1960,16 @@ async fn save_order_parameters(
     headers: HeaderMap,
     Json(request): Json<SaveOrderParametersRequest>,
 ) -> Result<Response, ApiError> {
+    let _guard = state.configuration_lock.lock().await;
+    if let Err(error) = virtual_accounts::require_independent(&state.pool, &source_id).await {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        )
+            .into_response());
+    }
     if let Err(message) = validate_strategy_name(&request.strategy_name) {
         return Ok(bad_request(message));
     }
@@ -2106,6 +2134,7 @@ async fn save_position_strategy(
     headers: HeaderMap,
     Json(mut request): Json<SavePositionStrategyRequest>,
 ) -> Result<Response, ApiError> {
+    let _configuration_guard = state.configuration_lock.lock().await;
     if let Err(message) = request.normalize_symbols() {
         return Ok(bad_request(message));
     }
@@ -2204,6 +2233,7 @@ async fn delete_position_strategy(
     State(state): State<WebState>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
+    let _configuration_guard = state.configuration_lock.lock().await;
     match strategy_catalog::delete_position_strategy(&state.pool, &name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("position strategy was not found")),
@@ -2434,6 +2464,7 @@ async fn save_order_strategy(
     headers: HeaderMap,
     Json(request): Json<SaveOrderStrategyRequest>,
 ) -> Result<Response, ApiError> {
+    let _configuration_guard = state.configuration_lock.lock().await;
     if let Err(message) = require_experimental_algorithm_token(
         &headers,
         request.order_parameters.algorithm.is_experimental(),
@@ -2441,7 +2472,11 @@ async fn save_order_strategy(
         return Ok(forbidden(message));
     }
     match strategy_catalog::upsert_order_strategy(&state.pool, &request, unix_now_us()).await {
-        Ok(saved) => Ok((NO_STORE, Json(saved)).into_response()),
+        Ok(saved) => {
+            virtual_accounts::enqueue_order_followers(&state.pool, &request.strategy_name).await?;
+            state.configuration_notify.notify_one();
+            Ok((NO_STORE, Json(saved)).into_response())
+        }
         Err(error) => Ok(catalog_error(error)),
     }
 }
@@ -2450,6 +2485,7 @@ async fn delete_order_strategy(
     State(state): State<WebState>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
+    let _configuration_guard = state.configuration_lock.lock().await;
     match strategy_catalog::delete_order_strategy(&state.pool, &name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("order strategy was not found")),
@@ -3042,6 +3078,7 @@ async fn save_account_binding(
     headers: HeaderMap,
     Json(request): Json<SaveBindingRequest>,
 ) -> Result<Response, ApiError> {
+    let _configuration_guard = state.configuration_lock.lock().await;
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
         Err(response) => return Ok(response),
@@ -3131,6 +3168,7 @@ async fn save_account_binding_shares(
     headers: HeaderMap,
     Json(request): Json<SaveBindingSharesRequest>,
 ) -> Result<Response, ApiError> {
+    let _configuration_guard = state.configuration_lock.lock().await;
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
         Err(response) => return Ok(response),
@@ -3189,6 +3227,7 @@ async fn delete_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
+    let _configuration_guard = state.configuration_lock.lock().await;
     match strategy_catalog::delete_binding(&state.pool, &source_id, &binding_name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("binding was not found")),
@@ -3200,6 +3239,21 @@ async fn publish_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
+    let _configuration_guard = state.configuration_lock.lock().await;
+    if !virtual_accounts::pending(&state.pool, &source_id)
+        .await?
+        .is_empty()
+    {
+        state.configuration_notify.notify_one();
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "configuration synchronization is pending; automatic retry scheduled"
+                    .to_string(),
+            }),
+        )
+            .into_response());
+    }
     let shares = strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name)
         .await?
         .map(|loaded| loaded.3);
@@ -3589,7 +3643,12 @@ async fn load_factual_position(
 
 fn catalog_error(error: anyhow::Error) -> Response {
     let message = error.to_string();
-    let status = if message.contains("exceeds")
+    let status = if message.contains("following a virtual")
+        || message.contains("still pending")
+        || message.contains("still has followers")
+        || message.contains("duplicate binding")
+        || message.contains("must contain")
+        || message.contains("exceeds")
         || message.contains("cannot")
         || message.contains("unknown")
         || message.contains("invalid")
@@ -4963,6 +5022,46 @@ mod tests {
         };
         let grants_path = "/api/catalog/position-strategies/sk/grants";
         let account_path = "/api/catalog/accounts/binance_exec_trade01/bindings";
+        assert_eq!(
+            request_permission_error(
+                false,
+                false,
+                None,
+                "/api/catalog/virtual-accounts/model",
+                &access
+            ),
+            Some("administrator permission required")
+        );
+        assert_eq!(
+            request_permission_error(
+                true,
+                false,
+                None,
+                "/api/catalog/virtual-accounts/model",
+                &access
+            ),
+            None
+        );
+        assert_eq!(
+            request_permission_error(
+                false,
+                false,
+                source_id_from_path("/api/catalog/accounts/binance_exec_trade01/configuration"),
+                "/api/catalog/accounts/binance_exec_trade01/configuration",
+                &access
+            ),
+            None
+        );
+        assert_eq!(
+            request_permission_error(
+                false,
+                false,
+                source_id_from_path("/api/catalog/accounts/binance_exec_trade02/configuration"),
+                "/api/catalog/accounts/binance_exec_trade02/configuration",
+                &access
+            ),
+            Some("you are not authorized to configure this account")
+        );
         // Reads need the view tier; writes need the configure tier.
         assert_eq!(
             request_permission_error(false, true, None, "/api/timeline", &access),
@@ -5060,4 +5159,298 @@ mod tests {
         assert!(validate_exec_order_rate_limit("limit", -1).is_err());
         assert!(validate_exec_order_rate_limit("limit", i64::from(i32::MAX) + 1).is_err());
     }
+}
+
+async fn list_virtual_accounts(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Extension(visible): Extension<VisibleSources>,
+) -> Result<Response, ApiError> {
+    let _guard = state.configuration_lock.lock().await;
+    let mut accounts = virtual_accounts::list(&state.pool).await?;
+    if !user.is_admin() {
+        let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
+        accounts.retain(|account| {
+            account.bindings.iter().all(|binding| {
+                visibility
+                    .iter()
+                    .find(|v| v.strategy_name == binding.position_strategy_name)
+                    .is_some_and(|v| v.user_can_view(user.user_id))
+            })
+        });
+    }
+    for account in &mut accounts {
+        account
+            .followers
+            .retain(|follower| visible.0.contains(&follower.source_id));
+    }
+    Ok((NO_STORE, Json(accounts)).into_response())
+}
+
+async fn validate_virtual_activation(
+    state: &WebState,
+    headers: &HeaderMap,
+    source_id: &str,
+    bindings: &[virtual_accounts::VirtualBinding],
+    multiplier: f64,
+) -> Result<(), String> {
+    let source = resolve_publish_source(&state.config, source_id).map_err(|e| e.message)?;
+    virtual_accounts::validate_source_bindings(&state.pool, &source.venue, bindings)
+        .await
+        .map_err(|e| e.to_string())?;
+    let effective =
+        virtual_accounts::effective_bindings(bindings, multiplier).map_err(|e| e.to_string())?;
+    let current = strategy_catalog::list_bindings(&state.pool, source_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let orders = strategy_catalog::list_order_strategies(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let positions = strategy_catalog::list_position_strategies(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    for b in effective {
+        if let Some(position) = positions
+            .iter()
+            .find(|p| p.strategy_name == b.position_strategy_name)
+        {
+            strategy_catalog::validate_targets(&strategy_catalog::scale_targets(
+                &position.targets,
+                b.shares,
+            ))?;
+        }
+        let existing = current
+            .iter()
+            .find(|old| old.binding_name == b.binding_name);
+        let selected = orders
+            .iter()
+            .find(|o| o.strategy_name == b.order_strategy_name);
+        let requires = experimental_binding_change_requires_token(
+            selected.map(|o| o.order_parameters.algorithm),
+            &b.order_strategy_name,
+            existing.map(|o| o.order_strategy_name.as_str()),
+            existing.map(|o| o.shares),
+            b.shares,
+        );
+        require_experimental_algorithm_token(headers, requires).map_err(str::to_string)?;
+    }
+    Ok(())
+}
+
+async fn save_virtual_account(
+    State(state): State<WebState>,
+    Path(virtual_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SaveVirtualAccount>,
+) -> Result<Response, ApiError> {
+    let _guard = state.configuration_lock.lock().await;
+    // Also validate catalogs when the virtual account has no real followers.
+    let positions = strategy_catalog::list_position_strategies(&state.pool).await?;
+    let orders = strategy_catalog::list_order_strategies(&state.pool).await?;
+    if let Err(error) = virtual_accounts::effective_bindings(&request.bindings, 1.0) {
+        return Ok(catalog_error(error));
+    }
+    for b in &request.bindings {
+        if !positions
+            .iter()
+            .any(|p| p.strategy_name == b.position_strategy_name)
+            || !orders
+                .iter()
+                .any(|o| o.strategy_name == b.order_strategy_name)
+        {
+            return Ok(bad_request(format!(
+                "unknown strategy in binding {}",
+                b.binding_name
+            )));
+        }
+    }
+    for source_id in virtual_accounts::followers(&state.pool, &virtual_id).await? {
+        let AccountConfiguration::Follow { multiplier, .. } =
+            virtual_accounts::configuration(&state.pool, &source_id).await?
+        else {
+            continue;
+        };
+        if let Err(message) =
+            validate_virtual_activation(&state, &headers, &source_id, &request.bindings, multiplier)
+                .await
+        {
+            return Ok(bad_request(format!("source {source_id}: {message}")));
+        }
+    }
+    match virtual_accounts::save(&state.pool, &virtual_id, &request, unix_now_us()).await {
+        Ok(()) => {
+            state.configuration_notify.notify_one();
+            let saved = virtual_accounts::list(&state.pool)
+                .await?
+                .into_iter()
+                .find(|a| a.virtual_id == virtual_id);
+            Ok((NO_STORE, Json(saved)).into_response())
+        }
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn delete_virtual_account(
+    State(state): State<WebState>,
+    Path(virtual_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let _guard = state.configuration_lock.lock().await;
+    match virtual_accounts::delete(&state.pool, &virtual_id).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Ok(false) => Ok(not_found("virtual account was not found")),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn save_account_configuration(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Path(source_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<AccountConfiguration>,
+) -> Result<Response, ApiError> {
+    let _guard = state.configuration_lock.lock().await;
+    if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+        return Ok(response);
+    }
+    if let AccountConfiguration::Follow {
+        virtual_id,
+        multiplier,
+    } = &request
+    {
+        let Some(account) = virtual_accounts::list(&state.pool)
+            .await?
+            .into_iter()
+            .find(|a| a.virtual_id == *virtual_id)
+        else {
+            return Ok(not_found("virtual account was not found"));
+        };
+        for binding in &account.bindings {
+            if !user.is_admin()
+                && !user_can_configure_position_strategy(
+                    &state.pool,
+                    &user,
+                    &binding.position_strategy_name,
+                )
+                .await?
+            {
+                return Ok(forbidden(
+                    "strategy configure permission required to follow this virtual account",
+                ));
+            }
+        }
+        if let Err(message) = validate_virtual_activation(
+            &state,
+            &headers,
+            &source_id,
+            &account.bindings,
+            *multiplier,
+        )
+        .await
+        {
+            return Ok(bad_request(message));
+        }
+    }
+    match virtual_accounts::set_configuration(&state.pool, &source_id, &request, unix_now_us())
+        .await
+    {
+        Ok(()) => {
+            state.configuration_notify.notify_one();
+            Ok((
+                NO_STORE,
+                Json(strategy_catalog::load_account_studio(&state.pool, &source_id).await?),
+            )
+                .into_response())
+        }
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+fn spawn_configuration_publisher(state: WebState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {},
+                _ = state.configuration_notify.notified() => {},
+            }
+            let _guard = state.configuration_lock.lock().await;
+            if let Err(error) = publish_pending_configurations(&state).await {
+                warn!(error = %error, "virtual account synchronization failed; pending changes retained");
+            }
+        }
+    });
+}
+
+async fn publish_pending_configurations(state: &WebState) -> Result<()> {
+    let has_pending: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cta_follow_publish_queue)")
+            .fetch_one(&state.pool)
+            .await?;
+    if !has_pending {
+        return Ok(());
+    }
+    // Publication reads the catalog through the pool. A separate lock connection
+    // keeps this safe even when the configured pool has only one connection.
+    let mut connection = sqlx::PgConnection::connect_with(&state.pool.connect_options()).await?;
+    let mut tx = connection.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(740913211)")
+        .execute(&mut *tx)
+        .await?;
+    let rows = sqlx::query("SELECT source_id, binding_name, revision, archived FROM cta_follow_publish_queue ORDER BY source_id, binding_name")
+        .fetch_all(&mut *tx).await?;
+    for row in rows {
+        let source: String = row.try_get("source_id")?;
+        let binding: String = row.try_get("binding_name")?;
+        let revision: i64 = row.try_get("revision")?;
+        let mut archived: bool = row.try_get("archived")?;
+        let result = async {
+            if !archived {
+                archive_configuration_binding(state, &source, &binding).await?;
+                archived = true;
+            }
+            publish_binding(state, &source, &binding)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.message))?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                sqlx::query("DELETE FROM cta_follow_publish_queue WHERE source_id = $1 AND binding_name = $2 AND revision = $3")
+                    .bind(&source).bind(&binding).bind(revision).execute(&mut *tx).await?;
+            }
+            Err(error) => {
+                warn!(source_id = %source, binding_name = %binding, error = %error, "follow publish pending; retry scheduled");
+                sqlx::query("UPDATE cta_follow_publish_queue SET archived = $4, error = $5 WHERE source_id = $1 AND binding_name = $2 AND revision = $3")
+                    .bind(&source).bind(&binding).bind(revision).bind(archived).bind(error.to_string()).execute(&mut *tx).await?;
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn archive_configuration_binding(
+    state: &WebState,
+    source: &str,
+    binding: &str,
+) -> Result<()> {
+    // Both positive changes and stops need a frozen account-specific archive event.
+    let (position, _, _, shares) =
+        strategy_catalog::load_binding_parts(&state.pool, source, binding)
+            .await?
+            .context("pending binding disappeared")?;
+    let mut account = crate::position_archive::published_account(source, binding, shares);
+    account.theoretical_fee_rate =
+        postgres::load_theoretical_twap_fee_rate(&state.pool, source).await?;
+    let factual = load_factual_position(state, source, binding)
+        .await
+        .into_iter()
+        .collect();
+    state
+        .position_archive
+        .append(unix_now_us(), &position, factual, vec![account])?;
+    Ok(())
 }

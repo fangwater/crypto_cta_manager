@@ -17,6 +17,7 @@ import {
   ContractLeveragePanel,
   ContractLeverageToolbar,
 } from '../../components/ContractLeveragePanel'
+import { AccountFollowPanel } from '../../components/AccountFollowPanel'
 import { ConfigShell } from '../../components/ConfigShell'
 import { Alert } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
@@ -71,6 +72,8 @@ export function AccountBindingsPage() {
     () => new Set((studio?.bindings ?? []).map((binding) => binding.position_strategy_name)),
     [studio],
   )
+  const following = studio?.configuration.mode === 'follow'
+  const bindingEditsDisabled = !studio || studio.source_id !== sourceId || following || (studio?.pending_publishes.length ?? 0) > 0
   const selectedAccount = accounts.find((account) => account.source_id === sourceId)
 
   // New bindings require the strategy's configure grant; the access list is
@@ -157,6 +160,7 @@ export function AccountBindingsPage() {
       setQueriedContractLeverage(null)
       return
     }
+    setStudio(null)
     setExecOrderRateLimits(null)
     setQueriedContractLeverage(null)
     const controller = new AbortController()
@@ -250,6 +254,7 @@ export function AccountBindingsPage() {
               </Label>
             </CardContent>
           </Card>
+          <AccountFollowPanel sourceId={sourceId} studio={studio} onChange={applyStudio} experimentalToken={experimentalToken} />
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -356,7 +361,7 @@ export function AccountBindingsPage() {
             }
           />
 
-          <Card>
+          {!bindingEditsDisabled && <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Plus size={16} /> 启用新策略
@@ -427,7 +432,7 @@ export function AccountBindingsPage() {
                 </form>
               )}
             </CardContent>
-          </Card>
+          </Card>}
 
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm font-medium text-ink">
@@ -468,69 +473,73 @@ export function AccountBindingsPage() {
                       </span>
                     </div>
                     <div className="flex flex-wrap items-end gap-3">
-                      <Label className="min-w-[200px] flex-1">
-                        更换执行算法
-                        <Select
-                          value={binding.order_strategy_name}
-                          onChange={(event) =>
-                            void withWrite(async () => {
-                              await bindExecution(
-                                binding.position_strategy_name,
-                                event.target.value,
-                                binding.shares,
-                              )
-                              setExperimentalToken('')
-                            })
-                          }
-                        >
-                          {orders.map((item) => (
-                            <option key={item.strategy_name} value={item.strategy_name}>
-                              {item.strategy_name} ({item.order_parameters.algorithm.toUpperCase()})
-                            </option>
-                          ))}
-                        </Select>
-                      </Label>
-                      <Label className="w-32">
-                        份数
-                        <Input
-                          inputMode="decimal"
-                          value={shareDraft}
-                          onChange={(event) =>
-                            setShareDrafts((current) => ({
-                              ...current,
-                              [binding.binding_name]: event.target.value,
-                            }))
-                          }
-                        />
-                      </Label>
+                      {!bindingEditsDisabled && <>
+                        <Label className="min-w-[200px] flex-1">
+                          更换执行算法
+                          <Select
+                            value={binding.order_strategy_name}
+                            onChange={(event) =>
+                              void withWrite(async () => {
+                                await bindExecution(
+                                  binding.position_strategy_name,
+                                  event.target.value,
+                                  binding.shares,
+                                )
+                                setExperimentalToken('')
+                              })
+                            }
+                          >
+                            {orders.map((item) => (
+                              <option key={item.strategy_name} value={item.strategy_name}>
+                                {item.strategy_name} ({item.order_parameters.algorithm.toUpperCase()})
+                              </option>
+                            ))}
+                          </Select>
+                        </Label>
+                        <Label className="w-32">
+                          份数
+                          <Input
+                            inputMode="decimal"
+                            value={shareDraft}
+                            onChange={(event) =>
+                              setShareDrafts((current) => ({
+                                ...current,
+                                [binding.binding_name]: event.target.value,
+                              }))
+                            }
+                          />
+                        </Label>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            disabled={saving || !sharesChanged}
+                            onClick={() =>
+                              void withWrite(async () => {
+                                const next = await saveBindingShares(
+                                  sourceId,
+                                  binding.binding_name,
+                                  parsedShares,
+                                  experimentalToken,
+                                )
+                                applyStudio(next)
+                                setExperimentalToken('')
+                                return parsedShares === 0
+                                  ? `已停止 ${binding.binding_name}；零目标已发送，后续仓位更新将跳过此账户绑定`
+                                  : `已将 ${binding.binding_name} 设为 ${parsedShares} 份；下次仓位更新或手动重推生效`
+                              })
+                            }
+                          >
+                            {parsedShares === 0 ? <Power size={15} /> : <Save size={15} />}
+                            {parsedShares === 0 ? '停止并清仓' : '保存份数'}
+                          </Button>
+                        </div>
+                      </>}
                       <div className="flex flex-wrap gap-2">
                         <Button
                           type="button"
-                          variant="secondary"
-                          disabled={saving || !sharesChanged}
-                          onClick={() =>
-                            void withWrite(async () => {
-                              const next = await saveBindingShares(
-                                sourceId,
-                                binding.binding_name,
-                                parsedShares,
-                                experimentalToken,
-                              )
-                              applyStudio(next)
-                              setExperimentalToken('')
-                              return parsedShares === 0
-                                ? `已停止 ${binding.binding_name}；零目标已发送，后续仓位更新将跳过此账户绑定`
-                                : `已将 ${binding.binding_name} 设为 ${parsedShares} 份；下次仓位更新或手动重推生效`
-                            })
-                          }
-                        >
-                          {parsedShares === 0 ? <Power size={15} /> : <Save size={15} />}
-                          {parsedShares === 0 ? '停止并清仓' : '保存份数'}
-                        </Button>
-                        <Button
-                          type="button"
                           variant="primary"
-                          disabled={saving}
+                          disabled={saving || (studio?.pending_publishes.length ?? 0) > 0}
                           onClick={() =>
                             void withWrite(async () => {
                               await publishAccountBinding(sourceId, binding.binding_name)
@@ -540,7 +549,7 @@ export function AccountBindingsPage() {
                           <CheckCircle2 size={15} />
                           {binding.shares === 0 ? '重推清仓目标' : '重推到 Exec'}
                         </Button>
-                        {binding.shares > 0 && parsedShares !== 0 && (
+                        {!bindingEditsDisabled && binding.shares > 0 && parsedShares !== 0 && (
                           <Button
                             type="button"
                             variant="ghost"
@@ -556,7 +565,7 @@ export function AccountBindingsPage() {
                             <Power size={15} /> 停止并清仓
                           </Button>
                         )}
-                        {binding.shares === 0 && (
+                        {!bindingEditsDisabled && binding.shares === 0 && (
                           <Button
                             type="button"
                             variant="ghost"

@@ -218,6 +218,8 @@ export interface AccountStudio {
   taker_fee_rate: number
   theoretical_twap_fee_rate: number
   bindings: AccountBinding[]
+  configuration: AccountConfiguration
+  pending_publishes: { binding_name: string; error: string | null }[]
 }
 
 export interface ExecOrderRateLimits {
@@ -481,4 +483,29 @@ export type TheoreticalNavSeriesKey =
 export type NavSeriesKey = ActualNavSeriesKey | TheoreticalNavSeriesKey
 export type SymbolRow = AggregateSymbolNavReport & {
   venues?: VenueNavReport[]
+}
+
+export interface VirtualBinding {
+  binding_name: string
+  position_strategy_name: string
+  order_strategy_name: string
+  shares: number
+}
+
+export interface VirtualAccount {
+  virtual_id: string
+  name: string
+  bindings: VirtualBinding[]
+  updated_at_us: number
+  followers: {
+    source_id: string
+    multiplier: number
+    pending_publishes: { binding_name: string; error: string | null }[]
+  }[]
+}
+
+export type AccountConfiguration = { mode: 'independent' } | {
+  mode: 'follow'
+  virtual_id: string
+  multiplier: number
 }

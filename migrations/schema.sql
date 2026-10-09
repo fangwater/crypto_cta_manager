@@ -335,3 +335,35 @@ CREATE INDEX cta_exec_order_config_audit_source_time_idx ON public.cta_exec_orde
 CREATE INDEX cta_position_snapshots_source_latest_idx ON public.cta_position_snapshots USING btree (source_id, snapshot_ts_us DESC);
 CREATE INDEX cta_strategy_position_snapshots_source_latest_idx ON public.cta_strategy_position_snapshots USING btree (source_id, snapshot_ts_us DESC);
 CREATE UNIQUE INDEX cta_users_username_lower_idx ON public.cta_users USING btree (lower(username));
+
+-- Virtual accounts own configuration only; they are never Exec order sources.
+CREATE TABLE cta_virtual_accounts (
+    virtual_id text PRIMARY KEY,
+    name text NOT NULL CHECK (length(btrim(name)) > 0 AND octet_length(name) <= 200),
+    updated_at_us bigint NOT NULL
+);
+CREATE TABLE cta_virtual_account_bindings (
+    virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id) ON DELETE CASCADE,
+    binding_name text NOT NULL,
+    position_strategy_name text NOT NULL REFERENCES cta_position_strategies(strategy_name),
+    order_strategy_name text NOT NULL REFERENCES cta_order_strategies(strategy_name),
+    shares double precision NOT NULL CHECK (shares >= 0 AND shares < 'Infinity'::double precision),
+    PRIMARY KEY (virtual_id, binding_name)
+);
+CREATE TABLE cta_account_follows (
+    source_id text PRIMARY KEY REFERENCES cta_order_sources(source_id),
+    virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id),
+    multiplier double precision NOT NULL CHECK (multiplier >= 0 AND multiplier < 'Infinity'::double precision),
+    updated_at_us bigint NOT NULL
+);
+CREATE INDEX cta_account_follows_virtual_id_idx ON cta_account_follows(virtual_id);
+-- Durable delivery status, not a second order/target history.
+CREATE TABLE cta_follow_publish_queue (
+    source_id text NOT NULL,
+    binding_name text NOT NULL,
+    revision bigint NOT NULL,
+    archived boolean NOT NULL DEFAULT false,
+    error text,
+    PRIMARY KEY (source_id, binding_name),
+    FOREIGN KEY (source_id, binding_name) REFERENCES cta_account_strategy_bindings(source_id, binding_name) ON DELETE CASCADE
+);

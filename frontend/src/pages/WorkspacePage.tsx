@@ -5,6 +5,7 @@ import {
   Clock3,
   ExternalLink,
   LayoutDashboard,
+  Layers3,
   RefreshCw,
   Scale,
   Settings,
@@ -148,6 +149,11 @@ export function WorkspacePage() {
         <StatTile label="运行账户" value={dashboard ? integer(activeAccounts) : '--'} />
         <StatTile label="已配置账户" value={dashboard ? integer(accounts.length) : '--'} />
       </div>
+
+      <a href={routes.virtualAccounts} className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-border bg-surface p-5 transition hover:border-brand-ring">
+        <div className="flex min-w-0 items-center gap-3"><Layers3 size={20} className="shrink-0 text-brand" /><div><p className="font-semibold text-ink">Virtual 账户管理</p><p className="mt-1 text-sm text-muted">维护策略组合，查看跟随倍率与同步状态。</p></div></div>
+        <ArrowRight size={18} className="shrink-0 text-muted" />
+      </a>
 
       <a
         href="/manager/docs/"

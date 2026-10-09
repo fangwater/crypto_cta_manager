@@ -23,5 +23,6 @@ pub mod rocks_source;
 pub mod snapshot;
 pub mod strategy_catalog;
 pub mod theoretical_nav;
+pub mod virtual_accounts;
 pub mod viz_snapshot;
 pub mod web;

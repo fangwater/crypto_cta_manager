@@ -1,6 +1,9 @@
 import { normalizeTargetMap } from './lib/targetPositions'
 import type {
   AccountStudio,
+  AccountConfiguration,
+  VirtualAccount,
+  VirtualBinding,
   CatalogOrderStrategy,
   DashboardSnapshot,
   ExecOrderRateLimits,
@@ -591,4 +594,26 @@ export function publishAccountBinding(sourceId: string, bindingName: string) {
     `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings/${encodeURIComponent(bindingName)}/publish`,
     { method: 'POST' },
   )
+}
+
+export function listVirtualAccounts(signal?: AbortSignal) {
+  return requestJson<VirtualAccount[]>('/catalog/virtual-accounts', { signal })
+}
+
+export function saveVirtualAccount(virtualId: string, name: string, bindings: VirtualBinding[], experimentalToken?: string) {
+  return requestJson<VirtualAccount>(`/catalog/virtual-accounts/${encodeURIComponent(virtualId)}`, {
+    method: 'PUT', body: { name, bindings },
+    headers: experimentalToken ? { 'X-Experimental-Algorithm-Token': experimentalToken } : undefined,
+  })
+}
+
+export function deleteVirtualAccount(virtualId: string) {
+  return requestJson<void>(`/catalog/virtual-accounts/${encodeURIComponent(virtualId)}`, { method: 'DELETE' })
+}
+
+export function saveAccountConfiguration(sourceId: string, configuration: AccountConfiguration, experimentalToken?: string) {
+  return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}/configuration`, {
+    method: 'PUT', body: configuration,
+    headers: experimentalToken ? { 'X-Experimental-Algorithm-Token': experimentalToken } : undefined,
+  })
 }
