@@ -89,7 +89,8 @@ VIP 门槛与补足阈值、USD-M 手续费备用金及 Flexible Earn 分配继�
 运行。原 USDT/BFUSD 理财的配置和调度保持独立；这种流程独立不代表保证金隔离。
 
 **实施状态：已与虚拟账户联合发布到 jp-meta trade03。** 当前 Manager
-release 为 `20261009T053323Z`（`1b285b5`），配套 Exec/公共行情为 `8a263e04`。
+Manager 常态对冲精简版 release 为 `20261009T055537Z`（`af85845`），
+配套 Exec/公共行情继续使用 `8a263e04`。
 BNBUSDC 的报价、杠杆初始化和实际成交已验证。
 切换时须先检查
 该账户已有的 BNBUSDC CTA 目标、挂单和事实持仓。trade03 已完成旧 BNBUSDT

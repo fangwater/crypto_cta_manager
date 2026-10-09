@@ -1,8 +1,29 @@
 # jp-meta trade03 BNB management deployment
 
+## 2026-10-09 常态对冲精简与降频
+
+已发布 Manager `20261009T055537Z`，运行代码 `af85845`。trade03 调仓
+须同时满足：实际净敞口至少 0.5 BNB，且距上次目标发布至少 3600 秒。
+配置界面以小时显示间隔，允许 1–24 小时及至少 0.5 BNB 的调整阈值。
+余额检查继续每 60 秒；VIP 补仓维持 5.2 → 6，只使用 BFUSD 直接闪兑。
+
+删除已完成的旧 USDT → USDC 自动迁移、60 秒迁移频率例外和重复字段封装。
+保留独立系统策略、CTA 所有权保护和旧仓零目标。0.5 BNB 只用于调仓触发；
+前次成交完成、账户归属核对和新订单成交容差仍使用 0.02 BNB。
+
+线上读回配置符合上述数值，实际 USDC 空头约 5.77 BNB，净敞口约
+0.00549 BNB；没有对冲错误或待核对资金操作。Manager 健康 `ok`，相关网关
+HTTP 200、Exec WebSocket 101。保存的发布时刻及 Redis 对冲目标没有变化，
+重启没有绕过冷却。只重启 Manager；Exec、公共行情和其他交易进程保持运行，
+交易配置、Manager TOML 和原 USDT/BFUSD 理财文件哈希不变。
+
+全 crate 测试 278 项通过、8 项按原配置忽略，Rust 格式检查、`cargo check`、
+release 构建及前端 build 通过。回滚材料和验证记录位于
+`/home/ubuntu/crypto_cta_manager/backups/bnb-low-frequency-20261009T055216Z`。
+
 ## 2026-10-09 联合发布：BNBUSDC 与虚拟账户
 
-当前 Manager release 为 `20261009T053323Z`，运行代码 `1b285b5`。
+联合发布当时 Manager release 为 `20261009T053323Z`，运行代码 `1b285b5`。
 虚拟账户已随本次发布启用；jp-meta 的四张新增表和索引在完整 PostgreSQL
 备份后显式事务创建，没有启动 DDL、数据重置或真实账户跟随切换。
 空模板的创建、读取、删除已验证。首次联合 release `20261009T043909Z`
