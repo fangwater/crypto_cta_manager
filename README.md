@@ -812,6 +812,15 @@ request weights and exchange cooldowns. It is disabled and dry-run by default. B
 controllers require explicit `[treasury]` egress: a dedicated `local_ip` or
 operator-selected `use_account_ip_rotation`; see
 [BNB reserve management](docs/bnb_reserve_management.md) before enabling.
+The automatic Earn page lets users with account configure permission set the
+USDT-to-BFUSD trigger, per-round cap, and retained futures-wallet USDT balance
+(`reserve_usdt`) using their existing login session, without a separate operation
+token. Only the wallet balance above the reserve can be subscribed, subject to
+withdrawable funds, margin headroom, quota, and the per-round cap. That resulting
+amount must strictly exceed the trigger. The reserve defaults to zero for existing
+settings; for example, a 1,500 USDT wallet with a 1,000 USDT reserve can subscribe
+at most 500 USDT, and a wallet at or below the reserve skips subscription.
+BNB operations use the same account permissions. Read-only users can view settings.
 The hedge contract is BNBUSDC, reserved for the system strategy on
 the adopting account. This separates contract positions from CTA BNBUSDT but
 does not isolate collateral in Multi-Assets Mode. Normal updates require both a

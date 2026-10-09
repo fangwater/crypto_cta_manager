@@ -243,24 +243,69 @@ async fn materialize(
     Ok(())
 }
 
-pub async fn save(pool: &PgPool, id: &str, request: &SaveVirtualAccount, at: i64) -> Result<()> {
-    crate::order_config::validate_strategy_name(id).map_err(anyhow::Error::msg)?;
+fn validate_request(request: &SaveVirtualAccount) -> Result<()> {
     ensure!(
         !request.name.trim().is_empty() && request.name.len() <= 200,
         "virtual account name must contain 1–200 bytes"
     );
     effective_bindings(&request.bindings, 1.0)?;
+    Ok(())
+}
+
+fn next_virtual_id(ids: &[String]) -> Result<String> {
+    let mut highest = 0_u64;
+    for id in ids {
+        if let Some(number) = id
+            .strip_prefix("virtual")
+            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        {
+            highest = highest.max(number.parse::<u64>()?);
+        }
+    }
+    let next = highest
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("virtual account number exceeds the supported range"))?;
+    Ok(format!("virtual{next:02}"))
+}
+
+pub async fn create(pool: &PgPool, request: &SaveVirtualAccount, at: i64) -> Result<String> {
+    validate_request(request)?;
+    // Allocate and insert under the same configuration lock/transaction as saves.
     let mut tx = begin(pool).await?;
+    let ids: Vec<String> = sqlx::query_scalar("SELECT virtual_id FROM cta_virtual_accounts")
+        .fetch_all(&mut *tx)
+        .await?;
+    let id = next_virtual_id(&ids)?;
+    save_in_transaction(&mut tx, &id, request, at).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub async fn save(pool: &PgPool, id: &str, request: &SaveVirtualAccount, at: i64) -> Result<()> {
+    crate::order_config::validate_strategy_name(id).map_err(anyhow::Error::msg)?;
+    validate_request(request)?;
+    let mut tx = begin(pool).await?;
+    save_in_transaction(&mut tx, id, request, at).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn save_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    request: &SaveVirtualAccount,
+    at: i64,
+) -> Result<()> {
     sqlx::query("INSERT INTO cta_virtual_accounts (virtual_id,name,updated_at_us) VALUES ($1,$2,$3) ON CONFLICT (virtual_id) DO UPDATE SET name = EXCLUDED.name, updated_at_us = EXCLUDED.updated_at_us")
-        .bind(id).bind(request.name.trim()).bind(at).execute(&mut *tx).await?;
+        .bind(id).bind(request.name.trim()).bind(at).execute(&mut **tx).await?;
     let followers =
         sqlx::query("SELECT source_id, multiplier FROM cta_account_follows WHERE virtual_id = $1")
             .bind(id)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await?;
     for row in followers {
         materialize(
-            &mut tx,
+            tx,
             &row.try_get::<String, _>("source_id")?,
             &request.bindings,
             row.try_get("multiplier")?,
@@ -271,13 +316,12 @@ pub async fn save(pool: &PgPool, id: &str, request: &SaveVirtualAccount, at: i64
     }
     sqlx::query("DELETE FROM cta_virtual_account_bindings WHERE virtual_id = $1")
         .bind(id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     for b in &request.bindings {
         sqlx::query("INSERT INTO cta_virtual_account_bindings (virtual_id,binding_name,position_strategy_name,order_strategy_name,shares) VALUES ($1,$2,$3,$4,$5)")
-            .bind(id).bind(&b.binding_name).bind(&b.position_strategy_name).bind(&b.order_strategy_name).bind(b.shares).execute(&mut *tx).await?;
+            .bind(id).bind(&b.binding_name).bind(&b.position_strategy_name).bind(&b.order_strategy_name).bind(b.shares).execute(&mut **tx).await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 
@@ -399,6 +443,25 @@ pub async fn validate_source_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn virtual_numbers_skip_existing_ids_and_leave_aliases_independent() {
+        assert_eq!(next_virtual_id(&[]).unwrap(), "virtual01");
+        assert_eq!(next_virtual_id(&["virtual01".into()]).unwrap(), "virtual02");
+        assert_eq!(
+            next_virtual_id(&["model".into(), "virtual02".into(), "virtual09".into()]).unwrap(),
+            "virtual10"
+        );
+        assert_eq!(
+            next_virtual_id(&["virtual99".into()]).unwrap(),
+            "virtual100"
+        );
+        assert_eq!(
+            next_virtual_id(&["virtual".into(), "virtual-01".into(), "virtualVIP".into()]).unwrap(),
+            "virtual01"
+        );
+        assert!(next_virtual_id(&[format!("virtual{}", u64::MAX)]).is_err());
+    }
+
     #[test]
     fn follows_scale_shares_and_reject_invalid_or_overflowing_multipliers() {
         let b = VirtualBinding {

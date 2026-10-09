@@ -2,8 +2,6 @@ import {
   Check,
   CirclePlay,
   Clock3,
-  Eye,
-  EyeOff,
   LoaderCircle,
   PiggyBank,
   RefreshCw,
@@ -32,6 +30,7 @@ const defaults: AutoEarnSettings = {
   interval_secs: 3600,
   round_cap_usdt: 5000,
   trigger_usdt: 100,
+  reserve_usdt: 0,
   paused: false,
   running: false,
   last_result: null,
@@ -42,8 +41,6 @@ export function AutoEarnPage() {
   const [sourceId, setSourceId] = useState(readSourceId)
   const [settings, setSettings] = useState<AutoEarnSettings>(defaults)
   const [savedSettings, setSavedSettings] = useState<AutoEarnSettings | null>(null)
-  const [token, setToken] = useState('')
-  const [tokenVisible, setTokenVisible] = useState(false)
   const [loading, setLoading] = useState(true)
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -90,8 +87,6 @@ export function AutoEarnPage() {
     setSavedSettings(null)
     setError('')
     setNotice('')
-    setToken('')
-    setTokenVisible(false)
     void refresh(controller.signal)
     return () => controller.abort()
   }, [refresh])
@@ -100,12 +95,13 @@ export function AutoEarnPage() {
     () => accounts.find((account) => account.source_id === sourceId),
     [accounts, sourceId],
   )
-  const configurable = selected?.configurable ?? false
+  const configurable = selected?.access_level === 'configure'
   const dirty = savedSettings !== null && (
     settings.enabled !== savedSettings.enabled ||
     settings.interval_secs !== savedSettings.interval_secs ||
     settings.round_cap_usdt !== savedSettings.round_cap_usdt ||
-    settings.trigger_usdt !== savedSettings.trigger_usdt
+    settings.trigger_usdt !== savedSettings.trigger_usdt ||
+    settings.reserve_usdt !== savedSettings.reserve_usdt
   )
   const statusLabel = settingsLoading && !savedSettings
     ? '读取中'
@@ -118,33 +114,35 @@ export function AutoEarnPage() {
     ? 'warning'
     : settings.running ? 'brand'
       : savedSettings?.enabled ? 'success' : 'neutral'
+  const valid = Number.isInteger(settings.interval_secs)
+    && settings.interval_secs >= 60 && settings.interval_secs <= 86400
+    && Number.isFinite(settings.round_cap_usdt)
+    && settings.round_cap_usdt >= 1 && settings.round_cap_usdt <= 1_000_000
+    && Number.isFinite(settings.trigger_usdt)
+    && settings.trigger_usdt >= 0 && settings.trigger_usdt <= 1_000_000
+    && Number.isFinite(settings.reserve_usdt) && settings.reserve_usdt >= 0
 
   async function act(action: 'save' | 'run' | 'resume') {
-    if (!sourceId || !token.trim()) {
-      setError('请输入自动理财操作 token')
-      return
-    }
+    if (!sourceId || !configurable || (action === 'save' && !valid)) return
     setBusy(true)
     setError('')
     setNotice('')
     try {
       if (action === 'save') {
-        const next = await saveAutoEarn(sourceId, settings, token)
+        const next = await saveAutoEarn(sourceId, settings)
         setSettings(next)
         setSavedSettings(next)
         setNotice('设置已保存')
       } else if (action === 'resume') {
-        const next = await resumeAutoEarn(sourceId, token)
+        const next = await resumeAutoEarn(sourceId)
         setSettings(next)
         setSavedSettings(next)
         setNotice('暂停已解除')
       } else {
-        const response = await runAutoEarn(sourceId, token)
+        const response = await runAutoEarn(sourceId)
         setNotice(response.result)
         await refresh()
       }
-      setToken('')
-      setTokenVisible(false)
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason)
       if (action !== 'save') await refresh()
@@ -178,7 +176,6 @@ export function AutoEarnPage() {
           </div>
         </div>
       </div>
-      {!loading && sourceId && <BnbManagement key={sourceId} sourceId={sourceId} configurable={configurable} />}
       {!loading && !sourceId && <Alert tone="warning" className="mt-6">没有可用的 Binance 账户</Alert>}
       {sourceId && settingsLoading && !savedSettings ? (
         <div className="flex h-48 items-center justify-center gap-2 text-sm text-muted">
@@ -202,13 +199,21 @@ export function AutoEarnPage() {
                 <span aria-hidden="true" className="relative h-6 w-11 shrink-0 rounded-full bg-border transition-colors after:absolute after:left-1 after:top-1 after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-transform peer-checked:bg-brand peer-checked:after:translate-x-5 peer-focus-visible:ring-2 peer-focus-visible:ring-brand-ring peer-disabled:opacity-50" />
               </label>
             </div>
-            <div className="grid gap-5 py-6 sm:grid-cols-3">
+            <div className="grid gap-5 py-6 sm:grid-cols-2">
               <Label>执行间隔
                 <div className="relative">
                   <Input type="number" min="1" max="1440" step="1" className="pr-14 tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" value={settings.interval_secs / 60}
                     disabled={!configurable || busy || settingsLoading}
                     onChange={(event) => setSettings({ ...settings, interval_secs: Number(event.target.value) * 60 })} />
                   <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted">分钟</span>
+                </div>
+              </Label>
+              <Label>保留 USDT 余额
+                <div className="relative">
+                  <Input type="number" min="0" step="0.01" className="pr-16 tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" value={settings.reserve_usdt}
+                    disabled={!configurable || busy || settingsLoading}
+                    onChange={(event) => setSettings({ ...settings, reserve_usdt: Number(event.target.value) })} />
+                  <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted">USDT</span>
                 </div>
               </Label>
               <Label>每轮上限
@@ -219,7 +224,7 @@ export function AutoEarnPage() {
                   <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted">USDT</span>
                 </div>
               </Label>
-              <Label>触发下限
+              <Label>USDT 兑换触发下限
                 <div className="relative">
                   <Input type="number" min="0" max="1000000" step="0.01" className="pr-16 tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" value={settings.trigger_usdt}
                     disabled={!configurable || busy || settingsLoading}
@@ -228,28 +233,19 @@ export function AutoEarnPage() {
                 </div>
               </Label>
             </div>
+            <p className="pb-5 text-xs leading-6 text-muted">仅将合约 USDT 钱包中超出 {settings.reserve_usdt.toLocaleString('zh-CN')} USDT 保留余额的部分用于兑换。扣除保留额后，本轮可兑换金额大于 {settings.trigger_usdt.toLocaleString('zh-CN')} USDT 才申购 BFUSD；等于门槛时跳过。实际金额同时受每轮上限、可划转余额、保证金余量和剩余申购额度限制。</p>
+            {!valid && <Alert tone="warning" className="mb-5">执行间隔为 1–1440 分钟，每轮上限为 1–1,000,000 USDT，兑换触发下限为 0–1,000,000 USDT，保留余额须为非负金额。</Alert>}
+            {valid && settings.trigger_usdt >= settings.round_cap_usdt && <Alert tone="warning" className="mb-5">兑换触发下限需要低于每轮上限，否则每轮都会跳过兑换。</Alert>}
             {configurable && <div className="border-t border-border pt-6">
               <h3 className="mb-4 text-sm font-semibold text-ink">执行操作</h3>
-              <div className="max-w-sm">
-                <Label htmlFor="auto-earn-token" className="mb-1.5">操作 token</Label>
-                <div className="relative">
-                  <Input id="auto-earn-token" type={tokenVisible ? 'text' : 'password'} autoComplete="off" className="pr-11" value={token}
-                    disabled={busy} onChange={(event) => setToken(event.target.value)} />
-                  <button type="button" className="absolute inset-y-0 right-0 grid w-10 place-items-center text-muted hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-ring"
-                    title={tokenVisible ? '隐藏 token' : '显示 token'} aria-label={tokenVisible ? '隐藏 token' : '显示 token'}
-                    disabled={busy} onClick={() => setTokenVisible(!tokenVisible)}>
-                    {tokenVisible ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-              </div>
-              <div className="mt-5 flex flex-wrap gap-2">
-                <Button variant="primary" disabled={busy || settingsLoading || !token || !dirty} onClick={() => void act('save')}>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="primary" disabled={busy || settingsLoading || !dirty || !valid} onClick={() => void act('save')}>
                   <Check size={16} /> 保存设置
                 </Button>
-                <Button disabled={busy || settingsLoading || !token || dirty || !settings.enabled || settings.paused} onClick={() => void act('run')}>
+                <Button disabled={busy || settingsLoading || dirty || !settings.enabled || settings.paused} onClick={() => void act('run')}>
                   <CirclePlay size={16} /> 立即执行
                 </Button>
-                {settings.paused && <Button variant="secondary" disabled={busy || !token || dirty} onClick={() => void act('resume')}>
+                {settings.paused && <Button variant="secondary" disabled={busy || settingsLoading || dirty} onClick={() => void act('resume')}>
                   <RotateCcw size={16} /> 解除暂停
                 </Button>}
               </div>
@@ -273,6 +269,7 @@ export function AutoEarnPage() {
           </aside>
         </div>
       )}
+      {!loading && sourceId && <BnbManagement key={sourceId} sourceId={sourceId} configurable={configurable} />}
     </AppShell>
   )
 }

@@ -242,9 +242,10 @@ Account-scoped endpoints are under `/api/catalog/accounts/{source_id}/bnb-auto`:
 - `POST /run`: execute one round using the saved enabled/dry-run settings.
 - `POST /acknowledge`: `{"pending_at_ms": ..., "exchange_outcome_verified": true}`.
 
-The existing account visibility/configure authorization applies, and mutation /
-preview endpoints additionally require the existing `X-BFUSD-Operation-Token`.
-Tokens and exchange credentials are not returned to the browser or written to
+The existing login session and account visibility/configure authorization apply.
+Saving settings, previewing, executing, and acknowledging operations require the
+account's configure permission (or an administrator); no separate operation token
+is needed. Exchange credentials are not returned to the browser or written to
 BNB state. Preview is available while automation is disabled. Enable actual
 execution only after checking the intended source, thresholds, API permissions,
 dedicated egress and reserve ownership. This does not require a schema migration

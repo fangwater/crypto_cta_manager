@@ -242,7 +242,7 @@ export function AccountBindingsPage() {
                   ))}
                 </Select>
               </Label>
-              <Label className="max-w-xl">
+              {studio?.configuration?.mode !== 'follow' && <Label className="max-w-xl">
                 实验算法 Token
                 <Input
                   type="password"
@@ -251,10 +251,10 @@ export function AccountBindingsPage() {
                   onChange={(event) => setExperimentalToken(event.target.value)}
                 />
                 <FieldHint>首次启用、切换或重新启用 POV/Chase 时使用。</FieldHint>
-              </Label>
+              </Label>}
             </CardContent>
           </Card>
-          <AccountFollowPanel sourceId={sourceId} studio={studio} onChange={applyStudio} experimentalToken={experimentalToken} />
+          <AccountFollowPanel sourceId={sourceId} studio={studio} onChange={applyStudio} />
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">

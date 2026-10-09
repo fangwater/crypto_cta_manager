@@ -14,7 +14,6 @@ use sha2::Sha256;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
-use crate::auth;
 use crate::config::{AppConfig, SourceConfig, TreasuryConfig};
 use crate::exchange_leverage::parse_env_file;
 use crate::treasury_rate_limit::Limiter;
@@ -29,6 +28,8 @@ pub struct AccountSettings {
     pub interval_secs: u64,
     pub round_cap_usdt: f64,
     pub trigger_usdt: f64,
+    /// USDT retained in the futures wallet before calculating a subscription.
+    pub reserve_usdt: f64,
     pub paused: bool,
 }
 
@@ -39,6 +40,7 @@ impl Default for AccountSettings {
             interval_secs: 3600,
             round_cap_usdt: 5000.0,
             trigger_usdt: 100.0,
+            reserve_usdt: 0.0,
             paused: false,
         }
     }
@@ -47,6 +49,7 @@ impl Default for AccountSettings {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct DiskSettings {
+    // Preserve the existing file field; browser operations use session permissions.
     token_hash: String,
     accounts: BTreeMap<String, AccountSettings>,
 }
@@ -154,12 +157,10 @@ impl AutoEarnHub {
     pub async fn save(
         &self,
         source_id: &str,
-        token: Option<&str>,
         mut settings: AccountSettings,
     ) -> Result<AccountStatus> {
         validate_settings(&settings)?;
         let mut state = self.runtime.lock().await;
-        self.check_token(&state.disk, token)?;
         settings.paused = state
             .disk
             .accounts
@@ -182,9 +183,8 @@ impl AutoEarnHub {
         })
     }
 
-    pub async fn resume(&self, source_id: &str, token: Option<&str>) -> Result<AccountStatus> {
+    pub async fn resume(&self, source_id: &str) -> Result<AccountStatus> {
         let mut state = self.runtime.lock().await;
-        self.check_token(&state.disk, token)?;
         let old = state.disk.clone();
         state
             .disk
@@ -205,20 +205,9 @@ impl AutoEarnHub {
         })
     }
 
-    pub async fn run(
-        &self,
-        source: &SourceConfig,
-        token: Option<&str>,
-        manual: bool,
-    ) -> Result<String> {
-        if manual {
-            self.verify_token(token).await?;
-        }
+    pub async fn run(&self, source: &SourceConfig, manual: bool) -> Result<String> {
         let _funds = self.gate.lock().await;
         let mut state = self.runtime.lock().await;
-        if manual {
-            self.check_token(&state.disk, token)?;
-        }
         let settings = state
             .disk
             .accounts
@@ -276,7 +265,7 @@ impl AutoEarnHub {
                                 .is_none_or(|due| *due <= Instant::now())
                     };
                     if active {
-                        let _ = hub.run(source, None, false).await;
+                        let _ = hub.run(source, false).await;
                     }
                 }
             }
@@ -289,6 +278,7 @@ impl AutoEarnHub {
         settings: &AccountSettings,
         state: &mut Runtime,
     ) -> Result<String> {
+        validate_settings(settings)?;
         if source.venue != "binance-futures" {
             bail!("automatic BFUSD requires a Binance futures source");
         }
@@ -369,10 +359,11 @@ impl AutoEarnHub {
             .context("USDT asset missing from Binance account")?;
         let wallet = finite_number(usdt, "walletBalance")?;
         let withdrawable = number(usdt, "maxWithdrawAmount")?;
-        if wallet.min(withdrawable) <= settings.trigger_usdt {
+        let excess = (wallet - settings.reserve_usdt).max(0.0);
+        if excess.min(withdrawable) <= settings.trigger_usdt {
             return Ok(format!(
-                "skipped: USDT wallet {:.2}, max withdrawable {:.2} is below trigger",
-                wallet, withdrawable
+                "skipped: USDT wallet {:.2}, reserve {:.2}, max withdrawable {:.2}; excess available for subscription is below trigger",
+                wallet, settings.reserve_usdt, withdrawable
             ));
         }
         let margin = number(&account, "totalMarginBalance")?;
@@ -392,6 +383,7 @@ impl AutoEarnHub {
             maintenance,
             left,
             settings.round_cap_usdt,
+            settings.reserve_usdt,
         );
         if amount_cents < 100 || amount_cents as f64 / 100.0 <= settings.trigger_usdt {
             return Ok("skipped: transferable USDT or BFUSD quota below trigger".to_owned());
@@ -458,17 +450,6 @@ impl AutoEarnHub {
         Ok(())
     }
 
-    pub async fn verify_token(&self, token: Option<&str>) -> Result<()> {
-        self.check_token(&self.runtime.lock().await.disk, token)
-    }
-
-    fn check_token(&self, disk: &DiskSettings, token: Option<&str>) -> Result<()> {
-        if disk.token_hash.is_empty() || !auth::publish_token_matches(token, &disk.token_hash) {
-            bail!("valid automatic earn operation token required");
-        }
-        Ok(())
-    }
-
     fn persist(&self, settings: &DiskSettings) -> Result<()> {
         let parent = self
             .path
@@ -513,6 +494,9 @@ fn validate_settings(settings: &AccountSettings) -> Result<()> {
     if !settings.trigger_usdt.is_finite() || !(0.0..=1_000_000.0).contains(&settings.trigger_usdt) {
         bail!("trigger must be between 0 and 1000000 USDT");
     }
+    if !settings.reserve_usdt.is_finite() || settings.reserve_usdt < 0.0 {
+        bail!("reserve must be a finite nonnegative USDT amount");
+    }
     Ok(())
 }
 
@@ -523,9 +507,11 @@ fn round_amount_cents(
     maintenance: f64,
     quota: f64,
     cap: f64,
+    reserve: f64,
 ) -> i64 {
     let margin_headroom = (margin - maintenance * 3.0).max(0.0);
-    [wallet, withdrawable, margin_headroom, quota, cap]
+    let excess = (wallet - reserve).max(0.0);
+    [excess, withdrawable, margin_headroom, quota, cap]
         .into_iter()
         .fold(f64::INFINITY, f64::min)
         .mul_add(100.0, 0.0)
@@ -891,6 +877,62 @@ impl BinanceApi {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn account_trigger_and_reserve_survive_reload_without_an_operation_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config: AppConfig = toml::from_str("sources = []\n[database]\n").unwrap();
+        config.kline.rocksdb_path = dir.path().join("db");
+        let path = dir.path().join("config/bfusd-auto.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            br#"{"token_hash":"retired-fixture-marker","accounts":{"account-a":{"enabled":true,"paused":true}}}"#,
+        )
+        .unwrap();
+        let egress = TreasuryEgress::new(config.treasury.clone());
+        let hub = AutoEarnHub::new(&config, Arc::new(Mutex::new(())), egress.clone()).unwrap();
+        assert_eq!(hub.status("account-a").await.settings.reserve_usdt, 0.0);
+        let settings = AccountSettings {
+            enabled: true,
+            interval_secs: 600,
+            round_cap_usdt: 1000.0,
+            trigger_usdt: 250.25,
+            reserve_usdt: 625.75,
+            paused: false,
+        };
+        let saved = hub.save("account-a", settings).await.unwrap();
+        assert_eq!(saved.settings.trigger_usdt, 250.25);
+        assert_eq!(saved.settings.reserve_usdt, 625.75);
+        assert!(saved.settings.paused);
+        let second = AccountSettings {
+            trigger_usdt: 123.0,
+            ..AccountSettings::default()
+        };
+        hub.save("account-b", second).await.unwrap();
+
+        let reloaded = AutoEarnHub::new(&config, Arc::new(Mutex::new(())), egress).unwrap();
+        let first = reloaded.status("account-a").await.settings;
+        assert_eq!(first.trigger_usdt, 250.25);
+        assert_eq!(first.reserve_usdt, 625.75);
+        assert_eq!(first.round_cap_usdt, 1000.0);
+        assert_eq!(first.interval_secs, 600);
+        assert!(first.enabled && first.paused);
+        assert_eq!(
+            reloaded.status("account-b").await.settings.trigger_usdt,
+            123.0
+        );
+        let resumed = reloaded.resume("account-a").await.unwrap();
+        assert!(!resumed.settings.paused);
+        assert_eq!(resumed.settings.trigger_usdt, 250.25);
+        assert_eq!(resumed.settings.reserve_usdt, 625.75);
+        let disk: DiskSettings = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(disk.token_hash, "retired-fixture-marker");
+        assert!(!disk.accounts["account-a"].paused);
+        assert_eq!(disk.accounts["account-a"].reserve_usdt, 625.75);
+        assert_eq!(disk.accounts["account-b"].trigger_usdt, 123.0);
+        assert_eq!(disk.accounts["account-b"].reserve_usdt, 0.0);
+    }
+
     #[test]
     fn account_limits_reject_non_finite_values() {
         let mut settings = AccountSettings::default();
@@ -902,23 +944,176 @@ mod tests {
     }
 
     #[test]
+    fn account_reserve_rejects_invalid_amounts_and_allows_large_reserves() {
+        for reserve_usdt in [-0.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let settings = AccountSettings {
+                reserve_usdt,
+                ..AccountSettings::default()
+            };
+            assert!(validate_settings(&settings).is_err());
+        }
+        for reserve_usdt in [0.0, 1000.0, 2_000_000.0] {
+            let settings = AccountSettings {
+                reserve_usdt,
+                ..AccountSettings::default()
+            };
+            assert!(validate_settings(&settings).is_ok());
+        }
+    }
+
+    #[test]
     fn round_amount_respects_withdrawable_quota_cap_and_margin() {
         assert_eq!(
-            round_amount_cents(800.0, 649.27, 50_000.0, 200.0, 9000.0, 5000.0),
+            round_amount_cents(800.0, 649.27, 50_000.0, 200.0, 9000.0, 5000.0, 0.0),
             64927
         );
         assert_eq!(
-            round_amount_cents(9000.0, 9000.0, 50_000.0, 200.0, 9000.0, 5000.0),
+            round_amount_cents(9000.0, 9000.0, 50_000.0, 200.0, 9000.0, 5000.0, 0.0),
             500000
         );
         assert_eq!(
-            round_amount_cents(9000.0, 9000.0, 50_000.0, 200.0, 350.0, 5000.0),
+            round_amount_cents(9000.0, 9000.0, 50_000.0, 200.0, 350.0, 5000.0, 0.0),
             35000
         );
         assert_eq!(
-            round_amount_cents(9000.0, 9000.0, 650.0, 200.0, 9000.0, 5000.0),
+            round_amount_cents(9000.0, 9000.0, 650.0, 200.0, 9000.0, 5000.0, 0.0),
             5000
         );
+    }
+
+    #[test]
+    fn round_amount_retains_wallet_usdt_before_applying_other_limits() {
+        for (wallet, withdrawable, reserve, expected) in [
+            (1500.0, 1500.0, 1000.0, 50_000),
+            (1000.0, 1000.0, 1000.0, 0),
+            (900.0, 900.0, 1000.0, 0),
+            (-0.25, 0.0, 1000.0, 0),
+            (1500.0, 400.0, 1000.0, 40_000),
+            (1500.0, 1500.0, 0.0, 150_000),
+            (1500.019, 1500.019, 1000.01, 50_000),
+        ] {
+            assert_eq!(
+                round_amount_cents(
+                    wallet,
+                    withdrawable,
+                    50_000.0,
+                    200.0,
+                    9000.0,
+                    5000.0,
+                    reserve
+                ),
+                expected
+            );
+        }
+        assert_eq!(
+            round_amount_cents(1500.0, 1500.0, 50_000.0, 200.0, 9000.0, 200.0, 1000.0),
+            20_000
+        );
+        assert_eq!(
+            round_amount_cents(1500.0, 1500.0, 50_000.0, 200.0, 300.0, 5000.0, 1000.0),
+            30_000
+        );
+        assert_eq!(
+            round_amount_cents(1500.0, 1500.0, 650.0, 200.0, 9000.0, 5000.0, 1000.0),
+            5000
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_spends_only_the_excess_and_skips_the_reserve_boundary() {
+        let requests = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let observed = requests.clone();
+        let app = axum::Router::new().fallback(axum::routing::any(
+            move |request: axum::extract::Request| {
+                let observed = observed.clone();
+                async move {
+                    let path = request.uri().path().to_owned();
+                    let body = axum::body::to_bytes(request.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    let form = Url::parse(&format!(
+                        "http://fixture/?{}",
+                        std::str::from_utf8(&body).unwrap()
+                    ))
+                    .unwrap();
+                    let amount = form
+                        .query_pairs()
+                        .find(|(key, _)| key == "amount")
+                        .map(|(_, value)| value.into_owned())
+                        .unwrap_or_default();
+                    observed.lock().await.push((path.clone(), amount.clone()));
+                    axum::Json(match path.as_str() {
+                        "/sapi/v1/bfusd/quota" => {
+                            serde_json::json!({"subscriptionQuota": {"leftQuota": "9000"}})
+                        }
+                        "/sapi/v1/asset/transfer" => serde_json::json!({"tranId": 1}),
+                        "/sapi/v1/bfusd/subscribe" => {
+                            serde_json::json!({"success": true, "bfusdAmount": amount})
+                        }
+                        _ => panic!("unexpected mock exchange path: {path}"),
+                    })
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let env = BTreeMap::from([
+            ("BINANCE_API_KEY".into(), "fixture-key".into()),
+            ("BINANCE_API_SECRET".into(), "fixture-secret".into()),
+            ("BINANCE_FAPI_URL".into(), origin.clone()),
+            ("BINANCE_SAPI_URL".into(), origin),
+        ]);
+        let ip = "127.0.0.1".parse().unwrap();
+        let api = BinanceApi::new(&env, ip).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut config: AppConfig = toml::from_str("sources = []\n[database]\n").unwrap();
+        config.kline.rocksdb_path = dir.path().join("db");
+        let source: SourceConfig = toml::from_str(&format!(
+            "id='reserve-fixture'\naccount='fixture'\nvenue='binance-futures'\nrocksdb_path='{}'",
+            dir.path().join("unused-exec-db").display()
+        ))
+        .unwrap();
+        let hub = AutoEarnHub::new(
+            &config,
+            Arc::new(Mutex::new(())),
+            TreasuryEgress::new(config.treasury.clone()),
+        )
+        .unwrap();
+        let settings = AccountSettings {
+            enabled: true,
+            reserve_usdt: 1000.0,
+            ..AccountSettings::default()
+        };
+        hub.save(&source.id, settings.clone()).await.unwrap();
+        let mut state = hub.runtime.lock().await;
+        for wallet in [900, 1000, 1100, 1500] {
+            let account = serde_json::json!({
+                "assets": [{"asset": "USDT", "walletBalance": wallet.to_string(), "maxWithdrawAmount": wallet.to_string()}],
+                "totalMarginBalance": "50000", "totalMaintMargin": "200"
+            });
+            let result = hub
+                .subscribe_futures_usdt(&source, &settings, &mut state, &api, &account, ip)
+                .await
+                .unwrap();
+            if wallet <= 1100 {
+                assert!(result.starts_with("skipped:"));
+                assert!(requests.lock().await.is_empty());
+            } else {
+                assert!(result.contains("subscribed 500.00 USDT"));
+            }
+            assert!(!state.disk.accounts[&source.id].paused);
+        }
+        assert_eq!(
+            *requests.lock().await,
+            vec![
+                ("/sapi/v1/bfusd/quota".into(), "".into()),
+                ("/sapi/v1/asset/transfer".into(), "500.00".into()),
+                ("/sapi/v1/bfusd/subscribe".into(), "500.00".into()),
+                ("/sapi/v1/asset/transfer".into(), "500.00".into()),
+            ]
+        );
+        server.abort();
     }
 
     #[test]

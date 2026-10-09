@@ -183,6 +183,83 @@ async fn manager_operations_ignore_old_migration_history() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity() -> Result<()> {
+    use crypto_cta_manager::virtual_accounts::{self, AccountConfiguration, SaveVirtualAccount};
+
+    let db = TestDatabase::create().await?;
+    postgres::initialize(&db.pool).await?;
+    seed_business_data(&db.pool).await?;
+    let legacy = SaveVirtualAccount {
+        name: "Legacy alias".into(),
+        bindings: vec![],
+    };
+    virtual_accounts::save(&db.pool, "model", &legacy, 1).await?;
+    let mut tasks = Vec::new();
+    for index in 1..=8 {
+        let pool = db.pool.clone();
+        tasks.push(tokio::spawn(async move {
+            let request = SaveVirtualAccount {
+                name: format!("Alias {index}"),
+                bindings: vec![],
+            };
+            let id = virtual_accounts::create(&pool, &request, index).await?;
+            Ok::<_, anyhow::Error>((id, request.name))
+        }));
+    }
+    let mut created = std::collections::BTreeMap::new();
+    for task in tasks {
+        let (id, name) = task.await??;
+        assert!(created.insert(id, name).is_none());
+    }
+    assert_eq!(
+        created.keys().cloned().collect::<Vec<_>>(),
+        (1..=8)
+            .map(|number| format!("virtual{number:02}"))
+            .collect::<Vec<_>>()
+    );
+    for account in virtual_accounts::list(&db.pool).await? {
+        if account.virtual_id == "model" {
+            assert_eq!(account.name, legacy.name);
+        } else {
+            assert_eq!(account.name, created[&account.virtual_id]);
+        }
+    }
+    let follow = AccountConfiguration::Follow {
+        virtual_id: "virtual01".into(),
+        multiplier: 2.0,
+    };
+    virtual_accounts::set_configuration(&db.pool, "test-source", &follow, 10).await?;
+    virtual_accounts::save(
+        &db.pool,
+        "virtual01",
+        &SaveVirtualAccount {
+            name: "Updated alias".into(),
+            bindings: vec![],
+        },
+        11,
+    )
+    .await?;
+    assert_eq!(
+        virtual_accounts::configuration(&db.pool, "test-source").await?,
+        follow
+    );
+    let accounts = virtual_accounts::list(&db.pool).await?;
+    assert_eq!(accounts.len(), 9);
+    assert_eq!(
+        accounts
+            .iter()
+            .find(|a| a.virtual_id == "virtual01")
+            .unwrap()
+            .name,
+        "Updated alias"
+    );
+    let next = virtual_accounts::create(&db.pool, &legacy, 12).await?;
+    assert_eq!(next, "virtual09");
+    db.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
 async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -> Result<()> {
     use crypto_cta_manager::order_config::OrderParameters;
     use crypto_cta_manager::strategy_catalog::{

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { deleteVirtualAccount, listVirtualAccounts, saveVirtualAccount } from '../api'
+import { createVirtualAccount, deleteVirtualAccount, listVirtualAccounts, saveVirtualAccount } from '../api'
 import { useAuth } from '../components/AuthGate'
 import { Layers3, Plus, RefreshCw, Users } from 'lucide-react'
 import { AppShell, PageIntro, StatTile } from '../components/AppShell'
@@ -21,10 +21,8 @@ export function VirtualAccountsPage() {
   const { withWrite, saving, error: writeError, notice } = useConfigWrite()
   const [accounts, setAccounts] = useState<VirtualAccount[]>([])
   const [selected, setSelected] = useState('')
-  const [virtualId, setVirtualId] = useState('')
   const [name, setName] = useState('')
   const [bindings, setBindings] = useState<VirtualBinding[]>([])
-  const [experimentalToken, setExperimentalToken] = useState('')
   const [readError, setReadError] = useState<string | null>(null)
   const [reading, setReading] = useState(true)
   const [shareInputs, setShareInputs] = useState<Record<string, string>>({})
@@ -47,7 +45,6 @@ export function VirtualAccountsPage() {
   function select(id: string) {
     const account = accounts.find((a) => a.virtual_id === id)
     setSelected(id)
-    setVirtualId(id)
     setName(account?.name ?? '')
     setBindings(account?.bindings.map((b) => ({ ...b })) ?? [])
     setShareInputs(Object.fromEntries((account?.bindings ?? []).map((b) => [b.binding_name, String(b.shares)])))
@@ -75,34 +72,35 @@ export function VirtualAccountsPage() {
     </div>
     <div className="grid items-start gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
       <Card><CardHeader><CardTitle>账户列表</CardTitle></CardHeader><CardContent className="space-y-3">
-        <Input aria-label="搜索 Virtual 账户" placeholder="搜索名称或 ID" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <Input aria-label="搜索 Virtual 账户" placeholder="搜索编号或别名" value={query} onChange={(event) => setQuery(event.target.value)} />
         {reading ? <p className="text-sm text-muted">正在加载…</p> : filtered.length === 0 ? <p className="text-sm text-muted">{accounts.length ? '没有匹配的账户。' : '暂无 Virtual 账户。'}</p> : filtered.map((account) => <button type="button" key={account.virtual_id} disabled={saving} onClick={() => select(account.virtual_id)} aria-pressed={selected === account.virtual_id}
           className={cn('w-full rounded-xl border p-3 text-left transition-colors', selected === account.virtual_id ? 'border-brand-ring bg-brand-soft' : 'border-border hover:bg-canvas')}>
-          <span className="block truncate font-medium text-ink">{account.name}</span>
-          <span className="mt-1 block truncate text-xs text-muted">{account.virtual_id}</span>
+          <span className="block truncate font-medium text-ink">{account.virtual_id} · {account.name}</span>
           <span className="mt-2 block text-xs text-muted">{account.bindings.length} 条策略 · {account.followers.length} 个跟随账户</span>
         </button>)}
       </CardContent></Card>
       <div className="min-w-0 space-y-4">
-      <Card><CardHeader><CardTitle>{selected ? name : isAdmin ? '新建 Virtual 账户' : '选择 Virtual 账户查看组合'}</CardTitle></CardHeader><CardContent className="space-y-4">
+      <Card><CardHeader><CardTitle>{selected ? `${selected} · ${name}` : isAdmin ? '新建 Virtual 账户' : '选择 Virtual 账户查看组合'}</CardTitle></CardHeader><CardContent className="space-y-4">
       <form className="space-y-5" onSubmit={(event) => {
         event.preventDefault()
         if (!isAdmin || !validShares) return
         void withWrite(async () => {
-          const saved = await saveVirtualAccount(virtualId.trim(), name.trim(), bindings.map((b) => ({ ...b, shares: Number(shareInputs[b.binding_name] ?? b.shares) })), experimentalToken)
+          const nextBindings = bindings.map((b) => ({ ...b, shares: Number(shareInputs[b.binding_name] ?? b.shares) }))
+          const saved = selected
+            ? await saveVirtualAccount(selected, name.trim(), nextBindings)
+            : await createVirtualAccount(name.trim(), nextBindings)
           setAccounts(await listVirtualAccounts())
           setSelected(saved.virtual_id)
-          setVirtualId(saved.virtual_id)
+          setName(saved.name)
           setBindings(saved.bindings)
           setShareInputs(Object.fromEntries(saved.bindings.map((b) => [b.binding_name, String(b.shares)])))
-          setExperimentalToken('')
           return 'Virtual 配置已保存；跟随账户自动同步，发布状态可在账户的策略启用页查看。'
         })
       }}>
         <fieldset disabled={!isAdmin || saving || loading || reading} className="space-y-5">
           <div className="grid gap-4 sm:grid-cols-2">
-            <Label>稳定 ID<Input value={virtualId} disabled={!!selected} onChange={(event) => setVirtualId(event.target.value)} /><FieldHint>创建后保持不变。</FieldHint></Label>
-            <Label>名称<Input value={name} onChange={(event) => setName(event.target.value)} /></Label>
+            <Label>账户编号<Input value={selected || '保存时自动分配'} readOnly /><FieldHint>系统按 virtual01、virtual02 顺序分配。</FieldHint></Label>
+            <Label>别名<Input value={name} onChange={(event) => setName(event.target.value)} required /><FieldHint>用于展示，可随时修改。</FieldHint></Label>
           </div>
           <div className="space-y-4">
             {bindings.length === 0 && <p className="text-sm text-muted">暂未配置策略。保存空组合会停止跟随账户中原有的策略。</p>}
@@ -124,10 +122,9 @@ export function VirtualAccountsPage() {
               {available.map((p) => <option key={p.strategy_name} value={p.strategy_name}>{p.strategy_name}</option>)}
             </Select></Label>
           </div>
-          <Label>实验算法 Token<Input type="password" autoComplete="off" value={experimentalToken} onChange={(event) => setExperimentalToken(event.target.value)} /><FieldHint>修改涉及跟随账户首次启用或重新启用 POV/Chase 时使用。</FieldHint></Label>
           <FieldHint>实际账户的生效份数 = 这里的份数 × 跟随倍率。保存后自动更新全部跟随账户；移除策略会发布原策略名的零目标。</FieldHint>
           <div className="flex flex-wrap gap-3">
-            <Button type="submit" variant="primary" disabled={!virtualId.trim() || !name.trim() || !validShares}>保存组合并同步</Button>
+            <Button type="submit" variant="primary" disabled={!name.trim() || !validShares}>保存组合并同步</Button>
             {selected && <Button type="button" variant="ghost" onClick={() => void withWrite(async () => {
               await deleteVirtualAccount(selected)
               setAccounts(await listVirtualAccounts())

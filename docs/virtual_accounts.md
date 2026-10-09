@@ -4,16 +4,19 @@ Virtual accounts contain strategy bindings only, with no exchange credentials, E
 
 Removing a template binding or changing follow targets sets obsolete real bindings to zero and publishes the complete zero target under the original strategy name. The stopped bindings remain for retry and attribution. A binding name cannot be reassigned to another position strategy. Switching back to independent preserves the effective configuration; pending deliveries finish before independent edits are accepted. A followed virtual account cannot be deleted. Multiplier zero stops all its strategies. Follow mode disables manual binding and direct Exec order-parameter edits, but permits manual republishing after pending configuration deliveries complete. An explicit follow-mode save republishes the full effective configuration, including retained zero stops.
 
-Only admins write virtual accounts. Real account configuration uses existing account configure grants, and attaching a template requires configure rights for every included strategy. Virtual account listings are filtered by strategy visibility. Venue mismatches and experimental-algorithm activation without the existing token are rejected before configuration changes.
+New virtual accounts receive an automatic number (`virtual01`, `virtual02`, and so on) and an editable display alias. Numbers are allocated in the same PostgreSQL transaction as account creation, under the shared configuration lock, so concurrent creations cannot overwrite one another. Existing account IDs and follow relationships remain unchanged when aliases are edited.
+
+Only admins write virtual accounts. Real account configuration uses existing account configure grants, and attaching a template requires configure rights for every included strategy. Virtual account listings are filtered by strategy visibility. Creating, editing, or following a virtual account uses these existing permissions without a separate experimental-algorithm token. Venue and reserved-hedge target checks still run before configuration changes.
 
 Delivery status appears in the account editor. Failures remain durable across Manager restarts and retry every ten seconds. Archive writes precede runtime publishes, freezing effective shares and current theoretical fees. Multiple pending changes coalesce to the newest desired configuration. No startup DDL, Exec RocksDB writes, or trading-service changes.
 
 ## API
 
 - `GET /api/catalog/virtual-accounts` lists visible templates.
+- `POST /api/catalog/virtual-accounts` creates `{name, bindings}` and returns the account with its automatic number.
 - `PUT /api/catalog/virtual-accounts/{virtual_id}` replaces `{name, bindings: [{binding_name, position_strategy_name, order_strategy_name, shares}]}`.
 - `DELETE /api/catalog/virtual-accounts/{virtual_id}` deletes an unfollowed template.
-- `PUT /api/catalog/accounts/{source_id}/configuration` accepts `{"mode":"follow","virtual_id":"model","multiplier":2}` or `{"mode":"independent"}`.
+- `PUT /api/catalog/accounts/{source_id}/configuration` accepts `{"mode":"follow","virtual_id":"virtual01","multiplier":2}` or `{"mode":"independent"}`.
 - Existing account studio responses add `configuration` and `pending_publishes`.
 
 ## Existing database maintenance

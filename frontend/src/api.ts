@@ -155,6 +155,7 @@ export interface AutoEarnSettings {
   interval_secs: number
   round_cap_usdt: number
   trigger_usdt: number
+  reserve_usdt: number
   paused: boolean
   running: boolean
   last_result: string | null
@@ -169,27 +170,29 @@ export function getAutoEarn(sourceId: string, signal?: AbortSignal) {
 
 export function saveAutoEarn(
   sourceId: string,
-  settings: Pick<AutoEarnSettings, 'enabled' | 'interval_secs' | 'round_cap_usdt' | 'trigger_usdt'>,
-  token: string,
+  settings: Pick<AutoEarnSettings, 'enabled' | 'interval_secs' | 'round_cap_usdt' | 'trigger_usdt' | 'reserve_usdt'>,
 ) {
   return requestJson<AutoEarnSettings>(autoEarnPath(sourceId), {
     method: 'PUT',
-    headers: { 'X-BFUSD-Operation-Token': token },
-    body: settings,
+    body: {
+      enabled: settings.enabled,
+      interval_secs: settings.interval_secs,
+      round_cap_usdt: settings.round_cap_usdt,
+      trigger_usdt: settings.trigger_usdt,
+      reserve_usdt: settings.reserve_usdt,
+    },
   })
 }
 
-export function runAutoEarn(sourceId: string, token: string) {
+export function runAutoEarn(sourceId: string) {
   return requestJson<{ result: string }>(`${autoEarnPath(sourceId)}/run`, {
     method: 'POST',
-    headers: { 'X-BFUSD-Operation-Token': token },
   })
 }
 
-export function resumeAutoEarn(sourceId: string, token: string) {
+export function resumeAutoEarn(sourceId: string) {
   return requestJson<AutoEarnSettings>(`${autoEarnPath(sourceId)}/resume`, {
     method: 'POST',
-    headers: { 'X-BFUSD-Operation-Token': token },
   })
 }
 
@@ -634,21 +637,26 @@ export interface BnbStatus {
 const bnbPath = (sourceId: string) => `/catalog/accounts/${encodeURIComponent(sourceId)}/bnb-auto`
 export const getBnbSettings = (sourceId: string, signal?: AbortSignal) =>
   requestJson<BnbStatus>(bnbPath(sourceId), { signal })
-export const saveBnbSettings = (sourceId: string, settings: BnbSettings, token: string) =>
-  requestJson<BnbStatus>(bnbPath(sourceId), { method: 'PUT', headers: { 'X-BFUSD-Operation-Token': token }, body: settings })
-export const runBnbManagement = (sourceId: string, action: 'preview' | 'run', token: string) =>
-  requestJson<{ result: string }>(`${bnbPath(sourceId)}/${action}`, { method: 'POST', headers: { 'X-BFUSD-Operation-Token': token } })
-export const acknowledgeBnbOperation = (sourceId: string, pendingAtMs: number, token: string) =>
-  requestJson<BnbStatus>(`${bnbPath(sourceId)}/acknowledge`, { method: 'POST', headers: { 'X-BFUSD-Operation-Token': token }, body: { pending_at_ms: pendingAtMs, exchange_outcome_verified: true } })
+export const saveBnbSettings = (sourceId: string, settings: BnbSettings) =>
+  requestJson<BnbStatus>(bnbPath(sourceId), { method: 'PUT', body: settings })
+export const runBnbManagement = (sourceId: string, action: 'preview' | 'run') =>
+  requestJson<{ result: string }>(`${bnbPath(sourceId)}/${action}`, { method: 'POST' })
+export const acknowledgeBnbOperation = (sourceId: string, pendingAtMs: number) =>
+  requestJson<BnbStatus>(`${bnbPath(sourceId)}/acknowledge`, { method: 'POST', body: { pending_at_ms: pendingAtMs, exchange_outcome_verified: true } })
 
 export function listVirtualAccounts(signal?: AbortSignal) {
   return requestJson<VirtualAccount[]>('/catalog/virtual-accounts', { signal })
 }
 
-export function saveVirtualAccount(virtualId: string, name: string, bindings: VirtualBinding[], experimentalToken?: string) {
+export function createVirtualAccount(name: string, bindings: VirtualBinding[]) {
+  return requestJson<VirtualAccount>('/catalog/virtual-accounts', {
+    method: 'POST', body: { name, bindings },
+  })
+}
+
+export function saveVirtualAccount(virtualId: string, name: string, bindings: VirtualBinding[]) {
   return requestJson<VirtualAccount>(`/catalog/virtual-accounts/${encodeURIComponent(virtualId)}`, {
     method: 'PUT', body: { name, bindings },
-    headers: experimentalToken ? { 'X-Experimental-Algorithm-Token': experimentalToken } : undefined,
   })
 }
 
@@ -656,9 +664,8 @@ export function deleteVirtualAccount(virtualId: string) {
   return requestJson<void>(`/catalog/virtual-accounts/${encodeURIComponent(virtualId)}`, { method: 'DELETE' })
 }
 
-export function saveAccountConfiguration(sourceId: string, configuration: AccountConfiguration, experimentalToken?: string) {
+export function saveAccountConfiguration(sourceId: string, configuration: AccountConfiguration) {
   return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}/configuration`, {
     method: 'PUT', body: configuration,
-    headers: experimentalToken ? { 'X-Experimental-Algorithm-Token': experimentalToken } : undefined,
   })
 }

@@ -1,4 +1,4 @@
-import { ArrowDownToLine, ArrowRight, Check, ChevronDown, Coins, Eye, EyeOff, FlaskConical, LoaderCircle, Play, RefreshCw, ShieldCheck, SlidersHorizontal, Wallet } from 'lucide-react'
+import { ArrowDownToLine, ArrowRight, Check, ChevronDown, Coins, FlaskConical, LoaderCircle, Play, RefreshCw, ShieldCheck, SlidersHorizontal, Wallet } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { acknowledgeBnbOperation, getBnbSettings, runBnbManagement, saveBnbSettings, type BnbSettings, type BnbStatus } from '../api'
 import { Alert, Badge } from './ui/Badge'
@@ -11,8 +11,6 @@ const time = (ms: number) => new Date(ms).toLocaleString('zh-CN', { timeZone: 'A
 export function BnbManagement({ sourceId, configurable }: { sourceId: string; configurable: boolean }) {
   const [status, setStatus] = useState<BnbStatus | null>(null)
   const [settings, setSettings] = useState<BnbSettings | null>(null)
-  const [token, setToken] = useState('')
-  const [visible, setVisible] = useState(false)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -50,17 +48,17 @@ export function BnbManagement({ sourceId, configurable }: { sourceId: string; co
     && settings.max_quote_deviation_bps > 0 && settings.max_quote_deviation_bps <= 500
 
   async function act(action: 'save' | 'preview' | 'run' | 'refresh' | 'acknowledge') {
-    if (!settings || (action !== 'refresh' && !token.trim())) return
+    if (!settings || (action !== 'refresh' && !configurable)) return
     setBusy(action); setError(''); setNotice('')
     try {
       if (action === 'save') {
-        const next = await saveBnbSettings(sourceId, settings, token)
+        const next = await saveBnbSettings(sourceId, settings)
         setStatus(next); setSettings(next.settings); setNotice('BNB 管理设置已保存')
       } else if (action === 'acknowledge' && status?.pending) {
-        const next = await acknowledgeBnbOperation(sourceId, status.pending.at_ms, token)
+        const next = await acknowledgeBnbOperation(sourceId, status.pending.at_ms)
         setStatus(next); setVerified(false); setNotice('已记录人工核对结果，下轮将重新读取余额')
       } else if (action === 'preview' || action === 'run') {
-        const result = await runBnbManagement(sourceId, action, token)
+        const result = await runBnbManagement(sourceId, action)
         setNotice(result.result)
         setStatus(await getBnbSettings(sourceId))
       } else {
@@ -68,7 +66,6 @@ export function BnbManagement({ sourceId, configurable }: { sourceId: string; co
         setStatus(next)
         if (!dirty) setSettings(next.settings)
       }
-      if (action !== 'refresh') { setToken(''); setVisible(false) }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
       if (action !== 'save') { try { setStatus(await getBnbSettings(sourceId)) } catch { /* retain last status */ } }
@@ -157,7 +154,7 @@ export function BnbManagement({ sourceId, configurable }: { sourceId: string; co
             {status?.hedge_error && <Alert tone="warning" className="mt-4 break-words">对冲待恢复：{status.hedge_error}</Alert>}
             {status?.pending && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-6 text-amber-900">
               <p className="font-semibold">正在等待上一笔操作确认</p><p className="break-words">{status.pending.action}</p><p>确认结果前不会重复提交。仅在人工核对交易所记录、无在途操作且余额一致后解除。</p>
-              {configurable && <><label className="mt-3 flex items-start gap-2"><input type="checkbox" className="mt-1.5" checked={verified} disabled={!!busy} onChange={(e) => setVerified(e.target.checked)} />已核对交易所最终结果及余额</label><Button className="mt-3" size="sm" disabled={!verified || !token || !!busy} onClick={() => void act('acknowledge')}>记录核对并解除等待</Button></>}
+              {configurable && <><label className="mt-3 flex items-start gap-2"><input type="checkbox" className="mt-1.5" checked={verified} disabled={!!busy} onChange={(e) => setVerified(e.target.checked)} />已核对交易所最终结果及余额</label><Button className="mt-3" size="sm" disabled={!verified || !!busy} onClick={() => void act('acknowledge')}>记录核对并解除等待</Button></>}
             </div>}
           </aside>
         </div>
@@ -177,13 +174,10 @@ export function BnbManagement({ sourceId, configurable }: { sourceId: string; co
               {[true, false].map((dry) => <button key={String(dry)} type="button" disabled={disabled} aria-pressed={settings.dry_run === dry} onClick={() => setSettings({ ...settings, dry_run: dry })} className={`flex items-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50 ${settings.dry_run === dry ? 'bg-brand-soft text-brand-hover shadow-sm' : 'text-muted hover:bg-canvas'}`}>{dry ? <FlaskConical size={14} /> : <Play size={14} />}{dry ? '试运行' : '实际执行'}</button>)}
             </div>
           </div>
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-            <Label className="w-full sm:max-w-xs">操作 token<div className="relative"><Input type={visible ? 'text' : 'password'} autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} disabled={!!busy} className="pr-10" placeholder="与自动理财使用同一操作 token" /><button type="button" onClick={() => setVisible(!visible)} aria-label={visible ? '隐藏 token' : '显示 token'} className="absolute inset-y-0 right-0 grid w-10 place-items-center text-muted">{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></Label>
-            <div className="flex flex-wrap gap-2">
-              <Button disabled={disabled || !token || dirty} onClick={() => void act('preview')}><FlaskConical size={15} /> 运行检查</Button>
-              <Button disabled={disabled || !token || dirty || !settings.enabled} onClick={() => void act('run')}><Play size={15} /> 执行一轮</Button>
-              <Button variant="primary" disabled={disabled || !token || !dirty || !valid} onClick={() => void act('save')}>{busy === 'save' ? <LoaderCircle size={15} className="animate-spin" /> : <Check size={15} />} 保存配置</Button>
-            </div>
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={disabled || dirty} onClick={() => void act('preview')}><FlaskConical size={15} /> 运行检查</Button>
+            <Button disabled={disabled || dirty || !settings.enabled} onClick={() => void act('run')}><Play size={15} /> 执行一轮</Button>
+            <Button variant="primary" disabled={disabled || !dirty || !valid} onClick={() => void act('save')}>{busy === 'save' ? <LoaderCircle size={15} className="animate-spin" /> : <Check size={15} />} 保存配置</Button>
           </div>
         </div>}
       </>}

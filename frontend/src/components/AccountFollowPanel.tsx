@@ -8,11 +8,10 @@ import { Input, Label, Select, FieldHint } from './ui/Field'
 import { Button } from './ui/Button'
 import { Alert } from './ui/Badge'
 
-export function AccountFollowPanel({ sourceId, studio, onChange, experimentalToken }: {
+export function AccountFollowPanel({ sourceId, studio, onChange }: {
   sourceId: string
   studio: AccountStudio | null
   onChange: (studio: AccountStudio) => void
-  experimentalToken: string
 }) {
   const [accounts, setAccounts] = useState<VirtualAccount[]>([])
   const [mode, setMode] = useState('independent')
@@ -64,7 +63,7 @@ export function AccountFollowPanel({ sourceId, studio, onChange, experimentalTok
         void withWrite(async () => {
           const next = await saveAccountConfiguration(sourceId, mode === 'follow'
             ? { mode: 'follow', virtual_id: virtualId, multiplier: numericMultiplier }
-            : { mode: 'independent' }, experimentalToken)
+            : { mode: 'independent' })
           onChange(next)
           return next.pending_publishes.length ? '配置已保存，正在同步到 Exec。' : '配置模式已保存。'
         })
@@ -76,7 +75,7 @@ export function AccountFollowPanel({ sourceId, studio, onChange, experimentalTok
           <Label>Virtual 账户<Select value={virtualId} onChange={(event) => setVirtualId(event.target.value)}>
             <option value="">请选择</option>
             {followedId && !accounts.some((a) => a.virtual_id === followedId) && <option value={followedId}>{followedId}（无查看权限）</option>}
-            {accounts.map((a) => <option key={a.virtual_id} value={a.virtual_id}>{a.name} / {a.virtual_id}</option>)}
+            {accounts.map((a) => <option key={a.virtual_id} value={a.virtual_id}>{a.virtual_id} · {a.name}</option>)}
           </Select></Label>
           <Label>跟随倍率<Input value={multiplier} inputMode="decimal" onChange={(event) => setMultiplier(event.target.value)} /></Label>
         </>}

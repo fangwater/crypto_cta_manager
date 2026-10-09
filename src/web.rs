@@ -633,7 +633,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             "/api/catalog/accounts/{source_id}/contract-leverage",
             get(get_account_symbol_contract_leverage).put(save_account_symbol_contract_leverage),
         )
-        .route("/api/catalog/virtual-accounts", get(list_virtual_accounts))
+        .route(
+            "/api/catalog/virtual-accounts",
+            get(list_virtual_accounts).post(create_virtual_account),
+        )
         .route(
             "/api/catalog/virtual-accounts/{virtual_id}",
             put(save_virtual_account).delete(delete_virtual_account),
@@ -2851,8 +2854,7 @@ async fn get_account_exchange_fee_rates(
     }
 }
 
-const BFUSD_OPERATION_TOKEN_HEADER: &str = "x-bfusd-operation-token";
-
+// These account-scoped routes use auth_middleware's login/configure checks.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SaveBfusdAutoRequest {
@@ -2860,6 +2862,7 @@ struct SaveBfusdAutoRequest {
     interval_secs: u64,
     round_cap_usdt: f64,
     trigger_usdt: f64,
+    reserve_usdt: f64,
 }
 
 fn bfusd_source<'a>(
@@ -2877,19 +2880,12 @@ fn bfusd_source<'a>(
     Ok(source)
 }
 
-fn bfusd_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(BFUSD_OPERATION_TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok())
-}
-
 fn bfusd_error(error: anyhow::Error) -> Response {
     let message = format!("{error:#}");
-    let status = if message.contains("operation token required") {
-        StatusCode::FORBIDDEN
-    } else if message.contains("interval must")
+    let status = if message.contains("interval must")
         || message.contains("round cap must")
         || message.contains("trigger must")
+        || message.contains("reserve must")
         || message.contains("disabled or paused")
     {
         StatusCode::BAD_REQUEST
@@ -2908,16 +2904,12 @@ async fn get_account_bnb(State(state): State<WebState>, Path(source_id): Path<St
 async fn save_account_bnb(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
-    headers: HeaderMap,
     Json(settings): Json<crate::bnb_auto::Settings>,
 ) -> Response {
     let source = match bfusd_source(&state.config, &source_id) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    if let Err(e) = state.auto_earn.verify_token(bfusd_token(&headers)).await {
-        return bfusd_error(e);
-    }
     if let Err(e) = settings.validate() {
         return bad_request(e.to_string());
     }
@@ -2926,33 +2918,20 @@ async fn save_account_bnb(
         Err(e) => bfusd_error(e),
     }
 }
-async fn run_account_bnb(
-    State(state): State<WebState>,
-    Path(source_id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    bnb_run_response(&state, &source_id, &headers, false).await
+async fn run_account_bnb(State(state): State<WebState>, Path(source_id): Path<String>) -> Response {
+    bnb_run_response(&state, &source_id, false).await
 }
 async fn preview_account_bnb(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
-    headers: HeaderMap,
 ) -> Response {
-    bnb_run_response(&state, &source_id, &headers, true).await
+    bnb_run_response(&state, &source_id, true).await
 }
-async fn bnb_run_response(
-    state: &WebState,
-    source_id: &str,
-    headers: &HeaderMap,
-    preview: bool,
-) -> Response {
+async fn bnb_run_response(state: &WebState, source_id: &str, preview: bool) -> Response {
     let source = match bfusd_source(&state.config, source_id) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    if let Err(e) = state.auto_earn.verify_token(bfusd_token(headers)).await {
-        return bfusd_error(e);
-    }
     match state.bnb.run(source, preview).await {
         Ok(result) => (NO_STORE, Json(serde_json::json!({"result":result}))).into_response(),
         Err(e) => bfusd_error(e),
@@ -2967,16 +2946,12 @@ struct BnbAcknowledgeRequest {
 async fn acknowledge_account_bnb(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
-    headers: HeaderMap,
     Json(request): Json<BnbAcknowledgeRequest>,
 ) -> Response {
     let source = match bfusd_source(&state.config, &source_id) {
         Ok(s) => s,
         Err(r) => return r,
     };
-    if let Err(e) = state.auto_earn.verify_token(bfusd_token(&headers)).await {
-        return bfusd_error(e);
-    }
     if !request.exchange_outcome_verified {
         return bad_request("先核对交易所记录、待处理订单和余额".into());
     }
@@ -2999,7 +2974,6 @@ async fn get_account_bfusd_auto(
 async fn save_account_bfusd_auto(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
-    headers: HeaderMap,
     Json(request): Json<SaveBfusdAutoRequest>,
 ) -> Response {
     if let Err(response) = bfusd_source(&state.config, &source_id) {
@@ -3010,13 +2984,10 @@ async fn save_account_bfusd_auto(
         interval_secs: request.interval_secs,
         round_cap_usdt: request.round_cap_usdt,
         trigger_usdt: request.trigger_usdt,
+        reserve_usdt: request.reserve_usdt,
         paused: false,
     };
-    match state
-        .auto_earn
-        .save(&source_id, bfusd_token(&headers), settings)
-        .await
-    {
+    match state.auto_earn.save(&source_id, settings).await {
         Ok(status) => (NO_STORE, Json(status)).into_response(),
         Err(error) => bfusd_error(error),
     }
@@ -3025,17 +2996,12 @@ async fn save_account_bfusd_auto(
 async fn run_account_bfusd_auto(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
-    headers: HeaderMap,
 ) -> Response {
     let source = match bfusd_source(&state.config, &source_id) {
         Ok(source) => source,
         Err(response) => return response,
     };
-    match state
-        .auto_earn
-        .run(source, bfusd_token(&headers), true)
-        .await
-    {
+    match state.auto_earn.run(source, true).await {
         Ok(result) => (NO_STORE, Json(serde_json::json!({"result": result}))).into_response(),
         Err(error) => bfusd_error(error),
     }
@@ -3044,16 +3010,11 @@ async fn run_account_bfusd_auto(
 async fn resume_account_bfusd_auto(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
-    headers: HeaderMap,
 ) -> Response {
     if let Err(response) = bfusd_source(&state.config, &source_id) {
         return response;
     }
-    match state
-        .auto_earn
-        .resume(&source_id, bfusd_token(&headers))
-        .await
-    {
+    match state.auto_earn.resume(&source_id).await {
         Ok(status) => (NO_STORE, Json(status)).into_response(),
         Err(error) => bfusd_error(error),
     }
@@ -5151,6 +5112,55 @@ mod tests {
     }
 
     #[test]
+    fn treasury_operations_require_the_selected_accounts_configure_permission() {
+        let access = auth::SourceAccess {
+            view: BTreeSet::from(["account-a".into(), "account-b".into()]),
+            configure: BTreeSet::from(["account-a".into()]),
+        };
+        for suffix in [
+            "bfusd-auto",
+            "bfusd-auto/run",
+            "bfusd-auto/resume",
+            "bnb-auto",
+            "bnb-auto/run",
+            "bnb-auto/preview",
+            "bnb-auto/acknowledge",
+        ] {
+            for (source, expected) in [
+                ("account-a", None),
+                (
+                    "account-b",
+                    Some("you are not authorized to configure this account"),
+                ),
+                (
+                    "account-c",
+                    Some("you are not authorized to view or configure this account"),
+                ),
+            ] {
+                let path = format!("/api/catalog/accounts/{source}/{suffix}");
+                let source_id = source_id_from_path(&path);
+                assert_eq!(source_id, Some(source));
+                assert_eq!(
+                    request_permission_error(false, false, source_id, &path, &access),
+                    expected,
+                    "{path}"
+                );
+                assert_eq!(
+                    request_permission_error(true, false, source_id, &path, &access),
+                    None
+                );
+            }
+        }
+        for suffix in ["bfusd-auto", "bnb-auto"] {
+            let path = format!("/api/catalog/accounts/account-b/{suffix}");
+            assert_eq!(
+                request_permission_error(false, true, source_id_from_path(&path), &path, &access),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn source_grants_allow_only_their_account_mutations() {
         let access = auth::SourceAccess {
             view: BTreeSet::from([
@@ -5161,26 +5171,19 @@ mod tests {
         };
         let grants_path = "/api/catalog/position-strategies/sk/grants";
         let account_path = "/api/catalog/accounts/binance_exec_trade01/bindings";
-        assert_eq!(
-            request_permission_error(
-                false,
-                false,
-                None,
-                "/api/catalog/virtual-accounts/model",
-                &access
-            ),
-            Some("administrator permission required")
-        );
-        assert_eq!(
-            request_permission_error(
-                true,
-                false,
-                None,
-                "/api/catalog/virtual-accounts/model",
-                &access
-            ),
-            None
-        );
+        for path in [
+            "/api/catalog/virtual-accounts",
+            "/api/catalog/virtual-accounts/model",
+        ] {
+            assert_eq!(
+                request_permission_error(false, false, None, path, &access),
+                Some("administrator permission required")
+            );
+            assert_eq!(
+                request_permission_error(true, false, None, path, &access),
+                None
+            );
+        }
         assert_eq!(
             request_permission_error(
                 false,
@@ -5328,7 +5331,6 @@ async fn list_virtual_accounts(
 
 async fn validate_virtual_activation(
     state: &WebState,
-    headers: &HeaderMap,
     source_id: &str,
     bindings: &[virtual_accounts::VirtualBinding],
     multiplier: f64,
@@ -5339,12 +5341,6 @@ async fn validate_virtual_activation(
         .map_err(|e| e.to_string())?;
     let effective =
         virtual_accounts::effective_bindings(bindings, multiplier).map_err(|e| e.to_string())?;
-    let current = strategy_catalog::list_bindings(&state.pool, source_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let orders = strategy_catalog::list_order_strategies(&state.pool)
-        .await
-        .map_err(|e| e.to_string())?;
     let positions = strategy_catalog::list_position_strategies(&state.pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -5360,29 +5356,29 @@ async fn validate_virtual_activation(
                 .validate_cta_targets(source_id, &targets)
                 .map_err(|error| error.to_string())?;
         }
-        let existing = current
-            .iter()
-            .find(|old| old.binding_name == b.binding_name);
-        let selected = orders
-            .iter()
-            .find(|o| o.strategy_name == b.order_strategy_name);
-        let requires = experimental_binding_change_requires_token(
-            selected.map(|o| o.order_parameters.algorithm),
-            &b.order_strategy_name,
-            existing.map(|o| o.order_strategy_name.as_str()),
-            existing.map(|o| o.shares),
-            b.shares,
-        );
-        require_experimental_algorithm_token(headers, requires).map_err(str::to_string)?;
     }
     Ok(())
+}
+
+async fn create_virtual_account(
+    State(state): State<WebState>,
+    Json(request): Json<SaveVirtualAccount>,
+) -> Result<Response, ApiError> {
+    save_virtual_account_response(&state, None, request).await
 }
 
 async fn save_virtual_account(
     State(state): State<WebState>,
     Path(virtual_id): Path<String>,
-    headers: HeaderMap,
     Json(request): Json<SaveVirtualAccount>,
+) -> Result<Response, ApiError> {
+    save_virtual_account_response(&state, Some(&virtual_id), request).await
+}
+
+async fn save_virtual_account_response(
+    state: &WebState,
+    virtual_id: Option<&str>,
+    request: SaveVirtualAccount,
 ) -> Result<Response, ApiError> {
     let _guard = state.configuration_lock.lock().await;
     // Also validate catalogs when the virtual account has no real followers.
@@ -5405,26 +5401,35 @@ async fn save_virtual_account(
             )));
         }
     }
-    for source_id in virtual_accounts::followers(&state.pool, &virtual_id).await? {
+    let followers = match virtual_id {
+        Some(id) => virtual_accounts::followers(&state.pool, id).await?,
+        None => vec![],
+    };
+    for source_id in followers {
         let AccountConfiguration::Follow { multiplier, .. } =
             virtual_accounts::configuration(&state.pool, &source_id).await?
         else {
             continue;
         };
         if let Err(message) =
-            validate_virtual_activation(&state, &headers, &source_id, &request.bindings, multiplier)
-                .await
+            validate_virtual_activation(state, &source_id, &request.bindings, multiplier).await
         {
             return Ok(bad_request(format!("source {source_id}: {message}")));
         }
     }
-    match virtual_accounts::save(&state.pool, &virtual_id, &request, unix_now_us()).await {
-        Ok(()) => {
+    let saved_id = match virtual_id {
+        Some(id) => virtual_accounts::save(&state.pool, id, &request, unix_now_us())
+            .await
+            .map(|()| id.to_string()),
+        None => virtual_accounts::create(&state.pool, &request, unix_now_us()).await,
+    };
+    match saved_id {
+        Ok(id) => {
             state.configuration_notify.notify_one();
             let saved = virtual_accounts::list(&state.pool)
                 .await?
                 .into_iter()
-                .find(|a| a.virtual_id == virtual_id);
+                .find(|a| a.virtual_id == id);
             Ok((NO_STORE, Json(saved)).into_response())
         }
         Err(error) => Ok(catalog_error(error)),
@@ -5447,7 +5452,6 @@ async fn save_account_configuration(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
-    headers: HeaderMap,
     Json(request): Json<AccountConfiguration>,
 ) -> Result<Response, ApiError> {
     let _guard = state.configuration_lock.lock().await;
@@ -5480,14 +5484,8 @@ async fn save_account_configuration(
                 ));
             }
         }
-        if let Err(message) = validate_virtual_activation(
-            &state,
-            &headers,
-            &source_id,
-            &account.bindings,
-            *multiplier,
-        )
-        .await
+        if let Err(message) =
+            validate_virtual_activation(&state, &source_id, &account.bindings, *multiplier).await
         {
             return Ok(bad_request(message));
         }
