@@ -22,6 +22,31 @@ type StrategySymbol = (String, String);
 #[derive(Clone, Debug)]
 struct PositionArg(StrategySnapshotPosition);
 
+#[derive(Clone, Debug)]
+struct ReferencePriceArg {
+    symbol: String,
+    price: f64,
+}
+
+impl FromStr for ReferencePriceArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let (symbol, price) = value.split_once(':').ok_or("expected SYMBOL:PRICE")?;
+        if symbol.is_empty() || symbol != symbol.trim() {
+            return Err("reference symbol must be nonempty without surrounding whitespace".into());
+        }
+        let price = price.parse::<f64>().map_err(|error| error.to_string())?;
+        if !price.is_finite() || price <= 0.0 {
+            return Err("reference price must be finite and positive".into());
+        }
+        Ok(Self {
+            symbol: symbol.to_string(),
+            price,
+        })
+    }
+}
+
 impl FromStr for PositionArg {
     type Err = String;
 
@@ -76,6 +101,11 @@ struct Args {
     #[arg(long)]
     infer_from_fills: bool,
 
+    /// Explicit anchor price for an inferred holding with no post-anchor fill.
+    /// A factual fill price always takes precedence.
+    #[arg(long = "reference-price", value_name = "SYMBOL:PRICE")]
+    reference_prices: Vec<ReferencePriceArg>,
+
     /// Exec venue code for Viz-backed modes, for example 1 for Binance Futures.
     #[arg(long)]
     venue_code: Option<i16>,
@@ -106,6 +136,18 @@ async fn main() -> Result<()> {
     if selected_modes != 1 {
         bail!("select exactly one of --position, --from-exec-viz, or --infer-from-fills");
     }
+    if !args.infer_from_fills && !args.reference_prices.is_empty() {
+        bail!("--reference-price requires --infer-from-fills");
+    }
+    let mut reference_prices = BTreeMap::new();
+    for reference in args.reference_prices {
+        if reference_prices
+            .insert(reference.symbol.clone(), reference.price)
+            .is_some()
+        {
+            bail!("duplicate reference price for {}", reference.symbol);
+        }
+    }
     let snapshot = if args.from_exec_viz || args.infer_from_fills {
         let venue_code = args
             .venue_code
@@ -115,8 +157,15 @@ async fn main() -> Result<()> {
             .context("source has no exec_viz_url configured")?;
         let client = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
         if args.infer_from_fills {
-            snapshot_inferred_from_fills(source, venue_code, args.snapshot_ts_us, origin, &client)
-                .await?
+            snapshot_inferred_from_fills(
+                source,
+                venue_code,
+                args.snapshot_ts_us,
+                origin,
+                &client,
+                &reference_prices,
+            )
+            .await?
         } else {
             if args.snapshot_ts_us.is_some() {
                 bail!("--snapshot-ts-us cannot be combined with --from-exec-viz");
@@ -183,6 +232,7 @@ async fn snapshot_inferred_from_fills(
     requested_snapshot_ts_us: Option<i64>,
     origin: &str,
     client: &VizSnapshotClient,
+    supplied_reference_prices: &BTreeMap<String, f64>,
 ) -> Result<StrategyPositionSnapshot> {
     const MAX_ATTEMPTS: usize = 3;
 
@@ -222,6 +272,7 @@ async fn snapshot_inferred_from_fills(
                 requested_snapshot_ts_us,
                 allocation,
                 &events,
+                supplied_reference_prices,
             );
         }
         if attempt == MAX_ATTEMPTS {
@@ -240,6 +291,7 @@ fn infer_snapshot_from_history(
     requested_snapshot_ts_us: Option<i64>,
     allocation: SourceStrategyAllocation,
     events: &[UniformOrderEvent],
+    supplied_reference_prices: &BTreeMap<String, f64>,
 ) -> Result<StrategyPositionSnapshot> {
     validate_allocation_header(source_id, venue_code, &allocation)?;
 
@@ -350,6 +402,18 @@ fn infer_snapshot_from_history(
             .then_with(|| left.event_ts_us.cmp(&right.event_ts_us))
             .then_with(|| left.record_key.cmp(&right.record_key))
     });
+
+    // Untouched initial holdings can have no factual fill at all. The caller
+    // must supply their anchor valuation explicitly; never infer a price from
+    // a later live mark or replace an available factual execution price.
+    for (symbol, price) in supplied_reference_prices {
+        if !price.is_finite() || *price <= 0.0 {
+            bail!("reference price for {symbol} must be finite and positive");
+        }
+        first_prices
+            .entry(symbol.clone())
+            .or_insert((snapshot_ts_us, String::new(), *price));
+    }
 
     let mut account_initial = BTreeMap::<String, f64>::new();
     let mut symbols = account_current.keys().cloned().collect::<BTreeSet<_>>();
@@ -602,7 +666,11 @@ fn reference_price(
     first_prices
         .get(symbol)
         .map(|(_, _, price)| *price)
-        .with_context(|| format!("no post-anchor factual fill price is available for {symbol}"))
+        .with_context(|| {
+            format!(
+                "no post-anchor factual fill or supplied reference price is available for {symbol}"
+            )
+        })
 }
 
 fn validate_finite_quantity(value: f64, field: &str, symbol: &str) -> Result<()> {
@@ -915,6 +983,7 @@ mod tests {
                 fill(200, Some("cta_a"), 2, 0.5, 110.0),
                 fill(300, Some("cta_b"), 2, 1.0, 105.0),
             ],
+            &BTreeMap::new(),
         )
         .unwrap();
 
@@ -946,6 +1015,7 @@ mod tests {
             None,
             allocation(vec![("CTA_B", 1.0)], 1.0),
             &[fill(100, Some("SYSTEM_POSITION_CLOSE"), 2, 2.0, 100.0)],
+            &BTreeMap::new(),
         )
         .unwrap();
 
@@ -970,6 +1040,7 @@ mod tests {
                 fill(100, Some("cta_a"), 1, 9.0, 90.0),
                 fill(200, Some("cta_a"), 2, 0.5, 110.0),
             ],
+            &BTreeMap::new(),
         )
         .unwrap();
 
@@ -988,9 +1059,79 @@ mod tests {
             None,
             allocation(vec![("cta_a", 1.000_001)], 1.000_001),
             &[fill(100, Some("cta_a"), 1, 1.0, 100.0)],
+            &BTreeMap::new(),
         )
         .unwrap_err();
 
         assert!(error.to_string().contains("no strategy snapshot is needed"));
+    }
+
+    #[test]
+    fn supplied_anchor_price_preserves_untouched_account_residual() {
+        let mut current = allocation(vec![("cta_a", 1.5)], 1.5);
+        current
+            .rows
+            .push(crypto_cta_manager::viz_snapshot::StrategyAllocationRow {
+                strategy_name: "SYSTEM_POSITION_CLOSE".into(),
+                symbol: "LINKUSDT".into(),
+                current_qty: 1.5,
+                current_usdt: Some(999.0),
+                account_position_qty: Some(1.5),
+            });
+        let events = [fill(100, Some("cta_a"), 1, 0.5, 100.0)];
+        let missing = infer_snapshot_from_history(
+            "trade01",
+            1,
+            None,
+            current.clone(),
+            &events,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("LINKUSDT"));
+
+        let inferred = infer_snapshot_from_history(
+            "trade01",
+            1,
+            None,
+            current,
+            &events,
+            &BTreeMap::from([("LINKUSDT".into(), 12.0), ("BTCUSDT".into(), 500.0)]),
+        )
+        .unwrap();
+        let btc = inferred
+            .positions
+            .iter()
+            .find(|p| p.symbol == "BTCUSDT")
+            .unwrap();
+        assert_eq!(btc.reference_price, 100.0, "factual fill price must win");
+        assert_eq!(btc.quantity, 1.0);
+        let link = inferred
+            .positions
+            .iter()
+            .find(|p| p.symbol == "LINKUSDT")
+            .unwrap();
+        assert_eq!(link.strategy_name, UNALLOCATED_STRATEGY);
+        assert_eq!(link.quantity, 1.5);
+        assert_eq!(link.reference_price, 12.0, "never use the later live mark");
+        let account = inferred.account_snapshot().unwrap();
+        assert_eq!(account.positions.len(), 2);
+    }
+
+    #[test]
+    fn supplied_anchor_price_rejects_invalid_financial_values() {
+        for price in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                infer_snapshot_from_history(
+                    "trade01",
+                    1,
+                    None,
+                    allocation(vec![("cta_a", 1.5)], 1.5),
+                    &[fill(100, Some("cta_a"), 1, 0.5, 100.0)],
+                    &BTreeMap::from([("LINKUSDT".into(), price)]),
+                )
+                .is_err()
+            );
+        }
     }
 }

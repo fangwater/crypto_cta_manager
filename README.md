@@ -357,6 +357,21 @@ nav_strategy_snapshot \
   --position CTA_BETA:BTCUSDT:1:-0.002:80500
 ```
 
+If the initial strategy anchor is missing after an Exec start, use
+`nav_strategy_snapshot --infer-from-fills --venue-code 1 --dry-run` with the
+account's `--config` and `--source`. It derives initial strategy quantities from
+the current allocation minus later persisted fills and validates the replay.
+An explicit `--snapshot-ts-us` can select the startup instant; otherwise it uses
+the instant immediately before the first factual fill. This preserves the
+startup executions when the anchor is saved. The mode refuses to replace an
+existing strategy anchor.
+
+An untouched holding may have no post-anchor fill price. Supply its independently
+checked anchor valuation with `--reference-price SYMBOL:PRICE`, repeating the
+flag for multiple symbols. A factual fill price takes precedence. The tool never
+substitutes a later live mark automatically; record the price source in `--note`.
+Missing prices still prevent an inferred snapshot from being saved.
+
 Rebuild all enabled accounts directly from their complete RocksDB order history:
 
 ```bash
