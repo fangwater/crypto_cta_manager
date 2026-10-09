@@ -9,7 +9,9 @@ account monitoring, Viz and Config. Bahll202210 (`binance_exec_trade01`) resumed
 trading on the operator's subsequent instruction. The replacement trade05
 account xy_lxy21 has a new source/namespace (`binance_exec_xy_lxy21_05`) and now
 runs trading on the operator's later instruction, following c40 at multiplier
-116. Manager includes the USDT reserve, Virtual
+116. Matching initial account/strategy PnL anchors are now stored at the successful
+startup time; both ordinary users' desktop/mobile strategy views are verified.
+Manager includes the USDT reserve, Virtual
 editor and owned/delegated Virtual permissions.
 The latest verification is at the end; the COIN-M sections below are historical.
 
@@ -377,3 +379,66 @@ No manual balance-based snapshot was created: the operator chose live Exec
 allocation instead. Recoverable catalog/risk/runtime evidence is under the new
 environment's `backups/follow_c40_start_20261009T104355Z`; its `EXEC-RELEASE.json`
 records the authorized running state and correct environment identity.
+
+## xy_lxy21 initial inventory and strategy PnL
+
+The operator requested correct initial inventory, independent strategy PnL and
+browser verification. Exec already had the live strategy allocation, but Manager
+had no account or strategy snapshot for this new source. Backfilling the anchor
+from current allocation and later factual fills initially failed for LINKUSDT:
+that residual holding had no post-anchor fill to supply a reference price.
+
+The existing `nav_strategy_snapshot --infer-from-fills` tool now accepts explicit
+repeatable `--reference-price SYMBOL:PRICE` fallbacks. They must be finite and
+positive, with unique nonempty symbols; factual fill prices always take
+precedence. This keeps untouched inventory usable without silently treating a
+later live mark as its initial price. Source `517dd90` was built locally and
+published only as the standalone snapshot tool, SHA-256
+`19e28b535f1222e24b4f45837b58efea324680f68894749fc3cc220c139ffd0e`.
+Its release record and Manager's root runtime record describe this override.
+The running `cta_web` remains `25e2776`; no runtime restart was needed.
+
+After a recoverable backup and a successful dry run, the tool inferred the
+initial strategy quantities by subtracting all post-start factual fills from
+the current Exec allocation. The immutable anchor is `1791542845000000` us,
+2026-10-09 10:47:25 UTC / 18:47:25 Shanghai, before the first factual fill at
+`1791542851134220` us. All startup and subsequent executions remain in the PnL
+interval. These are inferred initial allocations, not a claim that Exec
+captured an allocation snapshot at that historical moment.
+
+The strategy snapshot contains 24 initial lots: 10 for
+`CTA_SK_C40V6PosT1_LXY_filter_Position`, 11 for
+`CTA_SK_C40V6PosV5_V2_LXY_filter_Position`, and 3 for `__unallocated__`.
+Both named strategies retain 58 Follow shares. A matching immutable account
+snapshot contains the 15 aggregate symbol/venue positions at the same timestamp
+and prices. Existing sub-dollar inference filtering is unchanged. Untouched
+inventory uses the last fully closed Binance one-minute candle before startup
+(10:46 UTC), retrieved with explicit `154.197.32.9` egress; the backup preserves
+the raw candles and price provenance. Fill-derived prices override those
+fallbacks wherever available. Neither snapshot modifies Exec RocksDB, strategy
+targets, trading bindings, or retired prc history.
+
+After Manager's normal refresh, source-scoped account and strategy timeline
+queries agreed on NAV before/after estimated fees and total estimated fees.
+Every displayed time point is additive, both initial baselines are zero, and
+strategy totals match the account's 514 factual fills in the measured interval.
+The two named strategy buckets and unallocated residual are present; no
+`SYSTEM_POSITION_CLOSE` strategy bucket is fabricated. The strategy and account
+anchors both report the startup timestamp above.
+
+Chromium through the production Nginx gateway checked shaokai and dzy at
+1440×1000 and 390×1100. Both users see the independent strategy curves and
+nonempty PnL rows, with all three buckets selected. Follow configuration still
+shows multiplier 116 and enabled configuration controls. Exec Viz shows both
+named strategies and ready factual positions. All four cases had no JavaScript
+errors, failed HTTP responses or page-level horizontal overflow. Screenshots
+were inspected, then removed; temporary auth sessions and browser staging were
+removed after verification.
+
+Formatting, `cargo check`, the full crate suite (280 library tests plus 8
+snapshot-tool tests) and the snapshot-tool release build passed. Three library
+tests and the seven isolated PostgreSQL integration tests remain intentionally
+ignored in this run. All 67 protected Manager/Exec process identities remained
+unchanged throughout; trading continues. Recovery snapshots, old binary,
+historical candles, dry-run output and API/browser verification are retained in
+`/home/el01/crypto_cta_manager/backups/xy_initial_pnl_20261009T124955Z`.
