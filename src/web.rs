@@ -642,6 +642,14 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             put(save_virtual_account).delete(delete_virtual_account),
         )
         .route(
+            "/api/catalog/virtual-accounts/users",
+            get(list_virtual_grantees),
+        )
+        .route(
+            "/api/catalog/virtual-accounts/{virtual_id}/grants",
+            put(save_virtual_grants),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/configuration",
             put(save_account_configuration),
         )
@@ -732,7 +740,7 @@ async fn auth_middleware(
     );
     // Account grants are tiered: 'view' reads the account, 'configure' also
     // writes it. Global catalog/access mutations remain admin-only, except
-    // order strategy templates and delegated strategy grant edits.
+    // order templates, owned/delegated Virtual accounts and strategy grant edits.
     let access = match auth::allowed_source_access(
         &auth_state.pool,
         &user,
@@ -786,6 +794,18 @@ fn request_permission_error(
             .strip_prefix("/api/catalog/order-strategies/")
             .is_some_and(|name| !name.is_empty() && !name.contains('/'))
     {
+        return None;
+    }
+    if path == "/api/catalog/virtual-accounts"
+        || path
+            .strip_prefix("/api/catalog/virtual-accounts/")
+            .is_some_and(|tail| {
+                let parts: Vec<_> = tail.split('/').collect();
+                !parts[0].is_empty()
+                    && (parts.len() == 1 || (parts.len() == 2 && parts[1] == "grants"))
+            })
+    {
+        // Handlers enforce creator/delegated-manager authorization per Virtual.
         return None;
     }
     // Delegated grant edits reach their own strategy-level check in the
@@ -5177,7 +5197,7 @@ mod tests {
         ] {
             assert_eq!(
                 request_permission_error(false, false, None, path, &access),
-                Some("administrator permission required")
+                None
             );
             assert_eq!(
                 request_permission_error(true, false, None, path, &access),
@@ -5310,15 +5330,19 @@ async fn list_virtual_accounts(
 ) -> Result<Response, ApiError> {
     let _guard = state.configuration_lock.lock().await;
     let mut accounts = virtual_accounts::list(&state.pool).await?;
+    for account in &mut accounts {
+        account.permissions_for(&user);
+    }
     if !user.is_admin() {
         let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
         accounts.retain(|account| {
-            account.bindings.iter().all(|binding| {
-                visibility
-                    .iter()
-                    .find(|v| v.strategy_name == binding.position_strategy_name)
-                    .is_some_and(|v| v.user_can_view(user.user_id))
-            })
+            account.can_configure
+                || account.bindings.iter().all(|binding| {
+                    visibility
+                        .iter()
+                        .find(|v| v.strategy_name == binding.position_strategy_name)
+                        .is_some_and(|v| v.user_can_view(user.user_id))
+                })
         });
     }
     for account in &mut accounts {
@@ -5362,28 +5386,54 @@ async fn validate_virtual_activation(
 
 async fn create_virtual_account(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Extension(visible): Extension<VisibleSources>,
     Json(request): Json<SaveVirtualAccount>,
 ) -> Result<Response, ApiError> {
-    save_virtual_account_response(&state, None, request).await
+    save_virtual_account_response(&state, &user, &visible, None, request).await
 }
 
 async fn save_virtual_account(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Extension(visible): Extension<VisibleSources>,
     Path(virtual_id): Path<String>,
     Json(request): Json<SaveVirtualAccount>,
 ) -> Result<Response, ApiError> {
-    save_virtual_account_response(&state, Some(&virtual_id), request).await
+    save_virtual_account_response(&state, &user, &visible, Some(&virtual_id), request).await
 }
 
 async fn save_virtual_account_response(
     state: &WebState,
+    user: &AuthUser,
+    visible: &VisibleSources,
     virtual_id: Option<&str>,
     request: SaveVirtualAccount,
 ) -> Result<Response, ApiError> {
     let _guard = state.configuration_lock.lock().await;
+    if let Some(id) = virtual_id {
+        let Some(account) = virtual_account_for_user(state, user, id).await? else {
+            return Ok(not_found("virtual account was not found"));
+        };
+        if !account.can_configure {
+            return Ok(forbidden(
+                "Virtual creator or delegated manager permission required",
+            ));
+        }
+    }
     // Also validate catalogs when the virtual account has no real followers.
     let positions = strategy_catalog::list_position_strategies(&state.pool).await?;
     let orders = strategy_catalog::list_order_strategies(&state.pool).await?;
+    if !user.is_admin() {
+        let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
+        if request.bindings.iter().any(|binding| {
+            !visibility.iter().any(|v| {
+                v.strategy_name == binding.position_strategy_name && v.user_can_view(user.user_id)
+            })
+        }) {
+            return Ok(forbidden("position strategy view permission required"));
+        }
+    }
     if let Err(error) = virtual_accounts::effective_bindings(&request.bindings, 1.0) {
         return Ok(catalog_error(error));
     }
@@ -5421,15 +5471,19 @@ async fn save_virtual_account_response(
         Some(id) => virtual_accounts::save(&state.pool, id, &request, unix_now_us())
             .await
             .map(|()| id.to_string()),
-        None => virtual_accounts::create(&state.pool, &request, unix_now_us()).await,
+        None => {
+            virtual_accounts::create(&state.pool, &request, Some(user.user_id), unix_now_us()).await
+        }
     };
     match saved_id {
         Ok(id) => {
             state.configuration_notify.notify_one();
-            let saved = virtual_accounts::list(&state.pool)
-                .await?
-                .into_iter()
-                .find(|a| a.virtual_id == id);
+            let mut saved = virtual_account_for_user(state, user, &id).await?;
+            if let Some(account) = &mut saved {
+                account
+                    .followers
+                    .retain(|follower| visible.0.contains(&follower.source_id));
+            }
             Ok((NO_STORE, Json(saved)).into_response())
         }
         Err(error) => Ok(catalog_error(error)),
@@ -5438,12 +5492,79 @@ async fn save_virtual_account_response(
 
 async fn delete_virtual_account(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(virtual_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let _guard = state.configuration_lock.lock().await;
+    let Some(account) = virtual_account_for_user(&state, &user, &virtual_id).await? else {
+        return Ok(not_found("virtual account was not found"));
+    };
+    if !account.can_configure {
+        return Ok(forbidden(
+            "Virtual creator or delegated manager permission required",
+        ));
+    }
     match virtual_accounts::delete(&state.pool, &virtual_id).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("virtual account was not found")),
+        Err(error) => Ok(catalog_error(error)),
+    }
+}
+
+async fn virtual_account_for_user(
+    state: &WebState,
+    user: &AuthUser,
+    id: &str,
+) -> Result<Option<virtual_accounts::VirtualAccount>, ApiError> {
+    let mut account = virtual_accounts::list(&state.pool)
+        .await?
+        .into_iter()
+        .find(|a| a.virtual_id == id);
+    if let Some(account) = &mut account {
+        account.permissions_for(user);
+    }
+    Ok(account)
+}
+
+async fn list_virtual_grantees(State(state): State<WebState>) -> Result<Response, ApiError> {
+    Ok((
+        NO_STORE,
+        Json(virtual_accounts::grantees(&state.pool).await?),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveVirtualGrants {
+    user_ids: Vec<i64>,
+}
+
+async fn save_virtual_grants(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Path(virtual_id): Path<String>,
+    Json(request): Json<SaveVirtualGrants>,
+) -> Result<Response, ApiError> {
+    let _guard = state.configuration_lock.lock().await;
+    let Some(account) = virtual_account_for_user(&state, &user, &virtual_id).await? else {
+        return Ok(not_found("virtual account was not found"));
+    };
+    if !account.can_manage_grants {
+        return Ok(forbidden(
+            "only the Virtual creator or administrator can manage grants",
+        ));
+    }
+    match virtual_accounts::set_managers(&state.pool, &virtual_id, &request.user_ids).await {
+        Ok(()) => Ok((
+            NO_STORE,
+            Json(
+                virtual_account_for_user(&state, &user, &virtual_id)
+                    .await?
+                    .map(|a| a.managers),
+            ),
+        )
+            .into_response()),
         Err(error) => Ok(catalog_error(error)),
     }
 }

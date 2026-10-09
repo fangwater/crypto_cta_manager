@@ -827,3 +827,10 @@ does not isolate collateral in Multi-Assets Mode. Normal updates require both a
 quantity change above the configured tolerance and a minimum interval (default
 300 seconds); existing BNBUSDT reserve shorts migrate in bounded steps. The
 jp-meta deployment still uses BNBUSDT pending the combined virtual-account release.
+# Virtual 账户权限
+
+登录用户可以创建自己的 Virtual 账户。创建者和管理员可以在 Virtual 页面的
+“管理授权”中授予或撤销其他用户的管理权限。获授权用户可以编辑组合和删除无
+跟随者的账户；授权管理仍由创建者或管理员负责。未获授权的组合保持只读。
+此授权不改变实际账户的配置权限、仓位策略的可见性或发布权限。
+

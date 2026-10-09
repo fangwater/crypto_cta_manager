@@ -497,6 +497,11 @@ export interface VirtualAccount {
   name: string
   bindings: VirtualBinding[]
   updated_at_us: number
+  created_by_user_id: number | null
+  owner_username: string | null
+  managers: { user_id: number; username: string }[]
+  can_configure: boolean
+  can_manage_grants: boolean
   followers: {
     source_id: string
     multiplier: number

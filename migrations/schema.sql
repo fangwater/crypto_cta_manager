@@ -340,7 +340,13 @@ CREATE UNIQUE INDEX cta_users_username_lower_idx ON public.cta_users USING btree
 CREATE TABLE cta_virtual_accounts (
     virtual_id text PRIMARY KEY,
     name text NOT NULL CHECK (length(btrim(name)) > 0 AND octet_length(name) <= 200),
+    created_by_user_id bigint REFERENCES cta_users(user_id) ON DELETE SET NULL,
     updated_at_us bigint NOT NULL
+);
+CREATE TABLE cta_virtual_account_managers (
+    virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id) ON DELETE CASCADE,
+    user_id bigint NOT NULL REFERENCES cta_users(user_id) ON DELETE CASCADE,
+    PRIMARY KEY (virtual_id, user_id)
 );
 CREATE TABLE cta_virtual_account_bindings (
     virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id) ON DELETE CASCADE,

@@ -202,7 +202,7 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
                 name: format!("Alias {index}"),
                 bindings: vec![],
             };
-            let id = virtual_accounts::create(&pool, &request, index).await?;
+            let id = virtual_accounts::create(&pool, &request, None, index).await?;
             Ok::<_, anyhow::Error>((id, request.name))
         }));
     }
@@ -253,7 +253,7 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
             .name,
         "Updated alias"
     );
-    let next = virtual_accounts::create(&db.pool, &legacy, 12).await?;
+    let next = virtual_accounts::create(&db.pool, &legacy, None, 12).await?;
     assert_eq!(next, "virtual09");
     db.remove().await
 }
@@ -511,6 +511,63 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
             .unwrap()
             .shares,
         9.0
+    );
+    db.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn virtual_owner_and_manager_grants_survive_edits_and_revoke_immediately() -> Result<()> {
+    use crypto_cta_manager::virtual_accounts::{self, SaveVirtualAccount};
+    let db = TestDatabase::create().await?;
+    postgres::initialize(&db.pool).await?;
+    let ids: Vec<i64> = sqlx::query_scalar("INSERT INTO cta_users (username,password_hash) VALUES ('owner','fixture'),('guest','fixture') RETURNING user_id")
+        .fetch_all(&db.pool).await?;
+    let request = SaveVirtualAccount {
+        name: "Owned".into(),
+        bindings: vec![],
+    };
+    let id = virtual_accounts::create(&db.pool, &request, Some(ids[0]), 1).await?;
+    let guest = crypto_cta_manager::auth::AuthUser {
+        user_id: ids[1],
+        username: "guest".into(),
+        role: "user".into(),
+    };
+    virtual_accounts::set_managers(&db.pool, &id, &[ids[1]]).await?;
+    virtual_accounts::save(
+        &db.pool,
+        &id,
+        &SaveVirtualAccount {
+            name: "Renamed".into(),
+            bindings: vec![],
+        },
+        2,
+    )
+    .await?;
+    let mut account = virtual_accounts::list(&db.pool).await?.remove(0);
+    assert_eq!(account.created_by_user_id, Some(ids[0]));
+    assert_eq!(account.owner_username.as_deref(), Some("owner"));
+    account.permissions_for(&guest);
+    assert!(account.can_configure && !account.can_manage_grants);
+    assert!(
+        virtual_accounts::set_managers(&db.pool, &id, &[i64::MAX])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        virtual_accounts::list(&db.pool).await?[0].managers[0].user_id,
+        ids[1]
+    );
+    virtual_accounts::set_managers(&db.pool, &id, &[]).await?;
+    let mut account = virtual_accounts::list(&db.pool).await?.remove(0);
+    account.permissions_for(&guest);
+    assert!(!account.can_configure && !account.can_manage_grants);
+    assert!(virtual_accounts::delete(&db.pool, &id).await?);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM cta_virtual_account_managers")
+            .fetch_one(&db.pool)
+            .await?,
+        0
     );
     db.remove().await
 }

@@ -23,6 +23,28 @@ pub struct VirtualAccount {
     pub bindings: Vec<VirtualBinding>,
     pub updated_at_us: i64,
     pub followers: Vec<VirtualFollower>,
+    pub created_by_user_id: Option<i64>,
+    pub owner_username: Option<String>,
+    pub managers: Vec<VirtualGrantee>,
+    pub can_configure: bool,
+    pub can_manage_grants: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VirtualGrantee {
+    pub user_id: i64,
+    pub username: String,
+}
+
+impl VirtualAccount {
+    pub fn permissions_for(&mut self, user: &crate::auth::AuthUser) {
+        self.can_manage_grants = user.is_admin() || self.created_by_user_id == Some(user.user_id);
+        self.can_configure = self.can_manage_grants
+            || self
+                .managers
+                .iter()
+                .any(|manager| manager.user_id == user.user_id);
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -101,7 +123,7 @@ pub async fn pending(pool: &PgPool, source_id: &str) -> Result<Vec<PendingPublis
 pub async fn list(pool: &PgPool) -> Result<Vec<VirtualAccount>> {
     let mut accounts = Vec::new();
     for row in sqlx::query(
-        "SELECT virtual_id, name, updated_at_us FROM cta_virtual_accounts ORDER BY virtual_id",
+        "SELECT v.virtual_id, v.name, v.updated_at_us, v.created_by_user_id, u.username AS owner_username FROM cta_virtual_accounts v LEFT JOIN cta_users u ON u.user_id = v.created_by_user_id ORDER BY v.virtual_id",
     )
     .fetch_all(pool)
     .await?
@@ -125,11 +147,19 @@ pub async fn list(pool: &PgPool) -> Result<Vec<VirtualAccount>> {
             });
         }
         accounts.push(VirtualAccount {
-            virtual_id: id,
+            virtual_id: id.clone(),
             name: row.try_get("name")?,
             bindings,
             updated_at_us: row.try_get("updated_at_us")?,
             followers,
+            created_by_user_id: row.try_get("created_by_user_id")?,
+            owner_username: row.try_get("owner_username")?,
+            managers: sqlx::query("SELECT u.user_id, u.username FROM cta_virtual_account_managers m JOIN cta_users u USING (user_id) WHERE m.virtual_id = $1 AND NOT u.disabled ORDER BY u.username")
+                .bind(&id).fetch_all(pool).await?.into_iter().map(|row| Ok(VirtualGrantee {
+                    user_id: row.try_get("user_id")?, username: row.try_get("username")?,
+                })).collect::<Result<Vec<_>>>()?,
+            can_configure: false,
+            can_manage_grants: false,
         });
     }
     Ok(accounts)
@@ -268,7 +298,12 @@ fn next_virtual_id(ids: &[String]) -> Result<String> {
     Ok(format!("virtual{next:02}"))
 }
 
-pub async fn create(pool: &PgPool, request: &SaveVirtualAccount, at: i64) -> Result<String> {
+pub async fn create(
+    pool: &PgPool,
+    request: &SaveVirtualAccount,
+    owner: Option<i64>,
+    at: i64,
+) -> Result<String> {
     validate_request(request)?;
     // Allocate and insert under the same configuration lock/transaction as saves.
     let mut tx = begin(pool).await?;
@@ -277,8 +312,58 @@ pub async fn create(pool: &PgPool, request: &SaveVirtualAccount, at: i64) -> Res
         .await?;
     let id = next_virtual_id(&ids)?;
     save_in_transaction(&mut tx, &id, request, at).await?;
+    sqlx::query("UPDATE cta_virtual_accounts SET created_by_user_id = $2 WHERE virtual_id = $1")
+        .bind(&id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(id)
+}
+
+pub async fn grantees(pool: &PgPool) -> Result<Vec<VirtualGrantee>> {
+    sqlx::query("SELECT user_id, username FROM cta_users WHERE NOT disabled ORDER BY username")
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(VirtualGrantee {
+                user_id: row.try_get("user_id")?,
+                username: row.try_get("username")?,
+            })
+        })
+        .collect()
+}
+
+pub async fn set_managers(pool: &PgPool, id: &str, user_ids: &[i64]) -> Result<()> {
+    let ids: BTreeSet<i64> = user_ids.iter().copied().collect();
+    ensure!(ids.len() == user_ids.len(), "duplicate Virtual manager");
+    let mut tx = begin(pool).await?;
+    let valid: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cta_users WHERE user_id = ANY($1) AND NOT disabled",
+    )
+    .bind(user_ids)
+    .fetch_one(&mut *tx)
+    .await?;
+    ensure!(
+        valid as usize == ids.len(),
+        "unknown or disabled Virtual manager"
+    );
+    sqlx::query("DELETE FROM cta_virtual_account_managers WHERE virtual_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    for user_id in ids {
+        sqlx::query(
+            "INSERT INTO cta_virtual_account_managers (virtual_id, user_id) VALUES ($1, $2)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 pub async fn save(pool: &PgPool, id: &str, request: &SaveVirtualAccount, at: i64) -> Result<()> {
@@ -443,6 +528,53 @@ pub async fn validate_source_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_ownership_and_delegation_do_not_grant_further_delegation() {
+        let mut account = VirtualAccount {
+            virtual_id: "virtual01".into(),
+            name: "model".into(),
+            bindings: vec![],
+            updated_at_us: 1,
+            followers: vec![],
+            created_by_user_id: Some(1),
+            owner_username: Some("owner".into()),
+            managers: vec![],
+            can_configure: false,
+            can_manage_grants: false,
+        };
+        let owner = crate::auth::AuthUser {
+            user_id: 1,
+            username: "owner".into(),
+            role: "user".into(),
+        };
+        let guest = crate::auth::AuthUser {
+            user_id: 2,
+            username: "guest".into(),
+            role: "user".into(),
+        };
+        account.permissions_for(&owner);
+        assert!(account.can_configure && account.can_manage_grants);
+        account.permissions_for(&guest);
+        assert!(!account.can_configure && !account.can_manage_grants);
+        account.managers.push(VirtualGrantee {
+            user_id: 2,
+            username: "guest".into(),
+        });
+        account.permissions_for(&guest);
+        assert!(account.can_configure && !account.can_manage_grants);
+        account.managers.clear();
+        account.permissions_for(&guest);
+        assert!(!account.can_configure && !account.can_manage_grants);
+        account.created_by_user_id = None;
+        account.permissions_for(&owner);
+        assert!(!account.can_configure && !account.can_manage_grants);
+        account.permissions_for(&crate::auth::AuthUser {
+            role: "admin".into(),
+            ..guest
+        });
+        assert!(account.can_configure && account.can_manage_grants);
+    }
     #[test]
     fn virtual_numbers_skip_existing_ids_and_leave_aliases_independent() {
         assert_eq!(next_virtual_id(&[]).unwrap(), "virtual01");

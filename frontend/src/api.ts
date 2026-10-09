@@ -648,6 +648,16 @@ export function listVirtualAccounts(signal?: AbortSignal) {
   return requestJson<VirtualAccount[]>('/catalog/virtual-accounts', { signal })
 }
 
+export function listVirtualGrantees(signal?: AbortSignal) {
+  return requestJson<{ user_id: number; username: string }[]>('/catalog/virtual-accounts/users', { signal })
+}
+
+export function saveVirtualGrants(virtualId: string, userIds: number[]) {
+  return requestJson<{ user_id: number; username: string }[]>(`/catalog/virtual-accounts/${encodeURIComponent(virtualId)}/grants`, {
+    method: 'PUT', body: JSON.stringify({ user_ids: userIds }),
+  })
+}
+
 export function createVirtualAccount(name: string, bindings: VirtualBinding[]) {
   return requestJson<VirtualAccount>('/catalog/virtual-accounts', {
     method: 'POST', body: { name, bindings },
