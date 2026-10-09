@@ -88,9 +88,10 @@ BNBUSDC 是线性合约，目标空头数量按实际持有的 BNB 数量计算�
 VIP 门槛与补足阈值、USD-M 手续费备用金及 Flexible Earn 分配继续按本说明
 运行。原 USDT/BFUSD 理财的配置和调度保持独立；这种流程独立不代表保证金隔离。
 
-**实施状态：代码已实现 BNBUSDC 切换、专用限制和频率控制，待与虚拟账户
-功能一起发布。** jp-meta trade03 的 release `20261009T033154Z` 仍使用
-BNBUSDT 对冲。切换时须先检查
+**实施状态：已与虚拟账户联合发布到 jp-meta trade03。** 当前 Manager
+release 为 `20261009T053323Z`（`1b285b5`），配套 Exec/公共行情为 `8a263e04`。
+BNBUSDC 的报价、杠杆初始化和实际成交已验证。
+切换时须先检查
 该账户已有的 BNBUSDC CTA 目标、挂单和事实持仓，协调旧 BNBUSDT 系统空头
 退出与新 BNBUSDC 空头建立；只处理储备系统策略的份额，保留原 CTA 的
 BNBUSDT 目标与持仓归属。迁移应按实际成交进度控制总对冲量，避免重复全额
@@ -121,8 +122,15 @@ cooldown. HTTP weight limits and exchange cooldowns apply independently.
 Existing BNBUSDT reserve targets migrate in steps. With a stable reserve, each
 step transfers at most 0.5 BNB from the old short to the new short and preserves
 the combined target quantity. Steps are at least 60 seconds apart and wait for
-both previous legs to settle with no pending/live orders. This is a one-time
-migration cadence; normal BNBUSDC adjustments use the longer configured interval.
+both previous legs to complete within quantity tolerance without live orders.
+Exec may retain a small unfilled residual as `pending_qty` after completion;
+this must remain within tolerance. A fresh, position-ready snapshot may omit
+a fully idle zero position; missing nonzero targets still block progress.
+Completed zero-target `SYSTEM_POSITION_CLOSE` rows may contain f32 account-IPC
+rounding differences against f64 fill allocations. Only these idle rows may
+ignore quantities within two relative f32 epsilon units, capped at 0.00001 BNB;
+other strategies and active orders retain strict ownership checks.
+This is a one-time migration cadence; normal BNBUSDC adjustments use the longer configured interval.
 An explicit zero BNBUSDT target remains after migration. This transfer is not
 atomic at the exchange: temporary exposure can occur within a step. Status reports
 both factual legs and the browser includes both when calculating net exposure.

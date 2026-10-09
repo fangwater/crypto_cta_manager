@@ -18,7 +18,9 @@ Delivery status appears in the account editor. Failures remain durable across Ma
 
 ## Existing database maintenance
 
-The SQL below is explicit additive maintenance for an existing Manager database. Review, back up the target database, and apply once within a transaction before starting the updated binary. No live database has been modified by this implementation. Fresh databases use migrations/schema.sql.
+The SQL below is explicit additive maintenance for an existing Manager database. Review, back up the target database, and apply once within a transaction before starting the updated binary. Fresh databases use migrations/schema.sql.
+
+On 2026-10-09 UTC this maintenance was applied to jp-meta after a complete PostgreSQL backup, in one transaction. Release `20261009T043909Z` (Manager `5a05f28`) enabled the virtual-account workspace. Authenticated empty-template creation, reading and deletion passed; no real account was switched to follow mode. The initial follow and publication-queue counts were both zero. Backup and verification evidence are retained under `/home/ubuntu/crypto_cta_manager/backups/combined-20261009T043632Z`. This schema maintenance did not change Exec RocksDB or historical catalog data. The final joint release is `20261009T053323Z` (`1b285b5`); see [trade03 deployment verification](jp_meta_bnb_trade03_20261009.md#联合发布最终验证).
 
 ```sql
 BEGIN;
