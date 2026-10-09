@@ -5353,10 +5353,12 @@ async fn validate_virtual_activation(
             .iter()
             .find(|p| p.strategy_name == b.position_strategy_name)
         {
-            strategy_catalog::validate_targets(&strategy_catalog::scale_targets(
-                &position.targets,
-                b.shares,
-            ))?;
+            let targets = strategy_catalog::scale_targets(&position.targets, b.shares);
+            strategy_catalog::validate_targets(&targets)?;
+            state
+                .redis_runtime
+                .validate_cta_targets(source_id, &targets)
+                .map_err(|error| error.to_string())?;
         }
         let existing = current
             .iter()
