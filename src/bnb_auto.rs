@@ -1083,6 +1083,7 @@ impl BnbManager {
         ensure!(
             !live.rows.iter().any(|r| r.symbol == HEDGE_SYMBOL
                 && r.strategy_name != HEDGE_STRATEGY
+                && !hedge_close_is_rounding_residual(r)
                 && (r.current_qty.is_some_and(|q| q.abs() > EPS)
                     || r.pending_qty.is_some_and(|q| q.abs() > EPS)
                     || r.live_order_qty.is_some_and(|q| q.abs() > EPS))),
@@ -1180,6 +1181,23 @@ impl BnbManager {
         self.commit(state, &source.id, account.clone())?;
         Ok((actual, legacy_actual))
     }
+}
+
+fn hedge_close_is_rounding_residual(r: &crate::viz_snapshot::ExecStateRowSnapshot) -> bool {
+    // Account position IPC uses f32 while fills/strategy allocations use f64.
+    // Their rounding difference can become a completed system-close residual.
+    // Never waive ownership checks for a CTA strategy or an active order.
+    let Some(account_qty) = r.account_position_qty.filter(|q| q.is_finite()) else {
+        return false;
+    };
+    let precision = (2. * f64::from(f32::EPSILON) * account_qty.abs().max(1.)).min(0.00001);
+    r.strategy_name == "SYSTEM_POSITION_CLOSE"
+        && r.execution_complete
+        && r.position_allocated == Some(true)
+        && r.target_qty.is_some_and(|q| q.abs() <= EPS)
+        && r.live_order_qty.is_some_and(|q| q.abs() <= EPS)
+        && r.current_qty.is_some_and(|q| q.abs() <= precision)
+        && r.pending_qty.is_some_and(|q| q.abs() <= precision)
 }
 
 fn hedge_step_settled(
@@ -1415,6 +1433,68 @@ mod tests {
         routing::any,
     };
     use serde_json::json;
+
+    #[test]
+    fn hedge_ownership_ignores_only_completed_system_close_float_rounding() {
+        let row = crate::viz_snapshot::ExecStateRowSnapshot {
+            strategy_name: "SYSTEM_POSITION_CLOSE".into(),
+            symbol: HEDGE_SYMBOL.into(),
+            position_allocated: Some(true),
+            source_updated_at_ms: 0,
+            current_qty: Some(0.000000238418578),
+            current_usdt: None,
+            target_qty: Some(0.),
+            pending_qty: Some(-0.000000238418578),
+            live_order_qty: Some(0.),
+            remaining_batches: 0,
+            estimated_completion_ts_ms: 0,
+            execution_complete: true,
+            completion_reason: "target_tolerance".into(),
+            account_position_qty: Some(-4.489999771),
+        };
+        assert!(hedge_close_is_rounding_residual(&row));
+        for conflict in [
+            crate::viz_snapshot::ExecStateRowSnapshot {
+                strategy_name: "cta".into(),
+                ..row.clone()
+            },
+            crate::viz_snapshot::ExecStateRowSnapshot {
+                current_qty: Some(0.01),
+                ..row.clone()
+            },
+            crate::viz_snapshot::ExecStateRowSnapshot {
+                live_order_qty: Some(0.000000238),
+                ..row.clone()
+            },
+            crate::viz_snapshot::ExecStateRowSnapshot {
+                target_qty: Some(0.01),
+                ..row.clone()
+            },
+            crate::viz_snapshot::ExecStateRowSnapshot {
+                pending_qty: Some(0.01),
+                ..row.clone()
+            },
+            crate::viz_snapshot::ExecStateRowSnapshot {
+                account_position_qty: None,
+                ..row.clone()
+            },
+            crate::viz_snapshot::ExecStateRowSnapshot {
+                position_allocated: None,
+                ..row.clone()
+            },
+            crate::viz_snapshot::ExecStateRowSnapshot {
+                execution_complete: false,
+                ..row.clone()
+            },
+            crate::viz_snapshot::ExecStateRowSnapshot {
+                current_qty: Some(0.01),
+                account_position_qty: Some(-1_000_000.),
+                ..row
+            },
+        ] {
+            assert!(!hedge_close_is_rounding_residual(&conflict));
+        }
+    }
 
     #[test]
     fn hedge_transfer_waits_for_both_legs_and_fresh_target_without_live_orders() {
