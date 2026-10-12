@@ -49,7 +49,11 @@ impl MarketRulesSnapshot {
         }
         if !matches!(
             self.venue.as_str(),
-            "binance-futures" | "binance-coin-futures" | "okex-futures"
+            "binance-futures"
+                | "binance-coin-futures"
+                | "okex-futures"
+                | "binance-margin"
+                | "okex-margin"
         ) {
             bail!("unsupported market-rules venue: {}", self.venue);
         }
@@ -171,8 +175,8 @@ pub(crate) fn execution_backend(
     values: &BTreeMap<String, String>,
 ) -> Result<&'static str> {
     let exchange = match venue {
-        "binance-futures" | "binance-coin-futures" => "binance",
-        "okex-futures" => "okex",
+        "binance-futures" | "binance-coin-futures" | "binance-margin" => "binance",
+        "okex-futures" | "okex-margin" => "okex",
         _ => bail!("unsupported rule venue"),
     };
     let parse = |value: &str| -> Result<&'static str> {

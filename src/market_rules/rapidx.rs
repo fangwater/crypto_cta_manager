@@ -99,11 +99,17 @@ fn parse_data(value: &Value, venue: &str) -> Result<BTreeMap<String, MarketRule>
         }
         let state = required_string(row, "state")?;
         let status = target.status(state, sym)?;
-        let contract_size = positive_decimal(row, "contractSize", sym)?;
+        let contract_size = if target.kind == "PERP" {
+            Some(positive_decimal(row, "contractSize", sym)?)
+        } else {
+            None
+        };
         if target.exchange == "BINANCE"
-            && decimal_value(&contract_size, "contractSize", sym)? != 1.0
+            && contract_size
+                .as_deref()
+                .is_some_and(|size| size.parse::<f64>().ok() != Some(1.0))
         {
-            bail!("RapidX Binance PERP contractSize must be 1 for {sym}, got {contract_size}");
+            bail!("RapidX Binance PERP contractSize must be 1 for {sym}, got {contract_size:?}");
         }
         let min_notional = optional_nonnegative_decimal(row, "minNotional", sym)?;
         let symbol = format!("{}{}", parsed.base, parsed.quote).to_uppercase();
@@ -115,7 +121,7 @@ fn parse_data(value: &Value, venue: &str) -> Result<BTreeMap<String, MarketRule>
             qty_step: positive_decimal(row, "lotSize", sym)?,
             min_qty: positive_decimal(row, "minSize", sym)?,
             min_notional,
-            contract_multiplier: Some(contract_size),
+            contract_multiplier: contract_size,
         };
         if rules.insert(symbol.clone(), rule).is_some() {
             bail!("duplicate RapidX target symbol: {symbol}");
@@ -123,20 +129,22 @@ fn parse_data(value: &Value, venue: &str) -> Result<BTreeMap<String, MarketRule>
     }
 
     if target_rows == 0 || rules.is_empty() {
-        bail!("RapidX sym info contained no target {venue} PERP USDT records");
+        bail!("RapidX sym info contained no target {venue} records");
     }
     Ok(rules)
 }
 
 fn is_target(symbol: Option<&ParsedSymbol<'_>>, target: &TargetVenue) -> bool {
     symbol.is_some_and(|symbol| {
-        symbol.exchange == target.exchange && symbol.kind == "PERP" && symbol.quote == "USDT"
+        symbol.exchange == target.exchange
+            && symbol.kind == target.kind
+            && (symbol.quote == "USDT" || (target.kind == "PERP" && symbol.quote == "USDC"))
     })
 }
 
 fn claims_target_perp(sym: &str, target: &TargetVenue) -> bool {
     sym.strip_prefix(target.exchange)
-        .is_some_and(|suffix| suffix.starts_with("_PERP"))
+        .is_some_and(|suffix| suffix.starts_with(&format!("_{}", target.kind)))
 }
 
 struct ParsedSymbol<'a> {
@@ -168,6 +176,7 @@ fn parse_symbol(sym: &str) -> Option<ParsedSymbol<'_>> {
 }
 
 struct TargetVenue {
+    kind: &'static str,
     exchange: &'static str,
 }
 
@@ -175,7 +184,8 @@ impl TargetVenue {
     fn native_symbol(&self, symbol: &ParsedSymbol<'_>) -> String {
         match self.exchange {
             "BINANCE" => format!("{}{}", symbol.base, symbol.quote),
-            "OKX" => format!("{}-{}-SWAP", symbol.base, symbol.quote),
+            "OKX" if self.kind == "PERP" => format!("{}-{}-SWAP", symbol.base, symbol.quote),
+            "OKX" => format!("{}-{}", symbol.base, symbol.quote),
             _ => unreachable!("TargetVenue only contains supported exchanges"),
         }
     }
@@ -194,8 +204,20 @@ fn target_venue(venue: &str) -> Result<TargetVenue> {
     match venue {
         "binance-futures" => Ok(TargetVenue {
             exchange: "BINANCE",
+            kind: "PERP",
         }),
-        "okex-futures" => Ok(TargetVenue { exchange: "OKX" }),
+        "okex-futures" => Ok(TargetVenue {
+            exchange: "OKX",
+            kind: "PERP",
+        }),
+        "binance-margin" => Ok(TargetVenue {
+            exchange: "BINANCE",
+            kind: "SPOT",
+        }),
+        "okex-margin" => Ok(TargetVenue {
+            exchange: "OKX",
+            kind: "SPOT",
+        }),
         _ => bail!("unsupported RapidX market-rules venue: {venue}"),
     }
 }
@@ -381,6 +403,23 @@ mod tests {
         assert_eq!(rule.price_tick, "0.10");
         assert_eq!(rule.min_notional, None);
         assert_eq!(rule.contract_multiplier.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn cash_rules_have_no_contract_size_and_do_not_replace_perp_rules() {
+        for (venue, exchange, original) in [
+            ("binance-margin", "BINANCE", "BTCUSDT"),
+            ("okex-margin", "OKX", "BTC-USDT"),
+        ] {
+            let sym = format!("{exchange}_SPOT_BTC_USDT");
+            let cash = serde_json::json!({"sym":sym,"originalSymbol":original,"state":"live",
+                "lotSize":"0.00001","tickSize":"0.01","minSize":"0.0001","minNotional":"5"});
+            let data = serde_json::json!({sym:cash,"BINANCE_PERP_BTC_USDT":binance_row("live")});
+            let rules = parse(&response(data), venue).unwrap();
+            assert_eq!(rules.len(), 1);
+            assert_eq!(rules["BTCUSDT"].contract_multiplier, None);
+            assert_eq!(rules["BTCUSDT"].qty_step, "0.00001");
+        }
     }
 
     #[test]

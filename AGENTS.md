@@ -126,9 +126,11 @@ an independent source with a stable, globally unique `source_id`; never infer
 identity only from an account label, path, process name, or array position.
 
 Order histories and position ledgers must include `source_id`. Runtime market
-ownership is deployment-specific: `binance-futures` Execs
-manage only USDT/USDC perpetuals, and `binance-coin-futures` Execs manage only USD
-coin-margined perpetuals. Never expand a native U-margined source to both markets.
+ownership is deployment-specific: RapidX Binance/OKX linear Execs also manage
+USDT cash targets, identified by bare assets such as `BTC`; `BTCUSDT` and
+`BTCUSDC` identify perpetuals. Keep cash and perpetual FIFO separate, then sum
+strategy PnL. Native linear Execs manage only USDT/USDC perpetuals, and
+`binance-coin-futures` Execs manage only USD coin-margined perpetuals. Never expand a native U-margined source to both markets.
 Keep one Manager with independent sources, namespaces, Exec RocksDB stores and
 Viz/Config gateways. Each Exec Viz declares its explicit venue and serves the
 corresponding separately maintained frontend. Preserve historical archive identity;

@@ -1290,6 +1290,73 @@ mod tests {
             .await
             .unwrap();
         assert!(foreign_keys.is_empty());
+
+        // Same source/name and same coin, routed atomically to independent
+        // cash/perpetual ledgers; omission clears the old cash target.
+        let mut rx = source.clone();
+        rx.id = "fixture_rx".into();
+        rx.env_path = Some(dir.path().join("rx.env"));
+        std::fs::write(
+            rx.env_path.as_ref().unwrap(),
+            "TRADE_ENGINE_EXEC_BACKEND=rapidx\n",
+        )
+        .unwrap();
+        let mixed = BTreeMap::from([
+            (
+                "BTC".into(),
+                TargetPosition {
+                    qty: 1.0,
+                    signal: 1,
+                },
+            ),
+            (
+                "BTCUSDT".into(),
+                TargetPosition {
+                    qty: -1.0,
+                    signal: -1,
+                },
+            ),
+        ]);
+        for algorithm in [ExecutionAlgorithm::Batch, ExecutionAlgorithm::Chase] {
+            parameters.algorithm = algorithm;
+            let name = algorithm.as_str();
+            runtime
+                .publish_strategy(&rx, name, &parameters, &BTreeMap::new(), &mixed)
+                .await
+                .unwrap();
+            let prefix = format!(
+                "fixture_rx:binance-margin:{}:{name}",
+                algorithm.family().redis_namespace()
+            );
+            let raw: String = connection.get(&prefix).await.unwrap();
+            let cash: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(cash["targets"].as_object().unwrap().len(), 1);
+            assert_eq!(cash["targets"]["BTC"]["qty"], 1.0);
+            let snapshot = runtime.load_exec_target_snapshot(&rx).await.unwrap();
+            assert_eq!(snapshot.strategies[name].targets["BTC"], 1.0);
+            assert_eq!(snapshot.strategies[name].targets["BTCUSDT"], -1.0);
+            runtime
+                .publish_strategy(
+                    &rx,
+                    name,
+                    &parameters,
+                    &BTreeMap::new(),
+                    &BTreeMap::from([("BTCUSDT".into(), mixed["BTCUSDT"])]),
+                )
+                .await
+                .unwrap();
+            let raw: String = connection.get(&prefix).await.unwrap();
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&raw).unwrap()["targets"]
+                    .as_object()
+                    .unwrap()
+                    .is_empty()
+            );
+            runtime
+                .request_strategy_removal(&rx, name, algorithm.family())
+                .await
+                .unwrap();
+        }
     }
 
     #[test]

@@ -82,7 +82,7 @@ impl VirtualDelta {
         self.open_ts_us(4) + MINUTE_US
     }
     pub fn prices(&self, store: &KlineStore) -> Result<Option<VirtualPrices>> {
-        if self.venue != "binance-futures" {
+        if !matches!(self.venue.as_str(), "binance-futures" | "binance-margin") {
             return Ok(None);
         }
         store.window_prices(&self.symbol, self.open_ts_us(0))
@@ -487,7 +487,7 @@ pub async fn prepare_acquisition(
     deltas.retain(|d| d.received_at_us >= (start - 300 * 1_000_000).max(store.cutoff_us(now_us())));
     let mut ranges = BTreeMap::new();
     for delta in &deltas {
-        if delta.venue == "binance-futures" {
+        if matches!(delta.venue.as_str(), "binance-futures" | "binance-margin") {
             add_range(
                 &mut ranges,
                 &delta.symbol,
@@ -582,7 +582,7 @@ pub async fn load_timeline(
             let ts = delta.open_ts_us(slice) + MINUTE_US;
             if ts <= end {
                 fills.push((ts, index, slice));
-                if delta.venue == "binance-futures" {
+                if matches!(delta.venue.as_str(), "binance-futures" | "binance-margin") {
                     add_range(
                         &mut ranges,
                         &delta.symbol,
@@ -595,7 +595,7 @@ pub async fn load_timeline(
     }
     carry.retain(|_, qty| clean_zero(*qty) != 0.0);
     for ((_, symbol, venue), _) in &carry {
-        if venue == "binance-futures" {
+        if matches!(venue.as_str(), "binance-futures" | "binance-margin") {
             add_range(&mut ranges, symbol, baseline_open, end);
         }
     }
@@ -757,7 +757,7 @@ fn rebuild_timeline(
         (ts - candle.end_ts_us() < MINUTE_US).then_some(candle.close)
     };
     for (key, quantity) in carry {
-        let price = if key.2 == "binance-futures" {
+        let price = if matches!(key.2.as_str(), "binance-futures" | "binance-margin") {
             mark(&key.1, start)
         } else {
             None

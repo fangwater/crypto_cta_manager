@@ -1,4 +1,4 @@
-//! Manager-owned, closed one-minute Binance USD-M candles. Cache misses only.
+//! Manager-owned Binance minute candles: suffixed perpetuals and bare USDT spot assets.
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -242,6 +242,7 @@ struct Inner {
     status: Mutex<CacheStatus>,
     // Fixed official origins in production; overridden only by in-module tests.
     api_url: String,
+    spot_api_url: String,
     ip_check_url: String,
 }
 #[derive(Clone)]
@@ -286,6 +287,7 @@ impl KlineStore {
                 }),
                 status: Mutex::new(status),
                 api_url: "https://fapi.binance.com/fapi/v1/klines".into(),
+                spot_api_url: "https://api.binance.com/api/v3/klines".into(),
                 ip_check_url: "https://api.ipify.org".into(),
             }),
         })
@@ -643,14 +645,24 @@ impl KlineStore {
         check_trading_ips(&self.inner.config)?;
         let client = self.client().await?;
         let count = ((end - start) / MINUTE_US) as usize;
-        let weight = if count < 100 { 1 } else { 2 };
+        let spot = crate::exec_routing::is_spot_target(symbol);
+        let wire_symbol = if spot {
+            format!("{symbol}USDT")
+        } else {
+            symbol.to_string()
+        };
+        let weight = if spot || count >= 100 { 2 } else { 1 };
         let _permit = self.inner.permits.acquire().await?;
         self.reserve_weight(weight).await;
         self.inner.status.lock().unwrap().requests += 1;
         let response = client
-            .get(&self.inner.api_url)
+            .get(if spot {
+                &self.inner.spot_api_url
+            } else {
+                &self.inner.api_url
+            })
             .query(&[
-                ("symbol", symbol.to_string()),
+                ("symbol", wire_symbol),
                 ("interval", "1m".into()),
                 ("startTime", (start / 1000).to_string()),
                 ("endTime", (end / 1000 - 1).to_string()),
@@ -1050,6 +1062,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let app = Router::new()
             .route("/klines", get(mock_candles))
+            .route("/spot-klines", get(mock_candles))
             .route("/ip", get(|| async { "198.51.100.50" }))
             .with_state(state.clone());
         let server = tokio::spawn(async move {
@@ -1059,9 +1072,36 @@ mod tests {
         let inner = Arc::get_mut(&mut store.inner).unwrap();
         inner.config.enabled = true;
         inner.api_url = format!("http://{address}/klines");
+        inner.spot_api_url = format!("http://{address}/spot-klines");
         inner.ip_check_url = format!("http://{address}/ip");
         (dir, store, state, server)
     }
+    #[tokio::test]
+    async fn cash_candle_cache_is_separate_from_same_pair_perpetuals() {
+        let (_dir, store, state, server) = fixture(None).await;
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US;
+        let start = end - 5 * MINUTE_US;
+        store.ensure_range("BTC", start, end).await.unwrap();
+        assert!(store.get("BTC", start).unwrap().is_some());
+        assert!(store.get("BTCUSDT", start).unwrap().is_none());
+        assert!(
+            state
+                .symbols
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|symbol| symbol == "BTCUSDT")
+        );
+        let cash_requests = state.calls.lock().unwrap().len();
+        assert!(cash_requests > 0);
+        store.ensure_range("BTCUSDT", start, end).await.unwrap();
+        let all_requests = state.calls.lock().unwrap().len();
+        assert!(all_requests > cash_requests);
+        store.ensure_range("BTC", start, end).await.unwrap();
+        assert_eq!(state.calls.lock().unwrap().len(), all_requests);
+        server.abort();
+    }
+
     fn candle(open_ts_us: i64) -> Kline {
         Kline {
             open_ts_us,

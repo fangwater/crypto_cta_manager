@@ -49,7 +49,7 @@ impl From<UniformOrderEvent> for NavEvent {
             event_ts_us: event.event_ts_us,
             update_ts_us: event.update_ts_us,
             signal_ts_us: event.signal_ts_us,
-            symbol: event.symbol,
+            symbol: crate::exec_routing::target_symbol(&event.symbol, event.venue_code),
             client_order_id: event.client_order_id,
             venue_code: event.venue_code,
             venue: event.venue,
@@ -1592,7 +1592,10 @@ fn prepare_source_events<E: Into<Arc<NavEvent>>>(
         .map(|value| value.positions.as_slice())
         .unwrap_or_default()
     {
-        let key = (position.symbol.clone(), position.venue_code);
+        let key = (
+            crate::exec_routing::target_symbol(&position.symbol, position.venue_code),
+            position.venue_code,
+        );
         let first_fill = first_fill_references.get(&key);
         let (reference_price, reference_price_source) = match position.reference_price {
             Some(price) => {
@@ -1650,11 +1653,14 @@ fn prepare_source_events<E: Into<Arc<NavEvent>>>(
                 }
                 let key = (
                     position.strategy_name.clone(),
-                    position.symbol.clone(),
+                    crate::exec_routing::target_symbol(&position.symbol, position.venue_code),
                     position.venue_code,
                 );
                 let venue = first_fill_references
-                    .get(&(position.symbol.clone(), position.venue_code))
+                    .get(&(
+                        crate::exec_routing::target_symbol(&position.symbol, position.venue_code),
+                        position.venue_code,
+                    ))
                     .map(|fill| fill.venue.clone())
                     .unwrap_or_else(|| venue_name(position.venue_code as u8));
                 states.insert(
@@ -1754,7 +1760,11 @@ fn merge_liquidity_records(
             if event.cumulative_filled_quantity <= 0.0 || event.client_order_id == 0 {
                 continue;
             }
-            let key = (event.symbol, event.venue_code, event.client_order_id);
+            let key = (
+                crate::exec_routing::target_symbol(&event.symbol, event.venue_code),
+                event.venue_code,
+                event.client_order_id,
+            );
             let observed = if event.is_maker {
                 LiquidityRole::Maker
             } else {
@@ -4192,6 +4202,34 @@ mod tests {
     }
 
     #[test]
+    fn spot_and_perpetual_fifo_realize_independently_then_sum() {
+        // Opposite initial legs must stay open until their own market closes.
+        let report = estimate(vec![
+            event(1, "BTCUSDT", 0, 1, 100.0, 2.0),
+            event(2, "BTCUSDT", 1, 2, 120.0, 2.0),
+            event(3, "BTCUSDT", 0, 1, 105.0, 1.0),
+            event(4, "BTCUSDT", 1, 1, 110.0, 1.0),
+            event(5, "BTCUSDT", 0, 2, 115.0, 2.5),
+        ]);
+        let spot = report
+            .symbols
+            .iter()
+            .flat_map(|s| &s.venues)
+            .find(|v| v.venue_code == 0)
+            .unwrap();
+        let perp = report
+            .symbols
+            .iter()
+            .flat_map(|s| &s.venues)
+            .find(|v| v.venue_code == 1)
+            .unwrap();
+        assert_close(spot.totals.realized_pnl_before_fee_quote, 35.0);
+        assert_close(perp.totals.realized_pnl_before_fee_quote, 10.0);
+        assert_close(report.totals.realized_pnl_before_fee_quote, 45.0);
+        assert_close(report.totals.floating_pnl_quote, 15.0);
+    }
+
+    #[test]
     fn venue_fifos_never_match_each_other() {
         let report = estimate(vec![
             event(1, "BTCUSDT", 1, 1, 100.0, 1.0),
@@ -4459,6 +4497,44 @@ mod tests {
         assert_close(report.summary.nav_change_before_fee_quote, 10.0);
         assert_close(report.summary.estimated_trading_fee_quote, 0.21);
         assert_close(report.summary.nav_change_after_fee_quote, 9.79);
+    }
+
+    #[test]
+    fn persisted_mixed_strategy_fills_keep_two_fifos_and_one_strategy_total() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mixed");
+        write_events(
+            &path,
+            &[
+                strategy_event_at(1, 1, "BTCUSDT", 0, 1, 100.0, 1.0, "basis"),
+                strategy_event_at(2, 2, "BTCUSDT", 1, 2, 120.0, 1.0, "basis"),
+                strategy_event_at(3, 3, "BTCUSDT", 0, 2, 110.0, 1.0, "basis"),
+                strategy_event_at(4, 4, "BTCUSDT", 1, 1, 115.0, 1.0, "basis"),
+            ],
+        );
+        let config = app_config(vec![source_at("mixed", &path, 0.0)]);
+        let before_close = rebuild_nav_timeline_from_rocksdb_with_snapshots(
+            &config,
+            timeline_request(1, 2, Vec::new(), Vec::new()),
+            &SourcePositionSnapshots::new(),
+        )
+        .unwrap();
+        assert_close(before_close.summary.realized_pnl_before_fee_quote, 0.0);
+        let complete = rebuild_nav_timeline_from_rocksdb_with_snapshots(
+            &config,
+            timeline_request(1, 4, Vec::new(), Vec::new()),
+            &SourcePositionSnapshots::new(),
+        )
+        .unwrap();
+        assert_eq!(complete.available_symbols, vec!["BTC", "BTCUSDT"]);
+        assert_eq!(complete.available_strategies, vec!["basis"]);
+        assert_close(
+            complete.strategy_points[0]
+                .summary
+                .realized_pnl_before_fee_quote,
+            15.0,
+        );
+        assert_close(complete.summary.realized_pnl_before_fee_quote, 15.0);
     }
 
     #[test]

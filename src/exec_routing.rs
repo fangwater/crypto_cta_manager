@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 use crate::config::SourceConfig;
 
-/// Each Exec deployment owns exactly its configured market.
+/// RapidX linear Execs own a perpetual market and its USDT cash market.
 pub(crate) fn markets(source: &SourceConfig) -> Result<Vec<String>> {
     let values = crate::market_rules::source_values(source)?;
     let backend = crate::market_rules::execution_backend(&source.venue, &values)?;
@@ -10,7 +10,15 @@ pub(crate) fn markets(source: &SourceConfig) -> Result<Vec<String>> {
         source.venue != "binance-coin-futures" || backend == "native",
         "COIN-M execution requires the native Binance backend"
     );
-    Ok(vec![source.venue.clone()])
+    let mut markets = vec![source.venue.clone()];
+    if backend == "ltp" {
+        match source.venue.as_str() {
+            "binance-futures" => markets.push("binance-margin".into()),
+            "okex-futures" => markets.push("okex-margin".into()),
+            _ => (),
+        }
+    }
+    Ok(markets)
 }
 
 pub(crate) fn symbol_market(configured_venue: &str, symbol: &str) -> Result<&'static str> {
@@ -23,7 +31,11 @@ pub(crate) fn symbol_market(configured_venue: &str, symbol: &str) -> Result<&'st
             crate::order_config::binance_coin_wire_symbol(&symbol).map_err(anyhow::Error::msg)?;
             Ok("binance-coin-futures")
         }
-        "okex-futures" => Ok("okex-futures"),
+        "okex-futures" if symbol.ends_with("USDT") || symbol.ends_with("USDC") => {
+            Ok("okex-futures")
+        }
+        "binance-futures" | "binance-margin" if is_spot_target(&symbol) => Ok("binance-margin"),
+        "okex-futures" | "okex-margin" if is_spot_target(&symbol) => Ok("okex-margin"),
         _ => bail!(
             "symbol {symbol} does not belong to Exec market {configured_venue}; use a separate Exec deployment for the other market"
         ),
@@ -40,6 +52,20 @@ pub(crate) fn for_symbol(source: &SourceConfig, symbol: &str) -> Result<SourceCo
     let mut selected = source.clone();
     selected.venue = market.into();
     Ok(selected)
+}
+
+pub(crate) fn is_spot_target(symbol: &str) -> bool {
+    !symbol.ends_with("USDT") && !symbol.ends_with("USDC") && !symbol.ends_with("USD")
+}
+
+/// Expose cash fills using the same bare-asset identity as published targets.
+/// Event venue remains an independent part of the FIFO key.
+pub(crate) fn target_symbol(symbol: &str, venue_code: i16) -> String {
+    if matches!(venue_code, 0 | 2) {
+        symbol.strip_suffix("USDT").unwrap_or(symbol).to_string()
+    } else {
+        symbol.to_string()
+    }
 }
 
 /// Historical archives retain their original source identity and market facts.
@@ -76,7 +102,11 @@ mod tests {
         assert_eq!(coin.env_path, source.env_path);
         assert_eq!(coin.venue, "binance-coin-futures");
         std::fs::write(&env, "TRADE_ENGINE_EXEC_BACKEND_MAP='binance=rapidx'\n").unwrap();
-        assert_eq!(markets(&source).unwrap(), vec!["binance-futures"]);
+        assert_eq!(
+            markets(&source).unwrap(),
+            vec!["binance-futures", "binance-margin"]
+        );
+        assert_eq!(for_symbol(&source, "BTC").unwrap().venue, "binance-margin");
         assert!(for_symbol(&source, "BTCUSD").is_err());
         assert!(for_symbol(&source, "BTCUSDC").is_ok());
         assert!(markets(&coin_source).is_err());
@@ -100,6 +130,9 @@ mod tests {
         assert!(symbol_market("binance-futures", "BTCUSD261225").is_err());
         assert!(symbol_market("binance-coin-futures", "BTCUSDT").is_err());
         assert!(symbol_market("binance-futures", "BTCUSD").is_err());
-        assert!(symbol_market("binance-futures", "BTC").is_err());
+        assert_eq!(
+            symbol_market("binance-futures", "BTC").unwrap(),
+            "binance-margin"
+        );
     }
 }
