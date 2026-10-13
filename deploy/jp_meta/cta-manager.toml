@@ -110,6 +110,22 @@ exec_viz_url = "http://127.0.0.1:10045/"
 estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade05"
 
+# RX01 cash entries and perpetual hedges, with independently carried inventory.
+# Derive account_ipc_service from the remote RX01 portfolio identity as for RX02.
+[[sources]]
+id = "binance_exec_trade06"
+account = "trade06"
+alias = "lgq_cta_RX01"
+venue = "binance-futures"
+rocksdb_path = "/home/ubuntu/binance_exec_trade06/data/persist_manager"
+enabled = true
+gateway_prefix = "/exec_trade06"
+exec_config_url = "http://127.0.0.1:18166/"
+exec_viz_url = "http://127.0.0.1:10046/"
+maker_fee_rate = -0.00002
+taker_fee_rate = 0.000175
+ipc_namespace = "binance_exec_trade06"
+
 [[sources]]
 id = "binance_exec_trade02"
 account = "trade02"

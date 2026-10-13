@@ -79,7 +79,10 @@ fn parse_data(value: &Value, venue: &str) -> Result<BTreeMap<String, MarketRule>
         }
         let row_sym = row.get("sym").and_then(Value::as_str);
         if !is_target(map_parsed.as_ref(), &target) {
-            if row_sym.is_some_and(|sym| claims_target_perp(sym, &target)) {
+            if row_sym.is_some_and(|sym| match parse_symbol(sym) {
+                Some(parsed) => is_target(Some(&parsed), &target),
+                None => claims_target_perp(sym, &target),
+            }) {
                 bail!("RapidX target row sym does not match unrelated map key: {map_symbol}");
             }
             continue;
@@ -419,6 +422,28 @@ mod tests {
             assert_eq!(rules.len(), 1);
             assert_eq!(rules["BTCUSDT"].contract_multiplier, None);
             assert_eq!(rules["BTCUSDT"].qty_step, "0.00001");
+        }
+    }
+
+    #[test]
+    fn cash_rules_skip_other_quote_markets_but_reject_hidden_target_rows() {
+        for (venue, exchange, original) in [
+            ("binance-margin", "BINANCE", "BTCUSDT"),
+            ("okex-margin", "OKX", "BTC-USDT"),
+        ] {
+            let sym = format!("{exchange}_SPOT_BTC_USDT");
+            let cash = serde_json::json!({"sym":sym,"originalSymbol":original,"state":"live",
+                "lotSize":"0.00001","tickSize":"0.01","minSize":"0.0001","minNotional":"5"});
+            let other = format!("{exchange}_SPOT_0G_USDC");
+            let mut data = serde_json::json!({sym.clone():cash,other.clone():{"sym":other}});
+            let rules = parse(&response(data.clone()), venue).unwrap();
+            assert_eq!(rules.len(), 1);
+            assert!(rules.contains_key("BTCUSDT"));
+
+            data[&other]["sym"] = serde_json::json!(sym);
+            assert!(parse(&response(data.clone()), venue).is_err());
+            data[&other]["sym"] = serde_json::json!(format!("{exchange}_SPOT_BTC_USDT_EXTRA"));
+            assert!(parse(&response(data), venue).is_err());
         }
     }
 

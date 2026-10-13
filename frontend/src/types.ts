@@ -397,6 +397,25 @@ export interface AcquisitionFillDiagnostic {
   price_shortfall_bps: number
 }
 
+export interface AcquisitionExecutionFill {
+  fill_ts_us: number
+  actual_price: number
+  actual_qty: number
+  liquidity: string
+  target_delay_us: number
+  order_delay_us: number
+}
+
+export interface AcquisitionExecution {
+  first_fill_ts_us: number | null
+  last_fill_ts_us: number | null
+  qty_weighted_target_delay_us: number | null
+  qty_weighted_order_delay_us: number | null
+  after_window_qty_ratio: number | null
+  fills_sampled: boolean
+  fills: AcquisitionExecutionFill[]
+}
+
 export interface AcquisitionCostRow {
   source_id: string
   binding_name: string
@@ -422,6 +441,7 @@ export interface AcquisitionCostRow {
   fee_shortfall_usdt: number | null
   after_fee_shortfall_usdt: number | null
   price_shortfall_bps: number | null
+  execution: AcquisitionExecution
 }
 
 export interface AcquisitionCostReport {
@@ -436,6 +456,10 @@ export interface AcquisitionCostReport {
   page_size: number
   page_count: number
   returned_row_count: number
+  row_symbol: string | null
+  row_strategy: string | null
+  row_sort: 'latest' | 'price_shortfall'
+  filtered_row_count: number
   totals: AcquisitionCostTotals
   points: AcquisitionCostPoint[]
   warnings: string[]

@@ -293,6 +293,17 @@ Clients performing these operations must explicitly bind one of these addresses.
 Never use either address for normal trading order submission or include it in
 normal trade-engine egress bindings (`local_ips`, primary/secondary addresses).
 
+By operator instruction on 2026-10-10, authenticated account, collateral,
+balance, and position queries must explicitly bind the account's configured
+trading IP and keep that binding fixed. This requirement takes precedence over
+the special-purpose address guidance above for these account queries. Resolve
+a trading `0.0.0.0`/`::` binding to its actual default-route local address
+without sending packets, then bind that address explicitly; do not change the
+trading configuration or fall back to an unbound HTTP client. On that date,
+zy_group26 (`binance_exec_trade10`) and zy_group29 (`binance_exec_trade11`)
+both resolved to `154.197.32.6`; re-check each account's live IP configuration
+before later queries.
+
 The minute Kline replacement was deployed to jp-meta on 2026-10-05 as release
 `20261005T144032Z`, runtime commit `9023094`. Its dedicated non-trading binding
 is `172.31.46.93`, verified public egress `18.181.48.65`; preserve the live

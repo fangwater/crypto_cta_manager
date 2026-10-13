@@ -17,17 +17,20 @@ pub const ACCOUNT_IPC_MAX_SUBSCRIBERS: usize = 4;
 pub const ACCOUNT_IPC_SUBSCRIBER_BUFFER: usize = 4_096;
 const WALLET_SNAPSHOT_TYPE: u32 = 4008;
 const ACCOUNT_RISK_TYPE: u32 = 4007;
+const BINANCE_STD_UM_SCOPE: u32 = 3;
+const BINANCE_UNIFIED_SCOPE: u32 = 1;
 const OKEX_UNIFIED_SCOPE: u32 = 10;
 const EVENT_HEADER_LEN: usize = 12;
+const ACCOUNT_RISK_ACTUAL_EQUITY_OFFSET: usize = 4 + 8 + 8;
 const ACCOUNT_RISK_MARGIN_RATIO_OFFSET: usize = 4 + 8 + 8 * 4;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LiveEquitySnapshot {
     pub source: String,
     pub equity_usdt: f64,
-    pub wallet_balance_usdt: f64,
-    pub unrealized_pnl_usdt: f64,
-    pub available_balance_usdt: f64,
+    pub wallet_balance_usdt: Option<f64>,
+    pub unrealized_pnl_usdt: Option<f64>,
+    pub available_balance_usdt: Option<f64>,
     pub ts_ms: i64,
 }
 
@@ -73,9 +76,9 @@ impl WalletAssetAccumulator {
         Some(LiveEquitySnapshot {
             source: "binance_std_um_stable_wallets".to_string(),
             equity_usdt: wallet_balance_usdt + unrealized_pnl_usdt,
-            wallet_balance_usdt,
-            unrealized_pnl_usdt,
-            available_balance_usdt,
+            wallet_balance_usdt: Some(wallet_balance_usdt),
+            unrealized_pnl_usdt: Some(unrealized_pnl_usdt),
+            available_balance_usdt: Some(available_balance_usdt),
             ts_ms: self.ts_ms?,
         })
     }
@@ -92,12 +95,40 @@ pub struct LiveAccountReading {
 #[derive(Debug, Clone, Default)]
 struct SourceLiveState {
     equity: Option<LiveEquitySnapshot>,
+    account_risk_equity: bool,
     unified_account: bool,
     uni_mmr: Option<f64>,
     uni_mmr_ts_ms: Option<i64>,
 }
 
 impl SourceLiveState {
+    fn apply_wallet_equity(&mut self, snapshot: LiveEquitySnapshot) {
+        // Wallet rows cover only stable assets. Once account totals arrive,
+        // subsequent wallet rows must not erase BTC/ETH collateral valuation.
+        if self.account_risk_equity
+            || self
+                .equity
+                .as_ref()
+                .is_some_and(|previous| snapshot.ts_ms < previous.ts_ms)
+        {
+            return;
+        }
+        self.equity = Some(snapshot);
+    }
+
+    fn apply_account_equity(&mut self, snapshot: LiveEquitySnapshot) {
+        if self.account_risk_equity
+            && self
+                .equity
+                .as_ref()
+                .is_some_and(|previous| snapshot.ts_ms < previous.ts_ms)
+        {
+            return;
+        }
+        self.account_risk_equity = true;
+        self.equity = Some(snapshot);
+    }
+
     fn reading(&self) -> Option<LiveAccountReading> {
         if self.equity.is_none() && !self.unified_account {
             return None;
@@ -219,6 +250,7 @@ fn run_subscriber(
         .with_context(|| format!("failed to subscribe to {service_name}"))?;
     info!(source_id, service_name, "account monitor IPC subscribed");
     let mut wallet_assets = WalletAssetAccumulator::default();
+    let rapidx_scope = rapidx_account_scope(service_name);
 
     loop {
         match subscriber.receive() {
@@ -235,13 +267,33 @@ fn run_subscriber(
                             .is_none()
                     });
                     if let Ok(mut guard) = snapshots.write() {
-                        guard.entry(source_id.to_string()).or_default().equity = Some(snapshot);
+                        guard
+                            .entry(source_id.to_string())
+                            .or_default()
+                            .apply_wallet_equity(snapshot);
                     }
                     if first {
                         info!(
                             source_id,
                             equity_usdt, "account monitor live equity received"
                         );
+                    }
+                }
+                if let Some(snapshot) = rapidx_scope
+                    .and_then(|scope| parse_account_equity(payload, scope, "rapidx_account_risk"))
+                    .or_else(|| parse_binance_std_um_equity(payload))
+                {
+                    let equity_usdt = snapshot.equity_usdt;
+                    if let Ok(mut guard) = snapshots.write() {
+                        let state = guard.entry(source_id.to_string()).or_default();
+                        let first = !state.account_risk_equity;
+                        state.apply_account_equity(snapshot);
+                        if first {
+                            info!(
+                                source_id,
+                                equity_usdt, "account monitor total equity received"
+                            );
+                        }
                     }
                 }
                 if let Some((ts_ms, uni_mmr)) = parse_okx_unified_risk(payload) {
@@ -285,22 +337,8 @@ fn parse_wallet_asset(payload: &[u8]) -> Option<WalletAssetSnapshot> {
 }
 
 fn parse_okx_unified_risk(payload: &[u8]) -> Option<(i64, f64)> {
-    if payload.len() < EVENT_HEADER_LEN {
-        return None;
-    }
-    let event_type = u32::from_le_bytes(payload[0..4].try_into().ok()?);
-    let scope = u32::from_le_bytes(payload[4..8].try_into().ok()?);
-    if event_type != ACCOUNT_RISK_TYPE || scope != OKEX_UNIFIED_SCOPE {
-        return None;
-    }
-    let body_len = u32::from_le_bytes(payload[8..12].try_into().ok()?) as usize;
-    let end = EVENT_HEADER_LEN.checked_add(body_len)?;
-    if payload.len() < end || body_len < ACCOUNT_RISK_MARGIN_RATIO_OFFSET + 8 {
-        return None;
-    }
-    let body = &payload[EVENT_HEADER_LEN..end];
-    let inner_type = u32::from_le_bytes(body[0..4].try_into().ok()?);
-    if inner_type != ACCOUNT_RISK_TYPE {
+    let body = account_risk_body(payload, OKEX_UNIFIED_SCOPE)?;
+    if body.len() < ACCOUNT_RISK_MARGIN_RATIO_OFFSET + 8 {
         return None;
     }
     let ts_ms = i64::from_le_bytes(body[4..12].try_into().ok()?);
@@ -313,6 +351,69 @@ fn parse_okx_unified_risk(payload: &[u8]) -> Option<(i64, f64)> {
         return None;
     }
     Some((ts_ms, uni_mmr))
+}
+
+fn parse_binance_std_um_equity(payload: &[u8]) -> Option<LiveEquitySnapshot> {
+    parse_account_equity(payload, BINANCE_STD_UM_SCOPE, "binance_std_um_account_risk")
+}
+
+fn rapidx_account_scope(service_name: &str) -> Option<u32> {
+    let (_, service) = service_name.rsplit_once("/account_pubs/")?;
+    if service.starts_with("rapidx_binance_") {
+        Some(BINANCE_UNIFIED_SCOPE)
+    } else if service.starts_with("rapidx_okex_") {
+        Some(OKEX_UNIFIED_SCOPE)
+    } else {
+        None
+    }
+}
+
+fn parse_account_equity(payload: &[u8], scope: u32, source: &str) -> Option<LiveEquitySnapshot> {
+    let body = account_risk_body(payload, scope)?;
+    if body.len() < ACCOUNT_RISK_ACTUAL_EQUITY_OFFSET + 8 {
+        return None;
+    }
+    let ts_ms = i64::from_le_bytes(body[4..12].try_into().ok()?);
+    let equity_usdt = f64::from_le_bytes(
+        body[ACCOUNT_RISK_ACTUAL_EQUITY_OFFSET..ACCOUNT_RISK_ACTUAL_EQUITY_OFFSET + 8]
+            .try_into()
+            .ok()?,
+    );
+    if ts_ms < 0 || !equity_usdt.is_finite() {
+        return None;
+    }
+    Some(LiveEquitySnapshot {
+        source: source.to_string(),
+        equity_usdt,
+        // This event carries exchange-valued totalMarginBalance, including
+        // Multi-Assets collateral. It has no aggregate wallet/PnL breakdown.
+        wallet_balance_usdt: None,
+        unrealized_pnl_usdt: None,
+        available_balance_usdt: None,
+        ts_ms,
+    })
+}
+
+fn account_risk_body(payload: &[u8], expected_scope: u32) -> Option<&[u8]> {
+    if payload.len() < EVENT_HEADER_LEN {
+        return None;
+    }
+    let event_type = u32::from_le_bytes(payload[0..4].try_into().ok()?);
+    let scope = u32::from_le_bytes(payload[4..8].try_into().ok()?);
+    if event_type != ACCOUNT_RISK_TYPE || scope != expected_scope {
+        return None;
+    }
+    let body_len = u32::from_le_bytes(payload[8..12].try_into().ok()?) as usize;
+    let end = EVENT_HEADER_LEN.checked_add(body_len)?;
+    if payload.len() < end || body_len < 4 {
+        return None;
+    }
+    let body = &payload[EVENT_HEADER_LEN..end];
+    let inner_type = u32::from_le_bytes(body[0..4].try_into().ok()?);
+    if inner_type != ACCOUNT_RISK_TYPE {
+        return None;
+    }
+    Some(body)
 }
 
 fn parse_wallet_snapshot(data: &[u8]) -> Option<WalletAssetSnapshot> {
@@ -423,8 +524,8 @@ mod tests {
             .expect("live equity");
         assert_eq!(snapshot.source, "binance_std_um_stable_wallets");
         assert!((snapshot.equity_usdt - 11_750.5).abs() < 1e-9);
-        assert!((snapshot.wallet_balance_usdt - 11_500.0).abs() < 1e-9);
-        assert!((snapshot.unrealized_pnl_usdt - 250.5).abs() < 1e-9);
+        assert_eq!(snapshot.wallet_balance_usdt, Some(11_500.0));
+        assert_eq!(snapshot.unrealized_pnl_usdt, Some(250.5));
         assert_eq!(snapshot.ts_ms, 1_700_000_000_000);
     }
 
@@ -442,8 +543,8 @@ mod tests {
             .update(parse_wallet_asset(&usdt).expect("USDT row"))
             .expect("combined equity");
         assert!((snapshot.equity_usdt - 95.0).abs() < 1e-9);
-        assert!((snapshot.wallet_balance_usdt - 90.0).abs() < 1e-9);
-        assert!((snapshot.available_balance_usdt - 80.0).abs() < 1e-9);
+        assert_eq!(snapshot.wallet_balance_usdt, Some(90.0));
+        assert_eq!(snapshot.available_balance_usdt, Some(80.0));
     }
 
     #[test]
@@ -494,7 +595,7 @@ mod tests {
         let mut body = Vec::new();
         body.extend_from_slice(&ACCOUNT_RISK_TYPE.to_le_bytes());
         body.extend_from_slice(&timestamp_ms.to_le_bytes());
-        for value in [0.0, 0.0, 0.0, 0.0, margin_ratio, 0.0, 0.0] {
+        for value in [0.0, 0.0, 0.0, 0.0, margin_ratio, 0.0, 0.0, f64::NAN] {
             body.extend_from_slice(&value.to_le_bytes());
         }
         let mut wrapped = Vec::new();
@@ -503,6 +604,139 @@ mod tests {
         wrapped.extend_from_slice(&(body.len() as u32).to_le_bytes());
         wrapped.extend_from_slice(&body);
         wrapped
+    }
+
+    fn encode_um_equity(timestamp_ms: i64, equity: f64) -> Vec<u8> {
+        let mut payload = encode_account_risk(BINANCE_STD_UM_SCOPE, timestamp_ms, 0.0);
+        let offset = EVENT_HEADER_LEN + ACCOUNT_RISK_ACTUAL_EQUITY_OFFSET;
+        payload[offset..offset + 8].copy_from_slice(&equity.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn rapidx_total_equity_is_scoped_to_its_account_stream_and_keeps_newest_value() {
+        let service = "trade05/account_pubs/rapidx_binance_test_pm";
+        let scope = rapidx_account_scope(service).unwrap();
+        assert_eq!(scope, BINANCE_UNIFIED_SCOPE);
+        assert_eq!(
+            rapidx_account_scope("trade02/account_pubs/binance_pm"),
+            None
+        );
+        assert_eq!(
+            rapidx_account_scope("trade05/account_pubs/rapidx_okex_test_pm"),
+            Some(OKEX_UNIFIED_SCOPE)
+        );
+        let risk = |timestamp, equity| {
+            let mut payload = encode_account_risk(scope, timestamp, 123.0);
+            let offset = EVENT_HEADER_LEN + ACCOUNT_RISK_ACTUAL_EQUITY_OFFSET;
+            payload[offset..offset + 8].copy_from_slice(&f64::to_le_bytes(equity));
+            payload
+        };
+        let mut state = SourceLiveState::default();
+        for (timestamp, equity) in [(20, 9994.0), (30, 9995.0), (10, 9000.0)] {
+            state.apply_account_equity(
+                parse_account_equity(&risk(timestamp, equity), scope, "rapidx_account_risk")
+                    .unwrap(),
+            );
+        }
+        let reading = state.reading().unwrap();
+        let snapshot = reading.equity.unwrap();
+        assert_eq!(snapshot.equity_usdt, 9995.0);
+        assert_eq!(snapshot.ts_ms, 30);
+        assert_eq!(snapshot.source, "rapidx_account_risk");
+        assert!(snapshot.wallet_balance_usdt.is_none());
+        assert!(parse_account_equity(&risk(40, f64::NAN), scope, "rapidx_account_risk").is_none());
+        assert!(
+            parse_account_equity(&encode_um_equity(40, 9995.0), scope, "rapidx_account_risk")
+                .is_none()
+        );
+        let payload = risk(40, 9995.0);
+        for len in 0..payload.len() {
+            assert!(parse_account_equity(&payload[..len], scope, "rapidx_account_risk").is_none());
+        }
+    }
+
+    #[test]
+    fn account_total_keeps_multi_asset_collateral_after_newer_wallet_rows() {
+        let wallet = |timestamp_ms| {
+            let payload = encode_wallet_event(
+                timestamp_ms,
+                timestamp_ms,
+                "USDT",
+                true,
+                288_000.0,
+                288_000.0,
+                -2_000.0,
+                250_000.0,
+                250_000.0,
+            );
+            WalletAssetAccumulator::default()
+                .update(parse_wallet_asset(&payload).unwrap())
+                .unwrap()
+        };
+        let risk = |timestamp_ms, equity| {
+            parse_binance_std_um_equity(&encode_um_equity(timestamp_ms, equity)).unwrap()
+        };
+        let mut state = SourceLiveState::default();
+        state.apply_wallet_equity(wallet(20));
+        assert_eq!(
+            state.reading().unwrap().equity.unwrap().equity_usdt,
+            286_000.0
+        );
+
+        // Account totals take precedence even if the first wallet row is newer.
+        state.apply_account_equity(risk(19, 830_000.0));
+        state.apply_wallet_equity(wallet(19));
+        state.apply_wallet_equity(wallet(25));
+        state.apply_account_equity(risk(30, 831_000.0));
+        state.apply_account_equity(risk(29, 829_000.0));
+        let reading = state.reading().unwrap();
+        assert!(!reading.unified_account);
+        assert_eq!(reading.uni_mmr, None);
+        let snapshot = reading.equity.unwrap();
+        assert_eq!(snapshot.equity_usdt, 831_000.0);
+        assert_eq!(snapshot.ts_ms, 30);
+        assert_eq!(snapshot.source, "binance_std_um_account_risk");
+        let json = serde_json::to_value(snapshot).unwrap();
+        for field in [
+            "wallet_balance_usdt",
+            "unrealized_pnl_usdt",
+            "available_balance_usdt",
+        ] {
+            assert!(json[field].is_null());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_account_equity_without_affecting_other_scopes() {
+        assert!(parse_binance_std_um_equity(&encode_account_risk(4, 10, 1.0)).is_none());
+        assert!(parse_binance_std_um_equity(&encode_account_risk(10, 10, 1.0)).is_none());
+        assert!(parse_okx_unified_risk(&encode_um_equity(10, 830_000.0)).is_none());
+        for equity in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(parse_binance_std_um_equity(&encode_um_equity(10, equity)).is_none());
+        }
+        assert!(parse_binance_std_um_equity(&encode_um_equity(-1, 100.0)).is_none());
+        assert_eq!(
+            parse_binance_std_um_equity(&encode_um_equity(10, -100.0))
+                .unwrap()
+                .equity_usdt,
+            -100.0
+        );
+        let payload = encode_um_equity(10, 830_000.0);
+        for len in 0..payload.len() {
+            assert!(parse_binance_std_um_equity(&payload[..len]).is_none());
+        }
+        let mut wrong_outer_type = payload.clone();
+        wrong_outer_type[0..4].copy_from_slice(&WALLET_SNAPSHOT_TYPE.to_le_bytes());
+        assert!(parse_binance_std_um_equity(&wrong_outer_type).is_none());
+        let mut wrong_inner_type = payload.clone();
+        wrong_inner_type[12..16].copy_from_slice(&WALLET_SNAPSHOT_TYPE.to_le_bytes());
+        assert!(parse_binance_std_um_equity(&wrong_inner_type).is_none());
+        for body_len in [0u32, 3, 27, u32::MAX] {
+            let mut invalid_length = payload.clone();
+            invalid_length[8..12].copy_from_slice(&body_len.to_le_bytes());
+            assert!(parse_binance_std_um_equity(&invalid_length).is_none());
+        }
     }
 
     #[test]

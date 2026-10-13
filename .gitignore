@@ -4,3 +4,6 @@
 /postgresql-*-linux-x86_64-user.tar.gz*
 /config/cta-manager.toml
 __pycache__/
+
+# Locally compiled one-time archive diagnostic; keep its Rust source.
+/artifacts/acquisition_cost_jp_meta_20261013T034926Z/archive_count

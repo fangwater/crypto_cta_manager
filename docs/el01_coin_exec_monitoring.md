@@ -1,11 +1,14 @@
 # el01 Exec market configuration and monitoring
 
-Last updated: 2026-10-09 UTC.
+Last updated: 2026-10-10 UTC.
 
 Current state: zy_group26 (`binance_exec_trade10`) and zy_group29
 (`binance_exec_trade11`) use Binance USD-M futures, following the operator's
-correction on October 9. Trade10/11 have the latest Exec binaries and run only
-account monitoring, Viz and Config. Bahll202210 (`binance_exec_trade01`) resumed
+correction on October 9. Trade10/11 now run trading on the operator's October 10
+instruction, following virtual03 at multipliers 171 and 261 respectively.
+Matching initial account and strategy snapshots anchor their PnL at startup.
+Both accounts use Multi-Assets collateral (USDT, BTC and ETH).
+Bahll202210 (`binance_exec_trade01`) resumed
 trading on the operator's subsequent instruction. The replacement trade05
 account xy_lxy21 has a new source/namespace (`binance_exec_xy_lxy21_05`) and now
 runs trading on the operator's later instruction, following c40 at multiplier
@@ -481,3 +484,228 @@ repair; parsed-config equality, live API status and browser rendering provide
 the verification. The recoverable TOML, before/after API records and browser
 verification are retained at
 `/home/el01/crypto_cta_manager/backups/xy_live_equity_20261009T130714Z`.
+
+## zy26 / zy29 trading, initial allocations and collateral equity
+
+On October 10 the operator authorized starting both accounts and validating
+execution and NAV. A fresh catalog/runtime check found both following
+`virtual03`: zy26 at multiplier 171 and zy29 at 261. Each has the four
+`CTA_SK_C40V6PosT1_LXY_filter_Position`,
+`CTA_SK_C40V6PosV5_V2_LXY_filter_Position`,
+`CTA_SK_C4V6PosT1_LXY_filter_Position`, and
+`CTA_SK_C4V6PosV5_V2_LXY_filter_Position` bindings. Each C40 binding has
+shares 1.71 / 2.61; each C4 binding has shares 83.79 / 127.89. All use
+`12min_attemp4_h45_o2`, and neither account has a pending publish.
+
+The synchronized production `arbmm` head is `e37eeb20`; the six deployed Exec
+binaries and 30 deployment scripts match that source's unchanged runtime
+artifacts from `8a263e04`. No dirty `mkt_signal` build was deployed. After a
+recoverable Manager database/config/process backup, initialized only the two
+missing standard risk hashes and enabled only their Manager `monitor_enabled`
+flags. The standard Exec wrappers started persistence, trade engine, account
+monitor, pre-trade, Viz and Config, with every component health check passing.
+`trade_signal` stays stopped. Trading configs, credentials, bindings and ports
+were retained.
+
+Immutable account and strategy snapshots now share each startup-invocation
+anchor:
+
+| Source | UTC anchor | Timestamp (us) | Account lots | Strategy lots |
+| --- | --- | --- | --- | --- |
+| binance_exec_trade10 | 2026-10-10 03:17:27.688215 | 1791602247688215 | 12 | 28 |
+| binance_exec_trade11 | 2026-10-10 03:18:12.819450 | 1791602292819450 | 12 | 28 |
+
+The strategy tool inferred initial allocation by subtracting every persisted
+post-anchor fill from current Exec allocations, validated replay in dry-run,
+then saved the validated quantities. Each snapshot has 9 C40 T1, 11 C40 V5,
+4 C4 T1 and 4 C4 V5 lots. Matching account quantities and prices aggregate
+exactly, with zero mismatches across all 12 symbols per source. These are
+inferred allocations at invocation, not historical snapshots captured by Exec.
+Untouched inventory uses the last fully closed Binance minute before the
+anchor (03:16 / 03:17 UTC), retrieved with explicit `.9` egress; factual fill
+prices take precedence. Startup fills remain inside the PnL interval.
+Snapshot tools read Exec RocksDB without writing or stopping it. No schema DDL
+or historical snapshot replacement was performed.
+
+Both factual position states are ready and allocated. All 32 named strategy
+rows per account completed, with no live orders or remaining batches; small
+residual differences are classified as target tolerance or exchange minimum.
+The measured strategy/account timelines include 100 / 152 fills respectively.
+Every displayed point and summary is additive across the four named strategy
+buckets plus `__unallocated__`, starts at zero, and ends at its window summary.
+At the measured end, NAV after estimated fees is -21.61996054875548 /
+13.363688742713997 quote units. These are order-derived PnL observations,
+valued at latest factual fill prices; they exclude funding, transfers and
+collateral currency revaluation.
+
+Authenticated balance/position requests explicitly use the trading address
+`154.197.32.6`, resolved without packets from the unchanged unspecified
+trade-engine bindings. Both accounts report Standard USD-M Multi-Assets mode,
+with USDT, BTC and ETH margin collateral. The operator subsequently authorized
+fixing Manager's incomplete stable-wallet equity. `cta_web` now consumes the
+existing scope-3 AccountRisk `actual_equity_usd`, sourced from Binance
+`totalMarginBalance`. Once received, this exchange-valued total takes
+precedence over subsequent partial USDT/BFUSD wallet messages. Stale risk
+samples cannot regress it. Unavailable aggregate wallet/PnL/available-balance
+breakdowns are JSON null. OKX UniMMR handling and the IPC wire stay unchanged.
+
+Formatting, check, the complete suite (282 library and 8 snapshot tests passed;
+10 intentionally ignored), and the locked release build passed. The new
+`cta_web` SHA-256 is
+`b898c84b7df3a33585ad0a765365cc6ba0a2e83d1ae6d417f5b4ff730a62c711`,
+built from Manager `23b4f1d` plus the recorded uncommitted equity patch.
+Only Manager restarted for this binary replacement; all 64 captured protected
+binary processes retained their identities, and all 63 non-target process
+identities from the original startup baseline were retained. The two old
+Python Config executables already have deleted-path markers; their original
+PIDs/start times and gateway HTTP 200 were verified. Trade10/11 protected
+configuration hashes are unchanged, Config gateways return 200, and Manager
+health is `ok` without a refresh error.
+
+The workspace and exchange-NAV API now show about 831,000 / 914,000 USDT of
+total equity, with feed `binance_std_um_account_risk` and status `ok`.
+Direct trading-IP account queries measured 831157.00751135 / 913892.53049215;
+nearby Manager samples differ by 63.61 / 47.54 (under 0.008%), reflecting
+the separate sampling times. The original frontend and Nginx were retained.
+Release provenance, the old Manager binary, database backup, immutable
+snapshot inputs, raw anchor candles and verification responses are retained
+at `/home/el01/crypto_cta_manager/backups/zy26_29_trading_start_20261010T031619Z`.
+The temporary verification session and its token file were removed afterward.
+
+## bn_group31 USD-M monitoring deployment, 2026-10-12
+
+The operator added `bn_group31` as the independent source
+`binance_exec_trade13` and explicitly selected monitoring only. Its directory is
+`/home/el01/binance_exec_trade13`, namespace and Redis prefix use that source ID,
+and its authenticated gateway is `/exec_trade13/` with Viz/Config on loopback
+`10054`/`18173`. The configured venue is exclusively `binance-futures`.
+
+Both trade-engine local IP entries explicitly bind `154.197.32.6`. Read-only
+signed account requests used that same address and verified STANDARD USD-M,
+one-way positions, and 11 nonzero positions at the check time. BTCUSDT's exchange
+commission response supplied Maker/Taker rates `0.0001`/`0.0003`, used to seed the
+new Manager source. Credentials remain solely in the new remote `env.sh`, mode
+`0600`; no credentials were added to repository files.
+
+Six release binaries were built locally from synchronized `mkt_signal/arbmm`
+commit `b8611bd1d61f20e24cfa30a7a0d09a74d5793db0`, published through
+`publish-exec.sh`, and SHA-256 verified. `EXEC-RELEASE.json` in the new environment
+records artifact hashes. Only its environment-local account-monitor, Viz and
+Config start scripts ran. Pre-trade, trade engine, signal and persistence remain
+stopped; its order store is empty, and Manager has zero strategy bindings and
+no account/strategy snapshot for this source. The empty Exec strategy snapshot
+is expected while pre-trade is stopped and does not mean the exchange account
+has no positions.
+
+Manager received an additive source entry and the new trading TOML was added to
+Kline's exclusion list. Its existing binary was retained and restarted to load
+the account; Nginx was syntax-checked and reloaded with three additive source
+route/auth/upstream blocks. `monitor_enabled = true` also enables Manager's
+live-equity IPC subscription. The existing standalone `cta_monitor` was not
+restarted. All 74 captured protected Exec/feed/monitor processes and all 28
+captured account environment/trading-configuration hashes remained unchanged.
+
+Verification through Nginx returned HTTP 200 for Manager health, dashboard,
+account studio, Exec page, snapshot, Config and bootstrap; WebSocket returned
+101 and unauthenticated snapshot access returned 401. Manager health was `ok`
+with 13 enabled sources, and the new account's live equity status was `ok`.
+Its Manager-published market-rule cache contained 924 USD-M symbols including
+BTCUSDT and excluding BTCUSD_PERP. The isolated el01 deployment-layout test
+passed. Recovery configs and sanitized verification records are retained under
+`/home/el01/crypto_cta_manager/backups/bn_group31_trade13_20261012`; temporary
+verification sessions and publication staging files were removed.
+
+The operator subsequently granted `dzy` and `shaokai` full account access to
+`binance_exec_trade13`. Both users have the `configure` permission, covering
+account viewing and configuration. Per-user gateway checks verified that the
+dashboard reports `configure`, and account studio, Exec snapshot and Config
+bootstrap each return HTTP 200. Other account grants and both users' global
+roles were preserved. Temporary verification sessions were removed; the
+before/after permission audit is retained in the same remote backup directory.
+
+### Trading enabled after target verification
+
+At the operator's subsequent request, trade13's execution stack started on
+2026-10-12 at approximately 10:05 UTC. The source follows `virtual03` with
+multiplier `17`; its four active bindings use `12min_attemp4_h45_o2`:
+
+| Position strategy | Shares |
+| --- | ---: |
+| CTA_SK_C40V6PosT1_LXY_filter_Position | 0.17 |
+| CTA_SK_C40V6PosV5_V2_LXY_filter_Position | 0.17 |
+| CTA_SK_C4V6PosT1_LXY_filter_Position | 8.33 |
+| CTA_SK_C4V6PosV5_V2_LXY_filter_Position | 8.33 |
+
+Before startup, all four runtime targets were present, every nonzero target
+symbol was venue-active, signed account checks returned `canTrade = true`,
+one-way positions and multi-assets margin already enabled, and all existing
+account positions belonged to the published symbol vectors. The account's
+missing risk hash was initialized with its deployed `sync_exec_risk_params.py`:
+10 pending orders, 10 per side, and limits of 400 orders/minute and 200/10s,
+matching the standard script and trade10/11/12. No strategy target, shares,
+exchange leverage, account mode or trading IP was changed.
+
+`scripts/start-exec.sh` ran from synchronized `mkt_signal/arbmm` and used the
+environment-local wrappers. Persistence, trade engine, account monitor,
+pre-trade, Viz and Config passed startup health checks; `trade_signal` remains
+stopped. Startup performs the normal account-scoped USD-M open-order cancel.
+Viz subsequently reported `position_ready = true`, all four strategies,
+32 execution rows and 9 active batches. Manager reported zero pending publishes
+and healthy source refreshes. A read-only RocksDB diagnostic observed 94 order
+events and 36 positive fill records: 34 Maker records and two internal-cross
+records with unclassified liquidity. This diagnostic bypassed snapshots and
+was used only to verify persistence, not to establish account NAV.
+
+All 78 captured non-target protected processes and 30 account/Manager/Nginx
+configuration hashes remained unchanged. The new runtime manifest records the
+running components and PIDs. Startup baseline, targets, exchange checks, risk
+settings, Viz state and verification evidence are retained under
+`/home/el01/crypto_cta_manager/backups/bn_group31_trade13_start_20261012`.
+Temporary verification sessions were removed.
+
+### trade13 initial account and strategy snapshots
+
+At the operator's request, restored trade13's initial allocation at
+`1791799531000000` us: 2026-10-12 10:05:31 UTC / 18:05:31 Shanghai. This is
+the first pre-trade startup log timestamp, before the first persisted fill.
+The inference subtracts all later source/venue-scoped fills from the current
+Exec strategy quantities and validates forward replay. It includes internal
+cross records in the corresponding strategy ledgers.
+
+The original snapshot tool discarded each inferred lot below 1 USDT. That
+incorrectly removed both small strategy allocations of 1000PEPE and ADA,
+losing the account's factual initial -324 and +6 quantities. The tool now
+preserves every lot above the existing execution quantity epsilon, independent
+of its price. A regression test covers sub-dollar strategy lots and their
+account total; the floating-point remainder test now uses execution epsilon.
+Formatting, the focused nine snapshot tests, full crate tests, Cargo check,
+and the release build passed. Only the standalone `nav_strategy_snapshot`
+binary was replaced, with SHA-256
+`3e58248d605ceb6435be45790d7f022bd68ab4866b8eff555c5936163d76a02d`.
+Its release record captures base commit `23b4f1d`, the source patch and the
+preexisting local modifications included in the tool build.
+
+The restored snapshot contains 29 strategy lots: 10 C40 T1, 11 C40 V5,
+4 C4 T1 and 4 C4 V5. Their aggregate contains all 11 initial account positions.
+Account quantities match the pre-start exchange response to floating-point
+precision (maximum quantity difference below `1e-12`); all 29 strategy lots
+also match the independently logged startup allocations within their eight
+decimal places. First positive fill prices take precedence. Untouched
+1000PEPEUSDT, BTCUSDT, NEARUSDT and UNIUSDT use the 10:04 UTC closed-minute
+price, obtained through explicitly bound and verified `154.197.32.9` egress.
+
+After backing up the four snapshot tables, inserted both immutable headers and
+all 40 position rows in one PostgreSQL transaction. Existing-snapshot guards
+prevented replacement; all saved rows exactly match the validated candidates,
+and other sources' snapshot rows are unchanged. Manager's normal refresh loaded
+both anchors. Gateway verification confirms a zero NAV start point, a terminal
+point matching the summary, and strategy NAV adding to account NAV; the fixed
+verification window contains 105 fills. All 84 captured runtime process
+identities remained unchanged, including the live trade13 stack.
+
+The database backup, exact insertion SQL, inferred account/strategy JSON,
+rounded startup-log allocations, raw fallback candles, tool provenance and API
+verification records are retained at
+`/home/el01/crypto_cta_manager/backups/bn_group31_trade13_snapshot_20261012`.
+No Exec RocksDB write, trading interruption, target change or schema DDL was
+performed. Temporary verification sessions were removed.

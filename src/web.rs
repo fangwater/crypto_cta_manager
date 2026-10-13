@@ -265,6 +265,10 @@ struct AcquisitionCostQuery {
     strategy_name: Option<String>,
     page: Option<usize>,
     page_size: Option<usize>,
+    row_symbol: Option<String>,
+    row_strategy: Option<String>,
+    #[serde(default)]
+    row_sort: crate::acquisition_cost::AcquisitionRowSort,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1401,13 +1405,13 @@ fn exchange_nav_account(
         equity_usdt: snapshot.as_ref().map(|snapshot| snapshot.equity_usdt),
         wallet_balance_usdt: snapshot
             .as_ref()
-            .map(|snapshot| snapshot.wallet_balance_usdt),
+            .and_then(|snapshot| snapshot.wallet_balance_usdt),
         unrealized_pnl_usdt: snapshot
             .as_ref()
-            .map(|snapshot| snapshot.unrealized_pnl_usdt),
+            .and_then(|snapshot| snapshot.unrealized_pnl_usdt),
         available_balance_usdt: snapshot
             .as_ref()
-            .map(|snapshot| snapshot.available_balance_usdt),
+            .and_then(|snapshot| snapshot.available_balance_usdt),
         exchange_ts_ms: snapshot.as_ref().map(|snapshot| snapshot.ts_ms),
         status,
     }
@@ -1828,6 +1832,27 @@ async fn acquisition_cost(
         return Ok(bad_request(message));
     }
     let page = query.page.unwrap_or(1);
+    let row_strategy = query
+        .row_strategy
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if let Some(name) = row_strategy
+        && let Err(message) = validate_strategy_name(name)
+    {
+        return Ok(bad_request(message));
+    }
+    let row_symbol = query
+        .row_symbol
+        .as_deref()
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .map(str::to_ascii_uppercase);
+    if let Some(symbol) = &row_symbol
+        && let Err(message) = strategy_catalog::validate_contract_symbol(symbol)
+    {
+        return Ok(bad_request(message));
+    }
     let page_size = query
         .page_size
         .unwrap_or(crate::acquisition_cost::DEFAULT_PAGE_SIZE);
@@ -1862,6 +1887,9 @@ async fn acquisition_cost(
         strategy_name,
         page,
         page_size,
+        row_symbol.as_deref(),
+        row_strategy,
+        query.row_sort,
     )
     .await?;
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);

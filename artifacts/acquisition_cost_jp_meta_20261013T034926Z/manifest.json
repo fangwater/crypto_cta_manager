@@ -1,0 +1,25 @@
+{
+  "release": "20261013T034926Z",
+  "target": "jp-meta",
+  "source_commit": "bf6b3542bd7308cd9d6b2b20bc646a25c476cd35",
+  "working_tree_modified": true,
+  "source_sha256": {
+    "src/acquisition_cost.rs": "aade04173f955068ca6e8cb4636d48a9a1c33b71be32fddc8e77745f93720f31",
+    "src/account_ipc.rs": "02772fee73fdcf0f25400c61c17efe445f24a5ab6f03a140b019c6b97e35dd6a",
+    "src/config.rs": "6a81310ad38895cbb5a89b41a418859e0c3467acc071d9892c64e31fc2b8e30d",
+    "src/web.rs": "147e0789b06867e257d40a60aa1e4218b0f45cb73df9e10e0594a82213212cd8",
+    "src/monitor.rs": "7f4ecf7f2502c7db91808b3369269f93c6d132938c3f625b23af321b1cdcea05",
+    "frontend/package.json": "2ad5f078e9aa5f3ce6b6ed51b088dfe916ddff9f782ac54d2401dd7d6ba4bd10",
+    "frontend/src/types.ts": "6d08065c4439d9e29518ac959822de30e09d7ea3a68c554d662e7b6f6cb909fe",
+    "frontend/src/pages/AcquisitionCostPage.tsx": "a6264821818c68055b319562e1fe7c087355a4cc449a3e93224193ccbfa323f0",
+    "frontend/src/components/AcquisitionCostCharts.tsx": "7cd428e1142acc52a2057907057f6634babf4d0cfe472c180a1611a5b38d809a",
+    "frontend/src/lib/acquisitionAnalysis.ts": "8190d446b09615049a43c29ca0f0bdc8272ef56d623450bfb6d51c6700506261"
+  },
+  "artifacts": {
+    "cta_web": "bf60725a67c04a68cc6758f953c92187c69a1a8034fcde7be9ef09c04d923f26",
+    "favicon.svg": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+    "index.html": "bb202ab946c52faa98afdb4baaf8411e82c226d89d9feff6083f0c497819d430",
+    "assets/index-BZs4nHNo.js": "503f3397956d6d468ae6768f2f4d37060aba8cacdadbaa654a000f74db5131c5",
+    "assets/index-CHyq9i7o.css": "0d86b7aec381fa903d7deb9a4c1b711203025bca269705df0ed98cbb38c40ce3"
+  }
+}

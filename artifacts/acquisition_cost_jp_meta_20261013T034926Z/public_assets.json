@@ -1,0 +1,22 @@
+[
+  {
+    "asset": "favicon.svg",
+    "status": 200,
+    "sha256_verified": true
+  },
+  {
+    "asset": "index.html",
+    "status": 200,
+    "sha256_verified": true
+  },
+  {
+    "asset": "assets/index-BZs4nHNo.js",
+    "status": 200,
+    "sha256_verified": true
+  },
+  {
+    "asset": "assets/index-CHyq9i7o.css",
+    "status": 200,
+    "sha256_verified": true
+  }
+]

@@ -272,3 +272,20 @@ maker_fee_rate = 0.00012
 taker_fee_rate = 0.00032
 ipc_namespace = "binance_exec_trade07"
 account_ipc_service = "account_pubs/binance_pm"
+
+[[sources]]
+id = "binance_exec_trade13"
+account = "trade13"
+alias = "bn_group31"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade13/data/persist_manager"
+enabled = true
+# Enables Manager live equity from account IPC; trading remains stopped.
+monitor_enabled = true
+gateway_prefix = "/exec_trade13"
+exec_config_url = "http://127.0.0.1:18173/"
+exec_viz_url = "http://127.0.0.1:10054/"
+maker_fee_rate = 0.0001
+taker_fee_rate = 0.0003
+ipc_namespace = "binance_exec_trade13"
+account_ipc_service = "account_pubs/binance_pm"

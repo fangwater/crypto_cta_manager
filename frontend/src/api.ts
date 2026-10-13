@@ -236,6 +236,9 @@ export interface AcquisitionCostQuery {
   endMs?: number
   sourceIds?: string[]
   strategyName?: string
+  rowSymbol?: string
+  rowStrategy?: string
+  rowSort?: 'latest' | 'price_shortfall'
   page?: number
   pageSize?: number
   signal?: AbortSignal
@@ -247,6 +250,9 @@ export function getAcquisitionCost(query: AcquisitionCostQuery) {
   params.set('endMs', String(query.endMs))
   if (query.sourceIds?.length) params.set('sourceIds', query.sourceIds.join(','))
   if (query.strategyName) params.set('strategyName', query.strategyName)
+  if (query.rowSymbol) params.set('rowSymbol', query.rowSymbol)
+  if (query.rowStrategy) params.set('rowStrategy', query.rowStrategy)
+  if (query.rowSort) params.set('rowSort', query.rowSort)
   if (query.page) params.set('page', String(query.page))
   if (query.pageSize) params.set('pageSize', String(query.pageSize))
   return requestJson<AcquisitionCostSnapshot>(`/catalog/acquisition-cost?${params}`, {

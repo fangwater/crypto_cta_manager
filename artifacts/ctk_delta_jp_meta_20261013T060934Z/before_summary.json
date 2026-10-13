@@ -1,0 +1,23 @@
+{
+  "phase": "before",
+  "query": {
+    "startMs": 1791784860000,
+    "endMs": 1791871260000,
+    "sourceIds": "binance_exec_trade03",
+    "page": 1,
+    "pageSize": 25
+  },
+  "gateway": {
+    "/manager/api/health": 200,
+    "/manager/api/dashboard": 200,
+    "/exec_trade03/": 200,
+    "/exec_trade03/snapshot": 200,
+    "/exec_trade03/config/": 200,
+    "/exec_trade03/ws": 101
+  },
+  "manager_pid": 1872068,
+  "matched_fills": 28872,
+  "page_count": 1558,
+  "protected_processes": 118,
+  "generation_duration_ms": 3373
+}

@@ -1,0 +1,25 @@
+{
+  "phase": "before",
+  "statuses": {
+    "/manager/api/health": 200,
+    "/manager/api/dashboard": 200,
+    "/exec_trade03/": 200,
+    "/exec_trade03/snapshot": 200,
+    "/exec_trade03/config/": 200,
+    "/exec_trade03/ws": 101
+  },
+  "query": {
+    "startMs": 1791776580000,
+    "endMs": 1791862980000,
+    "sourceIds": "binance_exec_trade03",
+    "page": 1,
+    "pageSize": 25
+  },
+  "rows": 25,
+  "matched_fills": 29239,
+  "virtual_deltas": 39208,
+  "missing_deltas": 0,
+  "generation_duration_ms": 3077,
+  "protected_processes": 118,
+  "trading_configs": 23
+}

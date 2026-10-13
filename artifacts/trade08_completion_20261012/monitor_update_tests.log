@@ -1,0 +1,36 @@
+   Compiling crypto_cta_manager v0.1.0 (/home/fanghaizhou/crypto_cta_manager)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.46s
+     Running unittests src/lib.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/crypto_cta_manager-93158adb8c5dd1d6)
+
+running 28 tests
+test monitor::tests::delayed_issue_disappears_without_alert_or_recovery ... ok
+test monitor::tests::dingtalk_payload_is_text_with_at_fields ... ok
+test monitor::tests::delayed_issue_alerts_after_grace_and_then_recovers ... ok
+test monitor::tests::heartbeat_fires_once_per_slot_and_consumes_quiet_slots ... ok
+test monitor::tests::heartbeat_message_reports_channel_status ... ok
+test monitor::tests::market_notices_and_order_notices_use_separate_channels ... ok
+test monitor::tests::market_symbols_are_normalized ... ok
+test monitor::tests::heartbeat_content_uses_heartbeat_prefix_and_host_tag ... ok
+test monitor::tests::missing_zero_target_uses_ready_snapshot_after_publish ... ok
+test monitor::tests::linear_exec_does_not_require_an_unconfigured_coin_feed ... ok
+test monitor::tests::market_check_alerts_only_when_no_watched_symbol_is_fresh ... ok
+test monitor::tests::not_ready_requires_continuous_fresh_snapshots_per_source ... ok
+test monitor::tests::independent_market_sources_require_their_own_fresh_quote ... ok
+test monitor::tests::nonterminal_order_update_keeps_stale_order_alert ... ok
+test monitor::tests::position_check_detects_unapplied_strategy_when_account_net_is_unchanged ... ok
+test monitor::tests::quiet_window_covers_hours_and_wraps_overnight ... ok
+test monitor::tests::recovery_notice_reuses_alert_message ... ok
+test monitor::tests::position_check_suppresses_dust_residuals ... ok
+test monitor::tests::position_check_alerts_only_when_configured_gap_is_stuck ... ok
+test monitor::tests::shanghai_time_uses_fixed_utc8 ... ok
+test monitor::tests::repeat_alert_interval_has_thirty_second_floor ... ok
+test monitor::tests::signed_url_without_secret_is_unchanged ... ok
+test monitor::tests::signed_url_preserves_webhook_and_adds_signature_parameters ... ok
+test monitor::tests::source_issues_carry_the_account_alias ... ok
+test monitor::tests::stale_snapshot_only_reports_stale_position_issue ... ok
+test monitor::tests::terminal_order_update_clears_stale_uniform_new_order ... ok
+test monitor::tests::terminal_unmatched_trade_clears_stale_uniform_new_order ... ok
+test monitor::tests::tracker_notifies_on_transition_repeats_and_recovery ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 259 filtered out; finished in 0.01s
+

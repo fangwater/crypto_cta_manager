@@ -1,0 +1,41 @@
+{
+  "phase": "after",
+  "query": {
+    "startMs": 1791784860000,
+    "endMs": 1791871260000,
+    "sourceIds": "binance_exec_trade03",
+    "page": 1,
+    "pageSize": 25
+  },
+  "gateway": {
+    "/manager/api/health": 200,
+    "/manager/api/dashboard": 200,
+    "/exec_trade03/": 200,
+    "/exec_trade03/snapshot": 200,
+    "/exec_trade03/config/": 200,
+    "/exec_trade03/ws": 101
+  },
+  "manager_pid": 3078848,
+  "matched_fills": 28872,
+  "page_count": 1558,
+  "protected_processes": 124,
+  "generation_duration_ms": 2864,
+  "cost_report_unchanged": true,
+  "filtered_aggregate_unchanged": true,
+  "small_ctk_delta_count": 259,
+  "small_ctk_page_count": 11,
+  "small_ctk_price_shortfall": 99.36057284177858,
+  "all_filtered_pages_reconcile": true,
+  "small_mid_isolated": true,
+  "protected_configs_unchanged": false,
+  "observed_config_changes": [
+    "/etc/nginx/sites-available/crypto_proxy_4191.conf"
+  ],
+  "manager_and_trading_configs_unchanged": true,
+  "protected_processes_unchanged": false,
+  "observed_process_change_counts": {
+    "removed": 43,
+    "added": 49,
+    "changed": 0
+  }
+}

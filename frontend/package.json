@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:acquisition": "node --test tests/acquisitionAnalysis.test.mjs",
     "lint": "oxlint src vite.config.ts"
   },
   "dependencies": {

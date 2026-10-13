@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::AppConfig;
 use crate::nav;
@@ -10,6 +10,14 @@ pub const DEFAULT_PAGE_SIZE: usize = 25;
 pub const MAX_PAGE_SIZE: usize = 100;
 const ZERO_EPSILON: f64 = 1e-12;
 const MAX_VIRTUAL_REFERENCE_AGE_US: i64 = 300_000_000;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AcquisitionRowSort {
+    #[default]
+    Latest,
+    PriceShortfall,
+}
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct AcquisitionCostTotals {
@@ -98,6 +106,109 @@ pub struct AcquisitionFillDiagnostic {
     pub price_shortfall_bps: f64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct AcquisitionExecutionFill {
+    pub fill_ts_us: i64,
+    pub actual_price: f64,
+    pub actual_qty: f64,
+    pub liquidity: &'static str,
+    pub target_delay_us: i64,
+    pub order_delay_us: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AcquisitionExecution {
+    pub first_fill_ts_us: Option<i64>,
+    pub last_fill_ts_us: Option<i64>,
+    pub qty_weighted_target_delay_us: Option<f64>,
+    pub qty_weighted_order_delay_us: Option<f64>,
+    pub after_window_qty_ratio: Option<f64>,
+    pub fills_sampled: bool,
+    pub fills: Vec<AcquisitionExecutionFill>,
+}
+
+// Summaries use every matched fill; only the plot is bounded. Preserve temporal
+// endpoints and price extrema, then spread the remaining samples across time.
+fn execution_summary(
+    fills: &[&AcquisitionFillDiagnostic],
+    window_end_us: i64,
+) -> AcquisitionExecution {
+    const MAX_PLOT_FILLS: usize = 200;
+    if fills.is_empty() {
+        return AcquisitionExecution::default();
+    }
+    let mut ordered = fills.to_vec();
+    ordered.sort_by_key(|fill| fill.fill_ts_us);
+    let qty: f64 = ordered.iter().map(|fill| fill.actual_qty.abs()).sum();
+    let weighted_delay = |order: bool| {
+        (qty > 0.0).then(|| {
+            ordered
+                .iter()
+                .map(|fill| {
+                    let delay = if order {
+                        fill.order_delay_us
+                    } else {
+                        fill.target_delay_us
+                    };
+                    fill.actual_qty.abs() * delay as f64
+                })
+                .sum::<f64>()
+                / qty
+        })
+    };
+    let mut indices = std::collections::BTreeSet::new();
+    if ordered.len() <= MAX_PLOT_FILLS {
+        indices.extend(0..ordered.len());
+    } else {
+        for i in 0..MAX_PLOT_FILLS - 2 {
+            indices.insert(i * (ordered.len() - 1) / (MAX_PLOT_FILLS - 3));
+        }
+        if let Some((index, _)) = ordered
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.actual_price.total_cmp(&b.1.actual_price))
+        {
+            indices.insert(index);
+        }
+        if let Some((index, _)) = ordered
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.actual_price.total_cmp(&b.1.actual_price))
+        {
+            indices.insert(index);
+        }
+    }
+    AcquisitionExecution {
+        first_fill_ts_us: ordered.first().map(|fill| fill.fill_ts_us),
+        last_fill_ts_us: ordered.last().map(|fill| fill.fill_ts_us),
+        qty_weighted_target_delay_us: weighted_delay(false),
+        qty_weighted_order_delay_us: weighted_delay(true),
+        after_window_qty_ratio: (qty > 0.0).then(|| {
+            ordered
+                .iter()
+                .filter(|fill| fill.fill_ts_us >= window_end_us)
+                .map(|fill| fill.actual_qty.abs())
+                .sum::<f64>()
+                / qty
+        }),
+        fills_sampled: ordered.len() > indices.len(),
+        fills: indices
+            .into_iter()
+            .map(|index| {
+                let fill = ordered[index];
+                AcquisitionExecutionFill {
+                    fill_ts_us: fill.fill_ts_us,
+                    actual_price: fill.actual_price,
+                    actual_qty: fill.actual_qty,
+                    liquidity: fill.liquidity,
+                    target_delay_us: fill.target_delay_us,
+                    order_delay_us: fill.order_delay_us,
+                }
+            })
+            .collect(),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct BreakdownAccumulator {
     fill_count: u64,
@@ -184,6 +295,7 @@ pub struct AcquisitionCostRow {
     pub fee_shortfall_usdt: Option<f64>,
     pub after_fee_shortfall_usdt: Option<f64>,
     pub price_shortfall_bps: Option<f64>,
+    pub execution: AcquisitionExecution,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -199,6 +311,11 @@ pub struct AcquisitionCostReport {
     pub page_size: usize,
     pub page_count: usize,
     pub returned_row_count: usize,
+    /// Only the detail rows are filtered; totals/breakdowns retain the query scope.
+    pub row_symbol: Option<String>,
+    pub row_strategy: Option<String>,
+    pub row_sort: AcquisitionRowSort,
+    pub filtered_row_count: usize,
     pub totals: AcquisitionCostTotals,
     pub points: Vec<AcquisitionCostPoint>,
     pub warnings: Vec<String>,
@@ -246,6 +363,70 @@ fn page_bounds(count: usize, page: usize, page_size: usize) -> (usize, usize) {
     (end.saturating_sub(page_size), end)
 }
 
+fn select_row_indices(
+    rows: &[AcquisitionCostRow],
+    symbol: Option<&str>,
+    strategy: Option<&str>,
+    sort: AcquisitionRowSort,
+) -> Vec<usize> {
+    let mut indices: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| symbol.is_none_or(|symbol| row.symbol == symbol))
+        .filter(|(_, row)| strategy.is_none_or(|strategy| row.strategy_name == strategy))
+        .map(|(index, _)| index)
+        .collect();
+    if sort == AcquisitionRowSort::PriceShortfall {
+        // Ascending internally, as with chronological rows: page 1 takes the end.
+        // Missing comparisons precede even negative shortfalls; they are not zero.
+        indices.sort_by(|&left, &right| {
+            rows[left]
+                .price_shortfall_usdt
+                .partial_cmp(&rows[right].price_shortfall_usdt)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.cmp(&right))
+        });
+    }
+    indices
+}
+
+fn detail_page(
+    output_rows: &[AcquisitionCostRow],
+    output_indices: &[usize],
+    fill_diagnostics: &[(usize, AcquisitionFillDiagnostic)],
+    row_symbol: Option<&str>,
+    row_strategy: Option<&str>,
+    row_sort: AcquisitionRowSort,
+    page: usize,
+    page_size: usize,
+) -> (Vec<AcquisitionCostRow>, usize) {
+    let selected_indices = select_row_indices(output_rows, row_symbol, row_strategy, row_sort);
+    let filtered_row_count = selected_indices.len();
+    let (start, end) = page_bounds(filtered_row_count, page, page_size);
+    let selected_page = &selected_indices[start..end];
+    let mut rows: Vec<_> = selected_page
+        .iter()
+        .map(|&index| output_rows[index].clone())
+        .collect();
+    let page_indices: Vec<_> = selected_page
+        .iter()
+        .map(|&index| output_indices[index])
+        .collect();
+    let mut page_fills: BTreeMap<usize, Vec<&AcquisitionFillDiagnostic>> = page_indices
+        .iter()
+        .map(|index| (*index, Vec::new()))
+        .collect();
+    for (index, diagnostic) in fill_diagnostics {
+        if let Some(fills) = page_fills.get_mut(index) {
+            fills.push(diagnostic);
+        }
+    }
+    for (row, index) in rows.iter_mut().zip(&page_indices) {
+        row.execution = execution_summary(&page_fills[index], row.virtual_execution_ts_us);
+    }
+    (rows, filtered_row_count)
+}
+
 fn delay_bucket(delay_us: i64) -> &'static str {
     match delay_us.max(0) {
         0..5_000_000 => "00_00-05s",
@@ -289,6 +470,9 @@ pub async fn report_acquisition_cost(
     strategy_name: Option<&str>,
     page: usize,
     page_size: usize,
+    row_symbol: Option<&str>,
+    row_strategy: Option<&str>,
+    row_sort: AcquisitionRowSort,
 ) -> Result<AcquisitionCostReport> {
     if start_received_at_us < 0 || end_received_at_us < start_received_at_us {
         bail!("invalid acquisition-cost timestamp range");
@@ -504,33 +688,36 @@ pub async fn report_acquisition_cost(
             let five_sample_drift = signed_qty * (fill.first_price - fill.virtual_vwap);
             totals.first_minute_shortfall_usdt += first_minute_shortfall;
             totals.five_sample_drift_usdt += five_sample_drift;
-            fill_diagnostics.push(AcquisitionFillDiagnostic {
-                source_id: source_id.clone(),
-                strategy_name: nav::strategy_from_from_key(&event.from_key_text),
-                symbol: event.symbol.clone(),
-                target_received_at_us: fill.received_at_us,
-                order_signal_ts_us: signal_ts_us,
-                fill_ts_us: event.update_ts_us,
-                client_order_id: event.client_order_id,
-                side,
-                liquidity,
-                actual_qty: signed_qty,
-                actual_price: event.price,
-                virtual_price: fill.virtual_vwap,
-                target_delay_us: event.update_ts_us - fill.received_at_us,
-                order_delay_us: event.update_ts_us - signal_ts_us,
-                target_signal: fill.target_signal,
-                execution_mode,
-                reference_turnover_usdt: reference_turnover,
-                price_shortfall_usdt: price_shortfall,
-                first_minute_shortfall_usdt: first_minute_shortfall,
-                five_sample_drift_usdt: five_sample_drift,
-                price_shortfall_bps: if reference_turnover > 0.0 {
-                    price_shortfall / reference_turnover * 10_000.0
-                } else {
-                    0.0
+            fill_diagnostics.push((
+                index,
+                AcquisitionFillDiagnostic {
+                    source_id: source_id.clone(),
+                    strategy_name: nav::strategy_from_from_key(&event.from_key_text),
+                    symbol: event.symbol.clone(),
+                    target_received_at_us: fill.received_at_us,
+                    order_signal_ts_us: signal_ts_us,
+                    fill_ts_us: event.update_ts_us,
+                    client_order_id: event.client_order_id,
+                    side,
+                    liquidity,
+                    actual_qty: signed_qty,
+                    actual_price: event.price,
+                    virtual_price: fill.virtual_vwap,
+                    target_delay_us: event.update_ts_us - fill.received_at_us,
+                    order_delay_us: event.update_ts_us - signal_ts_us,
+                    target_signal: fill.target_signal,
+                    execution_mode,
+                    reference_turnover_usdt: reference_turnover,
+                    price_shortfall_usdt: price_shortfall,
+                    first_minute_shortfall_usdt: first_minute_shortfall,
+                    five_sample_drift_usdt: five_sample_drift,
+                    price_shortfall_bps: if reference_turnover > 0.0 {
+                        price_shortfall / reference_turnover * 10_000.0
+                    } else {
+                        0.0
+                    },
                 },
-            });
+            ));
             for (values, bucket) in [
                 (&mut by_strategy, fill.strategy_name.as_str()),
                 (&mut by_symbol, event.symbol.as_str()),
@@ -583,12 +770,13 @@ pub async fn report_acquisition_cost(
     }
 
     let mut output_rows = Vec::with_capacity(virtual_fills.len());
+    let mut output_indices = Vec::with_capacity(virtual_fills.len());
     let mut points: Vec<AcquisitionCostPoint> = Vec::with_capacity(virtual_fills.len());
     let mut cumulative_virtual_turnover = 0.0;
     let mut cumulative_actual_turnover = 0.0;
     let mut cumulative_price_shortfall = 0.0;
     let mut cumulative_after_fee_shortfall = 0.0;
-    for fill in virtual_fills {
+    for (index, fill) in virtual_fills.into_iter().enumerate() {
         if fill.received_at_us < start_received_at_us && fill.matched_fill_count == 0 {
             continue;
         }
@@ -641,6 +829,7 @@ pub async fn report_acquisition_cost(
         } else {
             points.push(point);
         }
+        output_indices.push(index);
         output_rows.push(AcquisitionCostRow {
             source_id: fill.source_id,
             binding_name: fill.binding_name,
@@ -670,6 +859,7 @@ pub async fn report_acquisition_cost(
             fee_shortfall_usdt: fee_shortfall,
             after_fee_shortfall_usdt: after_fee_shortfall,
             price_shortfall_bps,
+            execution: AcquisitionExecution::default(),
         });
     }
     totals.price_shortfall_bps = if totals.matched_virtual_turnover_usdt > 0.0 {
@@ -692,9 +882,18 @@ pub async fn report_acquisition_cost(
     } else {
         0.0
     };
-    let page_count = output_rows.len().div_ceil(page_size);
-    let (start, end) = page_bounds(output_rows.len(), page, page_size);
-    let rows = output_rows[start..end].to_vec();
+    let (rows, filtered_row_count) = detail_page(
+        &output_rows,
+        &output_indices,
+        &fill_diagnostics,
+        row_symbol,
+        row_strategy,
+        row_sort,
+        page,
+        page_size,
+    );
+    let page_count = filtered_row_count.div_ceil(page_size);
+    let mut fill_diagnostics: Vec<_> = fill_diagnostics.into_iter().map(|(_, fill)| fill).collect();
     fill_diagnostics.sort_by(|left, right| {
         right
             .price_shortfall_usdt
@@ -714,6 +913,10 @@ pub async fn report_acquisition_cost(
         page_size,
         page_count,
         returned_row_count: rows.len(),
+        row_symbol: row_symbol.map(str::to_owned),
+        row_strategy: row_strategy.map(str::to_owned),
+        row_sort,
+        filtered_row_count,
         totals,
         points,
         warnings,
@@ -735,6 +938,294 @@ pub async fn report_acquisition_cost(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn detail_row(symbol: &str, received_at_us: i64, shortfall: Option<f64>) -> AcquisitionCostRow {
+        AcquisitionCostRow {
+            source_id: "source".into(),
+            binding_name: "binding".into(),
+            strategy_name: "strategy".into(),
+            symbol: symbol.into(),
+            venue: "binance-futures".into(),
+            received_at_us,
+            virtual_execution_ts_us: received_at_us + 300_000_000,
+            delta_qty: 1.0,
+            sample_prices: [Some(1.0); 5],
+            zero_volume_fallback_sample_count: 0,
+            zero_volume_skipped_sample_count: 0,
+            virtual_vwap: 1.0,
+            virtual_turnover_usdt: 1.0,
+            virtual_fee_usdt: 0.0,
+            actual_matched_qty: 1.0,
+            actual_vwap: shortfall.map(|v| 1.0 + v),
+            actual_matched_turnover_usdt: 1.0,
+            actual_matched_fee_usdt: 0.0,
+            matched_fill_count: 1,
+            fill_ratio: 1.0,
+            price_shortfall_usdt: shortfall,
+            fee_shortfall_usdt: Some(0.0),
+            after_fee_shortfall_usdt: shortfall,
+            price_shortfall_bps: shortfall.map(|v| v * 10_000.0),
+            execution: AcquisitionExecution::default(),
+        }
+    }
+
+    #[test]
+    fn symbol_drilldown_finds_old_worst_delta_and_preserves_fill_identity() {
+        let mut rows = vec![
+            detail_row("CTKUSDT", 1, Some(12.0)),
+            detail_row("CTKUSDT", 2, Some(-1.0)),
+        ];
+        rows.extend((3..60).map(|i| detail_row("BTCUSDT", i, Some(1.0))));
+        rows.push(detail_row("CTKUSDT", 60, Some(2.0)));
+        // Original virtual-fill indices need not equal output-row offsets.
+        let indices: Vec<_> = (100..100 + rows.len()).collect();
+        let diagnostics = vec![
+            (100, diagnostic(123, 1.0, 13.0)),
+            (160 - 1, diagnostic(456, 1.0, 3.0)),
+        ];
+        let (latest, total) = detail_page(
+            &rows,
+            &indices,
+            &diagnostics,
+            None,
+            None,
+            AcquisitionRowSort::Latest,
+            1,
+            25,
+        );
+        assert_eq!(total, 60);
+        assert!(!latest.iter().any(|r| r.received_at_us == 1));
+        let (worst, count) = detail_page(
+            &rows,
+            &indices,
+            &diagnostics,
+            Some("CTKUSDT"),
+            None,
+            AcquisitionRowSort::PriceShortfall,
+            1,
+            2,
+        );
+        assert_eq!(count, 3);
+        assert_eq!(
+            worst.iter().map(|r| r.received_at_us).collect::<Vec<_>>(),
+            [60, 1]
+        );
+        assert_eq!(worst[0].execution.first_fill_ts_us, Some(456));
+        assert_eq!(worst[1].execution.first_fill_ts_us, Some(123));
+        let (rest, _) = detail_page(
+            &rows,
+            &indices,
+            &diagnostics,
+            Some("CTKUSDT"),
+            None,
+            AcquisitionRowSort::PriceShortfall,
+            2,
+            2,
+        );
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].received_at_us, 2);
+        assert!(rest[0].execution.fills.is_empty());
+        assert_eq!(rows[0].price_shortfall_usdt, Some(12.0));
+        assert!(rows[0].execution.fills.is_empty());
+        assert_eq!(
+            rows.len(),
+            60,
+            "detail selection must not mutate the aggregate inputs"
+        );
+    }
+
+    #[test]
+    fn strategy_drilldown_finds_small_behind_mid_pages_without_mixing_fills() {
+        let mut small = detail_row("CTKUSDT", 10, Some(12.0));
+        small.strategy_name = "rbf_small".into();
+        let mut other_symbol = small.clone();
+        other_symbol.symbol = "BTCUSDT".into();
+        let mut rows = vec![small, other_symbol];
+        rows.extend((10..50).map(|ts| {
+            let mut row = detail_row("CTKUSDT", ts, Some(1.0));
+            row.strategy_name = "rbf_mid_1min".into();
+            row
+        }));
+        let indices: Vec<_> = (500..500 + rows.len()).collect();
+        let diagnostics = vec![
+            (500, diagnostic(111, 1.0, 13.0)),
+            (501, diagnostic(222, 1.0, 13.0)),
+            (502, diagnostic(333, 1.0, 2.0)),
+        ];
+        let (latest, _) = detail_page(
+            &rows,
+            &indices,
+            &diagnostics,
+            None,
+            None,
+            AcquisitionRowSort::Latest,
+            1,
+            25,
+        );
+        assert!(latest.iter().all(|row| row.strategy_name == "rbf_mid_1min"));
+        let (selected, count) = detail_page(
+            &rows,
+            &indices,
+            &diagnostics,
+            Some("CTKUSDT"),
+            Some("rbf_small"),
+            AcquisitionRowSort::PriceShortfall,
+            1,
+            25,
+        );
+        assert_eq!(count, 1);
+        assert_eq!(selected[0].strategy_name, "rbf_small");
+        assert_eq!(selected[0].symbol, "CTKUSDT");
+        assert_eq!(selected[0].execution.first_fill_ts_us, Some(111));
+        assert_eq!(selected[0].execution.fills.len(), 1);
+        let (all_symbols, count) = detail_page(
+            &rows,
+            &indices,
+            &diagnostics,
+            None,
+            Some("rbf_small"),
+            AcquisitionRowSort::Latest,
+            1,
+            25,
+        );
+        assert_eq!(count, 2);
+        assert!(
+            all_symbols
+                .iter()
+                .all(|row| row.strategy_name == "rbf_small")
+        );
+        let (unknown, _) = detail_page(
+            &rows,
+            &indices,
+            &diagnostics,
+            None,
+            Some("small"),
+            AcquisitionRowSort::Latest,
+            1,
+            25,
+        );
+        assert!(unknown.is_empty(), "strategy identity is an exact match");
+        assert_eq!(rows.len(), 42);
+        assert!(rows.iter().all(|row| row.execution.fills.is_empty()));
+    }
+
+    #[test]
+    fn detail_sort_keeps_unknown_after_negative_costs_and_handles_empty_pages() {
+        let rows = vec![
+            detail_row("CTKUSDT", 1, None),
+            detail_row("CTKUSDT", 2, Some(-2.0)),
+            detail_row("CTKUSDT", 3, Some(-2.0)),
+        ];
+        let (page, total) = detail_page(
+            &rows,
+            &[0, 1, 2],
+            &[],
+            Some("CTKUSDT"),
+            None,
+            AcquisitionRowSort::PriceShortfall,
+            1,
+            2,
+        );
+        assert_eq!(total, 3);
+        assert_eq!(
+            page.iter().map(|r| r.received_at_us).collect::<Vec<_>>(),
+            [2, 3]
+        );
+        let (empty, count) = detail_page(
+            &rows,
+            &[0, 1, 2],
+            &[],
+            Some("CTK"),
+            None,
+            AcquisitionRowSort::Latest,
+            1,
+            25,
+        );
+        assert!(empty.is_empty());
+        assert_eq!(count, 0, "symbols must match exactly");
+        let (empty, count) = detail_page(
+            &rows,
+            &[0, 1, 2],
+            &[],
+            None,
+            None,
+            AcquisitionRowSort::PriceShortfall,
+            20,
+            25,
+        );
+        assert!(empty.is_empty());
+        assert_eq!(count, 3);
+    }
+
+    fn diagnostic(ts: i64, qty: f64, price: f64) -> AcquisitionFillDiagnostic {
+        AcquisitionFillDiagnostic {
+            source_id: "source".into(),
+            strategy_name: "strategy".into(),
+            symbol: "TESTUSDT".into(),
+            target_received_at_us: 0,
+            order_signal_ts_us: ts / 2,
+            fill_ts_us: ts,
+            client_order_id: ts,
+            side: if qty > 0.0 { "buy" } else { "sell" },
+            liquidity: "maker",
+            target_signal: 0,
+            execution_mode: "maker",
+            actual_qty: qty,
+            actual_price: price,
+            virtual_price: 1.0,
+            target_delay_us: ts,
+            order_delay_us: ts / 2,
+            reference_turnover_usdt: qty.abs(),
+            price_shortfall_usdt: qty * (price - 1.0),
+            first_minute_shortfall_usdt: 0.0,
+            five_sample_drift_usdt: 0.0,
+            price_shortfall_bps: 0.0,
+        }
+    }
+
+    #[test]
+    fn execution_diagnostics_weight_by_absolute_quantity_and_include_window_boundary() {
+        for sign in [1.0, -1.0] {
+            let early = diagnostic(10_000_000, sign, 1.0);
+            let late = diagnostic(300_000_000, 3.0 * sign, 2.0);
+            let summary = execution_summary(&[&late, &early], 300_000_000);
+            assert_eq!(summary.first_fill_ts_us, Some(10_000_000));
+            assert_eq!(summary.last_fill_ts_us, Some(300_000_000));
+            assert_eq!(summary.qty_weighted_target_delay_us, Some(227_500_000.0));
+            assert_eq!(summary.qty_weighted_order_delay_us, Some(113_750_000.0));
+            assert_eq!(summary.after_window_qty_ratio, Some(0.75));
+            assert!(!summary.fills_sampled);
+            assert_eq!(summary.fills[0].actual_qty, sign);
+        }
+    }
+
+    #[test]
+    fn execution_plot_sampling_preserves_extrema_without_sampling_statistics() {
+        let mut fills: Vec<_> = (0..1000)
+            .map(|i| diagnostic(i * 1_000_000, 1.0, 1.0))
+            .collect();
+        fills[501].actual_price = 0.5;
+        fills[502].actual_price = 2.0;
+        fills.reverse();
+        let summary = execution_summary(&fills.iter().collect::<Vec<_>>(), 500_000_000);
+        assert!(summary.fills_sampled);
+        assert!(summary.fills.len() <= 200);
+        assert_eq!(summary.fills.first().unwrap().fill_ts_us, 0);
+        assert_eq!(summary.fills.last().unwrap().fill_ts_us, 999_000_000);
+        assert!(summary.fills.iter().any(|fill| fill.actual_price == 0.5));
+        assert!(summary.fills.iter().any(|fill| fill.actual_price == 2.0));
+        assert_eq!(summary.qty_weighted_target_delay_us, Some(499_500_000.0));
+        assert_eq!(summary.after_window_qty_ratio, Some(0.5));
+    }
+
+    #[test]
+    fn empty_execution_is_unavailable_rather_than_zero_delay() {
+        let summary = execution_summary(&[], 300_000_000);
+        assert!(summary.first_fill_ts_us.is_none());
+        assert!(summary.qty_weighted_target_delay_us.is_none());
+        assert!(summary.after_window_qty_ratio.is_none());
+        assert!(summary.fills.is_empty());
+    }
 
     #[test]
     fn acquisition_shortfall_is_side_aware() {

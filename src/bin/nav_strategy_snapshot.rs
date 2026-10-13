@@ -14,7 +14,6 @@ use crypto_cta_manager::viz_snapshot::{SourceStrategyAllocation, VizSnapshotClie
 const UNALLOCATED_STRATEGY: &str = "__unallocated__";
 const UNATTRIBUTED_STRATEGY: &str = "__unattributed__";
 const EPSILON: f64 = 1e-10;
-const INFERRED_POSITION_MIN_NOTIONAL: f64 = 1.0;
 const REPLAY_TOLERANCE_NOTIONAL: f64 = 1e-6;
 const MAX_INFERENCE_ITERATIONS: usize = 100;
 type StrategySymbol = (String, String);
@@ -480,9 +479,6 @@ fn infer_snapshot_from_history(
             continue;
         }
         let reference_price = reference_price(&first_prices, &symbol)?;
-        if quantity.abs() * reference_price < INFERRED_POSITION_MIN_NOTIONAL {
-            continue;
-        }
         if strategy_name == UNATTRIBUTED_STRATEGY {
             bail!(
                 "source {source_id} has a material unattributed inferred position for {symbol}; automatic strategy snapshot is unsafe"
@@ -499,7 +495,7 @@ fn infer_snapshot_from_history(
 
     if positions.is_empty() {
         bail!(
-            "source {source_id} has no inferred initial position at or above {INFERRED_POSITION_MIN_NOTIONAL} USDT; no strategy snapshot is needed"
+            "source {source_id} has no nonzero inferred initial position; no strategy snapshot is needed"
         );
     }
 
@@ -851,6 +847,28 @@ mod tests {
     use super::*;
     use crypto_cta_manager::viz_snapshot::StrategyAllocationRow;
 
+    #[test]
+    fn inference_preserves_small_initial_lots_and_account_quantity() {
+        let snapshot = infer_snapshot_from_history(
+            "trade01",
+            1,
+            Some(50),
+            allocation(vec![("alpha", 0.013), ("beta", 0.003)], 0.016),
+            &[fill(100, Some("alpha"), 1, 0.01, 100.0)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.positions.len(), 2);
+        for position in &snapshot.positions {
+            assert!((position.quantity - 0.003).abs() < 1e-12);
+            assert!(position.quantity.abs() * position.reference_price < 1.0);
+        }
+        let account = snapshot.account_snapshot().unwrap();
+        assert_eq!(account.positions.len(), 1);
+        assert!((account.positions[0].quantity - 0.006).abs() < 1e-12);
+    }
+
     fn fill(
         ts_us: i64,
         strategy_name: Option<&str>,
@@ -1052,12 +1070,13 @@ mod tests {
     }
 
     #[test]
-    fn ignores_sub_dollar_floating_point_remainders() {
+    fn ignores_quantity_remainders_below_execution_epsilon() {
+        let quantity = 1.0 + EPSILON * 0.5;
         let error = infer_snapshot_from_history(
             "trade01",
             1,
             None,
-            allocation(vec![("cta_a", 1.000_001)], 1.000_001),
+            allocation(vec![("cta_a", quantity)], quantity),
             &[fill(100, Some("cta_a"), 1, 1.0, 100.0)],
             &BTreeMap::new(),
         )

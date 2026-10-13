@@ -1,0 +1,5 @@
+[2m2026-10-12T12:48:44.055771Z[0m [32m INFO[0m [2mcrypto_cta_manager::redis_runtime[0m[2m:[0m Manager Redis long connection ready [3murl[0m[2m=[0mredis://127.0.0.1:6379/0
+0 [W] "Config::global_config()" 
+| No config file was loaded, a config with default values will be used. 
+[2m2026-10-12T12:48:44.112013Z[0m [32m INFO[0m [2mcrypto_cta_manager::monitor[0m[2m:[0m CTA monitor market BBO subscribed [3mvenue[0m[2m=[0m"binance-futures" [3mservice_name[0m[2m=[0m"spread_pbs/binance-futures/ask_bid_spread"
+CTA monitor: OK
