@@ -18,7 +18,7 @@ export function OrderStrategyPage() {
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [selectedOrder, setSelectedOrder] = useState(emptyOrder)
   const [experimentalToken, setExperimentalToken] = useState('')
-  const isExperimental = selectedOrder.order_parameters.algorithm !== 'batch'
+  const isExperimental = ['pov', 'chase'].includes(selectedOrder.order_parameters.algorithm)
 
   return (
     <ConfigShell

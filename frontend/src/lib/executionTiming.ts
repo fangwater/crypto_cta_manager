@@ -1,6 +1,7 @@
 import type { OrderParameters } from '../types'
 
 export function maxEstimatedExecutionMs(parameters: OrderParameters): number {
+  if (parameters.algorithm === 'ctaker') return 0
   const maxBatch = Math.max(1, Math.trunc(parameters.max_batch || 0))
   const batchIntervalMs = Math.max(0, parameters.batch_interval_ms || 0)
   const makerAttempts = Math.max(1, Math.trunc(parameters.max_maker_requotes || 0) + 1)

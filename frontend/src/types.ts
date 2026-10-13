@@ -109,7 +109,7 @@ export interface DashboardAccount {
 }
 
 export interface OrderParameters {
-  algorithm: 'batch' | 'pov' | 'chase'
+  algorithm: 'batch' | 'pov' | 'chase' | 'ctaker'
   pov: PovParameters
   chase: ChaseParameters
   signal_execution_enabled: boolean
@@ -148,7 +148,7 @@ export interface ChaseParameters {
 }
 
 export interface OrderParameterOverrides {
-  algorithm?: 'batch' | 'pov'
+  algorithm?: 'batch' | 'pov' | 'ctaker'
   pov?: PovParameters
   single_order_usdt?: number
   orders_per_batch?: number

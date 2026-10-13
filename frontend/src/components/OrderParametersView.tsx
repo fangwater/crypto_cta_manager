@@ -5,6 +5,9 @@ import {
 import type { OrderParameters } from '../types'
 
 export function OrderParametersView({ value }: { value: OrderParameters }) {
+  if (value.algorithm === 'ctaker') {
+    return <ParameterRows rows={[{ label: '算法', value: 'CTaker' }, { label: '执行', value: '全部仓位差额直接市价；按原 qty 平仓' }]} />
+  }
   if (value.algorithm === 'chase') {
     const chaseRows = [
       { label: '算法', value: 'Chase' },

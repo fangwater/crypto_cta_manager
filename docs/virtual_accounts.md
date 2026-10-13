@@ -14,6 +14,23 @@ Delivery status appears in the account editor. Failures remain durable across Ma
 
 ## API
 
+2026-10-11 jp-meta deployment: `virtual02`, alias `lgq_cta`, owns five one-share
+bindings (`lgq_cta_factor_036`, `lgq_cta_factor_051`, `lgq_cta_factor_170`,
+`lgq_cta_TD_TI_002`, `lgq_cta_baseline_004`) using order template
+`lgq_cta_ctaker`. Real `binance_exec_trade05` follows it with multiplier 1 and
+uses RX02 RapidX credentials held only on the host. RX03 is stopped. The signal
+publisher posts position strategies through the existing :4191 Manager gateway.
+Since 2026-10-12 each enabled symbol/factor pair uses its own 200 USDT entry
+allocation; factors keep independent targets and PnL attribution. Existing
+positions retain their entry quantity until exit.
+
+`ctaker` belongs to BatchExec and submits the entire executable signed delta as
+a MARKET order, with zero USDT target tolerance. Exit target 0 closes executed
+strategy qty. Manager owns order parameters and the complete market-rule cache.
+RapidX private rule requests bind the source's trading IP; native exchange
+account-mode checks do not apply to a RapidX sub-portfolio. Exec retains account
+risk checks, venue rules, and its usual net execution and position ledger.
+
 - `GET /api/catalog/virtual-accounts` lists visible templates.
 - `POST /api/catalog/virtual-accounts` creates `{name, bindings}` and returns the account with its automatic number.
 - `PUT /api/catalog/virtual-accounts/{virtual_id}` replaces `{name, bindings: [{binding_name, position_strategy_name, order_strategy_name, shares}]}`.
@@ -22,6 +39,13 @@ Delivery status appears in the account editor. Failures remain durable across Ma
 - Existing account studio responses add `configuration` and `pending_publishes`.
 
 ## Existing database maintenance
+
+The 2026-10-11 deployment also applied the current owner/manager-grant schema
+explicitly after a full PostgreSQL backup. Existing virtual accounts retained
+their IDs and bindings. The order-strategy algorithm constraint now accepts
+`ctaker` alongside `batch`, `pov`, and `chase`. Existing schema maintenance,
+including the owner foreign key's `ON DELETE SET NULL`, must match
+`migrations/schema.sql`; the service does not run DDL at startup.
 
 The SQL below is explicit additive maintenance for an existing Manager database. Review, back up the target database, and apply once within a transaction before starting the updated binary. Fresh databases use migrations/schema.sql.
 

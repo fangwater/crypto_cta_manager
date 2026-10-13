@@ -10,6 +10,7 @@ import { formatDuration, maxEstimatedExecutionMs } from '../lib/executionTiming'
 
 const algorithmOptions = [
   { value: 'batch', label: 'Batch' },
+  { value: 'ctaker', label: 'CTaker · 直接市价' },
   { value: 'pov', label: 'POV' },
   { value: 'chase', label: 'Chase' },
 ] as const
@@ -69,7 +70,7 @@ export function OrderParametersForm({
           ))}
         </Select>
         <FieldHint>
-          Batch 按批次推进；POV 按公开成交量释放；Chase 在己方一档挂单并原地改单追价。
+          CTaker 直接市价执行全部仓位差额；Batch 按批次推进；POV 按成交量释放；Chase 挂单追价。
         </FieldHint>
       </Label>
 
@@ -90,7 +91,9 @@ export function OrderParametersForm({
         </span>
       </label>
 
-      {value.algorithm !== 'chase' ? (
+      {value.algorithm === 'ctaker' ? (
+        <p className="text-sm text-muted">每次直接以 Taker 执行完整仓位差额。平仓按该策略的实际 qty，数量按交易所步长对齐。</p>
+      ) : value.algorithm !== 'chase' ? (
         <>
           <div className="grid gap-4 sm:grid-cols-2">
             {ORDER_PARAMETER_FIELDS.map((field) => {

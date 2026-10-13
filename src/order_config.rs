@@ -13,6 +13,7 @@ pub enum ExecutionAlgorithm {
     Batch,
     Pov,
     Chase,
+    Ctaker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +29,7 @@ impl ExecutionAlgorithm {
 
     pub const fn family(self) -> ExecutionFamily {
         match self {
-            Self::Batch | Self::Pov => ExecutionFamily::BatchExec,
+            Self::Batch | Self::Pov | Self::Ctaker => ExecutionFamily::BatchExec,
             Self::Chase => ExecutionFamily::ChaseExec,
         }
     }
@@ -38,6 +39,7 @@ impl ExecutionAlgorithm {
             Self::Batch => "batch",
             Self::Pov => "pov",
             Self::Chase => "chase",
+            Self::Ctaker => "ctaker",
         }
     }
 }
@@ -1187,6 +1189,15 @@ mod tests {
 
     #[test]
     fn runtime_parameters_use_the_selected_family_contract() {
+        let mut ctaker = valid_parameters();
+        ctaker.algorithm = ExecutionAlgorithm::Ctaker;
+        assert!(!ctaker.algorithm.is_experimental());
+        assert_eq!(ctaker.algorithm.family(), ExecutionFamily::BatchExec);
+        let encoded = runtime_order_parameters(&ctaker).unwrap();
+        assert_eq!(encoded["algorithm"], "ctaker");
+        let decoded = decode_runtime_order_parameters(encoded, ExecutionFamily::BatchExec).unwrap();
+        assert_eq!(decoded.algorithm, ExecutionAlgorithm::Ctaker);
+
         let mut pov = valid_parameters();
         pov.algorithm = ExecutionAlgorithm::Pov;
         pov.pov.participation_rate = 0.2;

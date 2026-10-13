@@ -1362,6 +1362,7 @@ fn parse_execution_algorithm(value: &str) -> Result<ExecutionAlgorithm> {
         "batch" => Ok(ExecutionAlgorithm::Batch),
         "pov" => Ok(ExecutionAlgorithm::Pov),
         "chase" => Ok(ExecutionAlgorithm::Chase),
+        "ctaker" => Ok(ExecutionAlgorithm::Ctaker),
         value => bail!("unknown order strategy algorithm: {value}"),
     }
 }

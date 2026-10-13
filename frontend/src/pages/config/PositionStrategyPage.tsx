@@ -41,7 +41,7 @@ export function PositionStrategyPage() {
     if (originalPosition?.symbol_order_strategy_overrides[symbol] === orderStrategyName) return false
     return orders.some(
       (order) =>
-        order.strategy_name === orderStrategyName && order.order_parameters.algorithm !== 'batch',
+        order.strategy_name === orderStrategyName && ['pov', 'chase'].includes(order.order_parameters.algorithm),
     )
   })
 

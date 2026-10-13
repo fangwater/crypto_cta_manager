@@ -101,7 +101,7 @@ CREATE TABLE cta_order_strategies (
     pov jsonb DEFAULT '{"liquidity": "maker_then_taker", "duration_ms": 3600000, "limit_price": null, "max_batch_usdt": 300.0, "max_carry_usdt": 600.0, "quote_stale_ms": 1000, "volume_stale_ms": 5000, "participation_rate": 0.1}'::jsonb NOT NULL,
     chase jsonb DEFAULT '{"max_batch": 4, "batch_floor_usdt": 100.0, "max_open_batches": 2, "maker_timeout_sec": 120, "target_tolerance_usdt": 10.0, "maker_amend_cooldown_ms": 1000, "maker_recenter_trigger_bps": 5.0, "strategy_order_rate_limit_10s": 0, "strategy_order_rate_limit_per_min": 0}'::jsonb NOT NULL,
     signal_execution_enabled boolean DEFAULT true NOT NULL,
-    CONSTRAINT cta_order_strategies_algorithm_check CHECK ((algorithm = ANY (ARRAY['batch'::text, 'pov'::text, 'chase'::text]))),
+    CONSTRAINT cta_order_strategies_algorithm_check CHECK ((algorithm = ANY (ARRAY['batch'::text, 'pov'::text, 'chase'::text, 'ctaker'::text]))),
     CONSTRAINT cta_order_strategies_batch_interval_ms_check CHECK ((batch_interval_ms >= 0)),
     CONSTRAINT cta_order_strategies_chase_check CHECK ((jsonb_typeof(chase) = 'object'::text)),
     CONSTRAINT cta_order_strategies_maker_timeout_ms_check CHECK ((maker_timeout_ms > 0)),

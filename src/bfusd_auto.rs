@@ -522,6 +522,13 @@ fn load_rotation_ips(source: &SourceConfig) -> Result<Vec<IpAddr>> {
     load_source_ips(source, false, crate::kline::default_route_local_ip)
 }
 
+pub(crate) fn account_fixed_ip(source: &SourceConfig) -> Result<IpAddr> {
+    load_rotation_ips(source)?
+        .into_iter()
+        .next()
+        .context("account has no trading IP")
+}
+
 fn load_source_ips(
     source: &SourceConfig,
     include_fallbacks: bool,

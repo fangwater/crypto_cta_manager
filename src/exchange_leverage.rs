@@ -215,6 +215,19 @@ pub fn required_trading_account_mode(venue: &str) -> &'static str {
 /// Mode or Portfolio Margin. OKX requires unified account mode:
 /// multi-currency margin (`acctLv=3`) or portfolio margin (`acctLv=4`).
 pub async fn has_required_trading_account_mode(source: &SourceConfig) -> Result<bool> {
+    let values = crate::market_rules::source_values(source)?;
+    if crate::market_rules::execution_backend(&source.venue, &values)? == "ltp" {
+        anyhow::ensure!(
+            matches!(source.venue.as_str(), "binance-futures" | "okex-futures"),
+            "RapidX account mode is supported only for linear perpetual Exec"
+        );
+        for name in ["LTP_API_KEY", "LTP_API_SECRET", "LTP_PORTFOLIO_ID"] {
+            required_env(&values, name)?;
+        }
+        // RapidX owns collateral and margin checks. Native exchange account-mode
+        // endpoints do not describe this sub-portfolio and cannot authenticate it.
+        return Ok(true);
+    }
     match source.venue.as_str() {
         "binance-futures" => has_binance_multi_assets_mode(source).await,
         "okex-futures" => has_okx_unified_account_mode(source).await,
@@ -1141,6 +1154,27 @@ fn truncate(value: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rapidx_publish_uses_portfolio_mode_without_native_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = dir.path().join("fixture.env");
+        let mut source: SourceConfig = toml::from_str(&format!(
+            "id='fixture'\naccount='fixture'\nvenue='binance-futures'\nrocksdb_path='{}'\nenv_path='{}'\n",
+            dir.path().join("data/persist_manager").display(), env.display()
+        )).unwrap();
+        std::fs::write(&env, "TRADE_ENGINE_EXEC_BACKEND=rapidx\nLTP_API_KEY=fixture\nLTP_API_SECRET=fixture\nLTP_PORTFOLIO_ID=123\n").unwrap();
+        assert!(has_required_trading_account_mode(&source).await.unwrap());
+        source.venue = "okex-futures".into();
+        assert!(has_required_trading_account_mode(&source).await.unwrap());
+        source.venue = "binance-coin-futures".into();
+        assert!(has_required_trading_account_mode(&source).await.is_err());
+        source.venue = "binance-futures".into();
+        std::fs::write(&env, "TRADE_ENGINE_EXEC_BACKEND=rapidx\n").unwrap();
+        assert!(has_required_trading_account_mode(&source).await.is_err());
+        std::fs::write(&env, "TRADE_ENGINE_EXEC_BACKEND=native\n").unwrap();
+        assert!(has_required_trading_account_mode(&source).await.is_err());
+    }
 
     #[tokio::test]
     async fn binance_account_apis_route_sign_and_restore_coin_symbols() {

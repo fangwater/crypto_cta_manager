@@ -268,6 +268,13 @@ async fn fetch_source_snapshot(
         .get("LTP_PORTFOLIO_ID")
         .context("LTP_PORTFOLIO_ID missing from source env")?;
     validate_portfolio(portfolio)?;
+    // RapidX sym/info is authenticated and must use this account's trading egress.
+    let signed_client = Client::builder()
+        .no_proxy()
+        .local_address(crate::bfusd_auto::account_fixed_ip(source)?)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .context("build account-bound RapidX rules client")?;
     // All RapidX source requests share this worker; even failed requests stay paced.
     tokio::time::sleep(Duration::from_secs(4)).await;
     let snapshot = MarketRulesSnapshot {
@@ -275,7 +282,7 @@ async fn fetch_source_snapshot(
         execution_backend: backend.into(),
         portfolio_id: Some(portfolio.clone()),
         fetched_at_us: now_us(),
-        symbols: rapidx::fetch(client, &source.venue, &values).await?,
+        symbols: rapidx::fetch(&signed_client, &source.venue, &values).await?,
     };
     snapshot.validate()?;
     Ok(snapshot)
