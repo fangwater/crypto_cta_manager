@@ -17,6 +17,8 @@ use crate::model::{
 use crate::rocks_source;
 use crate::snapshot::{PositionSnapshot, StrategyPositionSnapshot};
 
+mod fill_recovery;
+
 pub type VenueMarkOverrides = BTreeMap<(String, i16), f64>;
 pub type SourceMarkOverrides = BTreeMap<String, VenueMarkOverrides>;
 pub type SourcePositionSnapshots = BTreeMap<String, PositionSnapshot>;
@@ -1825,6 +1827,8 @@ fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
             })?,
         ));
     }
+    let events = events.into_iter().collect();
+    let events = fill_recovery::resolve(source, &events)?.unwrap_or(events);
     let liquidity_by_order = decode_liquidity_by_order(source, records)?;
     let decode_ms = decode_started.elapsed().as_millis();
     info!(
@@ -1836,7 +1840,7 @@ fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
         "loaded NAV source history"
     );
     Ok(NavSourceHistory {
-        events: events.into_iter().collect(),
+        events,
         liquidity_by_order,
         ..Default::default()
     })
@@ -2015,13 +2019,30 @@ impl IncrementalSourceHistory {
             scanned.insert(column_family, (scanned_keys, last_ts));
         }
 
+        // A terminal lifecycle report can precede the priced execution evidence.
+        // Resolve against the durable facts before advancing any checkpoints.
+        // Recovery may replace earlier fills of the same order, so invalidate
+        // that source's FIFO generation instead of treating it as append-only.
+        let recovered_events = if new_events
+            .iter()
+            .any(|event| fill_recovery::needs_price(event))
+        {
+            let mut combined = self.history.events.clone();
+            combined.extend(new_events.iter().cloned());
+            fill_recovery::resolve(source, &combined)?
+        } else {
+            None
+        };
         let mut roles = self.history.liquidity_by_order.clone();
         let changed_roles = merge_liquidity_records(&mut roles, source, new_trade_records)?;
         let earliest_liquidity_fill_ts_us = changed_roles
             .iter()
             .filter_map(|key| self.legacy_fill_times.get(key).copied())
             .min();
-        if !new_events.is_empty() || !changed_roles.is_empty() {
+        if recovered_events.is_some() {
+            self.history.change = None;
+            self.history.revision = HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
+        } else if !new_events.is_empty() || !changed_roles.is_empty() {
             self.history.change = Some(Arc::new(HistoryChange {
                 previous_revision: self.history.revision,
                 events: new_events.clone(),
@@ -2036,7 +2057,22 @@ impl IncrementalSourceHistory {
             .last()
             .zip(new_events.first())
             .is_some_and(|(last, first)| first.record_key < last.record_key);
-        for event in new_events {
+        let index_events = if let Some(events) = recovered_events {
+            self.history.events = events;
+            self.legacy_fill_times.clear();
+            // Rebuild legacy-role lookups for the replaced source projection.
+            self.history.events.iter().cloned().collect::<Vec<_>>()
+        } else {
+            let index_events = new_events.clone();
+            self.history.events.extend(new_events);
+            if out_of_order {
+                self.history
+                    .events
+                    .sort_by(|left, right| left.record_key.cmp(&right.record_key));
+            }
+            index_events
+        };
+        for event in index_events {
             if event.fill_liquidity.is_none() && event.amount_update > 0.0 {
                 let ts = fifo_ts_us(&event);
                 self.legacy_fill_times
@@ -2048,12 +2084,6 @@ impl IncrementalSourceHistory {
                     .and_modify(|old| *old = (*old).min(ts))
                     .or_insert(ts);
             }
-            self.history.events.push_back(event);
-        }
-        if out_of_order {
-            self.history
-                .events
-                .sort_by(|left, right| left.record_key.cmp(&right.record_key));
         }
         for (column_family, (scanned_keys, last_ts)) in scanned {
             let checkpoint = self.checkpoints.entry(column_family).or_default();
@@ -5275,6 +5305,184 @@ mod tests {
             .iter()
             .map(|event| event.record_key.parse::<i64>().unwrap())
             .collect()
+    }
+
+    fn recovery_config(root: &std::path::Path) -> AppConfig {
+        let env_path = root.join("source.env");
+        std::fs::write(
+            &env_path,
+            "TRADE_ENGINE_EXEC_BACKEND=rapidx\nLTP_PORTFOLIO_ID=123\n",
+        )
+        .unwrap();
+        let mut source = source_at("trade06", &root.join("db"), 0.0);
+        source.venue = "binance-futures".into();
+        source.env_path = Some(env_path);
+        app_config(vec![source])
+    }
+
+    fn recovery_fact(tx: &str, qty: &str, price: &str, rest: bool) -> serde_json::Value {
+        serde_json::json!({"portfolio":"123","exchange":"BINANCE","execution":{
+            "transaction_id":tx,"order_id":"88","client_order_id":"7",
+            "symbol":"BINANCE_MARGIN_FIL_USDT","side":"SELL","quantity":qty,"price":price,
+            "timestamp_ms":if tx=="a" {100} else {110},"rest":rest
+        }})
+    }
+
+    fn write_recovery_records(
+        path: &std::path::Path,
+        events: &[UniformOrderEvent],
+        facts: &[serde_json::Value],
+    ) {
+        use sha2::{Digest, Sha256};
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf(
+            &options,
+            path,
+            ["default", UNIFORM_ORDERS_CF, "rapidx_executions"],
+        )
+        .unwrap();
+        for event in events {
+            db.put_cf(
+                db.cf_handle(UNIFORM_ORDERS_CF).unwrap(),
+                event.record_key.as_bytes(),
+                encode_event(event),
+            )
+            .unwrap();
+        }
+        for fact in facts {
+            let mut hash = Sha256::new();
+            hash.update(b"mkt_signal/rapidx_execution/stable_key");
+            for value in [
+                fact["portfolio"].as_str().unwrap(),
+                fact["exchange"].as_str().unwrap(),
+                fact["execution"]["transaction_id"].as_str().unwrap(),
+            ] {
+                hash.update((value.len() as u64).to_be_bytes());
+                hash.update(value.as_bytes());
+            }
+            hash.update([u8::from(fact["execution"]["rest"].as_bool().unwrap())]);
+            db.put_cf(
+                db.cf_handle("rapidx_executions").unwrap(),
+                hash.finalize(),
+                serde_json::to_vec(fact).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    fn unpriced_recovery_event() -> UniformOrderEvent {
+        let mut fill = strategy_event_at(200_000, 200_000, "FILUSDT", 0, 2, 0.0, 3.0, "alpha");
+        fill.client_order_id = 7;
+        fill.order_type_code = 3;
+        fill
+    }
+
+    #[test]
+    fn rebuild_recovers_real_execution_prices_without_mutating_exec_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = recovery_config(temp.path());
+        let path = &config.sources[0].rocksdb_path;
+        let bad = unpriced_recovery_event();
+        let original = encode_event(&bad);
+        write_recovery_records(
+            path,
+            &[event(50_000, "FILUSDT", 0, 1, 90.0, 3.0), bad.clone()],
+            &[
+                recovery_fact("a", "1", "100", false),
+                recovery_fact("a", "1.0", "100.0", true),
+                recovery_fact("b", "2", "103", true),
+            ],
+        );
+        let report = rebuild_nav_from_rocksdb(&config, &[]).unwrap();
+        assert_eq!(report.aggregate.totals.fill_count, 3);
+        assert_close(report.aggregate.totals.nav_change_before_fee_quote, 36.0);
+        let rows =
+            rocks_source::read_available_column_families(path, &[UNIFORM_ORDERS_CF]).unwrap();
+        let raw = rows[UNIFORM_ORDERS_CF]
+            .iter()
+            .find(|r| r.key == bad.record_key.as_bytes())
+            .unwrap();
+        assert_eq!(raw.value, original);
+        let histories = load_nav_source_histories(&config, &[]).unwrap();
+        let fills = histories["trade06"]
+            .events
+            .iter()
+            .filter(|e| e.client_order_id == 7)
+            .collect::<Vec<_>>();
+        assert_eq!(fills.iter().map(|e| e.amount_update).sum::<f64>(), 3.0);
+        assert_eq!(
+            fills.iter().map(|e| e.price * e.amount_update).sum::<f64>(),
+            306.0
+        );
+        assert_eq!(
+            fills.iter().map(|e| e.update_ts_us).collect::<Vec<_>>(),
+            [100_000, 110_000]
+        );
+    }
+
+    #[test]
+    fn history_retries_late_evidence_and_rebuilds_previously_priced_order_without_duplicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = recovery_config(temp.path());
+        let path = &config.sources[0].rocksdb_path;
+        let mut partial = unpriced_recovery_event();
+        partial.record_key = format!("{:020}", 90_000);
+        partial.event_ts_us = 90_000;
+        partial.update_ts_us = 90_000;
+        partial.price = 100.0;
+        partial.amount_update = 1.0;
+        write_recovery_records(
+            path,
+            &[event(50_000, "FILUSDT", 0, 1, 90.0, 3.0), partial],
+            &[],
+        );
+        let snapshots = Arc::new(BTreeMap::new());
+        let strategies = Arc::new(BTreeMap::new());
+        let mut store = NavHistoryStore::default();
+        let initial = Arc::new(store.refresh(&config).unwrap());
+        let previous = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            initial.clone(),
+        )
+        .unwrap();
+        let mut bad = unpriced_recovery_event();
+        bad.amount_update = 2.0;
+        write_recovery_records(path, &[bad], &[recovery_fact("a", "1", "100", false)]);
+        assert!(store.refresh(&config).is_err());
+        assert_eq!(
+            store.sources["trade06"].history.revision,
+            initial["trade06"].revision
+        );
+        assert_eq!(store.sources["trade06"].history.events.len(), 2);
+        write_recovery_records(path, &[], &[recovery_fact("b", "2", "103", true)]);
+        let histories = Arc::new(store.refresh(&config).unwrap());
+        assert_eq!(histories["trade06"].events.len(), 3);
+        assert!(histories["trade06"].change.is_none());
+        let updated = NavTimelineCache::refresh(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+            Some(&previous),
+        )
+        .unwrap();
+        assert_refreshed_cache_matches_full(&updated, &config, &snapshots, &strategies, &histories);
+        assert_close(
+            updated
+                .dashboard_report()
+                .aggregate
+                .totals
+                .nav_change_before_fee_quote,
+            36.0,
+        );
+        let repeated = store.refresh(&config).unwrap();
+        assert_eq!(repeated["trade06"].events, histories["trade06"].events);
+        let cold = load_nav_source_histories(&config, &[]).unwrap();
+        assert_eq!(cold["trade06"].events, histories["trade06"].events);
     }
 
     #[test]

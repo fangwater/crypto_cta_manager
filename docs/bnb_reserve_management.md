@@ -26,6 +26,8 @@ VIP offsets:
 
 For a 25 BNB requirement, configure 25 / 25.2 / 26, or another explicitly
 chosen trigger and target. Validation requires `required < trigger < target`.
+On 2026-10-13, jp-meta trade03 was set to 25 / 25.2 / 26 and its initial refill
+and BNBUSDC hedge were completed; see [the live verification](jp_meta_trade03_vip2_20261013.md).
 The target is never reduced automatically based on the exchange's current VIP
 level. A refill already in progress remains latched until confirmed complete.
 A small fee charged just after that purchase does not initiate another refill.
