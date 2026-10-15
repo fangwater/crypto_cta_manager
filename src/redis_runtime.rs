@@ -119,11 +119,16 @@ impl RedisRuntime {
         })
     }
 
-    pub(crate) fn reserve_bnb_symbol(&self, source_id: &str) {
-        self.bnb_reserve_sources
+    pub(crate) fn set_bnb_symbol_reserved(&self, source_id: &str, reserved: bool) {
+        let mut sources = self
+            .bnb_reserve_sources
             .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(source_id.into());
+            .unwrap_or_else(|e| e.into_inner());
+        if reserved {
+            sources.insert(source_id.into());
+        } else {
+            sources.remove(source_id);
+        }
     }
 
     pub(crate) fn validate_cta_targets(
@@ -1048,7 +1053,7 @@ mod tests {
         let runtime = RedisRuntime::connect(RedisSettings::default()).unwrap();
         let targets = BTreeMap::from([("BNBUSDC".into(), TargetPosition { qty: 1., signal: 0 })]);
         assert!(runtime.validate_cta_targets("trade03", &targets).is_ok());
-        runtime.reserve_bnb_symbol("trade03");
+        runtime.set_bnb_symbol_reserved("trade03", true);
         assert!(
             runtime
                 .clone()
@@ -1058,6 +1063,13 @@ mod tests {
         assert!(runtime.validate_cta_targets("trade04", &targets).is_ok());
         let zero = BTreeMap::from([("BNBUSDC".into(), TargetPosition { qty: 0., signal: 0 })]);
         assert!(runtime.validate_cta_targets("trade03", &zero).is_ok());
+        runtime.set_bnb_symbol_reserved("trade03", false);
+        assert!(
+            runtime
+                .clone()
+                .validate_cta_targets("trade03", &targets)
+                .is_ok()
+        );
     }
 
     fn valid_parameters() -> OrderParameters {

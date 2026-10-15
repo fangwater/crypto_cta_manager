@@ -145,7 +145,7 @@ export function BnbManagement({ sourceId, configurable }: { sourceId: string; co
               <div className="flex justify-between gap-3"><dt className="text-muted">对冲最小调整间隔</dt><dd className="font-medium tabular-nums text-ink">{amount(settings.hedge_min_interval_secs / 3600)} 小时</dd></div>
               <div className="flex justify-between gap-3"><dt className="text-muted">当前净敞口</dt><dd className="font-medium tabular-nums text-ink">{amount(total != null && (status?.hedge_qty != null || status?.legacy_hedge_qty != null) ? total + (status?.hedge_qty ?? 0) + (status?.legacy_hedge_qty ?? 0) : null)} BNB</dd></div>
             </dl>
-            <p className="mt-4 text-[11px] leading-5 text-subtle">BNBUSDC 专用于 BNB 储备对冲，普通 CTA 禁用。实际净敞口达到阈值且达到最小间隔才调整；调仓触发阈值不影响成交精度。多资产模式下仍与 CTA 共享保证金。</p>
+            <p className="mt-4 text-[11px] leading-5 text-subtle">未启用 BNB 自动管理且没有历史储备对冲的账户，可按普通策略交易 BNBUSDC。启用后该合约专用于储备对冲；暂停管理保留已有对冲归属。实际净敞口达到阈值且达到最小间隔才调整；调仓触发阈值不影响成交精度。多资产模式下仍与 CTA 共享保证金。</p>
             <div className="mt-6 border-t border-border pt-5">
               <p className="text-[11px] font-medium text-muted">最近检查</p>
               <p className="mt-2 break-words text-xs leading-6 text-ink">{status?.last_result || '尚无检查记录，可先运行检查读取账户余额。'}</p>

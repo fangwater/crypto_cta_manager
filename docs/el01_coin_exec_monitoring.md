@@ -709,3 +709,36 @@ verification records are retained at
 `/home/el01/crypto_cta_manager/backups/bn_group31_trade13_snapshot_20261012`.
 No Exec RocksDB write, trading interruption, target change or schema DDL was
 performed. Temporary verification sessions were removed.
+
+## hxl_2025 USD-M monitoring deployment, 2026-10-15
+
+Added independent source `binance_exec_trade14` for `hxl_2025`, with its own
+directory, IPC namespace and empty order-history directory. The operator chose
+monitoring only: only account-monitor, Viz and Config run; no trading binaries,
+strategy bindings or initial-position snapshots were installed for this source.
+Its authenticated gateway is `/exec_trade14/`, with loopback Viz/Config ports
+`10055`/`18174`. `shaokai` and `dzy` both have account `configure` permission;
+all existing grants and global roles were preserved.
+
+Signed read-only account, position and commission queries explicitly bound
+`154.197.32.6`. They confirmed STANDARD USD-M, one-way positions, four nonzero
+positions, and BTCUSDT Maker/Taker rates `0.0001`/`0.0003`. Credentials exist only
+in the new host `env.sh`, mode `0600`. Account-monitor and Viz reuse SHA-256
+verified previously published artifacts from local `arbmm` build `b8611bd1`;
+the new `MONITORING-RELEASE.json` records their hashes and monitoring-only scope.
+
+Manager received one additive source and the new trading TOML in both Kline and
+funding IP exclusions. Its existing executable and frontend were preserved;
+Manager restarted to load the source and Nginx reloaded three additive blocks.
+After cold history initialization, both users' dashboard/account studio, Viz,
+snapshot and Config/bootstrap requests returned HTTP 200, WebSockets upgraded
+with HTTP 101, and anonymous snapshot access returned HTTP 401. Both dashboards
+showed `configure` and live equity status `ok`. All 83 captured protected
+process identities and 28 existing account credential/configuration hashes
+were unchanged. The standalone DingTalk monitor was not restarted.
+
+Post-deployment disk space was approximately 44 GiB available on the 98 GiB
+root filesystem (53% used); inode use was 3%, and `/dev/shm` had 6.8 GiB free.
+Recovery configuration and sanitized verification evidence are retained under
+`/home/el01/crypto_cta_manager/backups/hxl_2025_trade14_20261015`.
+Temporary verification sessions were deleted. No exchange state was changed.

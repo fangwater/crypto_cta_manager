@@ -96,6 +96,7 @@ trade_engine_configs = [
   "/home/el01/binance_exec_trade11/trade_engine.toml",
   "/home/el01/binance_exec_trade12/trade_engine.toml",
   "/home/el01/binance_exec_trade13/trade_engine.toml",
+  "/home/el01/binance_exec_trade14/trade_engine.toml",
 ]
 
 
@@ -312,4 +313,22 @@ exec_viz_url = "http://127.0.0.1:10054/"
 maker_fee_rate = 0.0001
 taker_fee_rate = 0.0003
 ipc_namespace = "binance_exec_trade13"
+account_ipc_service = "account_pubs/binance_pm"
+
+
+[[sources]]
+id = "binance_exec_trade14"
+account = "trade14"
+alias = "hxl_2025"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_trade14/data/persist_manager"
+enabled = true
+# Account monitoring only; no trading execution or strategy binding is started.
+monitor_enabled = true
+gateway_prefix = "/exec_trade14"
+exec_config_url = "http://127.0.0.1:18174/"
+exec_viz_url = "http://127.0.0.1:10055/"
+maker_fee_rate = 0.0001
+taker_fee_rate = 0.0003
+ipc_namespace = "binance_exec_trade14"
 account_ipc_service = "account_pubs/binance_pm"

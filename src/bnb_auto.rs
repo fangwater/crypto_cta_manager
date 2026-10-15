@@ -148,6 +148,13 @@ struct Account {
     #[serde(default)]
     last_hedge_publish_ms: u64,
 }
+impl Account {
+    fn reserves_hedge_symbol(&self) -> bool {
+        // Merely saving disabled settings must not take a normal CTA contract.
+        // A previously published reserve hedge stays owned while paused.
+        self.settings.enabled || self.last_hedge_publish_ms > 0
+    }
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 enum Route {
     FuturesConvert,
@@ -260,8 +267,8 @@ impl BnbManager {
         for a in disk.accounts.values() {
             a.settings.validate()?;
         }
-        for source in disk.accounts.keys() {
-            redis.reserve_bnb_symbol(source);
+        for (source, account) in &disk.accounts {
+            redis.set_bnb_symbol_reserved(source, account.reserves_hedge_symbol());
         }
         Ok(Self {
             path,
@@ -312,7 +319,6 @@ impl BnbManager {
         );
         a.settings = settings;
         self.commit(&mut s, &source.id, a)?;
-        self.redis.reserve_bnb_symbol(&source.id);
         s.next_due.remove(&source.id);
         drop(s);
         Ok(self.status(&source.id).await)
@@ -412,6 +418,7 @@ impl BnbManager {
         result
     }
     fn commit(&self, state: &mut Runtime, source: &str, account: Account) -> Result<()> {
+        let reserved = account.reserves_hedge_symbol();
         let old = state.disk.accounts.insert(source.into(), account);
         if let Err(error) = persist(&self.path, &state.disk) {
             if let Some(old) = old {
@@ -421,6 +428,7 @@ impl BnbManager {
             }
             return Err(error);
         }
+        self.redis.set_bnb_symbol_reserved(source, reserved);
         Ok(())
     }
     async fn execute(
@@ -1419,6 +1427,63 @@ mod tests {
         routing::any,
     };
     use serde_json::json;
+
+    #[tokio::test]
+    async fn disabled_bnb_settings_leave_cta_contract_available_after_save_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config =
+            AppConfig::load(std::path::Path::new("config/cta-manager.example.toml")).unwrap();
+        config.kline.rocksdb_path = dir.path().join("db");
+        config.treasury.use_account_ip_rotation = true;
+        let source = &config.sources[0];
+        let redis = RedisRuntime::connect(config.redis.clone()).unwrap();
+        let create = || {
+            BnbManager::new(
+                &config,
+                Arc::new(Mutex::new(())),
+                TreasuryEgress::new(config.treasury.clone()),
+                redis.clone(),
+                ReloadNotifyHub::spawn(),
+            )
+            .unwrap()
+        };
+        let targets =
+            BTreeMap::from([(HEDGE_SYMBOL.into(), TargetPosition { qty: 1., signal: 0 })]);
+        let hub = create();
+        assert!(redis.validate_cta_targets(&source.id, &targets).is_ok());
+        hub.save(source, Settings::default()).await.unwrap();
+        assert!(redis.validate_cta_targets(&source.id, &targets).is_ok());
+        let hub = create();
+        assert!(redis.validate_cta_targets(&source.id, &targets).is_ok());
+        hub.save(
+            source,
+            Settings {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(redis.validate_cta_targets(&source.id, &targets).is_err());
+        assert!(
+            redis
+                .validate_cta_targets("another_source", &targets)
+                .is_ok()
+        );
+        hub.save(source, Settings::default()).await.unwrap();
+        assert!(redis.validate_cta_targets(&source.id, &targets).is_ok());
+        let hub = create();
+        assert!(redis.validate_cta_targets(&source.id, &targets).is_ok());
+        // Pausing a reserve that has actually attempted publication retains ownership.
+        let mut state = hub.state.lock().await;
+        let mut account = state.disk.accounts[&source.id].clone();
+        account.last_hedge_publish_ms = 1;
+        hub.commit(&mut state, &source.id, account).unwrap();
+        drop(state);
+        assert!(redis.validate_cta_targets(&source.id, &targets).is_err());
+        let _restarted = create();
+        assert!(redis.validate_cta_targets(&source.id, &targets).is_err());
+    }
 
     #[test]
     fn hedge_ownership_ignores_only_completed_system_close_float_rounding() {
