@@ -5,272 +5,397 @@
     {
       "path": "artifacts/el01_bahll_30d_20261015/aligned_probe.jsonl",
       "bytes": 18723189,
-      "sha256": "c0fbfbd3e34cc3c4a95ae9e1a6211d423d60ec7820af79fe7b61bf9a8a4a744e"
+      "sha256": "c0fbfbd3e34cc3c4a95ae9e1a6211d423d60ec7820af79fe7b61bf9a8a4a744e",
+      "status": "removed",
+      "cleanup_reason": "raw_diagnostic_response_with_retained_summary"
     },
     {
       "path": "artifacts/el01_bahll_30d_20261015/probe.jsonl",
       "bytes": 19805253,
-      "sha256": "d68ecbea384526ea4f68dc34dfdb7cba1fbd5351a5294a98d054df5e2a2d6aa8"
+      "sha256": "d68ecbea384526ea4f68dc34dfdb7cba1fbd5351a5294a98d054df5e2a2d6aa8",
+      "status": "removed",
+      "cleanup_reason": "raw_diagnostic_response_with_retained_summary"
     },
     {
       "path": "artifacts/jp_meta_manager_cpu_20261014/validation.tar.gz",
       "bytes": 5708950,
-      "sha256": "476959a319936596266a4f92989b88a02b50ec5de47a5847a6f8f8c8a1e46c9f"
+      "sha256": "476959a319936596266a4f92989b88a02b50ec5de47a5847a6f8f8c8a1e46c9f",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/after_final.json",
       "bytes": 43036,
-      "sha256": "c4e6b697113f4b43effcb83daf834a51d7f740f2e4fee8f43dd239d75d81640f"
+      "sha256": "c4e6b697113f4b43effcb83daf834a51d7f740f2e4fee8f43dd239d75d81640f",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/after_first.json",
       "bytes": 42974,
-      "sha256": "baa95793629e91c8a296a55c28904598fee1ad76fd6ff1db67e642b236dc0a90"
+      "sha256": "baa95793629e91c8a296a55c28904598fee1ad76fd6ff1db67e642b236dc0a90",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/after_second.json",
       "bytes": 43011,
-      "sha256": "c91fb75d70366085117ea1a96e840e9fcdea8a89b55337268b10bb5e80b8e9bc"
+      "sha256": "c91fb75d70366085117ea1a96e840e9fcdea8a89b55337268b10bb5e80b8e9bc",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/after_third.json",
       "bytes": 43041,
-      "sha256": "3f26151071ba0a1a678cb8b3c223b138a79e6dc29436c7481bf691f7062a764c"
+      "sha256": "3f26151071ba0a1a678cb8b3c223b138a79e6dc29436c7481bf691f7062a764c",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/before.json",
       "bytes": 42990,
-      "sha256": "d552b6bf54a68bcc490a96316dfd6c69bea77a4064c54de74219bcb0bdcaf8c5"
+      "sha256": "d552b6bf54a68bcc490a96316dfd6c69bea77a4064c54de74219bcb0bdcaf8c5",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/rapidx_account_monitor",
       "bytes": 10234664,
-      "sha256": "d2f560ee4e51d229508376a6229d0343cc1a34af898b53e60ac76bdac4228949"
+      "sha256": "d2f560ee4e51d229508376a6229d0343cc1a34af898b53e60ac76bdac4228949",
+      "status": "removed",
+      "cleanup_reason": "rebuildable_binary"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/release.patch",
       "bytes": 10494,
-      "sha256": "a4f84f9755da23786866f80ca2a302593d94b7e47c9455fbbc4e5c7bd6dd7a07"
+      "sha256": "a4f84f9755da23786866f80ca2a302593d94b7e47c9455fbbc4e5c7bd6dd7a07",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/remote-evidence.tar.gz",
       "bytes": 39598417,
-      "sha256": "e5e373cd4219e28c9100cf3d50312235afc54533e3241d9fd1a206444366bc3f"
+      "sha256": "e5e373cd4219e28c9100cf3d50312235afc54533e3241d9fd1a206444366bc3f",
+      "status": "removed",
+      "cleanup_reason": "bundle_verified_against_retained_extracted_files"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/remote-evidence/journal-20261013T130454.997940-ea3a85da-0742-48cd-8839-70bde73fcb1c.jsonl.gz",
       "bytes": 35680915,
-      "sha256": "b7562c64af1b560d7f4512fa009a99499faa810b038afe0063198cd316090fda"
+      "sha256": "b7562c64af1b560d7f4512fa009a99499faa810b038afe0063198cd316090fda",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/remote-evidence/rapidx_account_monitor.previous",
       "bytes": 10158424,
-      "sha256": "cf49d717c1d9b3a7d4d3725e00bf8d883e1887dbf2de7bf622c75bc3aed116ad"
+      "sha256": "cf49d717c1d9b3a7d4d3725e00bf8d883e1887dbf2de7bf622c75bc3aed116ad",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/remote-evidence/start_monitor_bounded.log",
       "bytes": 330,
-      "sha256": "ed7eee8da98b49e1655820d4a4aafa5a109988c884aa4865f89f9c26de27a8f8"
+      "sha256": "ed7eee8da98b49e1655820d4a4aafa5a109988c884aa4865f89f9c26de27a8f8",
+      "status": "removed",
+      "cleanup_reason": "completed_validation_log"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/remote-evidence/start_monitor_native.log",
       "bytes": 860,
-      "sha256": "07225d9f13fb34eac51d106e645d8edf42a4c5c531b638f7c36c199163c29545"
+      "sha256": "07225d9f13fb34eac51d106e645d8edf42a4c5c531b638f7c36c199163c29545",
+      "status": "removed",
+      "cleanup_reason": "completed_validation_log"
     },
     {
       "path": "artifacts/jp_meta_rx01_equity_20261015/remote-evidence/stop_monitor_retry.log",
       "bytes": 243,
-      "sha256": "88627522b500ef8b86fb3cf77bf3cc626ec26b9d688813bda3ace9a1a706dd31"
+      "sha256": "88627522b500ef8b86fb3cf77bf3cc626ec26b9d688813bda3ace9a1a706dd31",
+      "status": "removed",
+      "cleanup_reason": "completed_validation_log"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/check.log",
       "bytes": 205,
-      "sha256": "7ae567355447164c21be644146d631807d4ad8f4f4e8fe4b6e7714421748a698"
+      "sha256": "7ae567355447164c21be644146d631807d4ad8f4f4e8fe4b6e7714421748a698",
+      "status": "removed",
+      "cleanup_reason": "completed_validation_log"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/dashboard_before.json",
       "bytes": 2095697,
-      "sha256": "97caa7e4edf81f4e1893ff2ed0cc14c96ca8c101a382a33837dfc278fb83c1eb"
+      "sha256": "97caa7e4edf81f4e1893ff2ed0cc14c96ca8c101a382a33837dfc278fb83c1eb",
+      "status": "removed",
+      "cleanup_reason": "identical_duplicate",
+      "duplicate_of": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/dashboard_before.json"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/diagnostic_build.log",
       "bytes": 141,
-      "sha256": "e8335a079bcadd8e83f44f6cb971fe04b5be9e1b1e7741619981349e0aef080f"
+      "sha256": "e8335a079bcadd8e83f44f6cb971fe04b5be9e1b1e7741619981349e0aef080f",
+      "status": "removed",
+      "cleanup_reason": "completed_validation_log"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/exec_snapshot.json",
       "bytes": 116867,
-      "sha256": "7a8fce7730ee02d23e3246efecf5ffcdf6adcd9e86d126378b714e4bcd0d9349"
+      "sha256": "7a8fce7730ee02d23e3246efecf5ffcdf6adcd9e86d126378b714e4bcd0d9349",
+      "status": "removed",
+      "cleanup_reason": "identical_duplicate",
+      "duplicate_of": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/exec_snapshot.json"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/export_history",
       "bytes": 19742704,
-      "sha256": "ad66202b681d310fcf1194be9e8777bc8f24424d67eba1efb40388fd15f6b576"
+      "sha256": "ad66202b681d310fcf1194be9e8777bc8f24424d67eba1efb40388fd15f6b576",
+      "status": "removed",
+      "cleanup_reason": "rebuildable_binary"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/full_tests.log",
       "bytes": 32075,
-      "sha256": "752146f78f11caf0c624f0509abfcd9602ff1c61a844cdceb4c5075ef806b5ff"
+      "sha256": "752146f78f11caf0c624f0509abfcd9602ff1c61a844cdceb4c5075ef806b5ff",
+      "status": "removed",
+      "cleanup_reason": "completed_validation_log"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/funding-bin/cta_web",
       "bytes": 40008632,
-      "sha256": "c81128491e1f1bdcc76ce8d65fa7d1223aac9acb857ed0867aae27aacfa7dcae"
+      "sha256": "c81128491e1f1bdcc76ce8d65fa7d1223aac9acb857ed0867aae27aacfa7dcae",
+      "status": "removed",
+      "cleanup_reason": "rebuildable_binary"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/funding-bin/nav_rebuild",
       "bytes": 18469776,
-      "sha256": "cdf8a92154587ac13f436fa171f26ff60569c383a98447dc60c21069292ce47e"
+      "sha256": "cdf8a92154587ac13f436fa171f26ff60569c383a98447dc60c21069292ce47e",
+      "status": "removed",
+      "cleanup_reason": "rebuildable_binary"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/funding_frontend.tar.gz",
       "bytes": 352685,
-      "sha256": "93f6c27c2e6555aa25890e4fcd1dd763ad94166e88caddc194287a34565941a8"
+      "sha256": "93f6c27c2e6555aa25890e4fcd1dd763ad94166e88caddc194287a34565941a8",
+      "status": "removed",
+      "cleanup_reason": "rebuildable_frontend_package"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/funding_release.patch",
       "bytes": 155704,
-      "sha256": "daffbf793c71f1e37884b7ad9d12192bd647412a71cb9879dbaa295e5c43ab14"
+      "sha256": "daffbf793c71f1e37884b7ad9d12192bd647412a71cb9879dbaa295e5c43ab14",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/funding_release_tests.log",
       "bytes": 32131,
-      "sha256": "1e22f681bd617ad0834d6059dfd60c173de80361ad8a64e45f79228d113403a4"
+      "sha256": "1e22f681bd617ad0834d6059dfd60c173de80361ad8a64e45f79228d113403a4",
+      "status": "removed",
+      "cleanup_reason": "completed_validation_log"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/nav_tests.log",
       "bytes": 7883,
-      "sha256": "1ad2627b7b00ee6b1f652d5c5089e5a981213476721e936a5eb786eab46271da"
+      "sha256": "1ad2627b7b00ee6b1f652d5c5089e5a981213476721e936a5eb786eab46271da",
+      "status": "removed",
+      "cleanup_reason": "completed_validation_log"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/release-bin/cta_web",
       "bytes": 39325376,
-      "sha256": "490f42f41c24655bf724e241957d42b409b2b02200323d50095b1d0f3a693d1d"
+      "sha256": "490f42f41c24655bf724e241957d42b409b2b02200323d50095b1d0f3a693d1d",
+      "status": "removed",
+      "cleanup_reason": "rebuildable_binary"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/release-bin/nav_rebuild",
       "bytes": 18404816,
-      "sha256": "b7984872a784fe25b74c064b7bc2f8fecaba9aecaa832c2203b6199d27bfb512"
+      "sha256": "b7984872a784fe25b74c064b7bc2f8fecaba9aecaa832c2203b6199d27bfb512",
+      "status": "removed",
+      "cleanup_reason": "rebuildable_binary"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/release.patch",
       "bytes": 18651,
-      "sha256": "15dad8bdd872d182d7d78364105b5e73f54630c91948a91668e6c3d04b6060c7"
+      "sha256": "15dad8bdd872d182d7d78364105b5e73f54630c91948a91668e6c3d04b6060c7",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/apply_funding_schema.sql",
       "bytes": 1192,
-      "sha256": "4194acab9898f30d34b0e8d4d3473bf35e0dc3d36f4266bd1ec98620b5441b94"
+      "sha256": "4194acab9898f30d34b0e8d4d3473bf35e0dc3d36f4266bd1ec98620b5441b94",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/apply_funding_settings_schema.sql",
       "bytes": 437,
-      "sha256": "34c0372369d697d19116f7562818d140407f114e6dd2463f228a783eda4c7d80"
+      "sha256": "34c0372369d697d19116f7562818d140407f114e6dd2463f228a783eda4c7d80",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/candidate_report.json",
       "bytes": 137660,
-      "sha256": "5b80e26b2f9851613c626336568ed3c1696fcbbae0d18a79d51c87f66c41144b"
+      "sha256": "5b80e26b2f9851613c626336568ed3c1696fcbbae0d18a79d51c87f66c41144b",
+      "status": "removed",
+      "cleanup_reason": "identical_duplicate",
+      "duplicate_of": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/old_report.json"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/candidate_snapshot.json",
       "bytes": 115012,
-      "sha256": "55b7ca3cd7bb33f9ec983b8ef990ab6cd06a3a6996439fc0b4b514b99baa5bbc"
+      "sha256": "55b7ca3cd7bb33f9ec983b8ef990ab6cd06a3a6996439fc0b4b514b99baa5bbc",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/dashboard_before.json",
       "bytes": 2095697,
-      "sha256": "97caa7e4edf81f4e1893ff2ed0cc14c96ca8c101a382a33837dfc278fb83c1eb"
+      "sha256": "97caa7e4edf81f4e1893ff2ed0cc14c96ca8c101a382a33837dfc278fb83c1eb",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/exec_snapshot.json",
       "bytes": 116867,
-      "sha256": "7a8fce7730ee02d23e3246efecf5ffcdf6adcd9e86d126378b714e4bcd0d9349"
+      "sha256": "7a8fce7730ee02d23e3246efecf5ffcdf6adcd9e86d126378b714e4bcd0d9349",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/executions.jsonl",
       "bytes": 3320897,
-      "sha256": "3543003a803cba294b8cb1c8fa8f389665751ab3aee43ead414ce925d42682ed"
+      "sha256": "3543003a803cba294b8cb1c8fa8f389665751ab3aee43ead414ce925d42682ed",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/final_candidate_report.json",
       "bytes": 137290,
-      "sha256": "44ce6bfaacef2add3729badce57fe0ccf4bed4e3d2785750a91d8b3dc2ff9caf"
+      "sha256": "44ce6bfaacef2add3729badce57fe0ccf4bed4e3d2785750a91d8b3dc2ff9caf",
+      "status": "removed",
+      "cleanup_reason": "identical_duplicate",
+      "duplicate_of": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/final_old_report.json"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/final_candidate_snapshot.json",
       "bytes": 113668,
-      "sha256": "810f624836416c6ac15103d40944ddcb982522adb7ba8a2a6a9b1314c5b0ce51"
+      "sha256": "810f624836416c6ac15103d40944ddcb982522adb7ba8a2a6a9b1314c5b0ce51",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/final_old_report.json",
       "bytes": 137290,
-      "sha256": "44ce6bfaacef2add3729badce57fe0ccf4bed4e3d2785750a91d8b3dc2ff9caf"
+      "sha256": "44ce6bfaacef2add3729badce57fe0ccf4bed4e3d2785750a91d8b3dc2ff9caf",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/funding_timeline_binance_exec_trade05.json",
       "bytes": 1145866,
-      "sha256": "2548121a30024248f249821b96cddfa20d5dd0cb23ee3ed0da2f693c9a920037"
+      "sha256": "2548121a30024248f249821b96cddfa20d5dd0cb23ee3ed0da2f693c9a920037",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/funding_timeline_binance_exec_trade06.json",
       "bytes": 4528053,
-      "sha256": "67fe958fcfdf423b39bc10bf9ba417d7aee913bab064d33a07be077d42b3e5e7"
+      "sha256": "67fe958fcfdf423b39bc10bf9ba417d7aee913bab064d33a07be077d42b3e5e7",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/funding_timeline_binance_exec_trade07.json",
       "bytes": 1055617,
-      "sha256": "efcbb47add0fc4012df2a7305205f028907185078337d5a3b02f73ef2d5562aa"
+      "sha256": "efcbb47add0fc4012df2a7305205f028907185078337d5a3b02f73ef2d5562aa",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/old_report.json",
       "bytes": 137660,
-      "sha256": "5b80e26b2f9851613c626336568ed3c1696fcbbae0d18a79d51c87f66c41144b"
+      "sha256": "5b80e26b2f9851613c626336568ed3c1696fcbbae0d18a79d51c87f66c41144b",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/snapshots_before.sql",
       "bytes": 12885,
-      "sha256": "95fba579d000537e5ef363768b9d921eab6ac8ac43d59f8b081350f4e7dc32e8"
+      "sha256": "95fba579d000537e5ef363768b9d921eab6ac8ac43d59f8b081350f4e7dc32e8",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/source_catalog_schema_before.sql",
       "bytes": 2482,
-      "sha256": "65c502cb83a2c575b8330a2f7748a5d8bc094dd5418210db726f22d1ff35625c"
+      "sha256": "65c502cb83a2c575b8330a2f7748a5d8bc094dd5418210db726f22d1ff35625c",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/uniform_orders.jsonl",
       "bytes": 2298935,
-      "sha256": "4e8c3010c33e32a84414e60b9332e2d56b3589ce2ecde32cd546081940e9989c"
+      "sha256": "4e8c3010c33e32a84414e60b9332e2d56b3589ce2ecde32cd546081940e9989c",
+      "status": "retained"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/snapshots_before.sql",
       "bytes": 12885,
-      "sha256": "95fba579d000537e5ef363768b9d921eab6ac8ac43d59f8b081350f4e7dc32e8"
+      "sha256": "95fba579d000537e5ef363768b9d921eab6ac8ac43d59f8b081350f4e7dc32e8",
+      "status": "removed",
+      "cleanup_reason": "identical_duplicate",
+      "duplicate_of": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/snapshots_before.sql"
     },
     {
       "path": "artifacts/jp_meta_rx01_initial_snapshot_20261015/uniform_orders.jsonl",
       "bytes": 2298935,
-      "sha256": "4e8c3010c33e32a84414e60b9332e2d56b3589ce2ecde32cd546081940e9989c"
+      "sha256": "4e8c3010c33e32a84414e60b9332e2d56b3589ce2ecde32cd546081940e9989c",
+      "status": "removed",
+      "cleanup_reason": "identical_duplicate",
+      "duplicate_of": "artifacts/jp_meta_rx01_initial_snapshot_20261015/remote-evidence/uniform_orders.jsonl"
     },
     {
       "path": "artifacts/position_creation_el01_20261014T093305Z/frontend_source.patch",
       "bytes": 23734,
-      "sha256": "3dd4dc5295defca7c0ddfec20718b664d1359303ecb4563b11ecac510951774e"
+      "sha256": "3dd4dc5295defca7c0ddfec20718b664d1359303ecb4563b11ecac510951774e",
+      "status": "retained"
     },
     {
       "path": "artifacts/position_creation_el01_20261014T093305Z/shaokai_desktop.png",
       "bytes": 194221,
-      "sha256": "9f41552bf4ba8535adc1401350d176ce950a0ad336d070a4e3c96c120514c7b1"
+      "sha256": "9f41552bf4ba8535adc1401350d176ce950a0ad336d070a4e3c96c120514c7b1",
+      "status": "removed",
+      "cleanup_reason": "temporary_browser_screenshot"
     },
     {
       "path": "artifacts/position_creation_el01_20261014T093305Z/source.patch",
       "bytes": 23334,
-      "sha256": "47269ec2655d17307aa473db5e048b1bbd9f64e5371e1be8286215ae279357f6"
+      "sha256": "47269ec2655d17307aa473db5e048b1bbd9f64e5371e1be8286215ae279357f6",
+      "status": "retained"
     },
     {
       "path": "artifacts/position_owner_el01_20261015/source.patch",
       "bytes": 106321,
-      "sha256": "fd92ac46221e93eee356a9d8cf8f2ae0cc679da3795a317109ef8e40afc951da"
+      "sha256": "fd92ac46221e93eee356a9d8cf8f2ae0cc679da3795a317109ef8e40afc951da",
+      "status": "retained"
     }
-  ]
+  ],
+  "cleanup": {
+    "completed_at_utc": "2026-10-15T04:08:25.342118+00:00",
+    "removed_archive_files": 25,
+    "removed_archive_bytes": 229732935,
+    "retained_archive_files": 29,
+    "retained_archive_bytes": 67184137,
+    "removed_generated_files": [
+      {
+        "path": "artifacts/jp_meta_refresh_failure_20261014/readonly_manager_archive_probe",
+        "bytes": 16051744,
+        "sha256": "d9d01a743b3fe9cdb142f0142cc3e3c55b11a8a043f6578c12d075c266808739",
+        "reason": "rebuildable_diagnostic_binary"
+      },
+      {
+        "path": "frontend/dist/assets/index-BczeSBuI.js",
+        "bytes": 1079410,
+        "sha256": "2dbe1f34035cac5381d0c29f8dae53fcfe02d0c1336365d99f745131b11c3a31",
+        "reason": "rebuildable_frontend_output"
+      },
+      {
+        "path": "frontend/dist/assets/index-BkPi1rHQ.css",
+        "bytes": 79843,
+        "sha256": "3d0a542b4fde6dcacf6534492eaa541095c5c56439f0c2a6a85cb5d763ac694d",
+        "reason": "rebuildable_frontend_output"
+      },
+      {
+        "path": "frontend/dist/favicon.svg",
+        "bytes": 258,
+        "sha256": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+        "reason": "rebuildable_frontend_output"
+      },
+      {
+        "path": "frontend/dist/index.html",
+        "bytes": 534,
+        "sha256": "d176defc4f21cb178f7835b2050fa0ef16f648577271217080741a384e05cc4f",
+        "reason": "rebuildable_frontend_output"
+      }
+    ],
+    "total_removed_bytes": 246944724
+  }
 }
