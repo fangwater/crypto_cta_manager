@@ -35,6 +35,7 @@ import { executionMarketLabel, executionSymbolPlaceholder, feeBps, formatUniMmr,
 import { FieldHint, Input, Label } from '../components/ui/Field'
 import { readSourceId, routes } from '../lib/routes'
 import { cn } from '../lib/cn'
+import { usesActualFunding } from '../lib/fundingPresentation'
 import type {
   AccountStudio,
   DashboardAccount,
@@ -568,8 +569,8 @@ function AccountMeta({
         <span className={signedClass(report.nav_change_after_fee_quote)}>
           累计费后 {money(report.nav_change_after_fee_quote)} 报价币
         </span>
-        {account.funding && (account.funding.enabled || account.funding.start_ts_us != null) && <>
-          <span className={signedClass(account.funding.income_quote)}>累计 funding {money(account.funding.income_quote)} 报价币</span>
+        {account.funding && usesActualFunding(account.funding) && <>
+          <span className={signedClass(account.funding.income_quote)}>累计实际 Funding {money(account.funding.income_quote)} 报价币</span>
           <span className={signedClass(account.total_nav_after_fee_quote ?? 0)}>总体费后 {money(account.total_nav_after_fee_quote ?? 0)} 报价币</span>
         </>}
       </CardContent>

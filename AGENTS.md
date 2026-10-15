@@ -196,7 +196,8 @@ Enabling requires the configured environment token and successful bound public-I
 and signed income REST tests before saving the switch. The operator-selected
 token is host-only, never committed or printed. Account polling intervals
 (60–86400 seconds, default 300) are saved in PostgreSQL and hot-reloaded. Pausing
-retains existing income in overall NAV. Show enable/progress/error badges.
+retains existing income for reconciliation; the NAV display switches to estimated
+funding as specified below. Show enable/progress/error badges.
 Funding never changes order FIFO, strategy attribution, or execution slippage.
 Existing databases use explicit `scripts/apply_funding_schema.sql` and
 `scripts/apply_funding_settings_schema.sql` maintenance;
@@ -215,6 +216,36 @@ Use RapidX `/api/v1/trading/statement` with `FUNDING_FEE`, validate portfolio,
 exchange, perpetual symbol, currency, time and complete pagination, and deduplicate
 by statement ID. Preserve per-source order-history starts and account-only PnL.
 Do not write to Exec stores or change any trading bindings.
+
+By operator instruction on 2026-10-15, public Binance USD-M funding-rate
+history may use any egress, independently of signed account-income collection
+and Kline egress constraints. `[funding_rates]` enables an in-memory, shared,
+lazy 30-day cache, `limit=1000`, 1800-second incremental refresh, and six default
+USDT symbols (BTC, ETH, BNB, SOL, XRP, DOGE). No credentials or database schema
+are needed. Reconstruct estimated strategy funding from the same NAV snapshot
+and validated fills, using signed quantity immediately before the scheduled
+hour for regular settlements (discard publication millisecond drift) and
+that settlement's public mark price/rate. Keep source/symbol/venue isolation,
+initial/unallocated ownership and internal-cross attribution. Preserve factual
+income separately and never double-count it with estimates. Compare only
+symbol ranges actually covered by income collection; absent earlier statements
+are unknown, not zero. RapidX reconciliation shows different position cutoffs and
+mark-price samples, so actual income collection remains available. Never replace
+the cutoff with a universal 15-second delay: observed settlements include both
+later fills that were charged and earlier fills that were not. See
+`docs/funding_estimate_20261015.md` and `docs/funding_and_slippage.md`.
+
+The operator's final display choice on 2026-10-15 keeps account and strategy
+funding separate: account overall NAV uses actual funding when collection is
+enabled and estimated funding when disabled, including RapidX. Retained historical
+statements must not override a disabled switch. Strategy PnL defaults to including
+the hourly estimate. Show
+strategy funding as its own numeric column and an independent cumulative curve
+with a zero reference, shared strategy selection, and enough decimal precision
+to see small receipts/payments. Explain Binance's possible 15-second
+collection-time deviation only in documentation, never in page notices.
+Do not infer settlement delays or allocate factual
+income into strategies to force reconciliation.
 
 Exchange-owned forced-close fills are order events, not account-ledger charges.
 Exec must persist liquidation, ADL, delisting settlement, and contract-delivery
@@ -553,8 +584,10 @@ not silently fold unclassified fills into Maker or Taker.
 CTA timeline series are NAV before estimated fees, NAV after estimated fees,
 realized PnL, floating PnL, and estimated trading fees. There is no baseline
 equity, interest, deposit, or withdrawal series. Opt-in account views expose a
-separate factual funding series and total NAV including funding; order-only
-series and strategy PnL retain their original meaning. The first point at a
+separate factual funding series and total NAV including funding; with collection
+disabled, NAV uses the separate public estimate. Order-only API series retain
+their original meaning; strategy PnL displays the estimated funding total alongside
+its independent funding amount. The first point at a
 normal window boundary is zero; the final point must equal the selected-window
 summary. PostgreSQL snapshots remain immutable source-specific initial-position
 anchors. Never merge FIFO state across source ID, symbol, or venue.

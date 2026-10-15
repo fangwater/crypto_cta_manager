@@ -69,7 +69,7 @@ export function FundingSettingsPanel({ sourceId, canConfigure = true }: { source
         setSettings(value)
         setInterval(String(value.refresh_secs))
         setToken('')
-        setNotice(enabled && !settings.enabled ? '固定出口与账户认证测试通过，已开启历史补齐。' : enabled ? '拉取间隔已保存并生效。' : '已暂停采集，历史账单继续计入总体盈亏。')
+        setNotice(enabled && !settings.enabled ? '固定出口与账户认证测试通过，已开启历史补齐。' : enabled ? '拉取间隔已保存并生效。' : '已暂停采集，历史账单已保留，净值页总体盈亏改用估算 Funding。')
       }
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : '保存失败')
@@ -80,7 +80,7 @@ export function FundingSettingsPanel({ sourceId, canConfigure = true }: { source
 
   return <Card>
     <CardHeader className="flex flex-wrap items-start justify-between gap-3">
-      <div><CardTitle>Funding 记录</CardTitle><CardDescription>从本机最早订单开始补齐实际资金费，计入账户总体盈亏。</CardDescription></div>
+      <div><CardTitle>Funding 记录</CardTitle><CardDescription>从本机最早订单开始补齐实际资金费。净值页总体盈亏在开启时使用实际 Funding，关闭时使用估算 Funding。</CardDescription></div>
       {settings && <FundingStatusBadge value={settings.summary} />}
     </CardHeader>
     <CardContent className="space-y-4">

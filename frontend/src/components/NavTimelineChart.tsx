@@ -2,6 +2,7 @@ import { LineChart } from 'echarts/charts'
 import {
   DataZoomComponent,
   GridComponent,
+  MarkLineComponent,
   TooltipComponent,
 } from 'echarts/components'
 import * as echarts from 'echarts/core'
@@ -15,16 +16,19 @@ import type {
   NavSeriesKey,
   NavTimelinePoint,
   StrategyNavTimeline,
+  StrategyFundingEstimate,
   SymbolNavTimeline,
   TheoreticalNavPoint,
   TimelineChartMode,
 } from '../types'
-import { strategyLabel, UI_FONT_SANS } from '../format'
+import { fundingMoney, strategyLabel, UI_FONT_SANS } from '../format'
+import { strategyFundingPoints } from '../lib/fundingPresentation'
 
 echarts.use([
   LineChart,
   DataZoomComponent,
   GridComponent,
+  MarkLineComponent,
   TooltipComponent,
   CanvasRenderer,
 ])
@@ -33,6 +37,8 @@ interface Props {
   points: NavTimelinePoint[]
   theoreticalPoints: TheoreticalNavPoint[]
   fundingPoints?: FundingNavPoint[]
+  fundingIsEstimate?: boolean
+  strategyFunding?: StrategyFundingEstimate[]
   symbolPoints: SymbolNavTimeline[]
   strategyPoints: StrategyNavTimeline[]
   visibleSeries: NavSeriesKey[]
@@ -111,6 +117,8 @@ export function NavTimelineChart({
   points,
   theoreticalPoints,
   fundingPoints,
+  fundingIsEstimate,
+  strategyFunding,
   symbolPoints,
   strategyPoints,
   visibleSeries,
@@ -125,6 +133,7 @@ export function NavTimelineChart({
     const chart = echarts.init(containerRef.current, undefined, {
       renderer: 'canvas',
     })
+    const fundingOnly = mode === 'strategyFunding'
     const series =
       mode === 'portfolio'
         ? visibleSeries.map((key) => {
@@ -144,7 +153,7 @@ export function NavTimelineChart({
                   point[key as ActualNavSeriesKey],
                 ])
             return {
-              name: meta.label,
+              name: fundingIsEstimate && (key === 'funding_income_quote' || key.startsWith('total_nav_')) ? meta.label.replace('Funding', '估算 Funding').replace('funding', '估算 funding') : meta.label,
               type: 'line' as const,
               data,
               showSymbol: false,
@@ -172,19 +181,28 @@ export function NavTimelineChart({
               feeMode === 'after'
                 ? 'nav_change_after_fee_quote'
                 : 'nav_change_before_fee_quote'
+            const funding = mode !== 'symbols' ? strategyFunding?.find((row) => row.strategy === (item as StrategyNavTimeline).strategy) : undefined
             return {
               name:
                 mode === 'symbols'
                   ? (item as SymbolNavTimeline).symbol
                   : strategyLabel((item as StrategyNavTimeline).strategy),
               type: 'line' as const,
-              data: item.points.map((point) => [
+              data: mode !== 'symbols' ? strategyFundingPoints(item as StrategyNavTimeline, funding, feeMode, fundingOnly) : item.points.map((point) => [
                 point.ts_us / 1_000,
                 point[key],
               ]),
               showSymbol: false,
               sampling: 'lttb' as const,
               connectNulls: true,
+              step: fundingOnly ? ('end' as const) : undefined,
+              markLine: fundingOnly && funding && index === 0 ? {
+                silent: true,
+                symbol: 'none',
+                label: { show: false },
+                lineStyle: { color: '#8993a4', type: 'dashed' as const },
+                data: [{ yAxis: 0 }],
+              } : undefined,
               lineStyle: { width: 1.7, color },
               itemStyle: { color },
               emphasis: { focus: 'series' as const },
@@ -199,7 +217,7 @@ export function NavTimelineChart({
           mode === 'portfolio'
             ? visibleSeries.map((key) => navSeriesMeta[key].color)
             : symbolPalette,
-        grid: { left: 70, right: 24, top: 20, bottom: 74 },
+        grid: { left: fundingOnly ? 100 : 70, right: 24, top: 20, bottom: 74 },
         tooltip: {
           trigger: 'axis',
           confine: true,
@@ -207,7 +225,7 @@ export function NavTimelineChart({
           borderColor: '#d7dbe2',
           textStyle: { color: '#20252d', fontSize: 12 },
           valueFormatter: (value: unknown) =>
-            money(typeof value === 'number' ? value : Number(value)),
+            (fundingOnly || mode === 'portfolio' && visibleSeries.includes('funding_income_quote') ? fundingMoney : money)(typeof value === 'number' ? value : Number(value)),
           axisPointer: {
             type: 'line',
             lineStyle: { color: '#8993a4', type: 'dashed' },
@@ -227,12 +245,12 @@ export function NavTimelineChart({
         },
         yAxis: {
           type: 'value',
-          scale: true,
+          scale: !fundingOnly,
           axisLine: { show: false },
           axisTick: { show: false },
           axisLabel: {
             color: '#697386',
-            formatter: (value: number) => money(value),
+            formatter: (value: number) => fundingOnly ? fundingMoney(value) : money(value),
           },
           splitLine: { lineStyle: { color: '#edf0f4' } },
         },
@@ -277,6 +295,8 @@ export function NavTimelineChart({
     symbolPoints,
     theoreticalPoints,
     fundingPoints,
+    fundingIsEstimate,
+    strategyFunding,
     visibleSeries,
   ])
 
@@ -289,7 +309,9 @@ export function NavTimelineChart({
           ? '组合净值时间曲线'
           : mode === 'symbols'
             ? '分币净值时间曲线'
-            : '分策略净值时间曲线'
+            : mode === 'strategyFunding'
+              ? '分策略累计估算资金费时间曲线'
+              : '分策略净值时间曲线'
       }
     />
   )

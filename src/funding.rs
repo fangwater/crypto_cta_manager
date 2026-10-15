@@ -672,6 +672,43 @@ impl FundingHub {
         summary
     }
 
+    pub fn reconcile_estimates(
+        &self,
+        report: &NavTimelineReport,
+        estimates: &[crate::funding_rates::FundingEstimateRecord],
+    ) -> Option<crate::funding_rates::FundingReconciliation> {
+        let accounts = self.accounts.read().unwrap();
+        let mut records = Vec::new();
+        let mut observations = Vec::new();
+        for id in &report.selected_source_ids {
+            if let Some(account) = accounts.get(id) {
+                observations.extend(
+                    account
+                        .summary
+                        .symbols
+                        .iter()
+                        .filter(|s| report.selected_symbols.contains(&s.symbol))
+                        .cloned(),
+                );
+                records.extend(
+                    account
+                        .records
+                        .iter()
+                        .filter(|r| {
+                            // Reconciliation aligns by settlement, whereas the
+                            // account NAV below intentionally uses posting time.
+                            r.ts_us >= report.start_ts_us.saturating_sub(900_000_000)
+                                && r.ts_us <= report.end_ts_us.saturating_add(900_000_000)
+                                && report.selected_symbols.contains(&r.symbol)
+                        })
+                        .cloned(),
+                );
+            }
+        }
+        (!observations.is_empty())
+            .then(|| crate::funding_rates::reconcile_estimates(estimates, &records, &observations))
+    }
+
     /// Funding is account-owned and never attributed to a named CTA strategy.
     pub fn timeline(&self, report: &NavTimelineReport) -> FundingTimeline {
         let mut summary = FundingSummary {
@@ -1289,6 +1326,37 @@ mod tests {
         let terminal = hub.timeline(&report);
         assert_eq!(terminal.points[0].funding_income_quote, -2.0);
         assert_eq!(terminal.total_nav_after_fee_quote, 6.0);
+
+        // A range ending at settlement must still compare its later statement.
+        // Factual NAV continues to book that statement at its actual posting time.
+        {
+            let mut accounts = hub.accounts.write().unwrap();
+            let account = accounts.get_mut("a").unwrap();
+            account.records = Arc::new(vec![record("BTCUSDT", 250_001_000, -2.0)]);
+            account.summary.symbols = vec![FundingSymbolStatus {
+                source_id: "a".into(),
+                symbol: "BTCUSDT".into(),
+                start_ts_us: 0,
+                synced_through_ts_us: Some(2_000_000_000),
+            }];
+        }
+        let estimate = crate::funding_rates::FundingEstimateRecord {
+            source_id: "a".into(),
+            symbol: "BTCUSDT".into(),
+            asset: "USDT".into(),
+            ts_us: 1000,
+            rate_type: "Regular".into(),
+            rate: 0.0001,
+            mark_price: 10000.0,
+            quantity: 2.0,
+            income_quote: -2.0,
+            strategies: BTreeMap::new(),
+            boundary_fill_count: 0,
+        };
+        let checked = hub.reconcile_estimates(&report, &[estimate]).unwrap();
+        assert_eq!(checked.actual_record_count, 1);
+        assert_eq!(checked.difference_quote, 0.0);
+        assert_eq!(hub.timeline(&report).summary.income_quote, 0.0);
     }
 
     #[tokio::test]

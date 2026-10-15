@@ -28,6 +28,7 @@ import { AutoEarnPage } from './pages/AutoEarnPage'
 import { AuthGate } from './components/AuthGate'
 import { normalizePath, readSourceId, routes } from './lib/routes'
 import { retainedQuickRangeStartMs } from './lib/navRange'
+import { displayedFunding, usesActualFunding } from './lib/fundingPresentation'
 import {
   NavTimelineChart,
   navSeriesMeta,
@@ -35,8 +36,10 @@ import {
 import { PositionLeverageChart } from './components/PositionLeverageChart'
 import { ExecutionSlippagePanel } from './components/ExecutionSlippagePanel'
 import { FundingPanel } from './components/FundingPanel'
+import { FundingEstimatePanel } from './components/FundingEstimatePanel'
 import {
   feeBps,
+  fundingMoney,
   formatUniMmr,
   integer,
   isOkxVenue,
@@ -166,7 +169,7 @@ function initialScope() {
 
 function defaultPnlMode(dashboard: DashboardSnapshot, sourceId: string): PnlMode {
   const funding = dashboard.accounts?.find((account) => account.source_id === sourceId)?.funding
-  return funding && (funding.enabled || funding.start_ts_us != null)
+  return usesActualFunding(funding)
     ? 'account'
     : 'strategy'
 }
@@ -351,7 +354,7 @@ function NavPage() {
         }
         setTimeline(next)
         if (!includeTheoretical && next.theoretical.loading) void load(true)
-        else if (next.theoretical.loading) retryTimer = window.setTimeout(() => void load(true), 10_000)
+        else if (next.theoretical.loading || next.estimated_funding?.loading) retryTimer = window.setTimeout(() => void load(true), 10_000)
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -401,21 +404,34 @@ function NavPage() {
     () => new Set(selectedStrategies ?? availableStrategies),
     [availableStrategies, selectedStrategies],
   )
+  const estimate = timeline?.estimated_funding
+  const strategyFunding = useMemo(
+    () => new Map((estimate?.strategies ?? []).map((row) => [row.strategy, row])),
+    [estimate],
+  )
   const visibleStrategyPoints = useMemo(
     () =>
       (timeline?.report.strategy_points ?? [])
         .filter((strategy) => selectedStrategySet.has(strategy.strategy))
-        .sort(
-          (left, right) =>
-            Math.abs(right.summary.nav_change_after_fee_quote) -
-              Math.abs(left.summary.nav_change_after_fee_quote) ||
-            left.strategy.localeCompare(right.strategy),
-        ),
-    [selectedStrategySet, timeline],
+        .sort((left, right) => {
+          const value = (row: typeof left) => {
+            const funding = strategyFunding.get(row.strategy)
+            if (chartMode === 'strategyFunding') return funding?.income_quote ?? 0
+            return (feeMode === 'after' ? funding?.total_nav_after_fee_quote : funding?.total_nav_before_fee_quote) ?? navValue(row.summary, feeMode)
+          }
+          return Math.abs(value(right)) - Math.abs(value(left)) || left.strategy.localeCompare(right.strategy)
+        }),
+    [selectedStrategySet, timeline, strategyFunding, chartMode, feeMode],
   )
   const noSymbolsSelected = selectedSymbols?.length === 0
   const noStrategiesSelected = selectedStrategies?.length === 0
-  const hasFunding = pnlMode === 'account' && Boolean(timeline?.funding && (timeline.funding.summary.enabled || timeline.funding.summary.start_ts_us != null))
+  const displayed = displayedFunding(pnlMode, timeline?.funding, estimate)
+  const usesEstimatedFunding = displayed.kind === 'estimated'
+  const fundingValue = displayed.value
+  const fundingIncome = displayed.income
+  const hasFunding = displayed.kind !== 'unavailable'
+  const strategyChart = chartMode === 'strategies' || chartMode === 'strategyFunding'
+  const fundingLabel = (key: NavSeriesKey) => usesEstimatedFunding ? navSeriesMeta[key].label.replace('Funding', '估算 Funding').replace('funding', '估算 funding') : navSeriesMeta[key].label
   const fundingSeriesVisible = (key: NavSeriesKey) => hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_'))
   const portfolioSeriesOptions = (
     selectedSymbols === null
@@ -740,9 +756,9 @@ function NavPage() {
           <div className={`summary-strip${hasFunding ? ' summary-strip--funding' : ''}`}>
             <SummaryItem
               icon={<Sigma size={18} />}
-              label={hasFunding ? '区间总体净值变化（含 funding）' : '区间净值变化'}
-              value={noSymbolsSelected ? 0 : hasFunding && timeline?.funding
-                ? (feeMode === 'after' ? timeline.funding.total_nav_after_fee_quote : timeline.funding.total_nav_before_fee_quote)
+              label={hasFunding ? (usesEstimatedFunding ? '区间净值变化（含估算 funding）' : '区间总体净值变化（含 funding）') : '区间净值变化'}
+              value={noSymbolsSelected ? 0 : hasFunding && fundingValue
+                ? (feeMode === 'after' ? fundingValue.total_nav_after_fee_quote : fundingValue.total_nav_before_fee_quote)
                 : totals ? navValue(totals, feeMode) : null}
               signed
             />
@@ -771,8 +787,8 @@ function NavPage() {
             {hasFunding && (
               <SummaryItem
                 icon={<Coins size={18} />}
-                label="区间 Funding（资金费）"
-                value={noSymbolsSelected ? 0 : timeline?.funding?.summary.income_quote ?? null}
+                label={usesEstimatedFunding ? "区间估算 Funding" : "区间 Funding（资金费）"}
+                value={noSymbolsSelected ? 0 : fundingIncome ?? null}
                 signed
               />
             )}
@@ -782,12 +798,13 @@ function NavPage() {
         <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />
         {!noSymbolsSelected && <ExecutionSlippagePanel value={timeline?.execution_slippage} />}
         {pnlMode === 'account' && !noSymbolsSelected && <FundingPanel value={timeline?.funding} />}
+        {!noSymbolsSelected && <FundingEstimatePanel value={estimate} />}
 
         <section className="chart-section" aria-labelledby="chart-title">
           <div className="panel-heading pnl-chart-header">
             <div>
               <p className="eyebrow">NAV TIMELINE</p>
-              <h2 id="chart-title">收益曲线</h2>
+              <h2 id="chart-title">{chartMode === 'strategyFunding' ? '策略 Funding（累计估算资金费）' : '收益曲线'}</h2>
             </div>
             <div className="chart-controls">
               <div className="segmented segmented--compact" aria-label="曲线视图">
@@ -819,19 +836,31 @@ function NavPage() {
                 >
                   分策略 PnL
                 </button>
+                <button
+                  type="button"
+                  className={pnlMode === 'strategy' && chartMode === 'strategyFunding' ? 'is-active' : ''}
+                  onClick={() => {
+                    selectPnlMode('strategy')
+                    setChartMode('strategyFunding')
+                  }}
+                >
+                  策略 Funding
+                </button>
               </div>
               {chartMode === 'symbols' && (
                 <span className="symbol-series-count">
                   {selectedSet.size} 条币种曲线
                 </span>
               )}
-              {pnlMode === 'strategy' && chartMode === 'strategies' && (
+              {pnlMode === 'strategy' && strategyChart && (
                 <span className="symbol-series-count">
                   {selectedStrategySet.size} 条策略曲线
                 </span>
               )}
             </div>
           </div>
+          {chartMode === 'strategyFunding' && <p className="chart-notice">每条曲线单独展示一个策略的累计估算 Funding，正数为收入、负数为支出。零线便于观察资金费是否相抵；可在右侧单独选择策略。</p>}
+          {chartMode === 'strategyFunding' && estimate?.income_quote == null && <p className="chart-notice" role="status">{estimate?.unavailable_reason ?? '正在加载策略估算 Funding'}</p>}
           {timeline?.theoretical.unavailable_reason && (
             <div className="chart-notice" role="status">理论净值：{timeline.theoretical.unavailable_reason}</div>
           )}
@@ -846,11 +875,13 @@ function NavPage() {
             <div className="chart-stage">
               {timeline &&
                 !noSymbolsSelected &&
-                !(chartMode === 'strategies' && noStrategiesSelected) && (
+                !(strategyChart && noStrategiesSelected) && (
                 <NavTimelineChart
                   points={timeline.report.points}
                   theoreticalPoints={timeline.theoretical.points}
-                  fundingPoints={timeline.funding?.points}
+                  fundingPoints={fundingValue?.points}
+                  fundingIsEstimate={usesEstimatedFunding}
+                  strategyFunding={estimate?.strategies}
                   symbolPoints={timeline.report.symbol_points}
                   strategyPoints={visibleStrategyPoints}
                   visibleSeries={portfolioVisibleSeries}
@@ -862,7 +893,7 @@ function NavPage() {
                 <div className="chart-empty">当前未选择币种</div>
               )}
               {!noSymbolsSelected &&
-                chartMode === 'strategies' &&
+                strategyChart &&
                 noStrategiesSelected && (
                   <div className="chart-empty">当前未选择策略</div>
                 )}
@@ -893,7 +924,7 @@ function NavPage() {
                         className="series-swatch"
                         style={{ backgroundColor: navSeriesMeta[key].color }}
                       />
-                      <span>{navSeriesMeta[key].label}</span>
+                      <span>{fundingLabel(key)}</span>
                     </label>
                   ))}
                 </div>
@@ -1047,11 +1078,14 @@ function NavPage() {
               {visibleStrategyPoints.length} / {availableStrategies.length} strategies
             </span>
           </div>
+          {estimate?.income_quote != null && <p className="chart-notice">策略净值默认包含估算 Funding；资金费单列，并可在「策略 Funding」视图查看独立曲线。未归属仓位单独核算。</p>}
           <div className="table-wrap">
             <table className="strategy-table">
               <thead>
                 <tr>
                   <th>策略</th>
+                  <th className="numeric">估算 Funding</th>
+                  <th className="numeric">净值变化（含估算 Funding）</th>
                   <th className="numeric">成交</th>
                   <th className="numeric">Maker 笔 / 额</th>
                   <th className="numeric">Taker 笔 / 额</th>
@@ -1061,17 +1095,26 @@ function NavPage() {
                   <th className="numeric">区间已实现</th>
                   <th className="numeric">区间浮动盈亏</th>
                   <th className="numeric">区间手续费</th>
-                  <th className="numeric">区间净值变化</th>
+                  <th className="numeric">订单净值变化</th>
                 </tr>
               </thead>
               <tbody>
-                {visibleStrategyPoints.map((strategy) => (
+                {visibleStrategyPoints.map((strategy) => {
+                  const funding = strategyFunding.get(strategy.strategy)
+                  const totalNav = feeMode === 'after' ? funding?.total_nav_after_fee_quote : funding?.total_nav_before_fee_quote
+                  return (
                   <tr key={strategy.strategy}>
                     <td className="strategy-cell" title={strategy.strategy}>
                       <strong>{strategyLabel(strategy.strategy)}</strong>
                       {strategyLabel(strategy.strategy) !== strategy.strategy && (
                         <code>{strategy.strategy}</code>
                       )}
+                    </td>
+                    <td className={`numeric mono ${signedClass(funding?.income_quote ?? 0)}`} title={funding && Object.entries(funding.income_by_asset).map(([asset, value]) => `${asset} ${fundingMoney(value)}`).join(' / ')}>
+                      {funding ? fundingMoney(funding.income_quote) : '—'}
+                    </td>
+                    <td className={`numeric mono nav-cell ${signedClass(totalNav ?? 0)}`}>
+                      {totalNav == null ? '—' : money(totalNav)}
                     </td>
                     <td className="numeric mono">
                       {integer(strategy.summary.fill_count)}
@@ -1110,14 +1153,15 @@ function NavPage() {
                       {money(strategy.summary.estimated_trading_fee_quote)}
                     </td>
                     <td
-                      className={`numeric mono nav-cell ${signedClass(
+                      className={`numeric mono ${signedClass(
                         navValue(strategy.summary, feeMode),
                       )}`}
                     >
                       {money(navValue(strategy.summary, feeMode))}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
             {visibleStrategyPoints.length === 0 && (

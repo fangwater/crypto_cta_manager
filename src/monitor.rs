@@ -1668,6 +1668,7 @@ mod tests {
             },
             treasury: Default::default(),
             funding: Default::default(),
+            funding_rates: Default::default(),
             sources: vec![test_source("binance-futures")],
         }
     }

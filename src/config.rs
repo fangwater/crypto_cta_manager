@@ -30,6 +30,8 @@ pub struct AppConfig {
     pub treasury: TreasuryConfig,
     #[serde(default)]
     pub funding: FundingConfig,
+    #[serde(default)]
+    pub funding_rates: FundingRateConfig,
     pub sources: Vec<SourceConfig>,
 }
 
@@ -212,6 +214,32 @@ pub struct FundingConfig {
     pub enable_token_env: String,
 }
 
+/// Public settlement history; independent of authenticated income collection.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FundingRateConfig {
+    pub enabled: bool,
+    pub local_ip: Option<IpAddr>,
+    pub refresh_secs: u64,
+    pub default_symbols: Vec<String>,
+}
+
+impl Default for FundingRateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            local_ip: None,
+            refresh_secs: 1800,
+            default_symbols: [
+                "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        }
+    }
+}
+
 impl Default for FundingConfig {
     fn default() -> Self {
         Self {
@@ -386,6 +414,21 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if !(60..=86400).contains(&self.funding_rates.refresh_secs)
+            || self
+                .funding_rates
+                .local_ip
+                .is_some_and(|ip| ip.is_unspecified())
+            || self
+                .funding_rates
+                .default_symbols
+                .iter()
+                .any(|symbol| !crate::funding_rates::supported_symbol(symbol))
+        {
+            bail!(
+                "funding_rates requires a 60–86400 second interval, valid USD-M symbols and a concrete optional local_ip"
+            );
+        }
         if self.treasury.use_account_ip_rotation && self.treasury.local_ip.is_some() {
             bail!("treasury.local_ip and use_account_ip_rotation are mutually exclusive");
         }
@@ -915,6 +958,7 @@ mod tests {
             monitor: MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
+            funding_rates: Default::default(),
             sources,
         }
     }

@@ -6,6 +6,11 @@ const moneyFormatter = new Intl.NumberFormat('zh-CN', {
   maximumFractionDigits: 2,
 })
 
+const fundingFormatter = new Intl.NumberFormat('zh-CN', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 8,
+})
+
 const compactMoneyFormatter = new Intl.NumberFormat('zh-CN', {
   notation: 'compact',
   minimumFractionDigits: 0,
@@ -32,6 +37,10 @@ const timeFormatter = new Intl.DateTimeFormat('zh-CN', {
 
 export function money(value: number) {
   return moneyFormatter.format(value)
+}
+
+export function fundingMoney(value: number) {
+  return fundingFormatter.format(value)
 }
 
 export function compactMoney(value: number) {

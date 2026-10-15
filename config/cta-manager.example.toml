@@ -100,6 +100,14 @@ is_at_all = false
 # keep working until tokens are assigned. Publishers send a token via
 # manager_publish_client.py --token or MANAGER_PUBLISH_TOKEN.
 
+# Public rate estimation is independent of account funding-income collection.
+# No API credentials or dedicated egress required. Optional local_ip fixes the route.
+[funding_rates]
+enabled = true
+refresh_secs = 1800
+default_symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+# local_ip = "154.197.32.9"
+
 [funding]
 enable_token_env = "CTA_FUNDING_ENABLE_TOKEN"
 # local_ip = "154.197.32.9"

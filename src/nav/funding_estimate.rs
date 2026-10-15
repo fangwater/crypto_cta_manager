@@ -1,0 +1,440 @@
+//! Reuse the same validated fills, snapshot choice and strategy ownership as NAV.
+use super::*;
+use crate::funding_rates::{FundingEstimateRecord, FundingRate, supported_symbol};
+
+impl NavTimelineCache {
+    /// Read-only settlement diagnostics, using the exact validated NAV fill stream.
+    pub fn funding_boundary_fills(
+        &self,
+        source_id: &str,
+        allocation: bool,
+        symbol: &str,
+        ts_us: i64,
+    ) -> Vec<serde_json::Value> {
+        let Some(source) = self.sources.get(&(source_id.to_owned(), allocation)) else {
+            return Vec::new();
+        };
+        let fills = &source.prepared.fill_events;
+        let start = fill_partition_point(fills, |f| f.fill_ts_us < ts_us - 300_000_000);
+        let end = fill_partition_point(fills, |f| f.fill_ts_us <= ts_us + 300_000_000);
+        (start..end)
+            .filter_map(|i| {
+                let fill = &fills[i];
+                let e = &fill.event;
+                (e.venue_code == 1 && e.symbol == symbol).then(|| serde_json::json!({
+                    "fill_ts_us": fill.fill_ts_us,
+                    "receive_ts_us": e.event_ts_us,
+                    "signed_qty": if fill.side == Side::Buy { e.amount_update } else { -e.amount_update },
+                    "price": e.price,
+                    "record_key": e.record_key,
+                    "client_order_id": e.client_order_id,
+                    "strategy": strategy_from_from_key(&e.from_key_text),
+                    "internal_cross": e.order_type_code == INTERNAL_CROSS_ORDER_TYPE_CODE,
+                }))
+            })
+            .collect()
+    }
+
+    pub fn funding_symbols(&self, report: &NavTimelineReport, allocation: bool) -> Vec<String> {
+        let mut symbols = BTreeSet::new();
+        for source_id in &report.selected_source_ids {
+            let Some(source) = self.sources.get(&(source_id.clone(), allocation)) else {
+                continue;
+            };
+            for ((symbol, venue), _) in &source.prepared.initial_states {
+                if *venue == 1
+                    && supported_symbol(symbol)
+                    && report.selected_symbols.contains(symbol)
+                {
+                    symbols.insert(symbol.clone());
+                }
+            }
+            // Offset strategy inventories can exist even when account net quantity is zero.
+            for ((_, symbol, venue), _) in &source.prepared.initial_strategy_states {
+                if *venue == 1
+                    && supported_symbol(symbol)
+                    && report.selected_symbols.contains(symbol)
+                {
+                    symbols.insert(symbol.clone());
+                }
+            }
+            for fill in &source.prepared.fill_events {
+                if fill.fill_ts_us > report.end_ts_us {
+                    break;
+                }
+                if fill.event.venue_code == 1
+                    && supported_symbol(&fill.event.symbol)
+                    && report.selected_symbols.contains(&fill.event.symbol)
+                {
+                    symbols.insert(fill.event.symbol.clone());
+                }
+            }
+        }
+        symbols.into_iter().collect()
+    }
+
+    pub fn estimate_funding_records(
+        &self,
+        report: &NavTimelineReport,
+        allocation: bool,
+        rates: &BTreeMap<String, Arc<Vec<FundingRate>>>,
+    ) -> Result<Vec<FundingEstimateRecord>> {
+        let mut settlements: Vec<_> = rates
+            .values()
+            .flat_map(|rows| rows.iter())
+            .map(|r| (r.estimate_ts_us(), r))
+            .filter(|(ts, r)| {
+                *ts >= report.start_ts_us
+                    && *ts <= report.end_ts_us
+                    && report.selected_symbols.contains(&r.symbol)
+            })
+            .collect();
+        settlements.sort_by(|a, b| {
+            (a.0, &a.1.symbol, &a.1.rate_type).cmp(&(b.0, &b.1.symbol, &b.1.rate_type))
+        });
+        let Some(first) = settlements.first() else {
+            return Ok(Vec::new());
+        };
+        let mut records = Vec::new();
+        for source_id in &report.selected_source_ids {
+            let source = self
+                .sources
+                .get(&(source_id.clone(), allocation))
+                .context("funding NAV source unavailable")?;
+            let config = self
+                .config
+                .sources
+                .iter()
+                .find(|s| &s.id == source_id)
+                .context("funding source configuration unavailable")?;
+            if config.venue != "binance-futures" {
+                continue;
+            }
+            let checkpoint = source
+                .checkpoints
+                .iter()
+                .rev()
+                .find(|cp| cp.ts_us <= first.0);
+            let (mut state, mut index) = match checkpoint {
+                Some(cp) => (cp.state.clone(), cp.next_fill),
+                None => (initial_timeline_state(config, &source.prepared)?, 0),
+            };
+            state.activate_snapshot_at(first.0);
+            // Quantities alone are sufficient for funding; seed them from NAV's
+            // immutable checkpoint, then apply the remaining validated fills once.
+            let mut quantities: BTreeMap<String, f64> = state
+                .states
+                .iter()
+                .filter(|((_, venue), _)| *venue == 1)
+                .map(|((symbol, _), s)| {
+                    (
+                        symbol.clone(),
+                        s.fifo.long_quantity(1.0) - s.fifo.short_quantity(1.0),
+                    )
+                })
+                .collect();
+            let mut strategies: BTreeMap<(String, String), f64> = state
+                .strategy_states
+                .iter()
+                .filter(|((_, _, venue), _)| *venue == 1)
+                .map(|((strategy, symbol, _), s)| {
+                    (
+                        (strategy.clone(), symbol.clone()),
+                        s.fifo.long_quantity(1.0) - s.fifo.short_quantity(1.0),
+                    )
+                })
+                .collect();
+            let fills = &source.prepared.fill_events;
+            for &(settlement_ts_us, rate) in &settlements {
+                // The operator-selected estimate uses the scheduled hour.
+                // At/after-boundary fills never move the estimated cutoff.
+                while index < fills.len() && fills[index].fill_ts_us < settlement_ts_us {
+                    let fill = &fills[index];
+                    if fill.event.venue_code == 1 {
+                        let signed = match fill.side {
+                            Side::Buy => fill.event.amount_update,
+                            Side::Sell => -fill.event.amount_update,
+                        };
+                        *quantities.entry(fill.event.symbol.clone()).or_default() += signed;
+                        let strategy = strategy_from_from_key(&fill.event.from_key_text);
+                        if !(state.strategy_allocation_active
+                            && is_system_position_close(&strategy))
+                        {
+                            *strategies
+                                .entry((strategy, fill.event.symbol.clone()))
+                                .or_default() += signed;
+                        }
+                    }
+                    index += 1;
+                }
+                if source
+                    .prepared
+                    .snapshot_ts_us
+                    .is_some_and(|ts| ts >= settlement_ts_us)
+                {
+                    // A snapshot is an after-events anchor. Its own settlement
+                    // cannot be reconstructed from the post-anchor fill stream.
+                    anyhow::bail!("资金费结算时刻不晚于仓位快照，无法还原结算前持仓");
+                }
+                let quantity = quantities.get(&rate.symbol).copied().unwrap_or(0.0);
+                let factor = -rate.mark_price * rate.rate;
+                let mut owners = BTreeMap::new();
+                let mut allocated = 0.0;
+                for ((strategy, symbol), qty) in &strategies {
+                    if symbol == &rate.symbol {
+                        allocated += qty;
+                        *owners.entry(strategy.clone()).or_default() += qty * factor;
+                    }
+                }
+                if state.strategy_allocation_active {
+                    *owners.entry(UNALLOCATED_STRATEGY.to_string()).or_default() +=
+                        (quantity - allocated) * factor;
+                }
+                let near_start =
+                    fill_partition_point(fills, |f| f.fill_ts_us < settlement_ts_us - 15_000_000);
+                let near_end =
+                    fill_partition_point(fills, |f| f.fill_ts_us <= settlement_ts_us + 15_000_000);
+                let boundary_fill_count = (near_start..near_end)
+                    .filter(|i| {
+                        let event = &fills[*i].event;
+                        event.venue_code == 1
+                            && event.symbol == rate.symbol
+                            && event.order_type_code != INTERNAL_CROSS_ORDER_TYPE_CODE
+                    })
+                    .count();
+                let income = quantity * factor;
+                anyhow::ensure!(
+                    income.is_finite() && owners.values().all(|v: &f64| v.is_finite()),
+                    "funding quantity/amount overflow"
+                );
+                records.push(FundingEstimateRecord {
+                    source_id: source_id.clone(),
+                    symbol: rate.symbol.clone(),
+                    asset: rate.symbol[rate.symbol.len() - 4..].to_string(),
+                    ts_us: settlement_ts_us,
+                    rate_type: rate.rate_type.clone(),
+                    rate: rate.rate,
+                    mark_price: rate.mark_price,
+                    quantity,
+                    income_quote: income,
+                    strategies: owners,
+                    boundary_fill_count,
+                });
+            }
+        }
+        records.sort_by(|a, b| {
+            (a.ts_us, &a.source_id, &a.symbol, &a.rate_type).cmp(&(
+                b.ts_us,
+                &b.source_id,
+                &b.symbol,
+                &b.rate_type,
+            ))
+        });
+        Ok(records)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::StrategySnapshotPosition;
+
+    const OFFSET: i64 = 3_400_000_000;
+
+    fn fixture() -> (NavTimelineCache, NavTimelineReport) {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../../config/cta-manager.example.toml")).unwrap();
+        config.sources.truncate(1);
+        let source = &mut config.sources[0];
+        source.id = "funding-fixture".into();
+        source.enabled = true;
+        source.maker_fee_rate = Some(0.0);
+        source.taker_fee_rate = Some(0.0);
+        let id = source.id.clone();
+        let position = |strategy: &str, symbol: &str, venue, quantity| StrategySnapshotPosition {
+            strategy_name: strategy.into(),
+            symbol: symbol.into(),
+            venue_code: venue,
+            quantity,
+            reference_price: 100.0,
+        };
+        let strategy = StrategyPositionSnapshot {
+            source_id: id.clone(),
+            snapshot_ts_us: OFFSET + 100_000_000,
+            positions: vec![
+                position("alpha", "BTCUSDT", 1, 3.0),
+                position("beta", "BTCUSDT", 1, -1.0),
+                position("alpha", "BTCUSDC", 1, -4.0),
+                position("alpha", "BTC", 0, 100.0),
+            ],
+        };
+        let snapshot = strategy.account_snapshot().unwrap();
+        let event = |ts, side, qty, owner: &str, kind| {
+            let ts = OFFSET + ts;
+            Arc::new(NavEvent {
+                record_key: format!("{ts}-{owner}"),
+                event_ts_us: ts,
+                create_ts_us: ts,
+                update_ts_us: ts,
+                signal_ts_us: ts,
+                symbol: "BTCUSDT".into(),
+                client_order_id: ts,
+                venue_code: 1,
+                venue: "BinanceFutures".into(),
+                order_type_code: kind,
+                side_code: side,
+                price: 100.0,
+                amount_update: qty,
+                from_key_text: format!("batch_exec:{owner}"),
+                fill_liquidity: None,
+            })
+        };
+        let history = NavSourceHistory {
+            events: vec![
+                event(150_000_000, 1, 1.0, "alpha", 1),
+                event(170_000_000, 1, 1.0, "alpha", INTERNAL_CROSS_ORDER_TYPE_CODE),
+                event(170_000_000, 2, 1.0, "beta", INTERNAL_CROSS_ORDER_TYPE_CODE),
+                event(180_000_000, 2, 1.0, "SYSTEM_POSITION_CLOSE", 1),
+                event(200_000_000, 1, 10.0, "alpha", 1),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let cache = NavTimelineCache::build(
+            config,
+            Arc::new(BTreeMap::from([(id.clone(), snapshot)])),
+            Arc::new(BTreeMap::from([(id.clone(), strategy)])),
+            Arc::new(BTreeMap::from([(id.clone(), history)])),
+        )
+        .unwrap();
+        let report = cache
+            .rebuild(
+                NavTimelineRequest {
+                    start_ts_us: Some(OFFSET + 190_000_000),
+                    end_ts_us: OFFSET + 210_000_000,
+                    selected_source_ids: vec![id],
+                    selected_symbols: Vec::new(),
+                    max_points: 1000,
+                },
+                true,
+            )
+            .unwrap();
+        (cache, report.as_ref().clone())
+    }
+
+    #[test]
+    fn estimates_signed_strategy_inventory_residual_and_usdc_without_spot_contamination() {
+        let (cache, report) = fixture();
+        let symbols = cache.funding_symbols(&report, true);
+        assert_eq!(symbols, vec!["BTCUSDC", "BTCUSDT"]);
+        let rate = |symbol: &str, rate, mark| FundingRate {
+            symbol: symbol.into(),
+            ts_us: OFFSET + 200_000_000,
+            rate,
+            mark_price: mark,
+            rate_type: "Regular".into(),
+        };
+        let rates = BTreeMap::from([
+            (
+                "BTCUSDT".into(),
+                Arc::new(vec![rate("BTCUSDT", 0.001, 100.0)]),
+            ),
+            (
+                "BTCUSDC".into(),
+                Arc::new(vec![rate("BTCUSDC", -0.002, 200.0)]),
+            ),
+        ]);
+        let records = cache
+            .estimate_funding_records(&report, true, &rates)
+            .unwrap();
+        let usdt = records.iter().find(|r| r.symbol == "BTCUSDT").unwrap();
+        assert_eq!(usdt.quantity, 2.0); // Equal-timestamp buy is excluded.
+        assert!((usdt.income_quote + 0.2).abs() < 1e-12);
+        assert!((usdt.strategies["alpha"] + 0.5).abs() < 1e-12);
+        assert!((usdt.strategies["beta"] - 0.2).abs() < 1e-12);
+        assert!((usdt.strategies["__unallocated__"] - 0.1).abs() < 1e-12);
+        assert_eq!(usdt.boundary_fill_count, 1);
+        let usdc = records.iter().find(|r| r.symbol == "BTCUSDC").unwrap();
+        assert_eq!(usdc.asset, "USDC");
+        assert!((usdc.income_quote + 1.6).abs() < 1e-12);
+        for record in &records {
+            assert!((record.strategies.values().sum::<f64>() - record.income_quote).abs() < 1e-12);
+        }
+        let coverage = crate::funding_rates::RateCoverage {
+            rates,
+            ..Default::default()
+        };
+        let estimate = crate::funding_rates::estimate_timeline(&report, &coverage, &records);
+        assert!((estimate.income_quote.unwrap() + 1.8).abs() < 1e-12);
+        assert!(
+            (estimate
+                .strategies
+                .iter()
+                .map(|s| s.income_quote)
+                .sum::<f64>()
+                + 1.8)
+                .abs()
+                < 1e-12
+        );
+        let mut filtered = report.clone();
+        filtered.selected_symbols = vec!["BTCUSDC".into()];
+        let selected = cache
+            .estimate_funding_records(&filtered, true, &coverage.rates)
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+    }
+
+    #[test]
+    fn regular_funding_uses_the_hour_even_when_published_milliseconds_later() {
+        let (cache, mut report) = fixture();
+        let hour = OFFSET + 200_000_000;
+        report.end_ts_us = hour;
+        let rate = FundingRate {
+            symbol: "BTCUSDT".into(),
+            ts_us: hour + 6_000,
+            rate: 0.001,
+            mark_price: 100.0,
+            rate_type: "Regular".into(),
+        };
+        let rates = BTreeMap::from([("BTCUSDT".into(), Arc::new(vec![rate.clone()]))]);
+        let records = cache
+            .estimate_funding_records(&report, true, &rates)
+            .unwrap();
+        assert_eq!(records.len(), 1); // Included in a window ending exactly at the hour.
+        assert_eq!(records[0].ts_us, hour);
+        assert_eq!(records[0].quantity, 2.0); // At-hour buy of 10 is excluded.
+        assert_eq!(records[0].boundary_fill_count, 1);
+        let special = FundingRate {
+            rate_type: "Special".into(),
+            ..rate
+        };
+        assert_eq!(special.estimate_ts_us(), hour + 6_000);
+    }
+
+    #[test]
+    fn account_snapshot_keeps_initial_owner_and_sources_do_not_mix() {
+        let (cache, mut report) = fixture();
+        let rates = BTreeMap::from([(
+            "BTCUSDT".into(),
+            Arc::new(vec![FundingRate {
+                symbol: "BTCUSDT".into(),
+                ts_us: OFFSET + 200_000_000,
+                rate: 0.001,
+                mark_price: 100.0,
+                rate_type: "Regular".into(),
+            }]),
+        )]);
+        let records = cache
+            .estimate_funding_records(&report, false, &rates)
+            .unwrap();
+        assert!((records[0].strategies["__initial_position__"] + 0.2).abs() < 1e-12);
+        assert!((records[0].income_quote + 0.2).abs() < 1e-12);
+        report.selected_source_ids = vec!["another-account".into()];
+        assert!(
+            cache
+                .estimate_funding_records(&report, false, &rates)
+                .is_err()
+        );
+    }
+}

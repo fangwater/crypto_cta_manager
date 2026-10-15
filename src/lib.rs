@@ -10,6 +10,7 @@ pub mod exchange_leverage;
 mod exec_routing;
 pub mod execution_slippage;
 pub mod funding;
+pub mod funding_rates;
 pub mod kline;
 pub mod manager_db;
 pub mod market_rules;

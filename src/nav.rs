@@ -18,6 +18,7 @@ use crate::rocks_source;
 use crate::snapshot::{PositionSnapshot, StrategyPositionSnapshot};
 
 mod fill_recovery;
+mod funding_estimate;
 
 pub type VenueMarkOverrides = BTreeMap<(String, i16), f64>;
 pub type SourceMarkOverrides = BTreeMap<String, VenueMarkOverrides>;
@@ -3907,6 +3908,7 @@ mod tests {
             monitor: crate::config::MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
+            funding_rates: Default::default(),
             sources,
         }
     }
@@ -5484,6 +5486,7 @@ mod tests {
             monitor: crate::config::MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
+            funding_rates: Default::default(),
             sources: vec![source],
         };
 

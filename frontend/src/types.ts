@@ -295,6 +295,7 @@ export interface TimelineSnapshot {
   theoretical: TheoreticalNavTimeline
   execution_slippage?: ExecutionSlippage
   funding?: FundingTimeline
+  estimated_funding?: FundingEstimate
 }
 
 export interface ExecutionSlippage {
@@ -558,7 +559,7 @@ export interface HealthResponse {
 
 export type FeeMode = 'after' | 'before'
 export type ChartMode = 'nav' | 'exposure'
-export type TimelineChartMode = 'portfolio' | 'symbols' | 'strategies'
+export type TimelineChartMode = 'portfolio' | 'symbols' | 'strategies' | 'strategyFunding'
 export type ActualNavSeriesKey =
   | 'nav_change_before_fee_quote'
   | 'nav_change_after_fee_quote'
@@ -602,4 +603,39 @@ export type AccountConfiguration = { mode: 'independent' } | {
   mode: 'follow'
   virtual_id: string
   multiplier: number
+}
+
+export interface StrategyFundingEstimate {
+  strategy: string
+  income_quote: number
+  income_by_asset: Record<string, number>
+  total_nav_before_fee_quote: number
+  total_nav_after_fee_quote: number
+  points: FundingNavPoint[]
+}
+
+export interface FundingEstimate {
+  reconciliation: {
+    compared_settlements: number
+    actual_record_count: number
+    unobserved_settlements: number
+    unmatched_actual_records: number
+    estimated_income_quote: number
+    actual_income_quote: number
+    difference_quote: number
+    absolute_error_quote: number
+    max_error_quote: number
+    mismatch_count: number
+  } | null
+  loading: boolean
+  unavailable_reason: string | null
+  synced_through_ts_us: number | null
+  income_quote: number | null
+  income_by_asset: Record<string, number>
+  total_nav_before_fee_quote: number | null
+  total_nav_after_fee_quote: number | null
+  settlement_count: number
+  boundary_fill_count: number
+  points: FundingNavPoint[]
+  strategies: StrategyFundingEstimate[]
 }

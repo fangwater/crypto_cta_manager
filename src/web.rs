@@ -146,6 +146,7 @@ pub struct TimelineSnapshot {
     pub theoretical: crate::theoretical_nav::TheoreticalNavTimeline,
     pub execution_slippage: crate::execution_slippage::ExecutionSlippage,
     pub funding: crate::funding::FundingTimeline,
+    pub estimated_funding: crate::funding_rates::FundingEstimate,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -222,6 +223,7 @@ struct WebState {
     auto_earn: AutoEarnHub,
     bnb: crate::bnb_auto::BnbManager,
     funding: crate::funding::FundingHub,
+    funding_rates: crate::funding_rates::FundingRateCache,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -486,6 +488,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .collect::<BTreeSet<_>>();
     let funding = crate::funding::FundingHub::new(&config);
     funding.load(&pool, &config).await?;
+    let funding_rates = crate::funding_rates::FundingRateCache::new(config.funding_rates.clone())?;
+    funding_rates.spawn_refresh();
     let state = WebState {
         cache,
         dashboard_refresh,
@@ -506,6 +510,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         auto_earn: auto_earn.clone(),
         bnb: bnb.clone(),
         funding,
+        funding_rates,
     };
     spawn_funding_collectors(&state);
 
@@ -1557,6 +1562,7 @@ async fn rebuild_timeline_snapshot(
     };
     let aligned_request = request.clone();
     let aligned_timelines = nav_timelines.clone();
+    let funding_timelines = nav_timelines.clone();
     let report = tokio::task::spawn_blocking(move || {
         nav_timelines.rebuild(request, use_strategy_allocation)
     })
@@ -1623,6 +1629,57 @@ async fn rebuild_timeline_snapshot(
                 .unwrap_or_else(|| "完整理论净值不可用；请选择全部币种及最近 1–30 天".into()),
         )
     };
+    let estimate_report = report.clone();
+    let public_rates = state.funding_rates.clone();
+    let supported = report.selected_source_ids.iter().all(|id| {
+        state
+            .config
+            .sources
+            .iter()
+            .any(|s| &s.id == id && s.venue == "binance-futures")
+    });
+    let estimated_funding = if supported {
+        let (cache, estimate_report, symbols) = tokio::task::spawn_blocking(move || {
+            let symbols =
+                funding_timelines.funding_symbols(&estimate_report, use_strategy_allocation);
+            (funding_timelines, estimate_report, symbols)
+        })
+        .await
+        .context("funding symbol projection failed")?;
+        let coverage = public_rates.request(&symbols, report.start_ts_us, report.end_ts_us);
+        let factual_funding = state.funding.clone();
+        tokio::task::spawn_blocking(move || {
+            let records = if coverage.unavailable_reason.is_none() {
+                cache.estimate_funding_records(
+                    &estimate_report,
+                    use_strategy_allocation,
+                    &coverage.rates,
+                )?
+            } else {
+                Vec::new()
+            };
+            let mut estimate =
+                crate::funding_rates::estimate_timeline(&estimate_report, &coverage, &records);
+            if estimate.income_quote.is_some() {
+                estimate.reconciliation =
+                    factual_funding.reconcile_estimates(&estimate_report, &records);
+            }
+            Ok::<_, anyhow::Error>(estimate)
+        })
+        .await
+        .context("funding estimate task failed")?
+        .unwrap_or_else(|error| crate::funding_rates::FundingEstimate {
+            unavailable_reason: Some(error.to_string()),
+            ..Default::default()
+        })
+    } else {
+        crate::funding_rates::FundingEstimate {
+            unavailable_reason: Some(
+                "公开资金费估算目前仅支持 Binance USDT / USDC 永续合约".into(),
+            ),
+            ..Default::default()
+        }
+    };
     let funding = if use_strategy_allocation {
         crate::funding::FundingTimeline::default()
     } else {
@@ -1643,6 +1700,7 @@ async fn rebuild_timeline_snapshot(
         theoretical,
         execution_slippage,
         funding,
+        estimated_funding,
     }))
 }
 
@@ -4193,6 +4251,18 @@ const TIMELINE_ARROW_SCHEMA_VERSION: &str = "1";
 fn timeline_arrow_metadata(snapshot: &TimelineSnapshot, dataset: &str) -> HashMap<String, String> {
     HashMap::from([
         ("compression".to_string(), "zstd".to_string()),
+        (
+            "estimated_funding".to_string(),
+            serde_json::json!({
+                "loading": snapshot.estimated_funding.loading,
+                "unavailable_reason": snapshot.estimated_funding.unavailable_reason,
+                "synced_through_ts_us": snapshot.estimated_funding.synced_through_ts_us,
+                "income_quote": snapshot.estimated_funding.income_quote,
+                "income_by_asset": snapshot.estimated_funding.income_by_asset,
+                "boundary_fill_count": snapshot.estimated_funding.boundary_fill_count,
+            })
+            .to_string(),
+        ),
         ("dataset".to_string(), dataset.to_string()),
         (
             "execution_slippage".to_string(),
@@ -4351,6 +4421,37 @@ fn arrow_write_options() -> Result<IpcWriteOptions> {
         .map_err(Into::into)
 }
 
+fn estimated_funding_fields() -> [Field; 3] {
+    [
+        "estimated_funding_income_quote",
+        "estimated_total_nav_before_fee_quote",
+        "estimated_total_nav_after_fee_quote",
+    ]
+    .map(|name| Field::new(name, DataType::Float64, true))
+}
+
+fn estimated_funding_arrays<'a>(
+    points: impl Iterator<Item = Option<&'a crate::funding::FundingNavPoint>>,
+) -> Vec<ArrayRef> {
+    let points: Vec<_> = points.collect();
+    (0..3)
+        .map(|column| {
+            Arc::new(Float64Array::from(
+                points
+                    .iter()
+                    .map(|point| {
+                        point.map(|p| match column {
+                            0 => p.funding_income_quote,
+                            1 => p.total_nav_before_fee_quote,
+                            _ => p.total_nav_after_fee_quote,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef
+        })
+        .collect()
+}
+
 fn encode_account_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>> {
     let mut fields = vec![Field::new("ts_us", DataType::Int64, false)];
     fields.extend(timeline_totals_fields());
@@ -4359,6 +4460,7 @@ fn encode_account_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>>
         Field::new("total_nav_before_fee_quote", DataType::Float64, false),
         Field::new("total_nav_after_fee_quote", DataType::Float64, false),
     ]);
+    fields.extend(estimated_funding_fields());
     let schema = Arc::new(Schema::new_with_metadata(
         fields,
         timeline_arrow_metadata(snapshot, "account_pnl"),
@@ -4401,6 +4503,15 @@ fn encode_account_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>>
                         .collect::<Vec<_>>(),
                 )));
             }
+            let estimated: BTreeMap<_, _> = snapshot
+                .estimated_funding
+                .points
+                .iter()
+                .map(|p| (p.ts_us, p))
+                .collect();
+            columns.extend(estimated_funding_arrays(
+                rows.iter().map(|row| estimated.get(&row.ts_us).copied()),
+            ));
             writer.write(&RecordBatch::try_new(Arc::clone(&schema), columns)?)?;
         }
         writer.finish()?;
@@ -4414,6 +4525,7 @@ fn encode_strategy_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>
         Field::new("ts_us", DataType::Int64, false),
     ];
     fields.extend(timeline_totals_fields());
+    fields.extend(estimated_funding_fields());
     let mut metadata = timeline_arrow_metadata(snapshot, "strategy_pnl");
     metadata.insert(
         "strategy_count".to_string(),
@@ -4432,6 +4544,17 @@ fn encode_strategy_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>
                 .map(move |point| (strategy.strategy.as_str(), point))
         })
         .collect::<Vec<_>>();
+    let estimated: BTreeMap<_, _> = snapshot
+        .estimated_funding
+        .strategies
+        .iter()
+        .flat_map(|strategy| {
+            strategy
+                .points
+                .iter()
+                .map(move |p| ((strategy.strategy.as_str(), p.ts_us), p))
+        })
+        .collect();
     let mut payload = Vec::new();
     {
         let mut writer = StreamWriter::try_new_with_options(
@@ -4457,6 +4580,9 @@ fn encode_strategy_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>
             columns.extend(timeline_totals_arrays(
                 batch_rows.iter().map(|(_, point)| &point.totals),
             ));
+            columns.extend(estimated_funding_arrays(batch_rows.iter().map(
+                |(strategy, point)| estimated.get(&(*strategy, point.ts_us)).copied(),
+            )));
             writer.write(&RecordBatch::try_new(Arc::clone(&schema), columns)?)?;
         }
         writer.finish()?;
@@ -5041,6 +5167,61 @@ mod tests {
             theoretical: crate::theoretical_nav::TheoreticalNavTimeline::default(),
             execution_slippage: Default::default(),
             funding: Default::default(),
+            estimated_funding: Default::default(),
+        }
+    }
+
+    #[test]
+    fn estimated_funding_arrow_is_nullable_and_matches_json_strategy_totals() {
+        use arrow_array::Array;
+        let mut snapshot = timeline_snapshot_for_arrow();
+        let payload = encode_strategy_timeline_arrow(&snapshot).unwrap();
+        let mut reader = StreamReader::try_new_buffered(Cursor::new(payload), None).unwrap();
+        let rows = reader.next().unwrap().unwrap();
+        assert_eq!(
+            rows.column_by_name("estimated_funding_income_quote")
+                .unwrap()
+                .null_count(),
+            2
+        );
+        let point = crate::funding::FundingNavPoint {
+            ts_us: 2_000,
+            funding_income_quote: -0.2,
+            total_nav_before_fee_quote: 8.55,
+            total_nav_after_fee_quote: 7.8,
+        };
+        snapshot.estimated_funding.income_quote = Some(-0.2);
+        snapshot.estimated_funding.points = vec![point.clone()];
+        snapshot.estimated_funding.strategies =
+            vec![crate::funding_rates::StrategyFundingEstimate {
+                strategy: "cta_alpha".into(),
+                income_quote: -0.2,
+                income_by_asset: BTreeMap::from([("USDC".into(), -0.2)]),
+                total_nav_before_fee_quote: 8.55,
+                total_nav_after_fee_quote: 7.8,
+                points: vec![point],
+            }];
+        for payload in [
+            encode_strategy_timeline_arrow(&snapshot).unwrap(),
+            encode_account_timeline_arrow(&snapshot).unwrap(),
+        ] {
+            let mut reader = StreamReader::try_new_buffered(Cursor::new(payload), None).unwrap();
+            let rows = reader.next().unwrap().unwrap();
+            let income = rows
+                .column_by_name("estimated_funding_income_quote")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert!(income.is_null(0));
+            assert_eq!(income.value(1), -0.2);
+            let total = rows
+                .column_by_name("estimated_total_nav_after_fee_quote")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(total.value(1), 7.8);
         }
     }
 
@@ -5209,6 +5390,7 @@ mod tests {
             monitor: crate::config::MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
+            funding_rates: Default::default(),
             sources: vec![crate::config::SourceConfig {
                 id: "binance_exec_trade01".into(),
                 account: "trade01".into(),
@@ -5294,6 +5476,7 @@ mod tests {
             monitor: crate::config::MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
+            funding_rates: Default::default(),
             sources: vec![source],
         };
         let sources = resolve_sources(&config, &[]).unwrap();
