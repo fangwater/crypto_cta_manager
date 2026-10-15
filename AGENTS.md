@@ -247,6 +247,16 @@ collection-time deviation only in documentation, never in page notices.
 Do not infer settlement delays or allocate factual
 income into strategies to force reconciliation.
 
+Public funding estimates were deployed to jp-meta on 2026-10-15 as release
+`20261015T063658Z`, runtime/frontend commit `4a216a9`. The deployment uses the
+default public cache configuration; host TOML and factual collection settings
+are unchanged. Ten fixed account/strategy queries retained identical order NAV;
+estimated funding sums and curve endpoints passed, including USDC. All 187
+protected process identities, 29 configuration hashes, four snapshot tables,
+and Manager CPU 24 were preserved. See
+`docs/jp_meta_funding_estimate_20261015.md` for verification and cold target-index
+rebuild status. el01 has not received this public-estimation release.
+
 Exchange-owned forced-close fills are order events, not account-ledger charges.
 Exec must persist liquidation, ADL, delisting settlement, and contract-delivery
 fills into `uniform_orders` with their factual side, price, base quantity, venue,

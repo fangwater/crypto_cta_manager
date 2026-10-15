@@ -1,6 +1,8 @@
 # 公开 Funding 估算与 RapidX 差异核对
 
-2026-10-15，代码已完成，尚未发布到生产 Manager。公开费率固定 `limit=1000`，
+2026-10-15，代码已完成，并以 `4a216a9` 发布到 jp-meta，release 为
+`20261015T063658Z`；el01 尚未发布。见 [发布验证](jp_meta_funding_estimate_20261015.md)。
+公开费率固定 `limit=1000`，
 支持 USDT/USDC，跨账户共享最近 30 天的动态内存缓存，默认六币、每 30 分钟刷新。
 策略资金费来自 NAV 同一份快照和已校验实际成交，不需要开启签名账单采集。
 实现与接口说明见 [funding_and_slippage.md](funding_and_slippage.md)。
@@ -131,4 +133,4 @@ python3 artifacts/funding_estimate_20261015/analyze.py
 ```
 
 输出 `analysis.json`，复核 31 组共同价格和两笔大差异的精确乘式。诊断工具不
-写数据库、不改变 funding 开关。公开估算功能尚未部署；实际账单采集继续运行。
+写数据库、不改变 funding 开关。公开估算功能已部署到 jp-meta；实际账单采集继续运行。
