@@ -1,0 +1,8 @@
+{
+  "kind": "frontend_release",
+  "release": "web-releases/20261014T223225Z",
+  "previous_release": "web-releases/20261014T220725Z",
+  "files_verified": 4,
+  "manager_pid_unchanged": true,
+  "runtime_binary_sha256": "3e3a015b716736f8416d2ff0ceed756531d0e148525551bf405877c084676b73"
+}

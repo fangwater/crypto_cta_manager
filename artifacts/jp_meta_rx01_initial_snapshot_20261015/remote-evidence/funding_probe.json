@@ -1,0 +1,113 @@
+[
+  {
+    "source_id": "binance_exec_trade05",
+    "local_ip": "172.31.35.228",
+    "public_ip": "13.115.227.29",
+    "http_status": 200,
+    "total": 19,
+    "empty_symbols": 0,
+    "sample": [
+      {
+        "statementId": "236277959307034949",
+        "coin": "USDT",
+        "sym": "BINANCE_PERP_DASH_USDT",
+        "statementType": "FUNDING_FEE",
+        "businessType": "PERP",
+        "deltaAmount": "-0.0000034341990770408",
+        "createAt": 1792022655431
+      },
+      {
+        "statementId": "236277938314543429",
+        "coin": "USDT",
+        "sym": "BINANCE_PERP_AAVE_USDT",
+        "statementType": "FUNDING_FEE",
+        "businessType": "PERP",
+        "deltaAmount": "-0.00107920257338528",
+        "createAt": 1792022650426
+      },
+      {
+        "statementId": "236277938314543685",
+        "coin": "USDT",
+        "sym": "BINANCE_PERP_FIL_USDT",
+        "statementType": "FUNDING_FEE",
+        "businessType": "PERP",
+        "deltaAmount": "-0.0000027252512",
+        "createAt": 1792022650426
+      }
+    ]
+  },
+  {
+    "source_id": "binance_exec_trade06",
+    "local_ip": "172.31.35.228",
+    "public_ip": "13.115.227.29",
+    "http_status": 200,
+    "total": 50,
+    "empty_symbols": 0,
+    "sample": [
+      {
+        "statementId": "236277959428669509",
+        "coin": "USDT",
+        "sym": "BINANCE_PERP_DASH_USDT",
+        "statementType": "FUNDING_FEE",
+        "businessType": "PERP",
+        "deltaAmount": "-0.0209348775736407168",
+        "createAt": 1792022655460
+      },
+      {
+        "statementId": "236277959428669765",
+        "coin": "USDT",
+        "sym": "BINANCE_PERP_DOGE_USDT",
+        "statementType": "FUNDING_FEE",
+        "businessType": "PERP",
+        "deltaAmount": "-0.007098877231875",
+        "createAt": 1792022655460
+      },
+      {
+        "statementId": "236277938511718981",
+        "coin": "USDT",
+        "sym": "BINANCE_PERP_ETH_USDT",
+        "statementType": "FUNDING_FEE",
+        "businessType": "PERP",
+        "deltaAmount": "0.0100785344781",
+        "createAt": 1792022650473
+      }
+    ]
+  },
+  {
+    "source_id": "binance_exec_trade07",
+    "local_ip": "172.31.35.228",
+    "public_ip": "13.115.227.29",
+    "http_status": 200,
+    "total": 14,
+    "empty_symbols": 0,
+    "sample": [
+      {
+        "statementId": "236277980354054469",
+        "coin": "USDT",
+        "sym": "BINANCE_PERP_BTC_USDT",
+        "statementType": "FUNDING_FEE",
+        "businessType": "PERP",
+        "deltaAmount": "-0.003376529355",
+        "createAt": 1792022660449
+      },
+      {
+        "statementId": "236277938398442309",
+        "coin": "USDT",
+        "sym": "BINANCE_PERP_ETH_USDT",
+        "statementType": "FUNDING_FEE",
+        "businessType": "PERP",
+        "deltaAmount": "-0.0001976183231",
+        "createAt": 1792022650446
+      },
+      {
+        "statementId": "236277938398442821",
+        "coin": "USDT",
+        "sym": "BINANCE_PERP_ZEC_USDT",
+        "statementType": "FUNDING_FEE",
+        "businessType": "PERP",
+        "deltaAmount": "-0.0001502431635551778",
+        "createAt": 1792022650446
+      }
+    ]
+  }
+]

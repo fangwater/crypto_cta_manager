@@ -28,6 +28,8 @@ pub struct AppConfig {
     pub monitor: MonitorConfig,
     #[serde(default)]
     pub treasury: TreasuryConfig,
+    #[serde(default)]
+    pub funding: FundingConfig,
     pub sources: Vec<SourceConfig>,
 }
 
@@ -193,6 +195,34 @@ pub struct SourceConfig {
     /// Optional Exec env.sh used only to read exchange API credentials.
     #[serde(default)]
     pub env_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FundingConfig {
+    /// Dedicated egress, except explicitly listed RapidX source exceptions.
+    pub local_ip: Option<IpAddr>,
+    pub public_ip: Option<IpAddr>,
+    pub trade_engine_configs: Vec<PathBuf>,
+    pub forbidden_public_ips: Vec<IpAddr>,
+    /// Explicit per-source operator exception: RapidX statements may use the
+    /// account's fixed trading IP. Native accounts keep the dedicated egress.
+    pub rapidx_trading_ip_sources: Vec<String>,
+    /// Secret is read only from this host environment variable.
+    pub enable_token_env: String,
+}
+
+impl Default for FundingConfig {
+    fn default() -> Self {
+        Self {
+            local_ip: None,
+            public_ip: None,
+            trade_engine_configs: Vec::new(),
+            forbidden_public_ips: Vec::new(),
+            rapidx_trading_ip_sources: Vec::new(),
+            enable_token_env: "CTA_FUNDING_ENABLE_TOKEN".into(),
+        }
+    }
 }
 
 impl Default for DashboardConfig {
@@ -473,6 +503,50 @@ impl AppConfig {
                 "kline.rocksdb_path must be absolute: {}",
                 self.kline.rocksdb_path.display()
             );
+        }
+        if self.funding.enable_token_env.trim().is_empty() {
+            bail!("funding.enable_token_env must not be empty");
+        }
+        if self.funding.local_ip.is_some()
+            || self.funding.public_ip.is_some()
+            || !self.funding.trade_engine_configs.is_empty()
+            || !self.funding.forbidden_public_ips.is_empty()
+            || !self.funding.rapidx_trading_ip_sources.is_empty()
+        {
+            if self
+                .funding
+                .local_ip
+                .is_none_or(|ip| ip.is_unspecified() || ip.is_loopback())
+            {
+                bail!("funding.local_ip must explicitly select a fixed IP");
+            }
+            if self
+                .funding
+                .public_ip
+                .is_none_or(|ip| ip.is_unspecified() || ip.is_loopback())
+                || self.funding.trade_engine_configs.is_empty()
+                || self
+                    .funding
+                    .trade_engine_configs
+                    .iter()
+                    .any(|path| !path.is_absolute())
+            {
+                bail!(
+                    "funding requires public_ip and absolute trade_engine_configs for all live accounts"
+                );
+            }
+        }
+        let mut funding_exceptions = std::collections::BTreeSet::new();
+        for source_id in &self.funding.rapidx_trading_ip_sources {
+            if !funding_exceptions.insert(source_id)
+                || !self.sources.iter().any(|source| {
+                    source.enabled && source.id == *source_id && source.venue == "binance-futures"
+                })
+            {
+                bail!(
+                    "funding RapidX trading-IP exception requires a unique enabled Binance USD-M source"
+                );
+            }
         }
         for source in &self.sources {
             if source.enabled && source.rocksdb_path == self.kline.rocksdb_path {
@@ -785,6 +859,30 @@ const fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn funding_requires_complete_fixed_egress_configuration() {
+        let mut config = AppConfig::load(Path::new("config/cta-manager.example.toml")).unwrap();
+        assert!(config.funding.local_ip.is_none());
+        config.funding.public_ip = Some("198.18.0.3".parse().unwrap());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("funding.local_ip")
+        );
+        config.funding.local_ip = config.funding.public_ip;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("public_ip")
+        );
+        config.funding.trade_engine_configs = vec!["/account/trade_engine.toml".into()];
+        config.validate().unwrap();
+        assert!(toml::from_str::<FundingConfig>("enabled = true").is_err());
+    }
     use super::*;
 
     #[test]
@@ -816,6 +914,7 @@ mod tests {
             kline: KlineConfig::default(),
             monitor: MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
+            funding: Default::default(),
             sources,
         }
     }

@@ -27,11 +27,14 @@ import { AdminPage } from './pages/AdminPage'
 import { AutoEarnPage } from './pages/AutoEarnPage'
 import { AuthGate } from './components/AuthGate'
 import { normalizePath, readSourceId, routes } from './lib/routes'
+import { retainedQuickRangeStartMs } from './lib/navRange'
 import {
   NavTimelineChart,
   navSeriesMeta,
 } from './components/NavTimelineChart'
 import { PositionLeverageChart } from './components/PositionLeverageChart'
+import { ExecutionSlippagePanel } from './components/ExecutionSlippagePanel'
+import { FundingPanel } from './components/FundingPanel'
 import {
   feeBps,
   formatUniMmr,
@@ -78,6 +81,9 @@ const seriesOptions: NavSeriesKey[] = [
   'realized_pnl_before_fee_quote',
   'floating_pnl_quote',
   'estimated_trading_fee_quote',
+  'funding_income_quote',
+  'total_nav_before_fee_quote',
+  'total_nav_after_fee_quote',
 ]
 
 const ZERO_TOTALS: NavTotals = {
@@ -158,6 +164,13 @@ function initialScope() {
   return readSourceId()
 }
 
+function defaultPnlMode(dashboard: DashboardSnapshot, sourceId: string): PnlMode {
+  const funding = dashboard.accounts?.find((account) => account.source_id === sourceId)?.funding
+  return funding && (funding.enabled || funding.start_ts_us != null)
+    ? 'account'
+    : 'strategy'
+}
+
 export default function App() {
   return <AuthGate><AuthenticatedApp /></AuthGate>
 }
@@ -201,6 +214,8 @@ function NavPage() {
     'theoretical_nav_before_fee_quote',
     'theoretical_nav_after_fee_quote',
     'floating_pnl_quote',
+    'funding_income_quote',
+    'total_nav_after_fee_quote',
   ])
   const [selectedSymbols, setSelectedSymbols] = useState<string[] | null>(null)
   const [selectedStrategies, setSelectedStrategies] = useState<string[] | null>(null)
@@ -210,6 +225,7 @@ function NavPage() {
   const [startMs, setStartMs] = useState<number | null>(null)
   const [endMs, setEndMs] = useState<number | null>(null)
   const [activeRange, setActiveRange] = useState<QuickRange | null>(DEFAULT_QUICK_RANGE)
+  const [retainedRangeAdjusted, setRetainedRangeAdjusted] = useState(false)
   const [loading, setLoading] = useState(true)
   const [timelineLoading, setTimelineLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -254,16 +270,18 @@ function NavPage() {
   useEffect(() => {
     if (!dashboard || initialized.current || !scopeReady) return
     initialized.current = true
+    const nextMode = defaultPnlMode(dashboard, scope)
+    setPnlMode(nextMode)
     const nextEnd = Date.now()
     const nextStart = Math.max(
-      scopeStartMs(dashboard, scope, nextEnd, pnlMode),
+      scopeStartMs(dashboard, scope, nextEnd, nextMode),
       nextEnd - DAY_MS,
     )
     setStartInput(toDatetimeLocal(nextStart))
     setEndInput(toDatetimeLocal(nextEnd))
     setStartMs(nextStart)
     setEndMs(nextEnd)
-  }, [dashboard, pnlMode, scope, scopeReady])
+  }, [dashboard, scope, scopeReady])
 
   useEffect(() => {
     if (!dashboard) return
@@ -272,6 +290,8 @@ function NavPage() {
       : dashboard.report.sources[0]?.source_id ?? ''
     if (nextScope !== scope) {
       setScope(nextScope)
+      setPnlMode(defaultPnlMode(dashboard, nextScope))
+      setChartMode('portfolio')
       setSelectedSymbols(null)
       setSelectedStrategies(null)
       setTimeline(null)
@@ -314,6 +334,21 @@ function NavPage() {
     })
       .then((next) => {
         if (controller.signal.aborted) return
+        const nextStart = next.theoretical.points.length > 0
+          ? startMs
+          : retainedQuickRangeStartMs(
+              activeRange,
+              startMs,
+              endMs,
+              next.theoretical.available_from_us,
+              next.theoretical.execution_window_secs,
+            )
+        if (nextStart !== startMs) {
+          setRetainedRangeAdjusted(true)
+          setStartInput(toDatetimeLocal(nextStart))
+          setStartMs(nextStart)
+          return
+        }
         setTimeline(next)
         if (!includeTheoretical && next.theoretical.loading) void load(true)
         else if (next.theoretical.loading) retryTimer = window.setTimeout(() => void load(true), 10_000)
@@ -330,7 +365,7 @@ function NavPage() {
       controller.abort()
       window.clearTimeout(retryTimer)
     }
-  }, [endMs, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision])
+  }, [activeRange, endMs, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision])
 
   const selectedSource = useMemo(
     () => dashboard?.report.sources.find((source) => source.source_id === scope),
@@ -380,14 +415,18 @@ function NavPage() {
   )
   const noSymbolsSelected = selectedSymbols?.length === 0
   const noStrategiesSelected = selectedStrategies?.length === 0
-  const portfolioSeriesOptions =
+  const hasFunding = pnlMode === 'account' && Boolean(timeline?.funding && (timeline.funding.summary.enabled || timeline.funding.summary.start_ts_us != null))
+  const fundingSeriesVisible = (key: NavSeriesKey) => hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_'))
+  const portfolioSeriesOptions = (
     selectedSymbols === null
       ? seriesOptions
       : seriesOptions.filter((key) => !key.startsWith('theoretical_'))
-  const portfolioVisibleSeries =
+  ).filter(fundingSeriesVisible)
+  const portfolioVisibleSeries = (
     selectedSymbols === null
       ? visibleSeries
       : visibleSeries.filter((key) => !key.startsWith('theoretical_'))
+  ).filter(fundingSeriesVisible)
   const totals = noSymbolsSelected
     ? ZERO_TOTALS
     : (timeline?.report.summary ?? null)
@@ -433,6 +472,7 @@ function NavPage() {
       return
     }
     setActiveRange(null)
+    setRetainedRangeAdjusted(false)
     setStartMs(nextStart)
     setEndMs(nextEnd)
   }
@@ -448,11 +488,19 @@ function NavPage() {
     const nextEnd = endOverride ?? (Number.isFinite(parsedEnd) ? parsedEnd : Date.now())
     const earliest = scopeStartMs(dashboard, nextScope, nextEnd, mode)
     const days = rangeOptions.find((option) => option.key === key)?.days ?? null
-    const nextStart =
+    const requestedStart =
       days === null
         ? earliest
         : Math.max(earliest, nextEnd - days * DAY_MS)
+    const nextStart = retainedQuickRangeStartMs(
+      key,
+      requestedStart,
+      nextEnd,
+      timeline?.theoretical.available_from_us ?? null,
+      timeline?.theoretical.execution_window_secs ?? 0,
+    )
     setActiveRange(key)
+    setRetainedRangeAdjusted(nextStart !== requestedStart)
     setStartInput(toDatetimeLocal(nextStart))
     setEndInput(toDatetimeLocal(nextEnd))
     setStartMs(nextStart)
@@ -460,19 +508,23 @@ function NavPage() {
   }
 
   function selectScope(nextScope: string) {
+    if (nextScope === scope || !dashboard) return
+    const nextMode = defaultPnlMode(dashboard, nextScope)
     setScope(nextScope)
+    setPnlMode(nextMode)
+    setChartMode('portfolio')
     const url = new URL(window.location.href)
     url.searchParams.set('source', nextScope)
     window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
     setSelectedSymbols(null)
     setSelectedStrategies(null)
     setTimeline(null)
-    if (!dashboard || endMs === null) return
+    if (endMs === null) return
     if (activeRange) {
-      applyQuickRange(activeRange, nextScope)
+      applyQuickRange(activeRange, nextScope, undefined, nextMode)
       return
     }
-    const earliest = scopeStartMs(dashboard, nextScope, endMs, pnlMode)
+    const earliest = scopeStartMs(dashboard, nextScope, endMs, nextMode)
     if (startMs === null || startMs < earliest) {
       setStartInput(toDatetimeLocal(earliest))
       setStartMs(earliest)
@@ -482,6 +534,7 @@ function NavPage() {
   function selectPnlMode(nextMode: PnlMode) {
     if (nextMode === pnlMode) return
     setPnlMode(nextMode)
+    setTimeline(null)
     setSelectedStrategies(null)
     setChartMode(nextMode === 'account' ? 'portfolio' : 'strategies')
     if (!dashboard) return
@@ -631,10 +684,16 @@ function NavPage() {
               className={pnlMode === 'account' ? 'is-active' : ''}
               onClick={() => selectPnlMode('account')}
             >
-              账户 PnL
+              账户综合 PnL
             </button>
           </div>
         </section>
+
+        {retainedRangeAdjusted && startMs != null && (
+          <div className="chart-notice" role="status">
+            30D 已按当前可查询范围对齐，实际与理论净值均从 {timestampUs(startMs * 1_000)} 计算。
+          </div>
+        )}
 
         <section className="overview" aria-labelledby="overview-title">
           <div className="section-heading">
@@ -678,11 +737,13 @@ function NavPage() {
             ))}
           </div>
 
-          <div className="summary-strip">
+          <div className={`summary-strip${hasFunding ? ' summary-strip--funding' : ''}`}>
             <SummaryItem
               icon={<Sigma size={18} />}
-              label="区间净值变化"
-              value={totals ? navValue(totals, feeMode) : null}
+              label={hasFunding ? '区间总体净值变化（含 funding）' : '区间净值变化'}
+              value={noSymbolsSelected ? 0 : hasFunding && timeline?.funding
+                ? (feeMode === 'after' ? timeline.funding.total_nav_after_fee_quote : timeline.funding.total_nav_before_fee_quote)
+                : totals ? navValue(totals, feeMode) : null}
               signed
             />
             <SummaryItem
@@ -707,10 +768,20 @@ function NavPage() {
               label="区间成交额"
               value={totals?.volume_quote ?? null}
             />
+            {hasFunding && (
+              <SummaryItem
+                icon={<Coins size={18} />}
+                label="区间 Funding（资金费）"
+                value={noSymbolsSelected ? 0 : timeline?.funding?.summary.income_quote ?? null}
+                signed
+              />
+            )}
           </div>
         </section>
 
         <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />
+        {!noSymbolsSelected && <ExecutionSlippagePanel value={timeline?.execution_slippage} />}
+        {pnlMode === 'account' && !noSymbolsSelected && <FundingPanel value={timeline?.funding} />}
 
         <section className="chart-section" aria-labelledby="chart-title">
           <div className="panel-heading pnl-chart-header">
@@ -779,6 +850,7 @@ function NavPage() {
                 <NavTimelineChart
                   points={timeline.report.points}
                   theoreticalPoints={timeline.theoretical.points}
+                  fundingPoints={timeline.funding?.points}
                   symbolPoints={timeline.report.symbol_points}
                   strategyPoints={visibleStrategyPoints}
                   visibleSeries={portfolioVisibleSeries}

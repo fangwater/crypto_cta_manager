@@ -1,0 +1,46 @@
+{
+  "release": "20261014T093305Z",
+  "target": "el01",
+  "git_head": "0502f40fec1d22d3c160828156c3bea6ea02ffae",
+  "working_tree_dirty": true,
+  "source_patch_sha256": "47269ec2655d17307aa473db5e048b1bbd9f64e5371e1be8286215ae279357f6",
+  "source_patch_files": [
+    "AGENTS.md",
+    "README.md",
+    "src/web.rs",
+    "frontend/src/types.ts",
+    "frontend/src/pages/config/PositionStrategyPage.tsx",
+    "frontend/src/pages/DocsPage.tsx"
+  ],
+  "previous_cta_web_sha256": "b898c84b7df3a33585ad0a765365cc6ba0a2e83d1ae6d417f5b4ff730a62c711",
+  "sha256": {
+    "cta_web": "e36a0d092907b9f3a3e59155794834d3ef37684ac6eb6152c72690be47b2fab1",
+    "frontend/manager/assets/index-BXQF-snY.js": "561a30f2004e46966c17256c79b869f155c4f65e81078587169b0bd1a03e6706",
+    "frontend/manager/assets/index-Ck2ifa8p.css": "e2a8d7aa63cae4c8e5249dccf8b56378cb35bc840cd39da3682d8a942597657b",
+    "frontend/manager/favicon.svg": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+    "frontend/manager/index.html": "51c7071c65fed97e205c0c6ef8ebef44300031021ae8e609e684bdfbdef2de81"
+  },
+  "changed_artifacts": [
+    "cta_web",
+    "frontend"
+  ],
+  "preserved": [
+    "service units",
+    "live TOML",
+    "Nginx",
+    "Exec",
+    "cta_monitor",
+    "analysis binaries",
+    "database schema",
+    "user roles"
+  ],
+  "validation": {
+    "cargo_fmt": true,
+    "cargo_check": true,
+    "cargo_test_passed": 311,
+    "cargo_test_ignored": 10,
+    "cta_web_release_build": true,
+    "frontend_build": true,
+    "frontend_lint": true
+  }
+}

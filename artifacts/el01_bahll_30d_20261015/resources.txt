@@ -1,0 +1,16 @@
+2026-10-15T03:09:37+00:00
+               total        used        free      shared  buff/cache   available
+Mem:           15991       11806         410        1042        5156        4185
+Swap:           4095        1867        2228
+some avg10=0.00 avg60=0.00 avg300=0.00 total=196343146
+full avg10=0.00 avg60=0.00 avg300=0.00 total=169736815
+low 0
+high 0
+max 0
+oom 0
+oom_kill 0
+oom_group_kill 0
+    PID     ELAPSED   RSS %CPU
+2605826    05:07:24 9880756 22.6
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   98G   49G   45G  53% /

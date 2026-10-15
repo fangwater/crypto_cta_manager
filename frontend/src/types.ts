@@ -106,6 +106,9 @@ export interface DashboardAccount {
   /** OKX maintenance margin ratio. Higher is safer. */
   uni_mmr?: number | null
   uni_mmr_status?: 'ok' | 'stale' | string | null
+  funding?: FundingSummary
+  total_nav_before_fee_quote?: number | null
+  total_nav_after_fee_quote?: number | null
 }
 
 export interface OrderParameters {
@@ -177,6 +180,8 @@ export interface OrderStrategyList {
 }
 
 export interface PositionStrategy {
+  /** Session-specific permission returned by the strategy catalog. */
+  can_publish?: boolean
   strategy_name: string
   targets: Record<string, TargetPosition>
   symbol_order_strategy_overrides: Record<string, string>
@@ -288,6 +293,62 @@ export interface TimelineSnapshot {
   generation_duration_ms: number
   report: NavTimelineReport
   theoretical: TheoreticalNavTimeline
+  execution_slippage?: ExecutionSlippage
+  funding?: FundingTimeline
+}
+
+export interface ExecutionSlippage {
+  start_ts_us: number
+  end_ts_us: number | null
+  volume_quote: number
+  before_fee_gap_quote: number | null
+  after_fee_gap_quote: number | null
+  before_fee_bps: number | null
+  after_fee_bps: number | null
+  unavailable_reason: string | null
+}
+
+export interface FundingSummary {
+  enabled: boolean
+  refresh_secs: number
+  status: string
+  start_ts_us: number | null
+  synced_through_ts_us: number | null
+  last_success_ts_us: number | null
+  last_error: string | null
+  record_count: number
+  income_quote: number
+  income_by_asset: Record<string, number>
+  symbols: { source_id: string; symbol: string; start_ts_us: number; synced_through_ts_us: number | null }[]
+}
+
+export interface FundingSettings {
+  source_id: string
+  enabled: boolean
+  refresh_secs: number
+  local_ip: string | null
+  public_ip: string | null
+  verified_at_us: number | null
+  verified_local_ip: string | null
+  verified_public_ip: string | null
+  unavailable_reason: string | null
+  summary: FundingSummary
+}
+
+export interface FundingNavPoint {
+  ts_us: number
+  funding_income_quote: number
+  total_nav_before_fee_quote: number
+  total_nav_after_fee_quote: number
+}
+
+export interface FundingTimeline {
+  summary: FundingSummary
+  total_nav_before_fee_quote: number
+  total_nav_after_fee_quote: number
+  points: FundingNavPoint[]
+  records: { source_id: string; venue: string; symbol: string; asset: string; ts_us: number; income_quote: number }[]
+  records_sampled: boolean
 }
 
 export interface TheoreticalNavPoint {
@@ -345,6 +406,7 @@ export interface AcquisitionCostTotals {
   fee_shortfall_usdt: number
   after_fee_shortfall_usdt: number
   price_shortfall_bps: number
+  after_fee_shortfall_bps: number
   first_minute_shortfall_bps: number
   matched_turnover_coverage: number
   actual_fill_reference_coverage: number
@@ -369,6 +431,7 @@ export interface AcquisitionCostBreakdown {
   first_minute_shortfall_usdt: number
   five_sample_drift_usdt: number
   price_shortfall_bps: number
+  after_fee_shortfall_bps: number
   first_minute_shortfall_bps: number
   after_fee_shortfall_usdt: number
 }
@@ -441,6 +504,7 @@ export interface AcquisitionCostRow {
   fee_shortfall_usdt: number | null
   after_fee_shortfall_usdt: number | null
   price_shortfall_bps: number | null
+  after_fee_shortfall_bps: number | null
   execution: AcquisitionExecution
 }
 
@@ -504,7 +568,8 @@ export type ActualNavSeriesKey =
 export type TheoreticalNavSeriesKey =
   | 'theoretical_nav_before_fee_quote'
   | 'theoretical_nav_after_fee_quote'
-export type NavSeriesKey = ActualNavSeriesKey | TheoreticalNavSeriesKey
+export type FundingNavSeriesKey = 'funding_income_quote' | 'total_nav_before_fee_quote' | 'total_nav_after_fee_quote'
+export type NavSeriesKey = ActualNavSeriesKey | TheoreticalNavSeriesKey | FundingNavSeriesKey
 export type SymbolRow = AggregateSymbolNavReport & {
   venues?: VenueNavReport[]
 }

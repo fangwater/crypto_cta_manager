@@ -100,6 +100,16 @@ is_at_all = false
 # keep working until tokens are assigned. Publishers send a token via
 # manager_publish_client.py --token or MANAGER_PUBLISH_TOKEN.
 
+[funding]
+enable_token_env = "CTA_FUNDING_ENABLE_TOKEN"
+# local_ip = "154.197.32.9"
+# public_ip = "154.197.32.9"
+# trade_engine_configs = ["/home/el01/binance_exec_trade01/trade_engine.toml"]
+# forbidden_public_ips = ["TRADING_PUBLIC_IP"] # required for NAT/default-route trading
+# Apply the documented PostgreSQL maintenance before enabling on an existing DB.
+# Additional accounts keep separate RocksDB histories and position ledgers.
+# Keep reserved accounts disabled until that Exec directory and listeners exist.
+
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"
@@ -120,8 +130,9 @@ account_ipc_service = "account_pubs/binance_pm"
 # GET/PUT /api/catalog/accounts/{source_id}/contract-leverage.
 # Defaults to <rocksdb_path>/../../env.sh, for example /home/el01/binance_exec_trade01/env.sh.
 # env_path = "/home/el01/binance_exec_trade01/env.sh"
-# Additional accounts keep separate RocksDB histories and position ledgers.
-# Keep reserved accounts disabled until that Exec directory and listeners exist.
+# Optional funding egress. Accounts default off; enable in Manager after token/IP checks.
+# Supports native Binance USD-M STANDARD and Portfolio Margin accounts.
+# The fixed local/public egress MUST differ from ALL trading addresses.
 [[sources]]
 id = "binance_exec_trade02"
 account = "trade02"

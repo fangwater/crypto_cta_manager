@@ -1,0 +1,68 @@
+{
+  "account": "dzynova",
+  "source_id": "binance_exec_trade09",
+  "funding_local_ip": "154.197.32.9",
+  "funding_public_ip": "154.197.32.9",
+  "forbidden_trading_public_ips": [
+    "154.197.32.6"
+  ],
+  "source_configs_checked": 13,
+  "observation_start_ts_us": 1791990889963576,
+  "observation_start_utc": "2026-10-14 15:14:49.963576 UTC",
+  "schema_maintenance": "scripts/apply_funding_schema.sql",
+  "other_accounts_funding_enabled": false,
+  "other_services_restarted": false,
+  "source_commit": "0502f40fec1d22d3c160828156c3bea6ea02ffae",
+  "working_tree_changes_included": true,
+  "authenticated_ip_tests": [
+    {
+      "ip": "154.197.32.6",
+      "observed_public_ip": "154.197.32.6",
+      "binance_public_http": 200,
+      "binance_funding_income_http": 200
+    },
+    {
+      "ip": "154.197.32.9",
+      "observed_public_ip": "154.197.32.9",
+      "binance_public_http": 200,
+      "binance_funding_income_http": 200
+    },
+    {
+      "ip": "154.197.32.10",
+      "observed_public_ip": "154.197.32.10",
+      "binance_public_http": 200,
+      "binance_funding_income_http": 200
+    }
+  ],
+  "release": "/home/el01/crypto_cta_manager/web-releases/20261014T152117Z",
+  "binary_sha256": "6693429778dd39772a2477c28e3f5fb94ef59321a0dd331037c633ea8052ac5a",
+  "live_config_sha256": "274cd150f8a8a1d04dd89d82eb328b1cf6391c6a53825d0806f2fb5d376a2f82",
+  "verified_at_utc": "2026-10-14T15:26:51.557199+00:00",
+  "funding_status": "ok",
+  "synced_symbols": 15,
+  "record_count": 0,
+  "synced_through_ts_us": 1791991363259000,
+  "protected_processes_checked": 81,
+  "protected_processes_unchanged": true,
+  "regression_test": "nav::tests::funding_discovers_decoded_usd_m_orders_and_earliest_update_time",
+  "rust_test_result": "309 passed, 4 ignored; 9 binary tests passed; 7 database tests ignored (explicit schema/integration passed earlier)",
+  "frontend_build": "passed",
+  "live_gateway_checks": {
+    "listen": "127.0.0.1:10051",
+    "manager": 200,
+    "manager_health": 200,
+    "dzynova_exec_page": 200,
+    "dzynova_snapshot": 200,
+    "unauthenticated_snapshot": 401,
+    "direct_exec_config": 200
+  },
+  "source_hashes": {
+    "src/nav.rs": "757873548f507ca0e7c91e595f163c04dd2b682ca602205b7225d5afbcce5321",
+    "src/funding.rs": "57600c325f10370751562cff423185430539a00f5236de49f8bb1162bea77888",
+    "src/web.rs": "6946cd9d6971ca11af3a1aea942e8dfebfeb20f253ea0dbe1ba078e5536450c3",
+    "deploy/crypto_cta_manager/cta-manager.toml": "8d06b8ff3114507c8d67ecd3c29b7948d35a8d5433f728c31636e3a526ef5cf4"
+  },
+  "temporary_backup_removed": true,
+  "manager_auto_restarts": 0,
+  "postgres_master_pid_unchanged": true
+}

@@ -1,0 +1,17 @@
+{
+  "query": {
+    "startMs": 1789441355221,
+    "endMs": 1792033355221,
+    "sourceIds": "binance_exec_trade01",
+    "maxPoints": 3500,
+    "includeTheoretical": "false"
+  },
+  "financial_keys": [
+    "summary",
+    "points",
+    "symbol_points",
+    "strategy_points",
+    "symbols"
+  ],
+  "sha256": "f606581dff715739c83ac8c570a686963ad7711fc905c3f5f09d77c46ee69c12"
+}

@@ -1,0 +1,358 @@
+{
+  "manager_pid": 1896005,
+  "webroot": "/home/el01/crypto_cta_manager/web-releases/20261009T095926Z",
+  "protected_processes": {
+    "27826": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "544169762"
+    },
+    "32918": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "710703245"
+    },
+    "61751": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "526591796"
+    },
+    "107046": {
+      "comm": "redis-server",
+      "start_ticks": "50718857"
+    },
+    "248620": {
+      "comm": "persist_manager",
+      "start_ticks": "664623144"
+    },
+    "249008": {
+      "comm": "trade_engine",
+      "start_ticks": "664623499"
+    },
+    "249235": {
+      "comm": "account_monitor",
+      "start_ticks": "664623929"
+    },
+    "251045": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "664624289"
+    },
+    "286082": {
+      "comm": "python",
+      "start_ticks": "664647614"
+    },
+    "339409": {
+      "comm": "viz_server",
+      "start_ticks": "456164348"
+    },
+    "359587": {
+      "comm": "trade_engine",
+      "start_ticks": "456272001"
+    },
+    "360186": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "456273482"
+    },
+    "462336": {
+      "comm": "persist_manager",
+      "start_ticks": "291589762"
+    },
+    "463215": {
+      "comm": "python",
+      "start_ticks": "291591551"
+    },
+    "467854": {
+      "comm": "viz_server",
+      "start_ticks": "664762852"
+    },
+    "509018": {
+      "comm": "postgres",
+      "start_ticks": "187375329"
+    },
+    "599009": {
+      "comm": "account_monitor",
+      "start_ticks": "343474081"
+    },
+    "709851": {
+      "comm": "viz_server",
+      "start_ticks": "586855500"
+    },
+    "810841": {
+      "comm": "account_monitor",
+      "start_ticks": "586902275"
+    },
+    "816697": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "586904649"
+    },
+    "1783984": {
+      "comm": "persist_manager",
+      "start_ticks": "673883042"
+    },
+    "1786535": {
+      "comm": "trade_engine",
+      "start_ticks": "673883409"
+    },
+    "1787381": {
+      "comm": "account_monitor",
+      "start_ticks": "673883860"
+    },
+    "1787579": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "673884221"
+    },
+    "1787774": {
+      "comm": "viz_server",
+      "start_ticks": "673884592"
+    },
+    "1789675": {
+      "comm": "python",
+      "start_ticks": "673885009"
+    },
+    "1873546": {
+      "comm": "nginx",
+      "start_ticks": "699812044"
+    },
+    "2044879": {
+      "comm": "persist_manager",
+      "start_ticks": "466031363"
+    },
+    "2046840": {
+      "comm": "python",
+      "start_ticks": "466039550"
+    },
+    "2057015": {
+      "comm": "trade_engine",
+      "start_ticks": "466075493"
+    },
+    "2107865": {
+      "comm": "persist_manager",
+      "start_ticks": "699957738"
+    },
+    "2108097": {
+      "comm": "trade_engine",
+      "start_ticks": "699958107"
+    },
+    "2111160": {
+      "comm": "account_monitor",
+      "start_ticks": "699958575"
+    },
+    "2112358": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "699958946"
+    },
+    "2112979": {
+      "comm": "viz_server",
+      "start_ticks": "699959328"
+    },
+    "2115007": {
+      "comm": "python",
+      "start_ticks": "699959763"
+    },
+    "2428613": {
+      "comm": "persist_manager",
+      "start_ticks": "674289059"
+    },
+    "2429637": {
+      "comm": "trade_engine",
+      "start_ticks": "674289452"
+    },
+    "2431580": {
+      "comm": "account_monitor",
+      "start_ticks": "674289899"
+    },
+    "2431783": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "674290264"
+    },
+    "2431966": {
+      "comm": "viz_server",
+      "start_ticks": "674290630"
+    },
+    "2433882": {
+      "comm": "python",
+      "start_ticks": "674291064"
+    },
+    "2837558": {
+      "comm": "python",
+      "start_ticks": "543300203"
+    },
+    "2837623": {
+      "comm": "viz_server",
+      "start_ticks": "543300241"
+    },
+    "2975407": {
+      "comm": "persist_manager",
+      "start_ticks": "543398114"
+    },
+    "2975809": {
+      "comm": "trade_engine",
+      "start_ticks": "543398497"
+    },
+    "2977285": {
+      "comm": "account_monitor",
+      "start_ticks": "543398933"
+    },
+    "2977453": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "543399293"
+    },
+    "2978132": {
+      "comm": "viz_server",
+      "start_ticks": "543399659"
+    },
+    "2979284": {
+      "comm": "python",
+      "start_ticks": "543400065"
+    },
+    "3493099": {
+      "comm": "persist_manager",
+      "start_ticks": "680231098"
+    },
+    "3493317": {
+      "comm": "trade_engine",
+      "start_ticks": "680231467"
+    },
+    "3495270": {
+      "comm": "account_monitor",
+      "start_ticks": "680231944"
+    },
+    "3495679": {
+      "comm": "viz_server",
+      "start_ticks": "680232697"
+    },
+    "3496588": {
+      "comm": "python",
+      "start_ticks": "680233126"
+    },
+    "3500316": {
+      "comm": "persist_manager",
+      "start_ticks": "680235562"
+    },
+    "3502216": {
+      "comm": "trade_engine",
+      "start_ticks": "680235943"
+    },
+    "3502499": {
+      "comm": "account_monitor",
+      "start_ticks": "680236404"
+    },
+    "3502702": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "680236777"
+    },
+    "3503307": {
+      "comm": "viz_server",
+      "start_ticks": "680237158"
+    },
+    "3506049": {
+      "comm": "python",
+      "start_ticks": "680237593"
+    },
+    "3607796": {
+      "comm": "persist_manager",
+      "start_ticks": "526152126"
+    },
+    "3608197": {
+      "comm": "trade_engine",
+      "start_ticks": "526152503"
+    },
+    "3608413": {
+      "comm": "persist_manager",
+      "start_ticks": "543811833"
+    },
+    "3609731": {
+      "comm": "trade_engine",
+      "start_ticks": "543812188"
+    },
+    "3609824": {
+      "comm": "account_monitor",
+      "start_ticks": "526152937"
+    },
+    "3610146": {
+      "comm": "viz_server",
+      "start_ticks": "526153644"
+    },
+    "3611395": {
+      "comm": "account_monitor",
+      "start_ticks": "543812631"
+    },
+    "3611738": {
+      "comm": "python",
+      "start_ticks": "526154057"
+    },
+    "3655127": {
+      "comm": "nginx",
+      "start_ticks": "664088182"
+    },
+    "3705881": {
+      "comm": "cta_monitor",
+      "start_ticks": "700924669"
+    },
+    "3708239": {
+      "comm": "persist_manager",
+      "start_ticks": "700925178"
+    },
+    "3710395": {
+      "comm": "trade_engine",
+      "start_ticks": "700925524"
+    },
+    "3710651": {
+      "comm": "account_monitor",
+      "start_ticks": "700925951"
+    },
+    "3710736": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "700926295"
+    },
+    "3710805": {
+      "comm": "viz_server",
+      "start_ticks": "700926645"
+    },
+    "3840899": {
+      "comm": "python",
+      "start_ticks": "474927527"
+    },
+    "4002284": {
+      "comm": "python",
+      "start_ticks": "336119324"
+    },
+    "4088916": {
+      "comm": "persist_manager",
+      "start_ticks": "517645735"
+    },
+    "4089152": {
+      "comm": "trade_engine",
+      "start_ticks": "517645765"
+    },
+    "4089308": {
+      "comm": "account_monitor",
+      "start_ticks": "517645885"
+    },
+    "4089394": {
+      "comm": "exec-pre-trade",
+      "start_ticks": "517645925"
+    },
+    "4089459": {
+      "comm": "viz_server",
+      "start_ticks": "517645967"
+    }
+  },
+  "config_sha256": {
+    "/home/el01/crypto_cta_manager/config/cta-manager.toml": "922620927dc3368cee72e1621d62ba51b1a12bc399fa6d244cc0827d024b3843",
+    "/home/el01/crypto_cta_manager/nginx/nginx.conf": "40e240b20649e2c7fc62afe768a49e23547872b6ba58ee8a84a0d64715fdd4e1",
+    "/home/el01/.config/systemd/user/crypto-cta-manager-web.service": "23c6efe51cbd16ae215131e5a88ffe6978cc1a65cb19a41860d99d59ef5dfe01",
+    "/home/el01/.config/systemd/user/crypto-cta-nginx.service": "3188ae4933118714de6e15df7cf5b2c2c9e1c64a6894bcb501654d036ead4b5b",
+    "/home/el01/binance_exec_trade01/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade02/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade03/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade04/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_xy_lxy21_05/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade06/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade07/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade08/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade09/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade10/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade11/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade12/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade13/trade_engine.toml": "2745a205315b7935c77a5e68eb0e6a3078189be2e77db6f9231e63cb2eefc6a8"
+  },
+  "trading_config_count": 13
+}

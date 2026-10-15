@@ -1,6 +1,7 @@
 import { normalizeTargetMap } from './lib/targetPositions'
 import type {
   AccountStudio,
+  FundingSettings,
   AccountConfiguration,
   VirtualAccount,
   VirtualBinding,
@@ -683,5 +684,15 @@ export function deleteVirtualAccount(virtualId: string) {
 export function saveAccountConfiguration(sourceId: string, configuration: AccountConfiguration) {
   return requestJson<AccountStudio>(`/catalog/accounts/${encodeURIComponent(sourceId)}/configuration`, {
     method: 'PUT', body: configuration,
+  })
+}
+
+export function getAccountFunding(sourceId: string, signal?: AbortSignal) {
+  return requestJson<FundingSettings>(`/catalog/accounts/${encodeURIComponent(sourceId)}/funding`, { signal })
+}
+
+export function saveAccountFunding(sourceId: string, enabled: boolean, refreshSecs: number, enableToken?: string, signal?: AbortSignal) {
+  return requestJson<FundingSettings>(`/catalog/accounts/${encodeURIComponent(sourceId)}/funding`, {
+    method: 'PUT', body: { enabled, refresh_secs: refreshSecs, enable_token: enableToken }, signal,
   })
 }

@@ -1,3 +1,5 @@
+import { FundingSettingsPanel } from '../components/FundingSettingsPanel'
+import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import {
   Activity,
   ArrowRight,
@@ -186,6 +188,7 @@ export function AccountOverviewPage() {
           />
 
           <div className="mb-8 space-y-4">
+            {account?.venue === 'binance-futures' && <FundingSettingsPanel key={sourceId} sourceId={sourceId} canConfigure={canConfigure} />}
             <Card>
               <CardHeader className="border-b border-border-soft/80">
                 <div>
@@ -549,6 +552,7 @@ function AccountMeta({
           <code className="text-[11px]">{sourceId}</code>
         </span>
         <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
+          {account.venue === 'binance-futures' && <FundingStatusBadge value={account.funding} />}
         {isOkxVenue(account.venue) && (
           <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
         )}
@@ -564,6 +568,10 @@ function AccountMeta({
         <span className={signedClass(report.nav_change_after_fee_quote)}>
           累计费后 {money(report.nav_change_after_fee_quote)} 报价币
         </span>
+        {account.funding && (account.funding.enabled || account.funding.start_ts_us != null) && <>
+          <span className={signedClass(account.funding.income_quote)}>累计 funding {money(account.funding.income_quote)} 报价币</span>
+          <span className={signedClass(account.total_nav_after_fee_quote ?? 0)}>总体费后 {money(account.total_nav_after_fee_quote ?? 0)} 报价币</span>
+        </>}
       </CardContent>
     </Card>
   )

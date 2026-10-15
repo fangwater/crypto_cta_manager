@@ -1,0 +1,64 @@
+{
+  "verified_at_us": 1792033829886307,
+  "accounts": [
+    {
+      "source_id": "binance_exec_trade05",
+      "status": "ok",
+      "symbols": 16,
+      "records_verified": 108,
+      "income_exact": "0.1288908844089895186",
+      "independent_statement_match": true,
+      "account_nav_addition_verified": true,
+      "strategy_funding_excluded": true,
+      "synced_through_ts_us": 1792033486555000
+    },
+    {
+      "source_id": "binance_exec_trade06",
+      "status": "ok",
+      "symbols": 16,
+      "records_verified": 75,
+      "income_exact": "-0.5858939310806462822",
+      "independent_statement_match": true,
+      "account_nav_addition_verified": true,
+      "strategy_funding_excluded": true,
+      "synced_through_ts_us": 1792033486797000
+    },
+    {
+      "source_id": "binance_exec_trade07",
+      "status": "ok",
+      "symbols": 14,
+      "records_verified": 14,
+      "income_exact": "-0.0194278629221733840",
+      "independent_statement_match": true,
+      "account_nav_addition_verified": true,
+      "strategy_funding_excluded": true,
+      "synced_through_ts_us": 1792033487037000
+    }
+  ],
+  "health": {
+    "status": "ok",
+    "source_count": 7,
+    "generated_at_us": 1792033813219921,
+    "last_attempt_at_us": 1792033796775436,
+    "refresh_interval_secs": 60,
+    "last_refresh_error": null
+  },
+  "frontend_checksums_match": true,
+  "gateways": {
+    "/exec_trade05/": 200,
+    "/exec_trade05/snapshot": 200,
+    "/exec_trade05/config/": 200,
+    "/exec_trade06/": 200,
+    "/exec_trade06/snapshot": 200,
+    "/exec_trade06/config/": 200,
+    "/exec_trade07/": 200,
+    "/exec_trade07/snapshot": 200,
+    "/exec_trade07/config/": 200
+  },
+  "target_history": {
+    "last_error": null,
+    "loading": false,
+    "processed_messages": 4720808,
+    "ready": true
+  }
+}

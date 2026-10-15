@@ -1,0 +1,213 @@
+{
+  "passed": true,
+  "results": [
+    {
+      "width": 1440,
+      "height": 1000,
+      "whilePending": {
+        "canvas": true,
+        "overlay": false,
+        "notice": true
+      },
+      "ready": {
+        "loading": false,
+        "notices": [
+          "30D 已按当前可查询范围对齐，实际与理论净值均从 09/15 11:15:00 计算。",
+          "（理论净值 − 实际净值）÷ 同期实际成交额 × 10,000；正值表示实际表现更差，funding 不计入滑点。",
+          "净值差包含仓位与估值差异；同成交量的价格与费用滑点见“成本分析”。"
+        ],
+        "start": "2026-09-15T11:15",
+        "overflow": false,
+        "canvas": 2
+      },
+      "requests": [
+        {
+          "path": "/manager/api/timeline",
+          "start": 1791946955221,
+          "end": 1792033355221,
+          "full": false,
+          "days": 1,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1791946955221,
+          "end": 1792033355221,
+          "full": true,
+          "days": 1,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1789442100000,
+          "end": 1792033355221,
+          "full": false,
+          "days": 29.991379872685187,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1789442100000,
+          "end": 1792033355221,
+          "full": true,
+          "days": 29.991379872685187,
+          "rejected": false,
+          "loading": true,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1789442100000,
+          "end": 1792033355221,
+          "full": true,
+          "days": 29.991379872685187,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1787209468395,
+          "end": 1792033355221,
+          "full": false,
+          "days": 55.83202344907407,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1787209468395,
+          "end": 1792033355221,
+          "full": true,
+          "days": 55.83202344907407,
+          "rejected": true,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        }
+      ],
+      "errors": [],
+      "simulatedApi": true
+    },
+    {
+      "width": 390,
+      "height": 1100,
+      "whilePending": {
+        "canvas": true,
+        "overlay": false,
+        "notice": true
+      },
+      "ready": {
+        "loading": false,
+        "notices": [
+          "30D 已按当前可查询范围对齐，实际与理论净值均从 09/15 11:15:00 计算。",
+          "（理论净值 − 实际净值）÷ 同期实际成交额 × 10,000；正值表示实际表现更差，funding 不计入滑点。",
+          "净值差包含仓位与估值差异；同成交量的价格与费用滑点见“成本分析”。"
+        ],
+        "start": "2026-09-15T11:15",
+        "overflow": false,
+        "canvas": 2
+      },
+      "requests": [
+        {
+          "path": "/manager/api/timeline",
+          "start": 1791946955221,
+          "end": 1792033355221,
+          "full": false,
+          "days": 1,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1791946955221,
+          "end": 1792033355221,
+          "full": true,
+          "days": 1,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1789441500000,
+          "end": 1792033355221,
+          "full": false,
+          "days": 29.99832431712963,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1789441500000,
+          "end": 1792033355221,
+          "full": true,
+          "days": 29.99832431712963,
+          "rejected": true,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1789442100000,
+          "end": 1792033355221,
+          "full": false,
+          "days": 29.991379872685187,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1789442100000,
+          "end": 1792033355221,
+          "full": true,
+          "days": 29.991379872685187,
+          "rejected": false,
+          "loading": true,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1789442100000,
+          "end": 1792033355221,
+          "full": true,
+          "days": 29.991379872685187,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1787209468395,
+          "end": 1792033355221,
+          "full": false,
+          "days": 55.83202344907407,
+          "rejected": false,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        },
+        {
+          "path": "/manager/api/timeline",
+          "start": 1787209468395,
+          "end": 1792033355221,
+          "full": true,
+          "days": 55.83202344907407,
+          "rejected": true,
+          "loading": false,
+          "source": "binance_exec_trade01"
+        }
+      ],
+      "errors": [],
+      "simulatedApi": true
+    }
+  ]
+}

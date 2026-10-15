@@ -1,0 +1,13 @@
+{
+  "frontend_release": "web-releases/20261014T223814Z",
+  "assets": [
+    "/manager/assets/index-Dcg4knVC.js",
+    "/manager/assets/index-BkPi1rHQ.css"
+  ],
+  "detail_sections_removed": true,
+  "funding_curve_and_summary_preserved": true,
+  "processes_unchanged": 82,
+  "trade_configs_unchanged": 13,
+  "manager_restarted": false,
+  "utc": "2026-10-14T22:38:34.564183+00:00"
+}

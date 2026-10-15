@@ -522,8 +522,21 @@ async fn binance_signed_get(
     credentials: &ExchangeCredentials,
     base: &str,
     path: &str,
-    mut params: BTreeMap<String, String>,
+    params: BTreeMap<String, String>,
 ) -> Result<(u16, String)> {
+    let response = binance_signed_response(client, credentials, base, path, params).await?;
+    let http_status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    Ok((http_status, body))
+}
+
+async fn binance_signed_response(
+    client: &Client,
+    credentials: &ExchangeCredentials,
+    base: &str,
+    path: &str,
+    mut params: BTreeMap<String, String>,
+) -> Result<reqwest::Response> {
     params.insert("recvWindow".to_string(), "5000".to_string());
     params.insert("timestamp".to_string(), now_ms().to_string());
     let query = encode_query(&params);
@@ -540,10 +553,41 @@ async fn binance_signed_get(
         .header("X-MBX-APIKEY", &credentials.api_key)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("Binance GET {path} request failed"))?;
-    let http_status = response.status().as_u16();
-    let body = response.text().await.unwrap_or_default();
-    Ok((http_status, body))
+    Ok(response)
+}
+
+/// Read-only income history, authenticated with this Exec account's credentials.
+pub(crate) async fn binance_funding_page(
+    client: &Client,
+    source: &SourceConfig,
+    symbol: &str,
+    start_ms: i64,
+    end_ms: i64,
+    page: usize,
+) -> Result<reqwest::Response> {
+    anyhow::ensure!(
+        source.venue == "binance-futures",
+        "funding supports Binance USD-M only"
+    );
+    let credentials = load_source_credentials(source)?;
+    let (base, path) = match credentials.account_mode {
+        AccountMode::Standard => (&credentials.fapi_url, "/fapi/v1/income"),
+        AccountMode::Unified => (&credentials.papi_url, "/papi/v1/um/income"),
+    };
+    let params = BTreeMap::from([
+        (
+            "symbol".into(),
+            binance_request_symbol(&source.venue, symbol)?,
+        ),
+        ("incomeType".into(), "FUNDING_FEE".into()),
+        ("startTime".into(), start_ms.to_string()),
+        ("endTime".into(), end_ms.to_string()),
+        ("page".into(), page.to_string()),
+        ("limit".into(), "1000".into()),
+    ]);
+    binance_signed_response(client, &credentials, base, path, params).await
 }
 
 async fn set_okx_symbol_leverage(

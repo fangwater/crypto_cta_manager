@@ -398,11 +398,11 @@ impl PositionAccess {
     }
 
     /// Configure authorizes binding this strategy to an account and editing
-    /// its targets. Managers hold it implicitly; the creator does not, so a
-    /// freshly created private strategy still needs an explicit configure
-    /// grant before anyone can bind it.
+    /// its targets. Creators and managers hold it implicitly. Binding still
+    /// requires the destination account's separate configure permission.
     pub fn user_can_configure(&self, user_id: i64) -> bool {
-        self.manager_user_ids.contains(&user_id)
+        self.created_by_user_id == Some(user_id)
+            || self.manager_user_ids.contains(&user_id)
             || self
                 .grants
                 .get(&user_id)
@@ -535,7 +535,8 @@ impl PositionVisibility {
     }
 
     pub fn user_can_configure(&self, user_id: i64) -> bool {
-        self.manager_user_ids.contains(&user_id)
+        self.created_by_user_id == Some(user_id)
+            || self.manager_user_ids.contains(&user_id)
             || self
                 .grants
                 .get(&user_id)
@@ -1370,6 +1371,56 @@ fn parse_execution_algorithm(value: &str) -> Result<ExecutionAlgorithm> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn position_creator_permissions_agree_for_catalog_and_write_checks() {
+        let mut access = PositionAccess {
+            created_by_user_id: Some(3),
+            publish_token_hash: None,
+            open_visibility: false,
+            manager_user_ids: vec![7],
+            grants: BTreeMap::from([(11, "view".into()), (12, "configure".into())]),
+        };
+        // Ownership works without an explicit grant and cannot be downgraded
+        // by a redundant view grant. Public visibility never grants configure.
+        for owner_view_grant in [false, true] {
+            if owner_view_grant {
+                access.grants.insert(3, "view".into());
+            }
+            for open_visibility in [false, true] {
+                access.open_visibility = open_visibility;
+                let visibility = PositionVisibility {
+                    strategy_name: "owned".into(),
+                    created_by_user_id: access.created_by_user_id,
+                    open_visibility,
+                    manager_user_ids: access.manager_user_ids.clone(),
+                    grants: access.grants.clone(),
+                };
+                for (user_id, private_view, configure) in [
+                    (3, true, true),
+                    (7, true, true),
+                    (11, true, false),
+                    (12, true, true),
+                    (99, false, false),
+                ] {
+                    assert_eq!(
+                        access.user_can_view(user_id),
+                        private_view || open_visibility
+                    );
+                    assert_eq!(
+                        visibility.user_can_view(user_id),
+                        access.user_can_view(user_id)
+                    );
+                    assert_eq!(access.user_can_configure(user_id), configure);
+                    assert_eq!(visibility.user_can_configure(user_id), configure);
+                    assert_eq!(access.user_can_manage_grants(user_id), configure);
+                }
+            }
+        }
+        access.created_by_user_id = None;
+        access.grants.remove(&3);
+        assert!(!access.user_can_configure(3));
+    }
 
     #[test]
     fn coin_targets_and_overrides_share_one_canonical_symbol_and_keep_base_units() {

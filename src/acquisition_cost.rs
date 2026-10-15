@@ -51,6 +51,7 @@ pub struct AcquisitionCostTotals {
     pub fee_shortfall_usdt: f64,
     pub after_fee_shortfall_usdt: f64,
     pub price_shortfall_bps: f64,
+    pub after_fee_shortfall_bps: f64,
     pub first_minute_shortfall_bps: f64,
     pub matched_turnover_coverage: f64,
     pub actual_fill_reference_coverage: f64,
@@ -77,6 +78,7 @@ pub struct AcquisitionCostBreakdown {
     pub first_minute_shortfall_usdt: f64,
     pub five_sample_drift_usdt: f64,
     pub price_shortfall_bps: f64,
+    pub after_fee_shortfall_bps: f64,
     pub first_minute_shortfall_bps: f64,
     pub after_fee_shortfall_usdt: f64,
 }
@@ -258,6 +260,13 @@ impl BreakdownAccumulator {
             } else {
                 0.0
             },
+            after_fee_shortfall_bps: if self.reference_turnover_usdt > 0.0 {
+                (self.price_shortfall_usdt + self.actual_fee_usdt - self.virtual_fee_usdt)
+                    / self.reference_turnover_usdt
+                    * 10_000.0
+            } else {
+                0.0
+            },
             first_minute_shortfall_bps: if self.reference_turnover_usdt > 0.0 {
                 self.first_minute_shortfall_usdt / self.reference_turnover_usdt * 10_000.0
             } else {
@@ -295,6 +304,7 @@ pub struct AcquisitionCostRow {
     pub fee_shortfall_usdt: Option<f64>,
     pub after_fee_shortfall_usdt: Option<f64>,
     pub price_shortfall_bps: Option<f64>,
+    pub after_fee_shortfall_bps: Option<f64>,
     pub execution: AcquisitionExecution,
 }
 
@@ -859,11 +869,19 @@ pub async fn report_acquisition_cost(
             fee_shortfall_usdt: fee_shortfall,
             after_fee_shortfall_usdt: after_fee_shortfall,
             price_shortfall_bps,
+            after_fee_shortfall_bps: after_fee_shortfall.and_then(|shortfall| {
+                (matched_turnover > 0.0).then_some(shortfall / matched_turnover * 10_000.0)
+            }),
             execution: AcquisitionExecution::default(),
         });
     }
     totals.price_shortfall_bps = if totals.matched_virtual_turnover_usdt > 0.0 {
         totals.price_shortfall_usdt / totals.matched_virtual_turnover_usdt * 10_000.0
+    } else {
+        0.0
+    };
+    totals.after_fee_shortfall_bps = if totals.matched_virtual_turnover_usdt > 0.0 {
+        totals.after_fee_shortfall_usdt / totals.matched_virtual_turnover_usdt * 10_000.0
     } else {
         0.0
     };
@@ -965,6 +983,7 @@ mod tests {
             fee_shortfall_usdt: Some(0.0),
             after_fee_shortfall_usdt: shortfall,
             price_shortfall_bps: shortfall.map(|v| v * 10_000.0),
+            after_fee_shortfall_bps: shortfall.map(|v| v * 10_000.0),
             execution: AcquisitionExecution::default(),
         }
     }
@@ -1258,6 +1277,7 @@ mod tests {
             row.first_minute_shortfall_usdt + row.five_sample_drift_usdt
         );
         assert_eq!(row.price_shortfall_bps, 100.0);
+        assert!((row.after_fee_shortfall_bps - 99.0).abs() < 1e-10);
         assert!((row.virtual_fee_usdt - 0.1).abs() <= f64::EPSILON);
     }
 

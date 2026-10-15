@@ -1,0 +1,226 @@
+{
+  "cta_position_snapshots": [
+    {
+      "note": "RX01 takeover: signed RapidX balance minus debt and perpetual quantity; contemporaneous index marks; historical fills remain in old environment",
+      "source_id": "binance_exec_trade06",
+      "created_at": "2026-10-13T13:11:51.257534+00:00",
+      "snapshot_ts_us": 1791896850441032
+    }
+  ],
+  "cta_position_snapshot_entries": [
+    {
+      "symbol": "BNB",
+      "quantity": 1.2773739760310892,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 740.36092932
+    },
+    {
+      "symbol": "BNBUSDT",
+      "quantity": -1.27,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 740.36092932
+    },
+    {
+      "symbol": "BTC",
+      "quantity": 6.668401093008e-05,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 83218.49652174
+    },
+    {
+      "symbol": "CRV",
+      "quantity": 0.07917,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 0.3392799
+    },
+    {
+      "symbol": "DOGE",
+      "quantity": -13633.076456229412,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 0.08391098
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "quantity": 13611,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 0.08391098
+    },
+    {
+      "symbol": "ETH",
+      "quantity": 0.05162267304983476,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 2500.2827907
+    },
+    {
+      "symbol": "ETHUSDT",
+      "quantity": -0.051,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 2500.2827907
+    },
+    {
+      "symbol": "SOL",
+      "quantity": -9.78535783423339,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 106.32701179
+    },
+    {
+      "symbol": "SOLUSDT",
+      "quantity": 9.74,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 106.32701179
+    },
+    {
+      "symbol": "XRP",
+      "quantity": -564.8728136389136,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 1.3605936
+    },
+    {
+      "symbol": "XRPUSDT",
+      "quantity": 563.5,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 1.3605936
+    }
+  ],
+  "cta_strategy_position_snapshots": [
+    {
+      "note": "RX01 takeover: signed RapidX balance minus debt and perpetual quantity; contemporaneous index marks; historical fills remain in old environment",
+      "source_id": "binance_exec_trade06",
+      "created_at": "2026-10-13T13:12:01.666648+00:00",
+      "snapshot_ts_us": 1791896850441032
+    }
+  ],
+  "cta_strategy_position_snapshot_entries": [
+    {
+      "symbol": "BNB",
+      "quantity": 1.2773739760310892,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 740.36092932
+    },
+    {
+      "symbol": "BNBUSDT",
+      "quantity": -1.27,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 740.36092932
+    },
+    {
+      "symbol": "BTC",
+      "quantity": 6.668401093008e-05,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 83218.49652174
+    },
+    {
+      "symbol": "CRV",
+      "quantity": 0.07917,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 0.3392799
+    },
+    {
+      "symbol": "DOGE",
+      "quantity": -13633.076456229412,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 0.08391098
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "quantity": 13611,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 0.08391098
+    },
+    {
+      "symbol": "ETH",
+      "quantity": 0.05162267304983476,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 2500.2827907
+    },
+    {
+      "symbol": "ETHUSDT",
+      "quantity": -0.051,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 2500.2827907
+    },
+    {
+      "symbol": "SOL",
+      "quantity": -9.78535783423339,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 106.32701179
+    },
+    {
+      "symbol": "SOLUSDT",
+      "quantity": 9.74,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 106.32701179
+    },
+    {
+      "symbol": "XRP",
+      "quantity": -564.8728136389136,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 0,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 1.3605936
+    },
+    {
+      "symbol": "XRPUSDT",
+      "quantity": 563.5,
+      "source_id": "binance_exec_trade06",
+      "venue_code": 1,
+      "strategy_name": "binance_cta_spread_rx01_inventory",
+      "snapshot_ts_us": 1791896850441032,
+      "reference_price": 1.3605936
+    }
+  ]
+}

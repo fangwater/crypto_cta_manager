@@ -1,6 +1,6 @@
 import { LoaderCircle, Save, Trash2 } from 'lucide-react'
-import { useEffect, useState } from 'react'
-import { deletePositionStrategy, listPositionAccess, savePositionStrategy } from '../../api'
+import { useState } from 'react'
+import { deletePositionStrategy, savePositionStrategy } from '../../api'
 import { ConfigShell } from '../../components/ConfigShell'
 import { useAuth } from '../../components/AuthGate'
 import { StrategyPicker } from '../../components/StrategyPicker'
@@ -19,22 +19,13 @@ export function PositionStrategyPage() {
   const { positions, orders, loading, error, reloadCatalog } = useStrategyCatalog()
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [selectedPosition, setSelectedPosition] = useState(emptyPosition)
-  const [configurable, setConfigurable] = useState<Set<string>>(new Set())
   const [experimentalToken, setExperimentalToken] = useState('')
 
-  useEffect(() => {
-    const controller = new AbortController()
-    listPositionAccess(controller.signal)
-      .then((access) => setConfigurable(new Set(access.map((item) => item.strategy_name))))
-      .catch(() => {})
-    return () => controller.abort()
-  }, [])
-
-  // Configure grant (or admin) can save targets; view-only users read only.
-  const canEdit = isAdmin || configurable.has(selectedPosition.strategy_name)
   const originalPosition = positions.find(
     (item) => item.strategy_name === selectedPosition.strategy_name,
   )
+  // Every logged-in user can create; saved strategies keep their publish gate.
+  const canEdit = !originalPosition || isAdmin || originalPosition.can_publish === true
   const requiresExperimentalToken = Object.entries(
     selectedPosition.symbol_order_strategy_overrides,
   ).some(([symbol, orderStrategyName]) => {
@@ -62,7 +53,7 @@ export function PositionStrategyPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
           <StrategyPicker
             title="策略库"
             emptyLabel="还没有仓位策略，先创建一个。"
@@ -79,7 +70,6 @@ export function PositionStrategyPage() {
               setSelectedPosition(emptyPosition())
               setExperimentalToken('')
             }}
-            allowCreate={isAdmin}
             renderMeta={(name) => {
               const item = positions.find((entry) => entry.strategy_name === name)
               if (!item) return ''
@@ -91,7 +81,7 @@ export function PositionStrategyPage() {
           <Card>
             <CardHeader>
               <CardTitle>编辑模板</CardTitle>
-              <CardDescription>CTA 仓位策略名通常来自上游系统；这里保存每份策略的原始目标数量。</CardDescription>
+              <CardDescription>所有登录用户均可创建私有策略，创建者可更新目标仓位、管理策略授权，并绑定到自己有配置权限的账户。</CardDescription>
             </CardHeader>
             <CardContent>
               <form
@@ -172,7 +162,7 @@ export function PositionStrategyPage() {
                     <Save size={15} /> 保存
                   </Button>
                   {!canEdit && (
-                    <p className="self-center text-xs text-muted">仅查看：需要该策略的可配置权限才能保存</p>
+                    <p className="self-center text-xs text-muted">仅查看：需要该策略的推送或可配置权限才能保存</p>
                   )}
                   {isAdmin && selectedPosition.strategy_name && (
                     <Button

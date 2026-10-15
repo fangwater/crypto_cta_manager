@@ -49,17 +49,25 @@ input and never stores the token in PostgreSQL or Redis.
 
 `cta_web` protects all Manager APIs with an HttpOnly session cookie. On a new
 database, open `/manager/` and register the first user; that account is made an
-administrator automatically. Later registrations create ordinary users with
-no visible accounts until an administrator grants access.
+administrator automatically. Afterwards administrators create ordinary users;
+public registration is closed. Ordinary users have no visible accounts until
+they are granted access.
 
 Administrators can open `/manager/admin/` to promote users and select the
 configured `source_id` values each ordinary user may view. Dashboard, NAV
 timeline, acquisition-cost, account details, and Manager
 position-update responses are filtered on the server. The machine-to-machine
-`POST /api/catalog/position-strategies` push endpoint is intentionally direct
-and does not require a browser session; catalog reads, deletes, account
-settings, Exec Config updates, and permission changes still require an
-administrator session. Direct Exec Viz and Config gateway routes also
+`POST /api/catalog/position-strategies` lets every logged-in user create a new
+private strategy and records the creator. Creation requires a valid session;
+anonymous requests and publish tokens alone cannot create a missing strategy.
+Updates require an administrator, creator, publish-manager or configure-grantee
+session, or a strategy/fallback publish token. Existing tokenless strategies
+retain legacy machine pushes without a session. Catalog responses include a
+session-specific `can_publish` flag so creators can edit their own targets.
+Creators and publish managers implicitly hold strategy configure access and
+may manage its user grants. Account binding also requires separate configure
+access to the destination account.
+Direct Exec Viz and Config gateway routes also
 validate the same session and source permission.
 
 The password is stored as a salted PBKDF2-HMAC-SHA256 record in Manager's
@@ -849,3 +857,9 @@ jp-meta deployment still uses BNBUSDT pending the combined virtual-account relea
 “管理授权”中授予或撤销其他用户的管理权限。获授权用户可以编辑组合和删除无
 跟随者的账户；授权管理仍由创建者或管理员负责。未获授权的组合保持只读。
 此授权不改变实际账户的配置权限、仓位策略的可见性或发布权限。
+
+### Optional funding and execution slippage
+
+The NAV page exposes before/after-fee NAV gaps against the minute-VWAP theoretical portfolio, divided by actual quote turnover in the same time window and expressed in bps. Acquisition cost also reports after-fee execution shortfall bps on its existing same-fill-quantity benchmark.
+
+Native Binance USD-M accounts may opt into durable funding-income collection. It is disabled by default. Account configuration in Manager controls the switch and polling interval without restarting; enabling requires the host-configured token and successful fixed-IP/public-egress and authenticated REST tests. Host `[funding]` requires a fixed non-trading local/public IP with complete trading-IP exclusions. The operator-authorized jp-meta LGQ RapidX sources (trade05/RX02, trade06/RX01 and trade07/RX03) instead use explicit `funding.rapidx_trading_ip_sources` exceptions: the configured fixed egress must match each account’s current trading IP, with verified public egress. RapidX collects factual `FUNDING_FEE` statements and deduplicates statement IDs. Pausing preserves historical funding in overall PnL. Funding backfills from each account/symbol's earliest local order creation time, preserves existing income when earlier history is discovered, and shows incremental progress until caught up. Funding is shown separately and added to account overall PnL, while execution slippage and strategy FIFO remain order-only. See [configuration, formulas and explicit database maintenance](docs/funding_and_slippage.md).

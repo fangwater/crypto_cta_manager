@@ -1,0 +1,119 @@
+[
+  {
+    "name": "health_before",
+    "elapsed_s": 0.007,
+    "bytes": 159,
+    "http_status": 200,
+    "body": {
+      "status": "ok",
+      "source_count": 13,
+      "generated_at_us": 1792035036134514,
+      "last_attempt_at_us": 1792035024850557,
+      "refresh_interval_secs": 60,
+      "last_refresh_error": null
+    }
+  },
+  {
+    "name": "status_before",
+    "elapsed_s": 0.003,
+    "bytes": 327,
+    "http_status": 200,
+    "body": {
+      "active_backfills": 0,
+      "cache_hits": 170,
+      "disk_batch_reads": 1217,
+      "disk_range_reads": 76,
+      "enabled": true,
+      "fetched_candles": 3918,
+      "last_error": null,
+      "memory_candle_hits": 8538858,
+      "pricing_cache_hits": 102017,
+      "requests": 419,
+      "retained_days": 30,
+      "target_history": {
+        "last_error": null,
+        "loading": false,
+        "processed_messages": 3807387,
+        "ready": true
+      }
+    }
+  },
+  {
+    "name": "rejected_30d",
+    "elapsed_s": 0.466,
+    "bytes": 5723748,
+    "http_status": 200,
+    "factual_points": 2882,
+    "theoretical_points": 0,
+    "loading": false,
+    "missing": 0,
+    "reason": "理论数据仅支持最近 30 天，不能查询更早或未来的区间",
+    "start": 1789443039315000,
+    "end": 1792035039315000
+  },
+  {
+    "name": "aligned_30d_0",
+    "elapsed_s": 1.189,
+    "bytes": 6024503,
+    "http_status": 200,
+    "factual_points": 2882,
+    "theoretical_points": 1754,
+    "loading": false,
+    "missing": 0,
+    "reason": null,
+    "start": 1789443420000000,
+    "end": 1792035039315000
+  },
+  {
+    "name": "aligned_repeat",
+    "elapsed_s": 0.395,
+    "bytes": 6024502,
+    "http_status": 200,
+    "factual_points": 2882,
+    "theoretical_points": 1754,
+    "loading": false,
+    "missing": 0,
+    "reason": null,
+    "start": 1789443420000000,
+    "end": 1792035039315000
+  },
+  {
+    "name": "status_after",
+    "elapsed_s": 0.003,
+    "bytes": 328,
+    "http_status": 200,
+    "body": {
+      "active_backfills": 0,
+      "cache_hits": 187,
+      "disk_batch_reads": 1238,
+      "disk_range_reads": 88,
+      "enabled": true,
+      "fetched_candles": 4114,
+      "last_error": null,
+      "memory_candle_hits": 11206959,
+      "pricing_cache_hits": 145019,
+      "requests": 426,
+      "retained_days": 30,
+      "target_history": {
+        "last_error": null,
+        "loading": false,
+        "processed_messages": 3809306,
+        "ready": true
+      }
+    }
+  },
+  {
+    "name": "health_after",
+    "elapsed_s": 0.003,
+    "bytes": 159,
+    "http_status": 200,
+    "body": {
+      "status": "ok",
+      "source_count": 13,
+      "generated_at_us": 1792035036134514,
+      "last_attempt_at_us": 1792035024850557,
+      "refresh_interval_secs": 60,
+      "last_refresh_error": null
+    }
+  }
+]

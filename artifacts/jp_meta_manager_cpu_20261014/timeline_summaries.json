@@ -1,0 +1,62 @@
+{
+  "binance_exec_trade01": {
+    "source": "binance_exec_trade01",
+    "elapsed": 0.673,
+    "points": 1437,
+    "factual_points": 98,
+    "loading": false,
+    "missing": 0,
+    "reason": null,
+    "latest_point_ts_us": 1791957960000000
+  },
+  "binance_exec_trade02": {
+    "source": "binance_exec_trade02",
+    "elapsed": 0.348,
+    "points": 1437,
+    "factual_points": 98,
+    "loading": false,
+    "missing": 0,
+    "reason": null,
+    "latest_point_ts_us": 1791957960000000
+  },
+  "binance_exec_trade03": {
+    "source": "binance_exec_trade03",
+    "elapsed": 0.813,
+    "points": 1437,
+    "factual_points": 98,
+    "loading": false,
+    "missing": 0,
+    "reason": null,
+    "latest_point_ts_us": 1791957960000000
+  },
+  "binance_exec_trade04": {
+    "source": "binance_exec_trade04",
+    "elapsed": 0.718,
+    "points": 1437,
+    "factual_points": 98,
+    "loading": false,
+    "missing": 0,
+    "reason": null,
+    "latest_point_ts_us": 1791957960000000
+  },
+  "binance_exec_trade05": {
+    "source": "binance_exec_trade05",
+    "elapsed": 0.056,
+    "points": 463,
+    "factual_points": 98,
+    "loading": false,
+    "missing": 0,
+    "reason": null,
+    "latest_point_ts_us": 1791957960000000
+  },
+  "binance_exec_trade06": {
+    "source": "binance_exec_trade06",
+    "elapsed": 0.056,
+    "points": 56,
+    "factual_points": 6,
+    "loading": false,
+    "missing": 0,
+    "reason": null,
+    "latest_point_ts_us": 1791957960000000
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "active_backfills": 0,
+  "cache_hits": 1087,
+  "disk_batch_reads": 642,
+  "disk_range_reads": 394,
+  "enabled": true,
+  "fetched_candles": 11053,
+  "last_error": null,
+  "memory_candle_hits": 4622308,
+  "pricing_cache_hits": 418030,
+  "requests": 337,
+  "retained_days": 30,
+  "target_history": {
+    "last_error": null,
+    "loading": false,
+    "processed_messages": 4597913,
+    "ready": true
+  }
+}

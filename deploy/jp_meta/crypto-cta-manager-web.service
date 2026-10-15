@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Keep Manager analysis off the busy default CPU 0-5 pool and trading cores.
+CPUAffinity=24
 WorkingDirectory=/home/ubuntu/crypto_cta_manager
 EnvironmentFile=/home/ubuntu/.config/crypto-cta-manager/database.env
 Environment=RUST_LOG=crypto_cta_manager=info,tower_http=info

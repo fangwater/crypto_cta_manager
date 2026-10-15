@@ -1,0 +1,16 @@
+{
+  "release": "20261015T030235Z",
+  "base_commit": "0502f40fec1d22d3c160828156c3bea6ea02ffae",
+  "patch_sha256": "daffbf793c71f1e37884b7ad9d12192bd647412a71cb9879dbaa295e5c43ab14",
+  "binaries": {
+    "cta_web": "c81128491e1f1bdcc76ce8d65fa7d1223aac9acb857ed0867aae27aacfa7dcae",
+    "nav_rebuild": "cdf8a92154587ac13f436fa171f26ff60569c383a98447dc60c21069292ce47e"
+  },
+  "frontend": {
+    "favicon.svg": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+    "index.html": "2768347740235da7e293ffeb94bc9b11604948af80e43e1d8068f84435626a0e",
+    "assets/index-DwhAqYMJ.js": "85b1cb6c4ddaba81525bd05a8aae8e5dcd4c704cfd624abec79cae7da936d690",
+    "assets/index-BB1UHnZe.css": "076d84cce84d276c4f4fcb21d1b488d16956bb5ec87ebc66f87208aa60153d08"
+  },
+  "frontend_archive_sha256": "93f6c27c2e6555aa25890e4fcd1dd763ad94166e88caddc194287a34565941a8"
+}

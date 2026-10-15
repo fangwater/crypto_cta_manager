@@ -1,4 +1,4 @@
-//! Resolve unpriced lifecycle fill deltas from durable, uniquely identified
+//! Recover unpriced and missing lifecycle fills from durable, uniquely identified
 //! RapidX executions. The original Exec records remain read-only audit facts.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,27 +58,46 @@ struct Fill {
     timestamp_us: i64,
 }
 
-/// Returns None without reading environments or execution ledgers for ordinary
-/// priced histories. An incomplete ledger fails this refresh, so the caller can
-/// retain the last good generation and retry without consuming the bad delta.
+/// Join only executions with an order already recorded by this Exec source.
+/// Historical executions without a matching order keep their original identity.
 pub(super) fn resolve(
     source: &SourceConfig,
     events: &im::Vector<Arc<NavEvent>>,
 ) -> Result<Option<im::Vector<Arc<NavEvent>>>> {
+    if events.is_empty() {
+        return Ok(None);
+    }
+    let unpriced = events.iter().any(|e| needs_price(e));
+    let values = match crate::market_rules::source_values(source) {
+        Ok(values) => values,
+        Err(_) if !unpriced => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let rapidx = matches!(
+        crate::market_rules::execution_backend(&source.venue, &values),
+        Ok("ltp")
+    );
+    if !rapidx {
+        ensure!(
+            !unpriced,
+            "source {} has an unpriced fill without RapidX execution evidence",
+            source.id
+        );
+        return Ok(None);
+    }
     let wanted = events
         .iter()
-        .filter(|e| needs_price(e))
+        .filter(|e| e.order_type_code != crate::model::INTERNAL_CROSS_ORDER_TYPE_CODE)
+        .filter(|e| e.client_order_id > 0)
         .map(|e| order_key(e))
         .collect::<BTreeSet<_>>();
     if wanted.is_empty() {
+        ensure!(
+            !unpriced,
+            "unpriced fill has no matching external order identity"
+        );
         return Ok(None);
     }
-    let values = crate::market_rules::source_values(source)?;
-    ensure!(
-        crate::market_rules::execution_backend(&source.venue, &values)? == "ltp",
-        "source {} has an unpriced fill without RapidX execution evidence",
-        source.id
-    );
     let portfolio = values
         .get("LTP_PORTFOLIO_ID")
         .context("missing execution portfolio scope")?;
@@ -96,12 +115,14 @@ pub(super) fn resolve(
     };
     let mut records =
         rocks_source::read_available_column_families(&source.rocksdb_path, &[EXECUTIONS_CF])?;
-    let records = records.remove(EXECUTIONS_CF).with_context(|| {
-        format!(
+    let Some(records) = records.remove(EXECUTIONS_CF) else {
+        ensure!(
+            !unpriced,
             "source {} is waiting for durable execution prices: missing {EXECUTIONS_CF}",
             source.id
-        )
-    })?;
+        );
+        return Ok(None);
+    };
     let fills = decode_fills(&records, portfolio, exchange, &wanted)
         .with_context(|| format!("source {} execution price evidence is invalid", source.id))?;
     let resolved = replace_orders(events, &wanted, &fills).with_context(|| {
@@ -110,10 +131,18 @@ pub(super) fn resolve(
             source.id
         )
     })?;
+    if resolved == *events {
+        return Ok(None);
+    }
+    let recovered_orders = resolved
+        .iter()
+        .filter(|e| e.record_key.contains(":execution:"))
+        .map(|e| order_key(e))
+        .collect::<BTreeSet<_>>()
+        .len();
     info!(
         source_id = source.id,
-        recovered_orders = wanted.len(),
-        "resolved unpriced fills from durable execution evidence"
+        recovered_orders, "recovered NAV fills from durable execution evidence"
     );
     Ok(Some(resolved))
 }
@@ -229,6 +258,7 @@ mod tests {
         Arc::new(NavEvent {
             record_key: format!("{receive_us:020}"),
             event_ts_us: receive_us,
+            create_ts_us: 1,
             update_ts_us: receive_us,
             signal_ts_us: 1,
             symbol: "FIL".into(),
@@ -375,6 +405,76 @@ mod tests {
         wrong_key.key[0] ^= 1;
         assert!(decode_fills(&[wrong_key], "123", "BINANCE", &wanted).is_err());
     }
+
+    #[test]
+    fn zero_fill_lifecycle_recovers_only_matching_deduplicated_executions() {
+        let events = im::vector![event(0.0, 0.0, 90_000)];
+        let wanted = BTreeSet::from([("FIL".into(), 0, 7)]);
+        let fills = decode_fills(
+            &[
+                record("123", "MARGIN", "a", 1.0, 100.0, false),
+                record("123", "MARGIN", "a", 1.0, 100.0, true),
+                record("123", "MARGIN", "b", 2.0, 103.0, true),
+                record("123", "PERP", "x", 99.0, 999.0, true),
+                record("456", "MARGIN", "x", 99.0, 999.0, true),
+            ],
+            "123",
+            "BINANCE",
+            &wanted,
+        )
+        .unwrap();
+        let result = replace_orders(&events, &wanted, &fills).unwrap();
+        assert_eq!(result.iter().filter(|e| e.amount_update > 0.0).count(), 2);
+        assert_eq!(result.iter().map(|e| e.amount_update).sum::<f64>(), 3.0);
+        assert!(
+            result
+                .iter()
+                .all(|e| e.from_key_text == events[0].from_key_text)
+        );
+        assert_eq!(events[0].amount_update, 0.0);
+        assert_eq!(
+            replace_orders(&events, &wanted, &BTreeMap::new()).unwrap(),
+            events
+        );
+    }
+
+    #[test]
+    fn missing_partial_is_recovered_and_late_lifecycle_does_not_duplicate_it() {
+        let partial = im::vector![event(100.0, 1.0, 90_000)];
+        let wanted = BTreeSet::from([("FIL".into(), 0, 7)]);
+        let fills = decode_fills(
+            &[
+                record("123", "MARGIN", "a", 1.0, 100.0, false),
+                record("123", "MARGIN", "b", 2.0, 103.0, true),
+            ],
+            "123",
+            "BINANCE",
+            &wanted,
+        )
+        .unwrap();
+        let recovered = replace_orders(&partial, &wanted, &fills).unwrap();
+        assert_eq!(recovered.iter().map(|e| e.amount_update).sum::<f64>(), 3.0);
+        let mut complete = partial.clone();
+        complete.push_back(event(103.0, 2.0, 110_000));
+        let late = replace_orders(&complete, &wanted, &fills).unwrap();
+        assert_eq!(late, complete);
+        assert_eq!(late.iter().map(|e| e.amount_update).sum::<f64>(), 3.0);
+    }
+
+    #[test]
+    fn execution_before_recorded_order_creation_is_not_reassigned() {
+        let mut lifecycle = (*event(0.0, 0.0, 200_000)).clone();
+        lifecycle.create_ts_us = 150_000;
+        let wanted = BTreeSet::from([("FIL".into(), 0, 7)]);
+        let fills = decode_fills(
+            &[record("123", "MARGIN", "a", 1.0, 100.0, true)],
+            "123",
+            "BINANCE",
+            &wanted,
+        )
+        .unwrap();
+        assert!(replace_orders(&im::vector![Arc::new(lifecycle)], &wanted, &fills).is_err());
+    }
 }
 
 fn replace_orders(
@@ -386,7 +486,7 @@ fn replace_orders(
     let mut result = im::Vector::new();
     for event in events {
         let key = order_key(event);
-        if event.amount_update > 0.0 && wanted.contains(&key) {
+        if wanted.contains(&key) {
             replaced.entry(key).or_default().push(event);
         } else {
             result.push_back(event.clone());
@@ -397,7 +497,7 @@ fn replace_orders(
         let template = original[0];
         let expected = original.iter().map(|e| e.amount_update).sum::<f64>();
         ensure!(
-            expected.is_finite() && expected > 0.0,
+            expected.is_finite() && expected >= 0.0,
             "invalid lifecycle fill quantity"
         );
         ensure!(
@@ -407,18 +507,31 @@ fn replace_orders(
             "conflicting lifecycle order attribution for {}",
             template.client_order_id
         );
-        let order = fills.get(&key).with_context(|| {
-            format!(
+        let unpriced = original.iter().any(|e| needs_price(e));
+        let Some(order) = fills.get(&key) else {
+            ensure!(
+                !unpriced,
                 "no executions for {} venue {} order {}",
-                key.0, key.1, key.2
-            )
-        })?;
+                key.0,
+                key.1,
+                key.2
+            );
+            result.extend(original.into_iter().cloned());
+            continue;
+        };
         let actual = order.values().map(|f| f.quantity).sum::<f64>();
-        // Only floating-point summation noise is accepted; never complete a
-        // genuinely missing fill with a fabricated residual quantity.
         let tolerance = expected.abs().max(actual.abs()) * 1e-12;
+        // A priced lifecycle can arrive before its complete execution ledger.
+        // Keep that factual lifecycle until the evidence catches up. Unpriced
+        // deltas still require complete evidence before advancing the reader.
+        if actual + tolerance < expected && !unpriced
+            || (actual - expected).abs() <= tolerance && !unpriced
+        {
+            result.extend(original.into_iter().cloned());
+            continue;
+        }
         ensure!(
-            actual.is_finite() && (actual - expected).abs() <= tolerance,
+            actual.is_finite() && actual + tolerance >= expected,
             "execution quantity mismatch for {} venue {} order {}: lifecycle={} evidence={}",
             key.0,
             key.1,
@@ -433,7 +546,10 @@ fn replace_orders(
             .order_id;
         for fill in order.values() {
             ensure!(
-                fill.side_code == template.side_code && fill.order_id == *order_id,
+                fill.side_code == template.side_code
+                    && fill.order_id == *order_id
+                    && (template.create_ts_us <= 0
+                        || fill.timestamp_us >= template.create_ts_us / 1_000 * 1_000),
                 "execution order side/identity conflict for {}",
                 key.2
             );
@@ -447,6 +563,12 @@ fn replace_orders(
             event.amount_update = fill.quantity;
             result.push_back(Arc::new(event));
         }
+        result.extend(
+            original
+                .into_iter()
+                .filter(|e| e.amount_update == 0.0)
+                .cloned(),
+        );
     }
     result.sort_by(|a, b| a.record_key.cmp(&b.record_key));
     Ok(result)

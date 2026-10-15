@@ -1,0 +1,318 @@
+{
+  "verified_at_us": 1792032964363846,
+  "snapshot_ts_ms": 1792032955806,
+  "original_anchor_ts_us": 1791896850441032,
+  "before_fills": 5160,
+  "after_fills": 5160,
+  "before_nav_after_fee": -163.79050225954197,
+  "after_nav_after_fee": -163.79050225954197,
+  "perpetuals_all_match": true,
+  "comparisons": [
+    {
+      "symbol": "AAVE",
+      "actual": 1.2889947790495413,
+      "before": 1.2959999999999994,
+      "after": 1.2959999999999994,
+      "difference_before": 0.00700522095045808,
+      "difference_after": 0.00700522095045808
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "actual": -1.2000000000000002,
+      "before": -1.2000000000000008,
+      "after": -1.2000000000000008,
+      "difference_before": -6.661338147750939e-16,
+      "difference_after": -6.661338147750939e-16
+    },
+    {
+      "symbol": "ADA",
+      "actual": 432.0761819102122,
+      "before": 438.79999999999876,
+      "after": 438.79999999999876,
+      "difference_before": 6.723818089786562,
+      "difference_after": 6.723818089786562
+    },
+    {
+      "symbol": "ADAUSDT",
+      "actual": 9.0,
+      "before": 9.0,
+      "after": 9.0,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "AVAX",
+      "actual": 20.151817826819457,
+      "before": 20.179999999999996,
+      "after": 20.179999999999996,
+      "difference_before": 0.028182173180539394,
+      "difference_after": 0.028182173180539394
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "actual": -10.0,
+      "before": -10.0,
+      "after": -10.0,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "BCH",
+      "actual": -0.00342653443867362,
+      "before": -0.0010000000000001236,
+      "after": -0.0010000000000001236,
+      "difference_before": 0.0024265344386734966,
+      "difference_after": 0.0024265344386734966
+    },
+    {
+      "symbol": "BCHUSDT",
+      "actual": 0.375,
+      "before": 0.37499999999999983,
+      "after": 0.37499999999999983,
+      "difference_before": -1.6653345369377348e-16,
+      "difference_after": -1.6653345369377348e-16
+    },
+    {
+      "symbol": "BNB",
+      "actual": 1.2773739760310892,
+      "before": 1.2773739760310892,
+      "after": 1.2773739760310892,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "BNBUSDT",
+      "actual": -1.27,
+      "before": -1.27,
+      "after": -1.27,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "BTC",
+      "actual": 6.668401093008e-05,
+      "before": 6.668401093008e-05,
+      "after": 6.668401093008e-05,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "CRV",
+      "actual": 0.07917,
+      "before": 0.07917,
+      "after": 0.07917,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "DASH",
+      "actual": 10.248793902360744,
+      "before": 10.278999999999996,
+      "after": 10.278999999999996,
+      "difference_before": 0.03020609763925286,
+      "difference_after": 0.03020609763925286
+    },
+    {
+      "symbol": "DASHUSDT",
+      "actual": -6.1610000000000005,
+      "before": -6.161000000000001,
+      "after": -6.161000000000001,
+      "difference_before": -8.881784197001252e-16,
+      "difference_after": -8.881784197001252e-16
+    },
+    {
+      "symbol": "DOGE",
+      "actual": -12378.497979478689,
+      "before": -12373.076456229412,
+      "after": -12373.076456229412,
+      "difference_before": 5.421523249277016,
+      "difference_after": 5.421523249277016
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "actual": 13611.0,
+      "before": 13611.0,
+      "after": 13611.0,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "DOT",
+      "actual": -95.46274820578029,
+      "before": -94.82000000000005,
+      "after": -94.82000000000005,
+      "difference_before": 0.6427482057802365,
+      "difference_after": 0.6427482057802365
+    },
+    {
+      "symbol": "DOTUSDT",
+      "actual": 90.3,
+      "before": 90.30000000000001,
+      "after": 90.30000000000001,
+      "difference_before": 1.4210854715202004e-14,
+      "difference_after": 1.4210854715202004e-14
+    },
+    {
+      "symbol": "ETH",
+      "actual": 0.05162267304983476,
+      "before": 0.05162267304983476,
+      "after": 0.05162267304983476,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "ETHUSDT",
+      "actual": -0.051,
+      "before": -0.051,
+      "after": -0.051,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "FIL",
+      "actual": 186.56283605580896,
+      "before": 187.8800000000004,
+      "after": 187.8800000000004,
+      "difference_before": 1.3171639441914351,
+      "difference_after": 1.3171639441914351
+    },
+    {
+      "symbol": "FILUSDT",
+      "actual": -90.1,
+      "before": -90.10000000000001,
+      "after": -90.10000000000001,
+      "difference_before": -1.4210854715202004e-14,
+      "difference_after": -1.4210854715202004e-14
+    },
+    {
+      "symbol": "LINK",
+      "actual": -8.042524165030718,
+      "before": -8.030000000000001,
+      "after": -8.030000000000001,
+      "difference_before": 0.012524165030717072,
+      "difference_after": 0.012524165030717072
+    },
+    {
+      "symbol": "LINKUSDT",
+      "actual": 8.01,
+      "before": 8.01,
+      "after": 8.01,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "LTC",
+      "actual": 0.023590704827834295,
+      "before": 0.02699999999999969,
+      "after": 0.02699999999999969,
+      "difference_before": 0.003409295172165396,
+      "difference_after": 0.003409295172165396
+    },
+    {
+      "symbol": "LTCUSDT",
+      "actual": -0.024,
+      "before": -0.024000000000000243,
+      "after": -0.024000000000000243,
+      "difference_before": -2.42861286636753e-16,
+      "difference_after": -2.42861286636753e-16
+    },
+    {
+      "symbol": "NEAR",
+      "actual": 20.993289828291857,
+      "before": 21.200000000000035,
+      "after": 21.200000000000035,
+      "difference_before": 0.20671017170817763,
+      "difference_after": 0.20671017170817763
+    },
+    {
+      "symbol": "NEARUSDT",
+      "actual": -1.0,
+      "before": -0.9999999999999876,
+      "after": -0.9999999999999876,
+      "difference_before": 1.2434497875801753e-14,
+      "difference_after": 1.2434497875801753e-14
+    },
+    {
+      "symbol": "SOL",
+      "actual": -7.914517172126927,
+      "before": -7.9083578342333904,
+      "after": -7.9083578342333904,
+      "difference_before": 0.0061593378935365095,
+      "difference_after": 0.0061593378935365095
+    },
+    {
+      "symbol": "SOLUSDT",
+      "actual": 8.77,
+      "before": 8.770000000000003,
+      "after": 8.770000000000003,
+      "difference_before": 3.552713678800501e-15,
+      "difference_after": 3.552713678800501e-15
+    },
+    {
+      "symbol": "UNI",
+      "actual": 42.454198298243675,
+      "before": 42.559999999999995,
+      "after": 42.559999999999995,
+      "difference_before": 0.1058017017563202,
+      "difference_after": 0.1058017017563202
+    },
+    {
+      "symbol": "UNIUSDT",
+      "actual": -28.0,
+      "before": -28.0,
+      "after": -28.0,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "XLM",
+      "actual": 1098.216409826607,
+      "before": 1100.0,
+      "after": 1100.0,
+      "difference_before": 1.783590173392895,
+      "difference_after": 1.783590173392895
+    },
+    {
+      "symbol": "XLMUSDT",
+      "actual": -556.0,
+      "before": -556.0,
+      "after": -556.0,
+      "difference_before": 0.0,
+      "difference_after": 0.0
+    },
+    {
+      "symbol": "XRP",
+      "actual": -414.6268976916167,
+      "before": -413.9728136389135,
+      "after": -413.9728136389135,
+      "difference_before": 0.6540840527031833,
+      "difference_after": 0.6540840527031833
+    },
+    {
+      "symbol": "XRPUSDT",
+      "actual": 487.6,
+      "before": 487.5999999999999,
+      "after": 487.5999999999999,
+      "difference_before": -1.1368683772161603e-13,
+      "difference_after": -1.1368683772161603e-13
+    },
+    {
+      "symbol": "ZEC",
+      "actual": 0.26751870260099236,
+      "before": 0.2690000000000002,
+      "after": 0.2690000000000002,
+      "difference_before": 0.0014812973990078193,
+      "difference_after": 0.0014812973990078193
+    },
+    {
+      "symbol": "ZECUSDT",
+      "actual": -0.089,
+      "before": -0.08899999999999988,
+      "after": -0.08899999999999988,
+      "difference_before": 1.1102230246251565e-16,
+      "difference_after": 1.1102230246251565e-16
+    }
+  ],
+  "before_absolute_quantity_error_usdt": 13.040487595430575,
+  "after_absolute_quantity_error_usdt": 13.040487595430575
+}

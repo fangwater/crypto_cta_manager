@@ -1,0 +1,45 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "username": "shaokai",
+      "layout": "desktop",
+      "new_button": true,
+      "create_save_enabled": true,
+      "owner_update_status": 200,
+      "owner_edit_after_reload": true,
+      "javascript_errors": 0,
+      "horizontal_overflow": false
+    },
+    {
+      "username": "shaokai",
+      "layout": "mobile",
+      "new_button": true,
+      "create_save_enabled": true,
+      "owner_update_status": 200,
+      "owner_edit_after_reload": true,
+      "javascript_errors": 0,
+      "horizontal_overflow": false
+    },
+    {
+      "username": "dzy",
+      "layout": "desktop",
+      "new_button": true,
+      "create_save_enabled": true,
+      "owner_update_status": 200,
+      "owner_edit_after_reload": true,
+      "javascript_errors": 0,
+      "horizontal_overflow": false
+    },
+    {
+      "username": "dzy",
+      "layout": "mobile",
+      "new_button": true,
+      "create_save_enabled": true,
+      "owner_update_status": 200,
+      "owner_edit_after_reload": true,
+      "javascript_errors": 0,
+      "horizontal_overflow": false
+    }
+  ]
+}

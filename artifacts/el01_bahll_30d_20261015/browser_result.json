@@ -1,0 +1,90 @@
+{
+  "fixtureReplay": true,
+  "onlineBundle": true,
+  "clicked": true,
+  "title": "CTA NAV",
+  "selectedRange": [
+    "30D"
+  ],
+  "notices": [
+    "（理论净值 − 实际净值）÷ 同期实际成交额 × 10,000；正值表示实际表现更差，funding 不计入滑点。",
+    "净值差包含仓位与估值差异；同成交量的价格与费用滑点见“成本分析”。",
+    "理论数据仅支持最近 30 天，不能查询更早或未来的区间",
+    "理论净值：理论数据仅支持最近 30 天，不能查询更早或未来的区间"
+  ],
+  "loading": false,
+  "canvasCount": 2,
+  "chartText": "14,601 fills2,882 15min ticks13 symbols0 mssampled",
+  "strokes": {
+    "#edf0f4": 98,
+    "#d7dbe2": 18,
+    "#2563a7": 18,
+    "#176b5b": 18,
+    "#7357a3": 10,
+    "#a33f55": 10,
+    "#4b6478": 10,
+    "#1f7a68": 46,
+    "#dfe3e8": 18,
+    "#b7791f": 8,
+    "#8292cc": 8
+  },
+  "longTasks": [
+    {
+      "start": 421.79999923706055,
+      "duration": 107
+    },
+    {
+      "start": 734.7000007629395,
+      "duration": 145
+    },
+    {
+      "start": 1239.5,
+      "duration": 58
+    },
+    {
+      "start": 1310.7000007629395,
+      "duration": 137
+    },
+    {
+      "start": 1606.7999992370605,
+      "duration": 53
+    },
+    {
+      "start": 1665.6000003814697,
+      "duration": 75
+    },
+    {
+      "start": 2048.2000007629395,
+      "duration": 55
+    },
+    {
+      "start": 2390.7000007629395,
+      "duration": 61
+    }
+  ],
+  "jsHeapUsed": 22326347,
+  "overflow": false,
+  "errors": [],
+  "requests": [
+    {
+      "path": "/manager/api/timeline",
+      "includeTheoretical": "false",
+      "at": 1792033610097
+    },
+    {
+      "path": "/manager/api/timeline",
+      "includeTheoretical": "true",
+      "at": 1792033610481
+    },
+    {
+      "path": "/manager/api/timeline",
+      "includeTheoretical": "false",
+      "at": 1792033610923
+    },
+    {
+      "path": "/manager/api/timeline",
+      "includeTheoretical": "true",
+      "at": 1792033611286
+    }
+  ]
+}

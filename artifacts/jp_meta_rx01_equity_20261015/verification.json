@@ -1,0 +1,41 @@
+{
+  "verified_at_us": 1792036227347542,
+  "old_monitor_pid": 3046353,
+  "new_monitor_pid": 2309899,
+  "protected_processes_unchanged": 190,
+  "config_files_unchanged": 33,
+  "snapshot_tables_unchanged": 4,
+  "affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "manager_pid_unchanged": 1850064,
+  "all_seven_equity_feeds_ok": true,
+  "rx01": {
+    "source_id": "binance_exec_trade06",
+    "account": "lgq_cta_RX01",
+    "venue": "binance-futures",
+    "feed": "rapidx_account_risk",
+    "equity_usdt": 19435.533861766635,
+    "wallet_balance_usdt": null,
+    "unrealized_pnl_usdt": null,
+    "available_balance_usdt": null,
+    "exchange_ts_ms": 1792036209932,
+    "status": "ok"
+  },
+  "prior_healthy_rx01_ts_ms": 1792036102022,
+  "healthy_update_gap_ms": 107910,
+  "financial": {
+    "execution_persistence_pending": 0,
+    "history_end_ms": 1792036221180,
+    "recovery_ready": true,
+    "statement_history_end_ms": 1792036221180,
+    "statement_persistence_pending": 0,
+    "total_equity": "19435.533861766634643561",
+    "observed_ms": 1792036226181
+  }
+}

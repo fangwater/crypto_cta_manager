@@ -1,0 +1,455 @@
+{
+  "passed": true,
+  "results": [
+    {
+      "username": "shaokai",
+      "width": 1440,
+      "height": 1000,
+      "permissions": {
+        "overflow": false,
+        "ownedVisible": true,
+        "description": true,
+        "implicitRows": [],
+        "alerts": []
+      },
+      "bindings": {
+        "overflow": false,
+        "ownedOption": true,
+        "alerts": []
+      },
+      "jsErrors": [],
+      "readOnly": true
+    },
+    {
+      "username": "shaokai",
+      "width": 390,
+      "height": 1100,
+      "permissions": {
+        "overflow": false,
+        "ownedVisible": true,
+        "description": true,
+        "implicitRows": [],
+        "alerts": []
+      },
+      "bindings": {
+        "overflow": false,
+        "ownedOption": true,
+        "alerts": []
+      },
+      "jsErrors": [],
+      "readOnly": true
+    },
+    {
+      "username": "admin",
+      "width": 1440,
+      "height": 1000,
+      "permissions": {
+        "overflow": false,
+        "ownedVisible": true,
+        "description": true,
+        "implicitRows": [
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          }
+        ],
+        "alerts": []
+      },
+      "bindings": null,
+      "jsErrors": [],
+      "readOnly": true
+    },
+    {
+      "username": "admin",
+      "width": 390,
+      "height": 1100,
+      "permissions": {
+        "overflow": false,
+        "ownedVisible": true,
+        "description": true,
+        "implicitRows": [
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          },
+          {
+            "buttons": [
+              {
+                "text": "无权限",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "仅查看",
+                "disabled": true,
+                "selected": false
+              },
+              {
+                "text": "可配置",
+                "disabled": true,
+                "selected": true
+              }
+            ]
+          }
+        ],
+        "alerts": []
+      },
+      "bindings": null,
+      "jsErrors": [],
+      "readOnly": true
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "verified": true,
+  "archive_sha256": "476959a319936596266a4f92989b88a02b50ec5de47a5847a6f8f8c8a1e46c9f",
+  "verified_archive_files": 17,
+  "manager_pid": 870208,
+  "manager_cpu": 24,
+  "protected_processes_unchanged": 178,
+  "config_sha256_unchanged": 34,
+  "browser_pnl_modes": 2,
+  "accounts_with_theoretical_curves": 6,
+  "fixed_window_repeats_without_kline_requests": 6,
+  "health": {
+    "status": "ok",
+    "source_count": 6,
+    "generated_at_us": 1791958394612925,
+    "last_attempt_at_us": 1791958387903328,
+    "refresh_interval_secs": 60,
+    "last_refresh_error": null
+  },
+  "target_history": {
+    "last_error": null,
+    "loading": false,
+    "processed_messages": 4597913,
+    "ready": true
+  }
+}

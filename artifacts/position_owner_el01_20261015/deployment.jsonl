@@ -1,0 +1,2 @@
+{"phase": "manager_restart", "release": "20261015T040000Z"}
+{"phase": "deployed", "release": "20261015T040000Z", "manager_ready": true, "manager_pid": 2915883, "protected_processes_unchanged": 83, "trade_configs_unchanged": 13, "backend_sha256": "1db19012d8f9f04b7f789107fcd92d9a059f30e451c900112f6eece5c6198ba8"}

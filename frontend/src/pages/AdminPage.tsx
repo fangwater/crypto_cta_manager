@@ -309,7 +309,7 @@ export function AdminPage() {
         title={isAdmin ? '账户权限' : '授权管理'}
         description={isAdmin
           ? '账户授权分三档：无权限（不显示）、仅查看（可读账户与绑定）、可配置（可编辑绑定、份数、执行参数、费率与杠杆）。策略授权独立于账户：可见即可在目录与已绑定账户中看到该策略，可配置才允许新建绑定并管理该策略的授权。已存在的绑定由账户可配置权限管理，不再重复校验策略权限。'
-          : '你持有可配置权限的账户和策略都可以继续授权给其他用户：账户的可配置授权允许对方读写该账户绑定与费率，策略的可配置授权允许对方新建绑定并继续授权。全员可见、推送 token、推送用户与新建策略仍由管理员维护。'}
+          : '你创建的策略，以及持有可配置权限的账户和策略，都可以继续授权给其他用户。新建绑定还需要目标账户的配置权限。所有登录用户均可新建私有策略；全员可见、推送 token 和推送用户由管理员维护。'}
       />
       {error && <Alert tone="error" className="mb-4">{error}</Alert>}
       {isAdmin && (
@@ -403,7 +403,7 @@ export function AdminPage() {
         <CardHeader><CardTitle>策略权限</CardTitle></CardHeader>
         <CardContent className="space-y-5">
           <p className="text-xs text-muted">
-            策略授权独立于账户：可见用户能在目录和已绑定账户中看到该策略；可配置用户能用它新建账户绑定并管理这里的授权。新建策略默认私有；管理员可勾选全员可见或设置推送 token、推送用户。机器推送方发送 X-CTA-Publish-Token；未设置 token 的策略保持开放推送（兼容旧方式）。
+            策略授权独立于账户：可见用户能在目录和已绑定账户中看到该策略；可配置用户能用它新建账户绑定并管理这里的授权，绑定还需目标账户的配置权限。创建者和推送管理者自动拥有策略配置权限。新建策略默认私有；管理员可勾选全员可见或设置推送 token、推送用户。机器推送方发送 X-CTA-Publish-Token；未设置 token 的策略保持开放推送（兼容旧方式）。
           </p>
           {access.map((item) => (
             <div key={item.strategy_name} className="rounded-xl border border-border-soft p-4">
@@ -445,13 +445,16 @@ export function AdminPage() {
                     </div>
                     <div className="space-y-2">
                       {grantableUsers.map((target) => {
-                        const level = item.grants.find((grant) => grant.user_id === target.user_id)?.access_level ?? 'none'
+                        const implicitRole = item.created_by === target.username
+                          ? '创建者'
+                          : item.managers.some((manager) => manager.user_id === target.user_id) ? '推送管理者' : null
+                        const level = implicitRole ? 'configure' : item.grants.find((grant) => grant.user_id === target.user_id)?.access_level ?? 'none'
                         return (
                           <div key={target.user_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-soft px-3 py-2">
-                            <span className="text-xs text-ink">{target.username}</span>
+                            <span className="text-xs text-ink">{target.username}{implicitRole ? ` · ${implicitRole}（自动可配置）` : ''}</span>
                             <LevelPicker
                               value={level}
-                              disabled={savingStrategy === item.strategy_name}
+                              disabled={!!implicitRole || savingStrategy === item.strategy_name}
                               onChange={(next) => void setUserGrantLevel(item, target, next)}
                             />
                           </div>

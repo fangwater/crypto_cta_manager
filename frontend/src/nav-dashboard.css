@@ -1210,6 +1210,14 @@
   background: rgba(255, 255, 255, 0.52);
 }
 
+.summary-strip--funding {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.summary-strip--funding .summary-item span {
+  white-space: normal;
+}
+
 .summary-item {
   min-width: 0;
   padding: 17px 18px;
@@ -1880,7 +1888,8 @@ tbody tr.is-selected td {
     border-top: 1px solid var(--line);
   }
 
-  .summary-item:nth-child(5) {
+  .summary-item:nth-child(5),
+  .summary-item:nth-child(6) {
     border-top: 1px solid var(--line);
   }
 
@@ -1973,6 +1982,10 @@ tbody tr.is-selected td {
 
   .summary-item:nth-child(5) {
     grid-column: 1 / -1;
+  }
+
+  .summary-strip--funding .summary-item:nth-child(5) {
+    grid-column: auto;
   }
 
   .panel-heading {
@@ -2445,4 +2458,13 @@ tbody tr.is-selected td {
   .gitbook-page {
     padding: 20px 0 48px;
   }
+}
+
+.nav-analysis-stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+@media (max-width: 700px) {
+  .nav-analysis-stats { grid-template-columns: minmax(0, 1fr); }
+  .nav-analysis-stats .summary-item + .summary-item { border-left: 0; border-top: 1px solid var(--line); }
+  .nav-analysis-stats .summary-item span { white-space: normal; }
 }

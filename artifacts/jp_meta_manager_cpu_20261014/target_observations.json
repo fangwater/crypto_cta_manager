@@ -1,0 +1,262 @@
+[
+  {
+    "time_us": 1791957856693952,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 2382080,
+      "ready": false
+    },
+    "elapsed": 0.018
+  },
+  {
+    "time_us": 1791957871697931,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 2714112,
+      "ready": false
+    },
+    "elapsed": 0.004
+  },
+  {
+    "time_us": 1791957886701037,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 2793728,
+      "ready": false
+    },
+    "elapsed": 0.003
+  },
+  {
+    "time_us": 1791957901704816,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 2873600,
+      "ready": false
+    },
+    "elapsed": 0.003
+  },
+  {
+    "time_us": 1791957916712096,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 2936832,
+      "ready": false
+    },
+    "elapsed": 0.005
+  },
+  {
+    "time_us": 1791957931715151,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3014912,
+      "ready": false
+    },
+    "elapsed": 0.003
+  },
+  {
+    "time_us": 1791957946718278,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3093504,
+      "ready": false
+    },
+    "elapsed": 0.003
+  },
+  {
+    "time_us": 1791957961874050,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3171584,
+      "ready": false
+    },
+    "elapsed": 0.143
+  },
+  {
+    "time_us": 1791957979517282,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3235584,
+      "ready": false
+    },
+    "elapsed": 2.642
+  },
+  {
+    "time_us": 1791957994520146,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3328512,
+      "ready": false
+    },
+    "elapsed": 0.002
+  },
+  {
+    "time_us": 1791958011146379,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3412480,
+      "ready": false
+    },
+    "elapsed": 1.626
+  },
+  {
+    "time_us": 1791958026247371,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3485952,
+      "ready": false
+    },
+    "elapsed": 0.101
+  },
+  {
+    "time_us": 1791958041305089,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3541760,
+      "ready": false
+    },
+    "elapsed": 0.057
+  },
+  {
+    "time_us": 1791958056308137,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3602944,
+      "ready": false
+    },
+    "elapsed": 0.003
+  },
+  {
+    "time_us": 1791958071311149,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3668224,
+      "ready": false
+    },
+    "elapsed": 0.002
+  },
+  {
+    "time_us": 1791958086319150,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3742720,
+      "ready": false
+    },
+    "elapsed": 0.007
+  },
+  {
+    "time_us": 1791958101322422,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3795456,
+      "ready": false
+    },
+    "elapsed": 0.003
+  },
+  {
+    "time_us": 1791958116325984,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3874304,
+      "ready": false
+    },
+    "elapsed": 0.003
+  },
+  {
+    "time_us": 1791958132160687,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 3953408,
+      "ready": false
+    },
+    "elapsed": 0.205
+  },
+  {
+    "time_us": 1791958147174700,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 4075776,
+      "ready": false
+    },
+    "elapsed": 0.003
+  },
+  {
+    "time_us": 1791958162182791,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 4145152,
+      "ready": false
+    },
+    "elapsed": 0.007
+  },
+  {
+    "time_us": 1791958177203716,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 4279040,
+      "ready": false
+    },
+    "elapsed": 0.02
+  },
+  {
+    "time_us": 1791958192206980,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 4364032,
+      "ready": false
+    },
+    "elapsed": 0.003
+  },
+  {
+    "time_us": 1791958208358881,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 4425472,
+      "ready": false
+    },
+    "elapsed": 1.151
+  },
+  {
+    "time_us": 1791958223367191,
+    "target_history": {
+      "last_error": null,
+      "loading": true,
+      "processed_messages": 4561152,
+      "ready": false
+    },
+    "elapsed": 0.007
+  },
+  {
+    "time_us": 1791958238544062,
+    "target_history": {
+      "last_error": null,
+      "loading": false,
+      "processed_messages": 4589908,
+      "ready": true
+    },
+    "elapsed": 0.005
+  }
+]

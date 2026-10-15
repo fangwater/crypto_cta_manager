@@ -17,6 +17,7 @@ import {
   ContractLeveragePanel,
   ContractLeverageToolbar,
 } from '../../components/ContractLeveragePanel'
+import { FundingSettingsPanel } from '../../components/FundingSettingsPanel'
 import { AccountFollowPanel } from '../../components/AccountFollowPanel'
 import { ConfigShell } from '../../components/ConfigShell'
 import { Alert } from '../../components/ui/Badge'
@@ -76,7 +77,7 @@ export function AccountBindingsPage() {
   const bindingEditsDisabled = !studio || studio.source_id !== sourceId || following || (studio?.pending_publishes.length ?? 0) > 0
   const selectedAccount = accounts.find((account) => account.source_id === sourceId)
 
-  // New bindings require the strategy's configure grant; the access list is
+  // New bindings require strategy configure permission; the access list is
   // already filtered to configurable strategies for non-admin sessions.
   const availablePositions = useMemo(
     () =>
@@ -254,6 +255,7 @@ export function AccountBindingsPage() {
               </Label>}
             </CardContent>
           </Card>
+          <FundingSettingsPanel key={sourceId} sourceId={sourceId} />
           <AccountFollowPanel sourceId={sourceId} studio={studio} onChange={applyStudio} />
           <Card>
             <CardHeader>

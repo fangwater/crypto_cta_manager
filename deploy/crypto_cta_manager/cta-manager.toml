@@ -77,6 +77,28 @@ retry_backoff_ms = 1000
 at_mobiles = []
 is_at_all = false
 
+[funding]
+enable_token_env = "CTA_FUNDING_ENABLE_TOKEN"
+local_ip = "154.197.32.9"
+public_ip = "154.197.32.9"
+forbidden_public_ips = ["154.197.32.6"]
+trade_engine_configs = [
+  "/home/el01/binance_exec_trade01/trade_engine.toml",
+  "/home/el01/binance_exec_trade02/trade_engine.toml",
+  "/home/el01/binance_exec_trade03/trade_engine.toml",
+  "/home/el01/binance_exec_trade04/trade_engine.toml",
+  "/home/el01/binance_exec_xy_lxy21_05/trade_engine.toml",
+  "/home/el01/binance_exec_trade06/trade_engine.toml",
+  "/home/el01/binance_exec_trade07/trade_engine.toml",
+  "/home/el01/binance_exec_trade08/trade_engine.toml",
+  "/home/el01/binance_exec_trade09/trade_engine.toml",
+  "/home/el01/binance_exec_trade10/trade_engine.toml",
+  "/home/el01/binance_exec_trade11/trade_engine.toml",
+  "/home/el01/binance_exec_trade12/trade_engine.toml",
+  "/home/el01/binance_exec_trade13/trade_engine.toml",
+]
+
+
 [[sources]]
 id = "binance_exec_trade01"
 account = "trade01"
@@ -105,6 +127,8 @@ exec_viz_url = "http://127.0.0.1:10049/"
 ipc_namespace = "binance_exec_trade09"
 account_ipc_service = "account_pubs/binance_pm"
 
+# Fixed funding history egress. Account switches/intervals are configured in Manager.
+# Backfill from the account/symbol's earliest local order creation timestamp.
 [[sources]]
 id = "binance_exec_trade10"
 account = "trade10"

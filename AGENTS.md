@@ -180,6 +180,42 @@ source in output. Order-only reconstruction does not include funding, deposits,
 withdrawals, liquidation charges, or other account-ledger movements; keep those
 limitations explicit.
 
+Native Binance USD-M sources may separately opt into funding in the Manager
+account configuration UI, disabled by default in PostgreSQL. Host `[funding]`
+locks the dedicated fixed egress. This persists factual funding income and per-symbol
+observation starts/cursors in Manager PostgreSQL, then adds funding to account
+overall NAV only. Begin historical funding at the account/symbol's earliest local
+order creation timestamp, independently of activation and position snapshots.
+Earlier discovered orders reopen affected cursors while preserving and
+deduplicating existing income. Continue bounded historical increments until
+caught up, then use the normal poll interval. Require explicit fixed local/public egress different from all
+trading addresses, complete live trading-config exclusions, and verified public
+egress before REST access. This operator requirement overrides the account-query
+trading-IP guidance for funding income. No proxy/default-route/trading-IP fallback.
+Enabling requires the configured environment token and successful bound public-IP
+and signed income REST tests before saving the switch. The operator-selected
+token is host-only, never committed or printed. Account polling intervals
+(60–86400 seconds, default 300) are saved in PostgreSQL and hot-reloaded. Pausing
+retains existing income in overall NAV. Show enable/progress/error badges.
+Funding never changes order FIFO, strategy attribution, or execution slippage.
+Existing databases use explicit `scripts/apply_funding_schema.sql` and
+`scripts/apply_funding_settings_schema.sql` maintenance;
+normal startup must not run DDL. See `docs/funding_and_slippage.md`.
+
+By operator instruction on 2026-10-15, jp-meta's three lgq RapidX CTA sources
+(`binance_exec_trade05` / RX02, `binance_exec_trade06` / RX01 and
+`binance_exec_trade07` / RX03) may collect factual funding statements using
+their own fixed trading IP. This is an explicit per-source exception to the
+dedicated funding egress rule above, recorded in
+`funding.rapidx_trading_ip_sources`; it must not apply to native accounts or
+other RapidX sources. Bind `funding.local_ip` explicitly, require it to match
+the source's current first resolved trading IP, and verify `funding.public_ip`
+before every collection pass. A binding change stops collection until reviewed.
+Use RapidX `/api/v1/trading/statement` with `FUNDING_FEE`, validate portfolio,
+exchange, perpetual symbol, currency, time and complete pagination, and deduplicate
+by statement ID. Preserve per-source order-history starts and account-only PnL.
+Do not write to Exec stores or change any trading bindings.
+
 Exchange-owned forced-close fills are order events, not account-ledger charges.
 Exec must persist liquidation, ADL, delisting settlement, and contract-delivery
 fills into `uniform_orders` with their factual side, price, base quantity, venue,
@@ -197,8 +233,19 @@ from local PostgreSQL snapshots plus later RocksDB fills. It keeps the last good
 report when a refresh fails and must never expose database credentials or write
 to the live Exec RocksDB. `cta_web` also owns a host-global Manager RocksDB,
 default `/home/el01/crypto_cta_manager/db`. This is not an Exec-account store,
-so it must not live under `binance_exec_trade01`. Position publishes skip the
-browser session flow but are gated per strategy:
+so it must not live under `binance_exec_trade01`. Every logged-in user may create
+a new position strategy; record that user's identity as its creator. Anonymous
+requests and publish tokens alone must never create a missing strategy. Check
+strategy access under the configuration lock before saving so concurrent
+same-name creations cannot overwrite another user's strategy. The browser
+exposes creation to ordinary users and uses the catalog's session-specific
+`can_publish` flag when editing saved targets.
+Creators implicitly hold configure permission for their own position strategies,
+including strategy grant management. New account bindings also require the
+destination account's configure permission. Explicit view grants must not
+downgrade creator or publish-manager permissions; show these implicit permissions
+in the browser rather than displaying "no permission" for an empty grant row.
+Updates from machine publishers skip the browser session flow but are gated per strategy:
 `POST /api/catalog/position-strategies` accepts an admin session, a session of
 the strategy's creator or an authorized manager
 (`cta_position_strategy_managers`), the strategy's publish token sent as
@@ -505,7 +552,9 @@ not silently fold unclassified fills into Maker or Taker.
 
 CTA timeline series are NAV before estimated fees, NAV after estimated fees,
 realized PnL, floating PnL, and estimated trading fees. There is no baseline
-equity, funding, interest, deposit, or withdrawal series. The first point at a
+equity, interest, deposit, or withdrawal series. Opt-in account views expose a
+separate factual funding series and total NAV including funding; order-only
+series and strategy PnL retain their original meaning. The first point at a
 normal window boundary is zero; the final point must equal the selected-window
 summary. PostgreSQL snapshots remain immutable source-specific initial-position
 anchors. Never merge FIFO state across source ID, symbol, or venue.

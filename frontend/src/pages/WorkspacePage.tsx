@@ -1,3 +1,4 @@
+import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import {
   Activity,
   ArrowRight,
@@ -249,6 +250,7 @@ function AccountCard({
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
+          {account.venue === 'binance-futures' && <FundingStatusBadge value={account.funding} />}
           {isOkxVenue(account.venue) && (
             <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
           )}

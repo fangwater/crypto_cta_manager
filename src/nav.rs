@@ -30,6 +30,7 @@ pub type SourceStrategyPositionSnapshots = BTreeMap<String, StrategyPositionSnap
 pub(crate) struct NavEvent {
     pub record_key: String,
     pub event_ts_us: i64,
+    pub create_ts_us: i64,
     pub update_ts_us: i64,
     pub signal_ts_us: i64,
     pub symbol: String,
@@ -49,6 +50,7 @@ impl From<UniformOrderEvent> for NavEvent {
         Self {
             record_key: event.record_key,
             event_ts_us: event.event_ts_us,
+            create_ts_us: event.create_ts_us,
             update_ts_us: event.update_ts_us,
             signal_ts_us: event.signal_ts_us,
             symbol: crate::exec_routing::target_symbol(&event.symbol, event.venue_code),
@@ -89,6 +91,31 @@ struct HistoryChange {
 }
 
 impl NavSourceHistory {
+    pub(crate) fn funding_symbols(&self) -> BTreeMap<String, i64> {
+        let mut symbols = BTreeMap::<String, i64>::new();
+        for event in &self.events {
+            // Order decoding names venue 1 `BinanceFutures`; the source's
+            // `binance-futures` configuration label is a different namespace.
+            if event.venue_code == 1
+                && (event.symbol.ends_with("USDT") || event.symbol.ends_with("USDC"))
+            {
+                // Historical observation begins when the order was created,
+                // including orders that did not fill. Legacy records may omit
+                // create_ts; use their factual receive/update timestamp then.
+                let Some(start) = [event.create_ts_us, event.event_ts_us, event.update_ts_us]
+                    .into_iter()
+                    .find(|ts| *ts > 0)
+                else {
+                    continue;
+                };
+                symbols
+                    .entry(event.symbol.clone())
+                    .and_modify(|ts| *ts = (*ts).min(start))
+                    .or_insert(start);
+            }
+        }
+        symbols
+    }
     pub(crate) fn events(&self) -> &im::Vector<Arc<NavEvent>> {
         &self.events
     }
@@ -1900,6 +1927,9 @@ struct IncrementalSourceHistory {
     db_identity: Option<Vec<u8>>,
     checkpoints: BTreeMap<String, ColumnFamilyCheckpoint>,
     history: NavSourceHistory,
+    /// Keep original lifecycle events after evidence first changes the analysis
+    /// projection, so a later real fill cannot duplicate a recovered execution.
+    raw_events: Option<im::Vector<Arc<NavEvent>>>,
     legacy_fill_times: im::OrdMap<LiquidityOrderKey, i64>,
 }
 
@@ -2019,20 +2049,27 @@ impl IncrementalSourceHistory {
             scanned.insert(column_family, (scanned_keys, last_ts));
         }
 
-        // A terminal lifecycle report can precede the priced execution evidence.
-        // Resolve against the durable facts before advancing any checkpoints.
-        // Recovery may replace earlier fills of the same order, so invalidate
-        // that source's FIFO generation instead of treating it as append-only.
-        let recovered_events = if new_events
-            .iter()
-            .any(|event| fill_recovery::needs_price(event))
-        {
-            let mut combined = self.history.events.clone();
-            combined.extend(new_events.iter().cloned());
-            fill_recovery::resolve(source, &combined)?
+        // Execution evidence can arrive without another uniform_orders record.
+        // Reconcile it on every refresh, always against the original lifecycle.
+        // Change FIFO generations only when the resulting projection changes.
+        let mut combined = self
+            .raw_events
+            .as_ref()
+            .unwrap_or(&self.history.events)
+            .clone();
+        combined.extend(new_events.iter().cloned());
+        let recovered = fill_recovery::resolve(source, &combined)?;
+        let recovery_active = recovered.is_some() || self.raw_events.is_some();
+        let recovered_events = if recovery_active {
+            let mut appended = self.history.events.clone();
+            appended.extend(new_events.iter().cloned());
+            appended.sort_by(|a, b| a.record_key.cmp(&b.record_key));
+            let projection = recovered.as_ref().unwrap_or(&combined);
+            (projection != &appended).then(|| projection.clone())
         } else {
             None
         };
+        let raw_events = recovery_active.then_some(combined);
         let mut roles = self.history.liquidity_by_order.clone();
         let changed_roles = merge_liquidity_records(&mut roles, source, new_trade_records)?;
         let earliest_liquidity_fill_ts_us = changed_roles
@@ -2051,6 +2088,7 @@ impl IncrementalSourceHistory {
             self.history.revision = HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
         }
         self.history.liquidity_by_order = roles;
+        self.raw_events = raw_events;
         let out_of_order = self
             .history
             .events
@@ -3868,6 +3906,7 @@ mod tests {
             kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
+            funding: Default::default(),
             sources,
         }
     }
@@ -3902,6 +3941,123 @@ mod tests {
         assert!(
             (actual - expected).abs() < 1e-9,
             "actual={actual}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn incremental_rapidx_evidence_arrives_without_lifecycle_and_late_fills_do_not_duplicate() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("source");
+        let env_path = temp.path().join("exec.env");
+        std::fs::write(
+            &env_path,
+            "TRADE_ENGINE_EXEC_BACKEND=rapidx\nLTP_PORTFOLIO_ID=123\n",
+        )
+        .unwrap();
+        let mut source = source_at("rx01", &path, 0.0);
+        source.venue = "binance-futures".into();
+        source.env_path = Some(env_path);
+        let config = app_config(vec![source]);
+        let mut lifecycle = strategy_event_at(90_000, 90_000, "FILUSDT", 0, 2, 0.0, 0.0, "alpha");
+        lifecycle.create_ts_us = 1;
+        lifecycle.order_type_code = 3;
+        lifecycle.client_order_id = 7;
+        write_events(&path, &[lifecycle.clone()]);
+        {
+            let mut db = open_uniform_orders_db(&path);
+            db.create_cf("rapidx_executions", &Options::default())
+                .unwrap();
+        }
+        let mut store = NavHistoryStore::default();
+        let before = store.refresh(&config).unwrap();
+        assert_eq!(
+            before["rx01"]
+                .events()
+                .iter()
+                .filter(|e| e.amount_update > 0.0)
+                .count(),
+            0
+        );
+        {
+            let db = DB::open_cf(
+                &Options::default(),
+                &path,
+                [UNIFORM_ORDERS_CF, "rapidx_executions"],
+            )
+            .unwrap();
+            let cf = db.cf_handle("rapidx_executions").unwrap();
+            for rest in [false, true] {
+                let mut hash = sha2::Sha256::new();
+                use sha2::Digest;
+                hash.update(b"mkt_signal/rapidx_execution/stable_key");
+                for part in ["123", "BINANCE", "tx"] {
+                    hash.update((part.len() as u64).to_be_bytes());
+                    hash.update(part.as_bytes());
+                }
+                hash.update([u8::from(rest)]);
+                let record = serde_json::json!({"portfolio":"123","exchange":"BINANCE","execution":{
+                    "transaction_id":"tx","order_id":"88","client_order_id":"7",
+                    "symbol":"BINANCE_MARGIN_FIL_USDT","side":"SELL","quantity":"3",
+                    "price":"100","timestamp_ms":100,"rest":rest
+                }});
+                db.put_cf(cf, hash.finalize(), serde_json::to_vec(&record).unwrap())
+                    .unwrap();
+            }
+        }
+        let recovered = store.refresh(&config).unwrap();
+        let history = &recovered["rx01"];
+        assert_eq!(
+            history
+                .events()
+                .iter()
+                .map(|e| e.amount_update)
+                .sum::<f64>(),
+            3.0
+        );
+        let revision = history.revision;
+        assert!(history.change.is_none());
+        assert_eq!(store.refresh(&config).unwrap()["rx01"].revision, revision);
+
+        let mut late = lifecycle.clone();
+        late.record_key = format!("{:020}", 200_000);
+        late.event_ts_us = 200_000;
+        late.update_ts_us = 100_000;
+        late.price = 100.0;
+        late.amount_update = 3.0;
+        {
+            let db = DB::open_cf(
+                &Options::default(),
+                &path,
+                [UNIFORM_ORDERS_CF, "rapidx_executions"],
+            )
+            .unwrap();
+            db.put_cf(
+                db.cf_handle(UNIFORM_ORDERS_CF).unwrap(),
+                late.record_key.as_bytes(),
+                encode_event(&late),
+            )
+            .unwrap();
+        }
+        let after = store.refresh(&config).unwrap();
+        assert_eq!(
+            after["rx01"]
+                .events()
+                .iter()
+                .map(|e| e.amount_update)
+                .sum::<f64>(),
+            3.0
+        );
+        assert_eq!(
+            after["rx01"]
+                .events()
+                .iter()
+                .filter(|e| e.amount_update > 0.0)
+                .count(),
+            1
+        );
+        assert_eq!(
+            load_nav_source_histories(&config, &[]).unwrap()["rx01"].events(),
+            after["rx01"].events()
         );
     }
 
@@ -4040,6 +4196,44 @@ mod tests {
         assert_close(report.totals.maker_volume_quote, 100.0);
         assert_close(report.totals.taker_volume_quote, 110.0);
         assert_close(report.totals.estimated_trading_fee_quote, 0.01106);
+    }
+
+    #[test]
+    fn funding_discovers_decoded_usd_m_orders_and_earliest_creation_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = source_at("funding-discovery", temp.path(), 0.0);
+        let mut later_update = event(10, "BTCUSDT", 1, 1, 100.0, 1.0);
+        later_update.create_ts_us = 12;
+        later_update.update_ts_us = 120;
+        let mut earlier_update = event(20, "BTCUSDT", 1, 1, 100.0, 1.0);
+        earlier_update.create_ts_us = 15;
+        earlier_update.update_ts_us = 110;
+        let mut legacy_order = event(30, "ETHUSDC", 1, 1, 100.0, 0.0);
+        legacy_order.create_ts_us = 0;
+        write_events(
+            temp.path(),
+            &[
+                later_update,
+                earlier_update,
+                legacy_order,
+                event(40, "XRPUSDT", 0, 1, 100.0, 1.0),
+                event(50, "SOLUSDT", 3, 1, 100.0, 1.0),
+                event(60, "BTCUSD_PERP", 14, 1, 100.0, 1.0),
+                event(70, "BTCUSD", 1, 1, 100.0, 1.0),
+                event(0, "BNBUSDT", 1, 1, 100.0, 1.0),
+            ],
+        );
+        let history = load_source_history(&source).unwrap();
+        assert!(
+            history
+                .events
+                .iter()
+                .any(|event| { event.symbol == "BTCUSDT" && event.venue == "BinanceFutures" })
+        );
+        assert_eq!(
+            history.funding_symbols(),
+            BTreeMap::from([("BTCUSDT".into(), 12), ("ETHUSDC".into(), 30)])
+        );
     }
 
     #[test]
@@ -5289,6 +5483,7 @@ mod tests {
             kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
+            funding: Default::default(),
             sources: vec![source],
         };
 
@@ -5374,6 +5569,7 @@ mod tests {
 
     fn unpriced_recovery_event() -> UniformOrderEvent {
         let mut fill = strategy_event_at(200_000, 200_000, "FILUSDT", 0, 2, 0.0, 3.0, "alpha");
+        fill.create_ts_us = 1;
         fill.client_order_id = 7;
         fill.order_type_code = 3;
         fill

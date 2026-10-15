@@ -10,6 +10,8 @@ import { useEffect, useRef } from 'react'
 import type {
   ActualNavSeriesKey,
   FeeMode,
+  FundingNavPoint,
+  FundingNavSeriesKey,
   NavSeriesKey,
   NavTimelinePoint,
   StrategyNavTimeline,
@@ -30,6 +32,7 @@ echarts.use([
 interface Props {
   points: NavTimelinePoint[]
   theoreticalPoints: TheoreticalNavPoint[]
+  fundingPoints?: FundingNavPoint[]
   symbolPoints: SymbolNavTimeline[]
   strategyPoints: StrategyNavTimeline[]
   visibleSeries: NavSeriesKey[]
@@ -58,6 +61,9 @@ export const navSeriesMeta: Record<
 > = {
   nav_change_before_fee_quote: { label: '费前净值', color: '#2563a7' },
   nav_change_after_fee_quote: { label: '费后净值', color: '#176b5b' },
+  funding_income_quote: { label: 'Funding（累计资金费）', color: '#d97706' },
+  total_nav_before_fee_quote: { label: '费前总体净值（含 funding）', color: '#0891b2' },
+  total_nav_after_fee_quote: { label: '费后总体净值（含 funding）', color: '#15803d' },
   theoretical_nav_before_fee_quote: {
     label: '理论费前（TWAP，分钟 VWAP）',
     color: '#7357a3',
@@ -104,6 +110,7 @@ function chartTime(value: number) {
 export function NavTimelineChart({
   points,
   theoreticalPoints,
+  fundingPoints,
   symbolPoints,
   strategyPoints,
   visibleSeries,
@@ -130,7 +137,9 @@ export function NavTimelineChart({
                     ? point.nav_change_after_fee_quote
                     : point.nav_change_before_fee_quote,
                 ])
-              : points.map((point) => [
+              : key === 'funding_income_quote' || key.startsWith('total_nav_')
+                ? (fundingPoints ?? []).map((point) => [point.ts_us / 1_000, point[key as FundingNavSeriesKey]])
+                : points.map((point) => [
                   point.ts_us / 1_000,
                   point[key as ActualNavSeriesKey],
                 ])
@@ -141,10 +150,12 @@ export function NavTimelineChart({
               showSymbol: false,
               sampling: 'lttb' as const,
               connectNulls: true,
-              step: theoretical ? ('end' as const) : undefined,
+              step: theoretical || key === 'funding_income_quote' ? ('end' as const) : undefined,
               lineStyle: {
                 width:
                   key === 'nav_change_after_fee_quote' ||
+                  key === 'funding_income_quote' ||
+                  key === 'total_nav_after_fee_quote' ||
                   key === 'theoretical_nav_after_fee_quote'
                     ? 2.4
                     : 1.6,
@@ -265,6 +276,7 @@ export function NavTimelineChart({
     strategyPoints,
     symbolPoints,
     theoreticalPoints,
+    fundingPoints,
     visibleSeries,
   ])
 

@@ -133,6 +133,9 @@ pub struct DashboardAccount {
     /// OKX `mgnRatio` from that sample. Higher is safer; 1.0 is the liquidation boundary.
     pub uni_mmr: Option<f64>,
     pub uni_mmr_status: Option<&'static str>,
+    pub funding: crate::funding::FundingSummary,
+    pub total_nav_before_fee_quote: Option<f64>,
+    pub total_nav_after_fee_quote: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -141,6 +144,8 @@ pub struct TimelineSnapshot {
     pub generation_duration_ms: u64,
     pub report: nav::NavTimelineReport,
     pub theoretical: crate::theoretical_nav::TheoreticalNavTimeline,
+    pub execution_slippage: crate::execution_slippage::ExecutionSlippage,
+    pub funding: crate::funding::FundingTimeline,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -216,6 +221,7 @@ struct WebState {
     refresh_interval_secs: u64,
     auto_earn: AutoEarnHub,
     bnb: crate::bnb_auto::BnbManager,
+    funding: crate::funding::FundingHub,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -478,6 +484,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .iter()
         .map(|source| source.id.clone())
         .collect::<BTreeSet<_>>();
+    let funding = crate::funding::FundingHub::new(&config);
+    funding.load(&pool, &config).await?;
     let state = WebState {
         cache,
         dashboard_refresh,
@@ -497,7 +505,9 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         refresh_interval_secs,
         auto_earn: auto_earn.clone(),
         bnb: bnb.clone(),
+        funding,
     };
+    spawn_funding_collectors(&state);
 
     let app = Router::new()
         .route("/api/auth/status", get(auth_status))
@@ -585,6 +595,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             delete(delete_order_strategy),
         )
         .route("/api/catalog/accounts/{source_id}", get(get_account_studio))
+        .route(
+            "/api/catalog/accounts/{source_id}/funding",
+            get(get_account_funding).put(save_account_funding),
+        )
         .route(
             "/api/catalog/accounts/{source_id}/bnb-auto",
             get(get_account_bnb).put(save_account_bnb),
@@ -702,7 +716,6 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
 
 async fn auth_middleware(
     State(auth_state): State<AuthMiddlewareState>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -718,7 +731,7 @@ async fn auth_middleware(
         return next.run(request).await;
     }
     if path == POSITION_STRATEGY_PUBLISH_PATH && request.method() == axum::http::Method::POST {
-        return gate_position_publish(&auth_state, peer_addr, request, next).await;
+        return prepare_position_publish(&auth_state, request, next).await;
     }
     let token = auth::extract_session_cookie(
         request
@@ -820,17 +833,11 @@ fn request_permission_error(
     Some("administrator permission required")
 }
 
-/// Position publishes arrive from machine publishers without a session, so the
-/// endpoint keeps its own gate. Any one of these suffices: an admin session, a
-/// session of the strategy's creator or an authorized manager, the strategy's
-/// own publish token, or a fallback publish token stored in
-/// cta_publish_fallback_tokens (accepted for every strategy). A strategy that
-/// has no token configured keeps the legacy open push, so deployments stay
-/// compatible until tokens are assigned. The body is buffered once so the gate
-/// can read strategy_name before the handler parses it again.
-async fn gate_position_publish(
+/// Machine publishers may omit the session. Authorization runs in the save
+/// handler under the configuration lock, so concurrent creates of the same
+/// name cannot overwrite a strategy before its creator's permissions are read.
+async fn prepare_position_publish(
     auth_state: &AuthMiddlewareState,
-    peer_addr: SocketAddr,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -839,15 +846,6 @@ async fn gate_position_publish(
         Ok(bytes) => bytes,
         Err(_) => return bad_request("position publish body is too large".to_string()),
     };
-    let strategy_name = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("strategy_name")
-                .and_then(|name| name.as_str())
-                .map(str::to_string)
-        });
-
     let mut session_user = None;
     if let Some(token) = auth::extract_session_cookie(
         parts
@@ -864,66 +862,54 @@ async fn gate_position_publish(
         }
     }
 
-    let access = match &strategy_name {
-        Some(name) => match strategy_catalog::load_position_access(&auth_state.pool, name).await {
-            Ok(access) => access,
-            Err(error) => {
-                error!(error = ?error, "failed to load position strategy access");
-                return internal_error();
-            }
-        },
-        None => None,
-    };
-
-    let mut allowed = session_user.as_ref().is_some_and(AuthUser::is_admin);
-    if !allowed && let (Some(user), Some(access)) = (&session_user, &access) {
-        allowed = access.user_can_publish(user.user_id) || access.user_can_configure(user.user_id);
-    }
-
-    if !allowed {
-        let required_hash = access
-            .and_then(|access| access.publish_token_hash)
-            .filter(|hash| !hash.is_empty());
-        allowed = match required_hash {
-            // The legacy open push only applies to machine publishers without
-            // a session; a logged-in user still needs a strategy role.
-            None => session_user.is_none(),
-            Some(hash) => {
-                let provided = parts
-                    .headers
-                    .get(PUBLISH_TOKEN_HEADER)
-                    .and_then(|value| value.to_str().ok());
-                if auth::publish_token_matches(provided, &hash) {
-                    true
-                } else {
-                    match auth::publish_fallback_token_matches(&auth_state.pool, provided).await {
-                        Ok(found) => found,
-                        Err(error) => {
-                            error!(error = ?error, "failed to check fallback publish token");
-                            return internal_error();
-                        }
-                    }
-                }
-            }
-        };
-    }
-
-    if !allowed {
-        warn!(
-            peer = %peer_addr,
-            strategy = strategy_name.as_deref().unwrap_or_default(),
-            "rejected position strategy publish"
-        );
-        return forbidden(
-            "position publish requires an admin or authorized session, or the strategy publish token",
-        );
-    }
-
     let mut request = Request::from_parts(parts, axum::body::Body::from(bytes));
     if let Some(user) = session_user {
         request.extensions_mut().insert(user);
     }
     next.run(request).await
+}
+
+fn position_publish_allowed(
+    user: Option<&AuthUser>,
+    access: Option<&strategy_catalog::PositionAccess>,
+    token_matches: bool,
+) -> bool {
+    let Some(access) = access else {
+        // Creating a strategy always requires a valid login, including when
+        // the caller holds a global fallback publish token.
+        return user.is_some();
+    };
+    user.is_some_and(|user| {
+        user.is_admin()
+            || access.user_can_publish(user.user_id)
+            || access.user_can_configure(user.user_id)
+    }) || token_matches
+        // Existing tokenless strategies retain their machine-publish contract.
+        || (user.is_none() && !access.token_required())
+}
+
+async fn authorize_position_publish(
+    pool: &PgPool,
+    user: Option<&AuthUser>,
+    access: Option<&strategy_catalog::PositionAccess>,
+    headers: &HeaderMap,
+) -> Result<bool> {
+    if position_publish_allowed(user, access, false) {
+        return Ok(true);
+    }
+    let Some(access) = access else {
+        return Ok(false);
+    };
+    let provided = headers
+        .get(PUBLISH_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    let token_matches = access
+        .publish_token_hash
+        .as_deref()
+        .filter(|hash| !hash.is_empty())
+        .is_some_and(|hash| auth::publish_token_matches(provided, hash))
+        || auth::publish_fallback_token_matches(pool, provided).await?;
+    Ok(position_publish_allowed(user, Some(access), token_matches))
 }
 
 fn source_id_from_path(path: &str) -> Option<&str> {
@@ -1165,6 +1151,25 @@ async fn dashboard(
     let now_ms = unix_now_ms();
     for account in &mut dashboard.accounts {
         apply_live_account(account, state.live_equity.get(&account.source_id), now_ms);
+        if let Some(report) = dashboard
+            .report
+            .sources
+            .iter()
+            .find(|r| r.source_id == account.source_id)
+        {
+            let start = report
+                .initial_position_snapshot_ts_us
+                .or(report.first_fill_ts_us)
+                .unwrap_or(0);
+            account.funding =
+                state
+                    .funding
+                    .summary(&account.source_id, start, dashboard.generated_at_us, &[]);
+            account.total_nav_before_fee_quote =
+                Some(report.totals.nav_change_before_fee_quote + account.funding.income_quote);
+            account.total_nav_after_fee_quote =
+                Some(report.totals.nav_change_after_fee_quote + account.funding.income_quote);
+        }
     }
     (NO_STORE, Json(dashboard))
 }
@@ -1550,6 +1555,8 @@ async fn rebuild_timeline_snapshot(
         selected_symbols,
         max_points,
     };
+    let aligned_request = request.clone();
+    let aligned_timelines = nav_timelines.clone();
     let report = tokio::task::spawn_blocking(move || {
         nav_timelines.rebuild(request, use_strategy_allocation)
     })
@@ -1591,6 +1598,36 @@ async fn rebuild_timeline_snapshot(
     } else {
         crate::theoretical_nav::TheoreticalNavTimeline::default()
     };
+    let execution_slippage = if let Some(point) = theoretical.points.last().copied() {
+        let aligned = nav::NavTimelineRequest {
+            start_ts_us: Some(report.start_ts_us),
+            end_ts_us: point.ts_us,
+            ..aligned_request
+        };
+        let actual = tokio::task::spawn_blocking(move || {
+            aligned_timelines.rebuild(aligned, use_strategy_allocation)
+        })
+        .await
+        .context("aligned slippage timeline task failed")??;
+        crate::execution_slippage::ExecutionSlippage::calculate(
+            report.start_ts_us,
+            actual.summary,
+            point,
+        )
+    } else {
+        crate::execution_slippage::ExecutionSlippage::unavailable(
+            report.start_ts_us,
+            theoretical
+                .unavailable_reason
+                .clone()
+                .unwrap_or_else(|| "完整理论净值不可用；请选择全部币种及最近 1–30 天".into()),
+        )
+    };
+    let funding = if use_strategy_allocation {
+        crate::funding::FundingTimeline::default()
+    } else {
+        state.funding.timeline(&report)
+    };
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     info!(
         actual_duration_ms,
@@ -1604,6 +1641,8 @@ async fn rebuild_timeline_snapshot(
         generation_duration_ms,
         report: report.as_ref().clone(),
         theoretical,
+        execution_slippage,
+        funding,
     }))
 }
 
@@ -2192,25 +2231,42 @@ async fn save_order_parameters(
 /// Admins see every strategy. Other users see a strategy while it keeps open
 /// visibility, or when they are its creator, a grant holder, or a publish
 /// manager. New strategies are private by default.
+#[derive(Serialize)]
+struct PositionStrategyCatalogView {
+    #[serde(flatten)]
+    strategy: strategy_catalog::PositionStrategy,
+    can_publish: bool,
+}
+
 async fn list_position_strategies(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
 ) -> Result<Response, ApiError> {
-    let mut strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
-    if !user.is_admin() {
-        let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
-        strategies.retain(|strategy| {
-            visibility
+    let strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
+    let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
+    let strategies: Vec<_> = strategies
+        .into_iter()
+        .filter_map(|strategy| {
+            let access = visibility
                 .iter()
-                .find(|entry| entry.strategy_name == strategy.strategy_name)
-                .is_none_or(|entry| entry.user_can_view(user.user_id))
-        });
-    }
+                .find(|entry| entry.strategy_name == strategy.strategy_name);
+            if !user.is_admin() && !access.is_some_and(|entry| entry.user_can_view(user.user_id)) {
+                return None;
+            }
+            let can_publish = user.is_admin()
+                || access.is_some_and(|entry| entry.user_can_configure(user.user_id));
+            Some(PositionStrategyCatalogView {
+                strategy,
+                can_publish,
+            })
+        })
+        .collect();
     Ok((NO_STORE, Json(strategies)).into_response())
 }
 
 async fn save_position_strategy(
     State(state): State<WebState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     user: Option<Extension<AuthUser>>,
     headers: HeaderMap,
     Json(mut request): Json<SavePositionStrategyRequest>,
@@ -2218,6 +2274,17 @@ async fn save_position_strategy(
     let _configuration_guard = state.configuration_lock.lock().await;
     if let Err(message) = request.normalize_symbols() {
         return Ok(bad_request(message));
+    }
+    let session_user = user.as_ref().map(|Extension(user)| user);
+    let access =
+        strategy_catalog::load_position_access(&state.pool, &request.strategy_name).await?;
+    if !authorize_position_publish(&state.pool, session_user, access.as_ref(), &headers).await? {
+        warn!(peer = %peer_addr, strategy = %request.strategy_name, "rejected position strategy publish");
+        return Ok(forbidden(if access.is_none() {
+            "login required to create a position strategy"
+        } else {
+            "position publish requires an admin or authorized session, or the strategy publish token"
+        }));
     }
     let position_strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
     let previous = position_strategies
@@ -2230,7 +2297,7 @@ async fn save_position_strategy(
     ) {
         return Ok(forbidden(message));
     }
-    let created_by = user.map(|Extension(user)| user.user_id);
+    let created_by = session_user.map(|user| user.user_id);
     for source_id in strategy_catalog::list_active_binding_source_ids_for_position(
         &state.pool,
         &request.strategy_name,
@@ -2439,10 +2506,10 @@ async fn save_position_grants(
                 "administrator permission required to change open visibility",
             ));
         }
-        // Managers keep implicit configure regardless of the grant list; a
-        // grant-based configure holder must keep their own grant or they
-        // would lock themselves out.
-        let keeps_configure = access.manager_user_ids.contains(&user.user_id)
+        // Creators and managers keep implicit configure regardless of the
+        // grant list; a grant-based configure holder must keep their own
+        // grant or they would lock themselves out.
+        let keeps_configure = access.user_can_publish(user.user_id)
             || request.grants.iter().any(|grant| {
                 grant.user_id == user.user_id && grant.access_level.trim() == "configure"
             });
@@ -2584,6 +2651,77 @@ fn live_equity_status(snapshot_ts_ms: i64, now_ms: i64) -> &'static str {
     } else {
         "ok"
     }
+}
+
+async fn get_account_funding(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+) -> Response {
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return response,
+    };
+    (
+        NO_STORE,
+        Json(state.funding.configuration(&state.config, source)),
+    )
+        .into_response()
+}
+
+async fn save_account_funding(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Extension(configurable): Extension<ConfigurableSources>,
+    Path(source_id): Path<String>,
+    Json(request): Json<crate::funding::SaveFundingSettings>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() && !configurable.0.contains(&source_id) {
+        return Ok(forbidden("account configure permission required"));
+    }
+    let source = match resolve_order_config_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(response) => return Ok(response),
+    };
+    if !(60..=86400).contains(&request.refresh_secs) {
+        return Ok(bad_request("funding 拉取间隔必须为 60–86400 秒".into()));
+    }
+    let _configuration_guard = state.configuration_lock.lock().await;
+    let mut settings = state.funding.settings(&source_id);
+    if request.enabled && !settings.enabled {
+        let expected = std::env::var(&state.config.funding.enable_token_env).ok();
+        if !crate::funding::enable_token_matches(
+            request.enable_token.as_deref(),
+            expected.as_deref(),
+        ) {
+            return Ok(forbidden("funding 启用 token 无效或主机尚未配置 token"));
+        }
+        if let Err(error) = state.funding.verify_enable(&state.config, source).await {
+            return Ok(bad_request(format!(
+                "funding 未开启：固定 IP 或账户 REST 测试失败：{error}"
+            )));
+        }
+        settings.verified_at_us = Some(crate::kline::now_us());
+        settings.verified_local_ip = state.config.funding.local_ip.map(|ip| ip.to_string());
+        settings.verified_public_ip = state.config.funding.public_ip.map(|ip| ip.to_string());
+    }
+    settings.enabled = request.enabled;
+    settings.refresh_secs = request.refresh_secs;
+    state
+        .funding
+        .save_settings(&state.pool, &source_id, settings)
+        .await?;
+    info!(
+        source_id,
+        user_id = user.user_id,
+        enabled = request.enabled,
+        refresh_secs = request.refresh_secs,
+        "account funding settings updated"
+    );
+    Ok((
+        NO_STORE,
+        Json(state.funding.configuration(&state.config, source)),
+    )
+        .into_response())
 }
 
 async fn get_account_studio(
@@ -2815,6 +2953,59 @@ async fn save_account_fee_rates(
             );
             Ok(catalog_error(error))
         }
+    }
+}
+
+fn spawn_funding_collectors(state: &WebState) {
+    for source in state.config.sources.iter().filter(|source| source.enabled) {
+        let source = source.clone();
+        let config = state.config.clone();
+        let cache = state.cache.clone();
+        let pool = state.pool.clone();
+        let funding = state.funding.clone();
+        let mut settings = funding.subscribe(&source.id);
+        tokio::spawn(async move {
+            loop {
+                let current = settings.borrow_and_update().clone();
+                if !current.enabled {
+                    if settings.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                let history = cache.read().await.nav_histories.get(&source.id).cloned();
+                let symbols = tokio::task::spawn_blocking(move || {
+                    crate::analysis::run(|| {
+                        history
+                            .map(|history| history.funding_symbols())
+                            .unwrap_or_default()
+                    })
+                })
+                .await
+                .unwrap_or_default();
+                // A disabled switch cancels pending budget waits and HTTP work.
+                // SQL transactions roll back on cancellation; stored income stays.
+                let result = tokio::select! {
+                    biased;
+                    changed = settings.changed() => { if changed.is_err() { break; } continue; }
+                    result = funding.poll(&pool, &config, &source, &symbols) => result,
+                };
+                let delay = match result {
+                    Ok(true) => Duration::from_secs(1),
+                    Ok(false) => Duration::from_secs(current.refresh_secs),
+                    Err(error) => {
+                        funding.failed(&source.id, &error);
+                        warn!(source_id = %source.id, error = %error, "funding collection failed; stored income retained");
+                        Duration::from_secs(current.refresh_secs)
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    changed = settings.changed() => { if changed.is_err() { break; } }
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            }
+        });
     }
 }
 
@@ -4004,6 +4195,14 @@ fn timeline_arrow_metadata(snapshot: &TimelineSnapshot, dataset: &str) -> HashMa
         ("compression".to_string(), "zstd".to_string()),
         ("dataset".to_string(), dataset.to_string()),
         (
+            "execution_slippage".to_string(),
+            serde_json::to_string(&snapshot.execution_slippage).unwrap(),
+        ),
+        (
+            "funding".to_string(),
+            serde_json::to_string(&snapshot.funding.summary).unwrap(),
+        ),
+        (
             "end_ts_us".to_string(),
             snapshot.report.end_ts_us.to_string(),
         ),
@@ -4155,6 +4354,11 @@ fn arrow_write_options() -> Result<IpcWriteOptions> {
 fn encode_account_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>> {
     let mut fields = vec![Field::new("ts_us", DataType::Int64, false)];
     fields.extend(timeline_totals_fields());
+    fields.extend([
+        Field::new("funding_income_quote", DataType::Float64, false),
+        Field::new("total_nav_before_fee_quote", DataType::Float64, false),
+        Field::new("total_nav_after_fee_quote", DataType::Float64, false),
+    ]);
     let schema = Arc::new(Schema::new_with_metadata(
         fields,
         timeline_arrow_metadata(snapshot, "account_pnl"),
@@ -4171,6 +4375,32 @@ fn encode_account_timeline_arrow(snapshot: &TimelineSnapshot) -> Result<Vec<u8>>
                 rows.iter().map(|row| row.ts_us).collect::<Vec<_>>(),
             ))];
             columns.extend(timeline_totals_arrays(rows.iter().map(|row| &row.totals)));
+            let funding: BTreeMap<_, _> = snapshot
+                .funding
+                .points
+                .iter()
+                .map(|point| (point.ts_us, point))
+                .collect();
+            for select in [0, 1, 2] {
+                columns.push(Arc::new(Float64Array::from(
+                    rows.iter()
+                        .map(|row| {
+                            funding.get(&row.ts_us).map_or_else(
+                                || match select {
+                                    0 => 0.0,
+                                    1 => row.totals.nav_change_before_fee_quote,
+                                    _ => row.totals.nav_change_after_fee_quote,
+                                },
+                                |point| match select {
+                                    0 => point.funding_income_quote,
+                                    1 => point.total_nav_before_fee_quote,
+                                    _ => point.total_nav_after_fee_quote,
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )));
+            }
             writer.write(&RecordBatch::try_new(Arc::clone(&schema), columns)?)?;
         }
         writer.finish()?;
@@ -4515,6 +4745,9 @@ async fn build_dashboard(
                     .as_ref()
                     .and_then(|reading| reading.uni_mmr_ts_ms)
                     .map(|ts_ms| live_equity_status(ts_ms, now_ms)),
+                funding: Default::default(),
+                total_nav_before_fee_quote: None,
+                total_nav_after_fee_quote: None,
             }
         })
         .collect();
@@ -4806,6 +5039,8 @@ mod tests {
                 sampled: false,
             },
             theoretical: crate::theoretical_nav::TheoreticalNavTimeline::default(),
+            execution_slippage: Default::default(),
+            funding: Default::default(),
         }
     }
 
@@ -4973,6 +5208,7 @@ mod tests {
             kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
+            funding: Default::default(),
             sources: vec![crate::config::SourceConfig {
                 id: "binance_exec_trade01".into(),
                 account: "trade01".into(),
@@ -5057,6 +5293,7 @@ mod tests {
             kline: crate::config::KlineConfig::default(),
             monitor: crate::config::MonitorConfig::default(),
             treasury: crate::config::TreasuryConfig::default(),
+            funding: Default::default(),
             sources: vec![source],
         };
         let sources = resolve_sources(&config, &[]).unwrap();
@@ -5103,6 +5340,87 @@ mod tests {
     }
 
     #[test]
+    fn creating_position_strategies_requires_a_session_even_with_a_publish_token() {
+        let shaokai = AuthUser {
+            user_id: 3,
+            username: "shaokai".into(),
+            role: "user".into(),
+        };
+        let dzy = AuthUser {
+            user_id: 7,
+            username: "dzy".into(),
+            role: "user".into(),
+        };
+        let admin = AuthUser {
+            role: "admin".into(),
+            ..shaokai.clone()
+        };
+        for token_matches in [false, true] {
+            assert!(!position_publish_allowed(None, None, token_matches));
+            for user in [&shaokai, &dzy, &admin] {
+                assert!(position_publish_allowed(Some(user), None, token_matches));
+            }
+        }
+    }
+
+    #[test]
+    fn existing_position_strategies_keep_owner_grants_and_token_authorization() {
+        let access = crate::strategy_catalog::PositionAccess {
+            created_by_user_id: Some(3),
+            publish_token_hash: Some(auth::publish_token_hash("owner-token")),
+            open_visibility: false,
+            manager_user_ids: vec![7],
+            grants: BTreeMap::from([(11, "view".into()), (12, "configure".into())]),
+        };
+        for (user_id, role, allowed) in [
+            (3, "user", true),
+            (7, "user", true),
+            (11, "user", false),
+            (12, "user", true),
+            (99, "user", false),
+            (99, "admin", true),
+        ] {
+            let user = AuthUser {
+                user_id,
+                username: format!("user-{user_id}"),
+                role: role.into(),
+            };
+            assert_eq!(
+                position_publish_allowed(Some(&user), Some(&access), false),
+                allowed
+            );
+            assert!(position_publish_allowed(Some(&user), Some(&access), true));
+        }
+        assert!(!position_publish_allowed(None, Some(&access), false));
+        assert!(position_publish_allowed(None, Some(&access), true));
+        let tokenless = crate::strategy_catalog::PositionAccess {
+            publish_token_hash: None,
+            ..access.clone()
+        };
+        assert!(position_publish_allowed(None, Some(&tokenless), false));
+        let unrelated = AuthUser {
+            user_id: 99,
+            username: "unrelated".into(),
+            role: "user".into(),
+        };
+        assert!(!position_publish_allowed(
+            Some(&unrelated),
+            Some(&tokenless),
+            false
+        ));
+        // Making a strategy visible does not grant its viewers publish access.
+        let visible = crate::strategy_catalog::PositionAccess {
+            open_visibility: true,
+            ..access
+        };
+        assert!(!position_publish_allowed(
+            Some(&unrelated),
+            Some(&visible),
+            false
+        ));
+    }
+
+    #[test]
     fn position_access_token_rules() {
         let open = crate::strategy_catalog::PositionAccess {
             created_by_user_id: None,
@@ -5138,13 +5456,15 @@ mod tests {
         assert!(protected.user_can_view(7));
         assert!(protected.user_can_view(11));
         assert!(!protected.user_can_view(8));
-        // Managers and configure grantees can bind the strategy and manage its
-        // grants; view grantees and the bare creator cannot.
+        // Creators, managers and configure grantees can bind the strategy
+        // and manage its grants; view grants alone do not allow configuration.
+        assert!(protected.user_can_configure(3));
+        assert!(protected.user_can_manage_grants(3));
         assert!(protected.user_can_configure(7));
         assert!(protected.user_can_configure(12));
         assert!(protected.user_can_manage_grants(12));
         assert!(!protected.user_can_configure(11));
-        assert!(!protected.user_can_configure(3));
+        assert!(!protected.user_can_configure(8));
         assert!(auth::publish_token_matches(
             Some("s3cret-token"),
             protected.publish_token_hash.as_deref().unwrap()

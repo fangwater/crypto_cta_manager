@@ -1,0 +1,322 @@
+[
+  {
+    "key": [
+      "9060593768473821269",
+      "ADAUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": 441.0,
+    "difference": -441.0
+  },
+  {
+    "key": [
+      "9060593308912320545",
+      "BCHUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": 0.375,
+    "difference": -0.375
+  },
+  {
+    "key": [
+      "9060593407696568386",
+      "UNIUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -6.0,
+    "difference": 6.0
+  },
+  {
+    "key": [
+      "9060593403401601063",
+      "SOLUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -0.94,
+    "difference": 0.94
+  },
+  {
+    "key": [
+      "9060593768473821267",
+      "ADAUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -1311.0,
+    "difference": 1311.0
+  },
+  {
+    "key": [
+      "7254734778430128129",
+      "XRPUSDT",
+      0
+    ],
+    "uniform": 0,
+    "actual": 436.8,
+    "difference": -436.8
+  },
+  {
+    "key": [
+      "9060593240192843840",
+      "AAVEUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -0.7,
+    "difference": 0.7
+  },
+  {
+    "key": [
+      "7254734804199932007",
+      "XLMUSDT",
+      0
+    ],
+    "uniform": 0,
+    "actual": -509.0,
+    "difference": 509.0
+  },
+  {
+    "key": [
+      "9060593291732451405",
+      "ZECUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -0.086,
+    "difference": 0.086
+  },
+  {
+    "key": [
+      "9060593411991535669",
+      "XLMUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -542.0,
+    "difference": 542.0
+  },
+  {
+    "key": [
+      "6242731438567859825",
+      "DOGEUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": 1177.0,
+    "difference": -1177.0
+  },
+  {
+    "key": [
+      "9060593313207287856",
+      "DASHUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -1.354,
+    "difference": 1.354
+  },
+  {
+    "key": [
+      "9060593416286502956",
+      "XRPUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -75.19999999999999,
+    "difference": 75.19999999999999
+  },
+  {
+    "key": [
+      "9060593287437484117",
+      "UNIUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": 13.0,
+    "difference": -13.0
+  },
+  {
+    "key": [
+      "7254734799904964612",
+      "UNIUSDT",
+      0
+    ],
+    "uniform": 0,
+    "actual": 39.96,
+    "difference": -39.96
+  },
+  {
+    "key": [
+      "9060593287437484119",
+      "UNIUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -6.0,
+    "difference": 6.0
+  },
+  {
+    "key": [
+      "9060593420581470282",
+      "ZECUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -0.086,
+    "difference": 0.086
+  },
+  {
+    "key": [
+      "6242731859474644995",
+      "AVAXUSDT",
+      0
+    ],
+    "uniform": 0,
+    "actual": -19.51,
+    "difference": 19.51
+  },
+  {
+    "key": [
+      "9060593562315390996",
+      "UNIUSDT",
+      0
+    ],
+    "uniform": 0,
+    "actual": 28.46,
+    "difference": -28.46
+  },
+  {
+    "key": [
+      "9060593772768788506",
+      "DOTUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": 175.5,
+    "difference": -175.5
+  },
+  {
+    "key": [
+      "9060593390516699162",
+      "LINKUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": 8.01,
+    "difference": -8.01
+  },
+  {
+    "key": [
+      "9060593317502255127",
+      "DOGEUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -1219.0,
+    "difference": 1219.0
+  },
+  {
+    "key": [
+      "9060593407696568384",
+      "UNIUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": 14.0,
+    "difference": -14.0
+  },
+  {
+    "key": [
+      "7254734787020062725",
+      "ADAUSDT",
+      0
+    ],
+    "uniform": 0,
+    "actual": -7105.3,
+    "difference": 7105.3
+  },
+  {
+    "key": [
+      "9060593270257614959",
+      "DASHUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -2.055,
+    "difference": 2.055
+  },
+  {
+    "key": [
+      "9060593244487811201",
+      "DASHUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -1.356,
+    "difference": 1.356
+  },
+  {
+    "key": [
+      "7254734782725095425",
+      "AAVEUSDT",
+      0
+    ],
+    "uniform": 0,
+    "actual": 6.86,
+    "difference": -6.86
+  },
+  {
+    "key": [
+      "9060593768473821270",
+      "ADAUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": 439.0,
+    "difference": -439.0
+  },
+  {
+    "key": [
+      "9060593283142516817",
+      "NEARUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -21.0,
+    "difference": 21.0
+  },
+  {
+    "key": [
+      "7254734808494899201",
+      "ZECUSDT",
+      0
+    ],
+    "uniform": 0,
+    "actual": 1.5759999999999998,
+    "difference": -1.5759999999999998
+  },
+  {
+    "key": [
+      "9060593356156960827",
+      "ZECUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": -0.086,
+    "difference": 0.086
+  },
+  {
+    "key": [
+      "9060593781358723103",
+      "FILUSDT",
+      1
+    ],
+    "uniform": 0,
+    "actual": 183.0,
+    "difference": -183.0
+  }
+]

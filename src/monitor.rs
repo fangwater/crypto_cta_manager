@@ -1667,6 +1667,7 @@ mod tests {
                 ..MonitorConfig::default()
             },
             treasury: Default::default(),
+            funding: Default::default(),
             sources: vec![test_source("binance-futures")],
         }
     }
