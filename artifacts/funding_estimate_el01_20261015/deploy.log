@@ -1,0 +1,17 @@
+checking el01 as el01@cta_exec
+checking host config for removed PostgreSQL order-ingestion settings
+uploading binaries and frontend to el01
+verifying uploaded artifacts on el01
+bin/cta_web.next.20261015T065429Z: OK
+bin/nav_rebuild.next.20261015T065429Z: OK
+bin/nav_snapshot.next.20261015T065429Z: OK
+bin/nav_strategy_snapshot.next.20261015T065429Z: OK
+web-releases/20261015T065429Z/manager/index.html: OK
+switching el01 to web-releases/20261015T065429Z
+bin/cta_web: OK
+bin/nav_rebuild: OK
+bin/nav_snapshot: OK
+bin/nav_strategy_snapshot: OK
+web-releases/20261015T065429Z/manager/index.html: OK
+deployed Manager to el01 (/home/el01/crypto_cta_manager, web-releases/20261015T065429Z)
+host toml was not overwritten; compare config/cta-manager.toml.template if needed

@@ -255,7 +255,18 @@ estimated funding sums and curve endpoints passed, including USDC. All 187
 protected process identities, 29 configuration hashes, four snapshot tables,
 and Manager CPU 24 were preserved. See
 `docs/jp_meta_funding_estimate_20261015.md` for verification and cold target-index
-rebuild status. el01 has not received this public-estimation release.
+rebuild status.
+
+The same public-funding binaries/frontend were deployed to el01 on 2026-10-15
+as `20261015T065429Z` (feature code `4a216a9`; checkout/manifest `0c7e864` only
+adds deployment documentation). All 28 fixed account/strategy reports across 14
+enabled accounts retained identical order NAV, and estimated funding additions
+and curve endpoints passed. All 91 protected processes, 17 configuration hashes,
+four snapshot tables and account collection switches were preserved. trade09
+continues using actual funding; other accounts use estimates. See
+`docs/el01_funding_estimate_20261015.md` for deployment verification. The final
+el01 target index is ready after 3,819,438 messages, and trade09 funding is `ok`.
+The jp-meta target index was also confirmed ready after 4,744,591 messages.
 
 Exchange-owned forced-close fills are order events, not account-ledger charges.
 Exec must persist liquidation, ADL, delisting settlement, and contract-delivery

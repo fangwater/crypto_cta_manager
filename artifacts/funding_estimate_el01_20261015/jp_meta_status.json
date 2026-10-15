@@ -1,0 +1,41 @@
+{
+  "manager_pid": 4155551,
+  "health": {
+    "status": "ok",
+    "source_count": 7,
+    "generated_at_us": 1792047390961054,
+    "last_attempt_at_us": 1792047381293894,
+    "refresh_interval_secs": 60,
+    "last_refresh_error": null
+  },
+  "target_history": {
+    "last_error": null,
+    "loading": false,
+    "processed_messages": 4744591,
+    "ready": true
+  },
+  "funding": [
+    {
+      "source_id": "binance_exec_trade05",
+      "enabled": true,
+      "status": "ok",
+      "records": 108,
+      "has_error": false
+    },
+    {
+      "source_id": "binance_exec_trade06",
+      "enabled": true,
+      "status": "ok",
+      "records": 75,
+      "has_error": false
+    },
+    {
+      "source_id": "binance_exec_trade07",
+      "enabled": true,
+      "status": "ok",
+      "records": 14,
+      "has_error": false
+    }
+  ],
+  "temporary_session_removed": true
+}

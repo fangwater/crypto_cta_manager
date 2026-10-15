@@ -1,0 +1,41 @@
+{
+  "removed": [
+    {
+      "path": "/home/el01/crypto_cta_manager/backups/funding_estimate_20261015T065300Z/cta_web.before",
+      "sha256": "1db19012d8f9f04b7f789107fcd92d9a059f30e451c900112f6eece5c6198ba8"
+    },
+    {
+      "path": "/home/el01/crypto_cta_manager/backups/funding_estimate_20261015T065300Z/nav_rebuild.before",
+      "sha256": "cac25256e866d7caf5651a15500d3813ca4e693824da93ed0e91df37e48c07d2"
+    },
+    {
+      "path": "/home/el01/crypto_cta_manager/backups/funding_estimate_20261015T065300Z/nav_snapshot.before",
+      "sha256": "84fd79283c0617244d615f677c3ae6851a19ff0ff5e1a355f396596f2ecd5921"
+    },
+    {
+      "path": "/home/el01/crypto_cta_manager/backups/funding_estimate_20261015T065300Z/nav_strategy_snapshot.before",
+      "sha256": "e2a741e8ce65f5936a0203c81d4f4a86e4b750cbed404fc5ca41ffe1a0d21c1b"
+    },
+    {
+      "path": "/home/el01/crypto_cta_manager/backups/funding_estimate_20261015T065300Z/manager-unit.before",
+      "sha256": "23c6efe51cbd16ae215131e5a88ffe6978cc1a65cb19a41860d99d59ef5dfe01"
+    },
+    {
+      "path": "/home/el01/crypto_cta_manager/backups/funding_estimate_20261015T065300Z/webroot.before",
+      "sha256": "fb95dfb4c235260b650573b8e01fe20031b51b675b7f5e0a10689b96427d7c89"
+    },
+    {
+      "path": "/home/el01/crypto_cta_manager/backups/funding_estimate_20261015T065300Z/before.json",
+      "sha256": "bff627960d5170416f302cb00b37413d86ede676c784b9add2de150b67770856"
+    },
+    {
+      "path": "/home/el01/crypto_cta_manager/backups/funding_estimate_20261015T065300Z/expected.json",
+      "sha256": "0e6cffe32d9cc1eac1eed854002f6b482edbc0c4ba554ff5adc7b4bfa21d2b15"
+    }
+  ],
+  "backup_directory_removed": true,
+  "deployment_staging_absent": true,
+  "final_protected_unchanged": 91,
+  "final_configs_unchanged": 17,
+  "retained_release": "/home/el01/crypto_cta_manager/web-releases/20261015T065429Z"
+}

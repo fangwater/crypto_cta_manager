@@ -1,0 +1,324 @@
+{
+  "health": {
+    "status": "ok",
+    "source_count": 14,
+    "generated_at_us": 1792047426412591,
+    "last_attempt_at_us": 1792047426412591,
+    "refresh_interval_secs": 60,
+    "last_refresh_error": null
+  },
+  "manager_pid": 1089257,
+  "manager_cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "protected_unchanged": 91,
+  "release_manifest": {
+    "cta_web_sha256": "f2ca00ff53883cc12e6504d4679588f2e3a989f1772ed9460eeb93b215fdce3f",
+    "nav_rebuild_sha256": "30b2dd3454e515eeda31ef38722e7b1d65aa5e4b91df8ddb8397314a101fd097",
+    "nav_snapshot_sha256": "71ca88adde40d14d4dc1a0cba9d4997220238ec0c75aab52cfae6cbd0a572847",
+    "nav_strategy_snapshot_sha256": "51a1237ebccf29bb4776d300964933e0f1dddc2bcb7833abcc2996158e8cd90a",
+    "source_commit": "0c7e8642f1fa2184ef6186c77c8e61b188bb7661",
+    "target": "el01",
+    "release": "web-releases/20261015T065429Z",
+    "frontend_index_sha256": "76af78fab439303d0d797afa96116b955b01ac9c455470c343143e586a9718bd"
+  },
+  "target_history": {
+    "last_error": null,
+    "loading": true,
+    "processed_messages": 2822144,
+    "ready": false
+  },
+  "temporary_session_removed": true,
+  "artifact_source_commit": "4a216a90ab60ea2d3e254c059d99b1ea236b940f",
+  "same_artifacts_as_jp_meta": true,
+  "config_files": 17,
+  "snapshot_tables": 4,
+  "frontend_files": 4,
+  "gateway_routes": 42,
+  "fixed_reports_unchanged": 28,
+  "timelines": {
+    "binance_exec_trade01/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": -0.039810500957727486,
+      "income_by_asset": {
+        "USDT": -0.039810500957727486
+      },
+      "strategy_count": 6,
+      "settlement_count": 39
+    },
+    "binance_exec_trade01/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": -0.0398105009577274,
+      "income_by_asset": {
+        "USDT": -0.0398105009577274
+      },
+      "strategy_count": 5,
+      "settlement_count": 39
+    },
+    "binance_exec_trade02/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": -0.13920665030921603,
+      "income_by_asset": {
+        "USDT": -0.13920665030921603
+      },
+      "strategy_count": 5,
+      "settlement_count": 36
+    },
+    "binance_exec_trade02/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": -0.13920665030921603,
+      "income_by_asset": {
+        "USDT": -0.13920665030921603
+      },
+      "strategy_count": 5,
+      "settlement_count": 36
+    },
+    "binance_exec_trade03/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": -24.698937559938212,
+      "income_by_asset": {
+        "USDT": -24.698937559938212
+      },
+      "strategy_count": 4,
+      "settlement_count": 1752
+    },
+    "binance_exec_trade03/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": -24.698937559938212,
+      "income_by_asset": {
+        "USDT": -24.698937559938212
+      },
+      "strategy_count": 3,
+      "settlement_count": 1752
+    },
+    "binance_exec_trade04/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": 0.7764550064885418,
+      "income_by_asset": {
+        "USDT": 0.7764550064885418
+      },
+      "strategy_count": 10,
+      "settlement_count": 36
+    },
+    "binance_exec_trade04/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": 0.7764550064885418,
+      "income_by_asset": {
+        "USDT": 0.7764550064885418
+      },
+      "strategy_count": 9,
+      "settlement_count": 36
+    },
+    "binance_exec_trade06/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": 22.532678424326175,
+      "income_by_asset": {
+        "USDT": 22.532678424326175
+      },
+      "strategy_count": 8,
+      "settlement_count": 1176
+    },
+    "binance_exec_trade06/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": -2.5789758366735205,
+      "income_by_asset": {
+        "USDT": -2.5789758366735205
+      },
+      "strategy_count": 8,
+      "settlement_count": 1176
+    },
+    "binance_exec_trade07/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": 109.75488910230085,
+      "income_by_asset": {
+        "USDT": 109.75488910230085
+      },
+      "strategy_count": 8,
+      "settlement_count": 1176
+    },
+    "binance_exec_trade07/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": -11.041354105893163,
+      "income_by_asset": {
+        "USDT": -11.041354105893163
+      },
+      "strategy_count": 8,
+      "settlement_count": 1176
+    },
+    "binance_exec_trade08/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": -1.5809940182952478,
+      "income_by_asset": {
+        "USDT": -1.5809940182952478
+      },
+      "strategy_count": 5,
+      "settlement_count": 36
+    },
+    "binance_exec_trade08/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": -1.5809940182952478,
+      "income_by_asset": {
+        "USDT": -1.5809940182952478
+      },
+      "strategy_count": 5,
+      "settlement_count": 36
+    },
+    "binance_exec_trade09/account": {
+      "selected_funding": "actual",
+      "actual_income_quote": 0.3071223499999997,
+      "estimated_income_quote": 0.3071223258476086,
+      "income_by_asset": {
+        "USDT": 0.3071223258476086
+      },
+      "strategy_count": 6,
+      "settlement_count": 45
+    },
+    "binance_exec_trade09/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": 0.3071223258476086,
+      "income_by_asset": {
+        "USDT": 0.3071223258476086
+      },
+      "strategy_count": 6,
+      "settlement_count": 45
+    },
+    "binance_exec_trade10/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": 1.0301995993411837,
+      "income_by_asset": {
+        "USDT": 1.0301995993411837
+      },
+      "strategy_count": 6,
+      "settlement_count": 36
+    },
+    "binance_exec_trade10/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": 1.0301995993411837,
+      "income_by_asset": {
+        "USDT": 1.0301995993411837
+      },
+      "strategy_count": 5,
+      "settlement_count": 36
+    },
+    "binance_exec_trade11/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": 1.5730506360617278,
+      "income_by_asset": {
+        "USDT": 1.5730506360617278
+      },
+      "strategy_count": 6,
+      "settlement_count": 36
+    },
+    "binance_exec_trade11/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": 1.5730506360617278,
+      "income_by_asset": {
+        "USDT": 1.5730506360617278
+      },
+      "strategy_count": 5,
+      "settlement_count": 36
+    },
+    "binance_exec_trade12/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": 25.958652027260268,
+      "income_by_asset": {
+        "USDT": 25.958652027260268
+      },
+      "strategy_count": 5,
+      "settlement_count": 39
+    },
+    "binance_exec_trade12/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": 1.020832707746008,
+      "income_by_asset": {
+        "USDT": 1.020832707746008
+      },
+      "strategy_count": 5,
+      "settlement_count": 42
+    },
+    "binance_exec_xy_lxy21_05/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": -2.9294781487747334,
+      "income_by_asset": {
+        "USDT": -2.9294781487747334
+      },
+      "strategy_count": 4,
+      "settlement_count": 45
+    },
+    "binance_exec_xy_lxy21_05/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": -2.9294781487747334,
+      "income_by_asset": {
+        "USDT": -2.9294781487747334
+      },
+      "strategy_count": 3,
+      "settlement_count": 45
+    },
+    "binance_exec_trade13/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": 0.1064034320916021,
+      "income_by_asset": {
+        "USDT": 0.1064034320916021
+      },
+      "strategy_count": 5,
+      "settlement_count": 36
+    },
+    "binance_exec_trade13/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": 0.1064034320916021,
+      "income_by_asset": {
+        "USDT": 0.1064034320916021
+      },
+      "strategy_count": 5,
+      "settlement_count": 36
+    },
+    "binance_exec_trade14/account": {
+      "selected_funding": "estimated",
+      "actual_income_quote": -0.0,
+      "estimated_income_quote": -0.0,
+      "income_by_asset": {},
+      "strategy_count": 6,
+      "settlement_count": 0
+    },
+    "binance_exec_trade14/strategy": {
+      "selected_funding": "estimated",
+      "actual_income_quote": 0.0,
+      "estimated_income_quote": -0.0,
+      "income_by_asset": {},
+      "strategy_count": 6,
+      "settlement_count": 0
+    }
+  }
+}

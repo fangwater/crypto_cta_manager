@@ -1,0 +1,27 @@
+{
+  "manager_pid": 1089257,
+  "health": {
+    "status": "ok",
+    "source_count": 14,
+    "generated_at_us": 1792047498480753,
+    "last_attempt_at_us": 1792047486414592,
+    "refresh_interval_secs": 60,
+    "last_refresh_error": null
+  },
+  "target_history": {
+    "last_error": null,
+    "loading": true,
+    "processed_messages": 3637248,
+    "ready": false
+  },
+  "funding": [
+    {
+      "source_id": "binance_exec_trade09",
+      "enabled": true,
+      "status": "backfilling",
+      "records": 674,
+      "has_error": false
+    }
+  ],
+  "temporary_session_removed": true
+}
