@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::config::SourceConfig;
 use crate::redis_runtime::RedisRuntime;
 mod rapidx;
+mod unified;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,7 +45,14 @@ impl MarketRulesSnapshot {
             self.portfolio_id.as_deref(),
         ) {
             ("native", None) => {}
-            ("ltp", Some(id)) if self.venue != "binance-coin-futures" => validate_portfolio(id)?,
+            ("ltp", Some(id))
+                if matches!(
+                    self.venue.as_str(),
+                    "binance-futures" | "okex-futures" | "binance-margin" | "okex-margin"
+                ) =>
+            {
+                validate_portfolio(id)?
+            }
             _ => bail!("invalid market-rules backend/account scope"),
         }
         if !matches!(
@@ -54,6 +62,8 @@ impl MarketRulesSnapshot {
                 | "okex-futures"
                 | "binance-margin"
                 | "okex-margin"
+                | "bybit-futures"
+                | "bitget-futures"
         ) {
             bail!("unsupported market-rules venue: {}", self.venue);
         }
@@ -177,6 +187,8 @@ pub(crate) fn execution_backend(
     let exchange = match venue {
         "binance-futures" | "binance-coin-futures" | "binance-margin" => "binance",
         "okex-futures" | "okex-margin" => "okex",
+        "bybit-futures" => "bybit",
+        "bitget-futures" => "bitget",
         _ => bail!("unsupported rule venue"),
     };
     let parse = |value: &str| -> Result<&'static str> {
@@ -230,8 +242,12 @@ pub(crate) fn execution_backend(
     }
     let backend = specific.or(wildcard).unwrap_or(default);
     anyhow::ensure!(
-        backend == "native" || venue != "binance-coin-futures",
-        "RapidX coin futures rules are unsupported"
+        backend == "native"
+            || matches!(
+                venue,
+                "binance-futures" | "okex-futures" | "binance-margin" | "okex-margin"
+            ),
+        "RapidX rules are unsupported for venue {venue}"
     );
     Ok(backend)
 }
@@ -293,6 +309,8 @@ async fn fetch_snapshot(client: &Client, venue: &str) -> Result<MarketRulesSnaps
         "binance-futures" => fetch_binance_futures(client).await?,
         "binance-coin-futures" => fetch_binance_coin_futures(client).await?,
         "okex-futures" => fetch_okx_futures(client).await?,
+        "bybit-futures" => unified::fetch_bybit(client, "https://api.bybit.com").await?,
+        "bitget-futures" => unified::fetch_bitget(client, "https://api.bitget.com").await?,
         _ => bail!("unsupported market-rules venue: {venue}"),
     };
     let snapshot = MarketRulesSnapshot {
@@ -498,6 +516,28 @@ fn now_us() -> i64 {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[tokio::test]
+    #[ignore = "read-only public exchange API smoke test"]
+    async fn live_uta_public_rules() {
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap();
+        for venue in ["bybit-futures", "bitget-futures"] {
+            let snapshot = fetch_snapshot(&client, venue).await.unwrap();
+            snapshot.validate().unwrap();
+            assert!(snapshot.symbols.contains_key("BTCUSDT"));
+            assert!(
+                snapshot
+                    .symbols
+                    .values()
+                    .all(|rule| rule.quote_asset == "USDT")
+            );
+            eprintln!("{venue}: {} USDT perpetual rules", snapshot.symbols.len());
+        }
+    }
 
     #[test]
     fn source_backend_matches_exec_mapping_precedence_and_fails_closed() {

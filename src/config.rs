@@ -756,7 +756,12 @@ impl SourceConfig {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("account_pubs/binance_pm");
+            .unwrap_or(match self.venue.as_str() {
+                "bybit-futures" => "account_pubs/bybit_pm",
+                "bitget-futures" => "account_pubs/bitget_pm",
+                "okex-futures" => "account_pubs/okex_pm",
+                _ => "account_pubs/binance_pm",
+            });
         Some(format!("{namespace}/{service}"))
     }
 

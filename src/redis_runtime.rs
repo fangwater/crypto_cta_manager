@@ -240,12 +240,13 @@ impl RedisRuntime {
         }
         if !matches!(
             source.venue.as_str(),
-            "binance-futures" | "binance-coin-futures" | "okex-futures"
+            "binance-futures"
+                | "binance-coin-futures"
+                | "okex-futures"
+                | "bybit-futures"
+                | "bitget-futures"
         ) {
-            bail!(
-                "source {} venue must be binance-futures, binance-coin-futures or okex-futures",
-                source.id
-            );
+            bail!("source {} has an unsupported Exec venue", source.id);
         }
         if matches!(
             strategy_name,
@@ -1188,6 +1189,49 @@ mod tests {
             keys.is_empty(),
             "wrong-market targets must not write any keys"
         );
+        for (id, venue, qty) in [
+            ("fixture_bybit", "bybit-futures", 0.1),
+            ("fixture_bitget", "bitget-futures", 0.2),
+        ] {
+            let mut uta = source.clone();
+            uta.id = id.into();
+            uta.venue = venue.into();
+            uta.rocksdb_path = dir.path().join(id).join("data/persist_manager");
+            let targets = BTreeMap::from([("BTCUSDT".into(), TargetPosition { qty, signal: 0 })]);
+            runtime
+                .publish_strategy(&uta, "uta_shared", &parameters, &BTreeMap::new(), &targets)
+                .await
+                .unwrap();
+            let key = format!("{id}:{venue}:batch_exec:uta_shared");
+            let raw: String = connection.get(&key).await.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(value["targets"]["BTCUSDT"]["qty"], qty);
+            for symbol in ["BTC", "BTCUSD", "BTCUSDC"] {
+                let wrong = BTreeMap::from([(
+                    symbol.into(),
+                    TargetPosition {
+                        qty: 1.0,
+                        signal: 0,
+                    },
+                )]);
+                assert!(
+                    runtime
+                        .publish_strategy(&uta, "uta_shared", &parameters, &BTreeMap::new(), &wrong)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(connection.get::<_, String>(&key).await.unwrap(), raw);
+            }
+        }
+        let bybit_keys: Vec<String> = connection
+            .keys("fixture_bybit:bitget-futures:*")
+            .await
+            .unwrap();
+        let bitget_keys: Vec<String> = connection
+            .keys("fixture_bitget:bybit-futures:*")
+            .await
+            .unwrap();
+        assert!(bybit_keys.is_empty() && bitget_keys.is_empty());
         let linear_targets = targets
             .iter()
             .filter(|(symbol, _)| symbol.ends_with("USDT") || symbol.ends_with("USDC"))

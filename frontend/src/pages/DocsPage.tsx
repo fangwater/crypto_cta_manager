@@ -439,7 +439,7 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'GET',
               path: `${ACCOUNT_PATH}/exchange-fees?symbol=BTCUSDT`,
-              summary: '查询该 symbol 的交易所实时 Maker/Taker；Binance 与 OKX 都支持',
+              summary: '查询该 symbol 的交易所实时 Maker/Taker；支持 Binance、OKX、Bybit 与 Bitget 统一账户',
             },
             {
               method: 'GET',
@@ -508,7 +508,7 @@ curl --noproxy '*' -sS -X PUT \\
           ]}
         />
         <Note>
-          报单限频写入该账户 pre_trade_risk_params Hash，Exec 最迟在下一次 60 秒参数刷新时加载。合约杠杆和实时手续费读该账户 Exec env.sh。Binance U 本位 STANDARD 走 fapi，币本位 STANDARD 走 dapi；UNIFIED 分别走 papi 的 um / cm；OKX 杠杆走 leverage-info / set-leverage，手续费走 trade-fee，并按合约 groupId 取 USDT 永续费率。OKX 返回的负费率会换成正的成本口径。非零目标发布前，Binance U 本位必须是 Standard 且打开多资产模式；币本位支持 Standard / Unified，OKX 必须是统一账户（acctLv 为 3 或 4）。jp-meta 若没有 env.sh，查询会 502。
+          报单限频写入该账户 pre_trade_risk_params Hash，Exec 最迟在下一次 60 秒参数刷新时加载。合约杠杆和实时手续费读该账户 Exec env.sh。Binance U 本位 STANDARD 走 fapi，币本位 STANDARD 走 dapi；UNIFIED 分别走 papi 的 um / cm；OKX 杠杆走 leverage-info / set-leverage，手续费走 trade-fee，并按合约 groupId 取 USDT 永续费率。OKX 返回的负费率会换成正的成本口径。非零目标发布前，Binance U 本位必须是 Standard 且打开多资产模式；币本位支持 Standard / Unified，OKX 必须是统一账户（acctLv 为 3 或 4）。jp-meta 若没有 env.sh，查询会 502。 Bybit、Bitget 统一账户当前支持 USDT 永续；账户总权益包含全部抵押资产，目标仓位仍按 Exec 市场隔离。Bybit 组合保证金模式没有固定逐合约杠杆。两家费率 API 不返回 VIP 等级，因此等级为空。
         </Note>
       </>
     ),

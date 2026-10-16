@@ -3124,7 +3124,7 @@ async fn get_account_exchange_fee_rates(
             info!(
                 source_id,
                 symbol = %result.symbol,
-                vip_tier = result.vip_tier,
+                vip_tier = ?result.vip_tier,
                 maker_fee_rate = result.maker_fee_rate,
                 taker_fee_rate = result.taker_fee_rate,
                 account_endpoint = %result.account_endpoint,

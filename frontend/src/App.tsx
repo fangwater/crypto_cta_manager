@@ -43,6 +43,7 @@ import {
   formatUniMmr,
   integer,
   isOkxVenue,
+  isUnifiedVenue,
   money,
   quantity,
   signedClass,
@@ -1234,6 +1235,7 @@ function NavPage() {
                 (account) => account.source_id === source.source_id,
               )
               const okx = isOkxVenue(source.configured_venue)
+              const unified = isUnifiedVenue(source.configured_venue)
               return (
               <div className="source-row" key={source.source_id}>
                 <div className="source-identity">
@@ -1241,7 +1243,7 @@ function NavPage() {
                   <div>
                     <strong>
                       {source.account}
-                      {okx ? ' · 统一账户' : ''}
+                      {unified ? ' · 统一账户' : ''}
                     </strong>
                     <code>{source.source_id}</code>
                   </div>
@@ -1261,7 +1263,7 @@ function NavPage() {
                   value={`${money(source.nav_change_after_fee_quote)} 报价币`}
                   tone={signedClass(source.nav_change_after_fee_quote)}
                 />
-                {okx && (
+                {unified && (
                   <SourceDatum
                     label="UniMMR"
                     value={

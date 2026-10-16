@@ -17,6 +17,7 @@ use crate::strategy_catalog::{
 type HmacSha256 = Hmac<Sha256>;
 
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 10;
+mod unified;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolContractLeverageResult {
@@ -35,7 +36,7 @@ pub struct ExchangeFeeRatesResult {
     pub source_id: String,
     pub symbol: String,
     pub exchange: String,
-    pub vip_tier: i32,
+    pub vip_tier: Option<i32>,
     pub maker_fee_rate: f64,
     pub taker_fee_rate: f64,
     pub account_endpoint: String,
@@ -128,6 +129,9 @@ pub async fn set_symbol_contract_leverage(
     validate_contract_leverage(request.contract_leverage).map_err(anyhow::Error::msg)?;
     let selected = crate::exec_routing::for_symbol(source, &request.symbol)?;
     let source = &selected;
+    if unified::supports(&source.venue) {
+        return unified::set_leverage(source, request).await;
+    }
     let credentials = load_source_credentials(source)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
@@ -155,6 +159,9 @@ pub async fn get_symbol_contract_leverage(
     validate_contract_symbol(&symbol).map_err(anyhow::Error::msg)?;
     let selected = crate::exec_routing::for_symbol(source, &symbol)?;
     let source = &selected;
+    if unified::supports(&source.venue) {
+        return unified::get_leverage(source, &symbol).await;
+    }
     let credentials = load_source_credentials(source)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
@@ -180,6 +187,9 @@ pub async fn get_exchange_fee_rates(
 ) -> Result<ExchangeFeeRatesResult> {
     let selected = crate::exec_routing::for_symbol(source, symbol)?;
     let source = &selected;
+    if unified::supports(&source.venue) {
+        return unified::get_fees(source, symbol).await;
+    }
     let credentials = load_source_credentials(source)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
@@ -202,6 +212,8 @@ pub async fn get_exchange_fee_rates(
 /// Operator-facing name of the account mode required before a non-zero publish.
 pub fn required_trading_account_mode(venue: &str) -> &'static str {
     match venue {
+        "bybit-futures" => "Bybit unified account with cross or portfolio margin",
+        "bitget-futures" => "Bitget unified account with one-way positions",
         "okex-futures" => {
             "OKX unified account mode (acctLv 3 multi-currency margin or 4 portfolio margin)"
         }
@@ -229,6 +241,7 @@ pub async fn has_required_trading_account_mode(source: &SourceConfig) -> Result<
         return Ok(true);
     }
     match source.venue.as_str() {
+        "bybit-futures" | "bitget-futures" => unified::has_required_mode(source).await,
         "binance-futures" => has_binance_multi_assets_mode(source).await,
         "okex-futures" => has_okx_unified_account_mode(source).await,
         _ => Ok(true),
@@ -442,7 +455,7 @@ async fn get_binance_exchange_fee_rates(
         source_id: source.id.clone(),
         symbol: symbol.to_string(),
         exchange: "binance".to_string(),
-        vip_tier,
+        vip_tier: Some(vip_tier),
         maker_fee_rate,
         taker_fee_rate,
         account_endpoint: account_path.to_string(),
@@ -507,7 +520,7 @@ async fn get_okx_exchange_fee_rates(
         source_id: source.id.clone(),
         symbol,
         exchange: "okx".to_string(),
-        vip_tier,
+        vip_tier: Some(vip_tier),
         maker_fee_rate,
         taker_fee_rate,
         account_endpoint: "/api/v5/public/instruments".to_string(),
@@ -1358,7 +1371,11 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                (fees.vip_tier, fees.maker_fee_rate, fees.taker_fee_rate),
+                (
+                    fees.vip_tier.unwrap(),
+                    fees.maker_fee_rate,
+                    fees.taker_fee_rate
+                ),
                 (3, 0.0002, 0.0005)
             );
             let batch = std::mem::take(&mut *calls.lock().unwrap());

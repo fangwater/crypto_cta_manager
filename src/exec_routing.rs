@@ -24,6 +24,8 @@ pub(crate) fn markets(source: &SourceConfig) -> Result<Vec<String>> {
 pub(crate) fn symbol_market(configured_venue: &str, symbol: &str) -> Result<&'static str> {
     let symbol = crate::order_config::normalize_exec_symbol(symbol).map_err(anyhow::Error::msg)?;
     match configured_venue {
+        "bybit-futures" if symbol.ends_with("USDT") => Ok("bybit-futures"),
+        "bitget-futures" if symbol.ends_with("USDT") => Ok("bitget-futures"),
         "binance-futures" if symbol.ends_with("USDT") || symbol.ends_with("USDC") => {
             Ok("binance-futures")
         }
@@ -86,6 +88,35 @@ pub(crate) fn archived_symbol_market(configured_venue: &str, symbol: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn native_uta_sources_keep_usdt_market_and_account_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        for (venue, service) in [
+            ("bybit-futures", "bybit_pm"),
+            ("bitget-futures", "bitget_pm"),
+        ] {
+            let source: SourceConfig = toml::from_str(&format!("id='uta_test'\naccount='test'\nvenue='{venue}'\nrocksdb_path='{}'\nipc_namespace='isolated'\n", dir.path().join("data/persist_manager").display())).unwrap();
+            assert_eq!(markets(&source).unwrap(), vec![venue]);
+            assert_eq!(for_symbol(&source, "BTCUSDT").unwrap().id, "uta_test");
+            assert_eq!(
+                source.account_ipc_service_name().unwrap(),
+                format!("isolated/account_pubs/{service}")
+            );
+            for symbol in ["BTC", "BTCUSD", "BTCUSDC", "BTCPERP", "BTCUSDT_261225"] {
+                assert!(for_symbol(&source, symbol).is_err());
+            }
+            let mut explicit = source.clone();
+            explicit.account_ipc_service = Some("account_pubs/custom".into());
+            assert_eq!(
+                explicit.account_ipc_service_name().unwrap(),
+                "isolated/account_pubs/custom"
+            );
+            let values = BTreeMap::from([("TRADE_ENGINE_EXEC_BACKEND".into(), "ltp".into())]);
+            assert!(crate::market_rules::execution_backend(venue, &values).is_err());
+        }
+    }
 
     #[test]
     fn deployment_market_is_fixed_for_every_backend() {

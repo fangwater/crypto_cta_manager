@@ -193,3 +193,26 @@ exec_viz_url = "http://127.0.0.1:10045/"
 estimated_fee_rate = 0.0004
 ipc_namespace = "binance_exec_trade05"
 account_ipc_service = "account_pubs/binance_pm"
+
+# Native UTA USDT perpetual sources. Enable only after a compatible Exec exists.
+# Account totals include all collateral; targets stay in this source's market.
+# See docs/native_uta_accounts.md. Keep credentials only in each Exec env.sh.
+[[sources]]
+id = "bybit_exec_trade01"
+account = "bybit_uta"
+venue = "bybit-futures"
+rocksdb_path = "/home/ubuntu/bybit_exec_trade01/data/persist_manager"
+env_path = "/home/ubuntu/bybit_exec_trade01/env.sh"
+enabled = false
+ipc_namespace = "bybit_exec_trade01"
+# account_ipc_service defaults to "account_pubs/bybit_pm".
+
+[[sources]]
+id = "bitget_exec_trade01"
+account = "bitget_uta"
+venue = "bitget-futures"
+rocksdb_path = "/home/ubuntu/bitget_exec_trade01/data/persist_manager"
+env_path = "/home/ubuntu/bitget_exec_trade01/env.sh"
+enabled = false
+ipc_namespace = "bitget_exec_trade01"
+# account_ipc_service defaults to "account_pubs/bitget_pm".

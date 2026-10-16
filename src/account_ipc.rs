@@ -20,6 +20,8 @@ const ACCOUNT_RISK_TYPE: u32 = 4007;
 const BINANCE_STD_UM_SCOPE: u32 = 3;
 const BINANCE_UNIFIED_SCOPE: u32 = 1;
 const OKEX_UNIFIED_SCOPE: u32 = 10;
+const BITGET_UNIFIED_SCOPE: u32 = 12;
+const BYBIT_UNIFIED_SCOPE: u32 = 13;
 const EVENT_HEADER_LEN: usize = 12;
 const ACCOUNT_RISK_ACTUAL_EQUITY_OFFSET: usize = 4 + 8 + 8;
 const ACCOUNT_RISK_MARGIN_RATIO_OFFSET: usize = 4 + 8 + 8 * 4;
@@ -141,12 +143,12 @@ impl SourceLiveState {
         })
     }
 
-    fn apply_okx_unified_risk(&mut self, ts_ms: i64, uni_mmr: f64) {
+    fn apply_unified_risk(&mut self, ts_ms: i64, uni_mmr: Option<f64>) {
         if self.uni_mmr_ts_ms.is_some_and(|previous| ts_ms < previous) {
             return;
         }
         self.unified_account = true;
-        self.uni_mmr = Some(uni_mmr);
+        self.uni_mmr = uni_mmr;
         self.uni_mmr_ts_ms = Some(ts_ms);
     }
 }
@@ -167,10 +169,11 @@ impl LiveEquityHub {
                 continue;
             };
             let source_id = source.id.clone();
+            let venue = source.venue.clone();
             let snapshots = Arc::clone(&hub.snapshots);
             thread::Builder::new()
                 .name(format!("cta-equity-{source_id}"))
-                .spawn(move || subscribe_loop(source_id, service_name, snapshots))
+                .spawn(move || subscribe_loop(source_id, venue, service_name, snapshots))
                 .expect("failed to spawn account IPC subscriber");
         }
         hub
@@ -186,11 +189,12 @@ impl LiveEquityHub {
 
 fn subscribe_loop(
     source_id: String,
+    venue: String,
     service_name: String,
     snapshots: Arc<RwLock<HashMap<String, SourceLiveState>>>,
 ) {
     loop {
-        if let Err(error) = run_subscriber(&source_id, &service_name, &snapshots) {
+        if let Err(error) = run_subscriber(&source_id, &venue, &service_name, &snapshots) {
             warn!(
                 source_id,
                 service_name,
@@ -204,6 +208,7 @@ fn subscribe_loop(
 
 fn run_subscriber(
     source_id: &str,
+    venue: &str,
     service_name: &str,
     snapshots: &Arc<RwLock<HashMap<String, SourceLiveState>>>,
 ) -> Result<()> {
@@ -250,72 +255,65 @@ fn run_subscriber(
         .with_context(|| format!("failed to subscribe to {service_name}"))?;
     info!(source_id, service_name, "account monitor IPC subscribed");
     let mut wallet_assets = WalletAssetAccumulator::default();
-    let rapidx_scope = rapidx_account_scope(service_name);
 
     loop {
         match subscriber.receive() {
             Ok(Some(sample)) => {
                 let payload = sample.payload();
-                if let Some(snapshot) =
-                    parse_wallet_asset(payload).and_then(|row| wallet_assets.update(row))
-                {
-                    let equity_usdt = snapshot.equity_usdt;
-                    let first = snapshots.read().ok().is_none_or(|guard| {
-                        guard
-                            .get(source_id)
-                            .and_then(|state| state.equity.as_ref())
-                            .is_none()
-                    });
-                    if let Ok(mut guard) = snapshots.write() {
-                        guard
-                            .entry(source_id.to_string())
-                            .or_default()
-                            .apply_wallet_equity(snapshot);
-                    }
-                    if first {
-                        info!(
-                            source_id,
-                            equity_usdt, "account monitor live equity received"
-                        );
-                    }
-                }
-                if let Some(snapshot) = rapidx_scope
-                    .and_then(|scope| parse_account_equity(payload, scope, "rapidx_account_risk"))
-                    .or_else(|| parse_binance_std_um_equity(payload))
-                {
-                    let equity_usdt = snapshot.equity_usdt;
-                    if let Ok(mut guard) = snapshots.write() {
-                        let state = guard.entry(source_id.to_string()).or_default();
-                        let first = !state.account_risk_equity;
-                        state.apply_account_equity(snapshot);
-                        if first {
-                            info!(
-                                source_id,
-                                equity_usdt, "account monitor total equity received"
-                            );
-                        }
-                    }
-                }
-                if let Some((ts_ms, uni_mmr)) = parse_okx_unified_risk(payload) {
-                    let first = snapshots.read().ok().is_none_or(|guard| {
-                        guard
-                            .get(source_id)
-                            .and_then(|state| state.uni_mmr)
-                            .is_none()
-                    });
-                    if let Ok(mut guard) = snapshots.write() {
-                        guard
-                            .entry(source_id.to_string())
-                            .or_default()
-                            .apply_okx_unified_risk(ts_ms, uni_mmr);
-                    }
-                    if first {
-                        info!(source_id, uni_mmr, "account monitor OKX UniMMR received");
-                    }
+                if let Ok(mut guard) = snapshots.write() {
+                    let state = guard.entry(source_id.to_string()).or_default();
+                    apply_account_message(state, &mut wallet_assets, venue, service_name, payload);
                 }
             }
             Ok(None) => thread::sleep(Duration::from_millis(50)),
             Err(error) => bail!("account IPC receive failed: {error}"),
+        }
+    }
+}
+
+fn unified_scope(venue: &str) -> Option<(u32, &'static str)> {
+    match venue {
+        "okex-futures" => Some((OKEX_UNIFIED_SCOPE, "okex_unified_account_risk")),
+        "bybit-futures" => Some((BYBIT_UNIFIED_SCOPE, "bybit_unified_account_risk")),
+        "bitget-futures" => Some((BITGET_UNIFIED_SCOPE, "bitget_unified_account_risk")),
+        _ => None,
+    }
+}
+
+fn apply_account_message(
+    state: &mut SourceLiveState,
+    wallets: &mut WalletAssetAccumulator,
+    venue: &str,
+    service: &str,
+    payload: &[u8],
+) {
+    if let Some(scope) = rapidx_account_scope(service) {
+        let expected = match venue {
+            "binance-futures" => Some(BINANCE_UNIFIED_SCOPE),
+            "okex-futures" => Some(OKEX_UNIFIED_SCOPE),
+            _ => None,
+        };
+        if expected != Some(scope) {
+            return;
+        }
+        if let Some(snapshot) = parse_account_equity(payload, scope, "rapidx_account_risk") {
+            state.apply_account_equity(snapshot);
+        }
+    } else if let Some((scope, label)) = unified_scope(venue) {
+        if let Some(snapshot) = parse_account_equity(payload, scope, label) {
+            state.apply_account_equity(snapshot);
+        }
+    } else if matches!(venue, "binance-futures" | "binance-coin-futures") {
+        if let Some(snapshot) = parse_wallet_asset(payload).and_then(|row| wallets.update(row)) {
+            state.apply_wallet_equity(snapshot);
+        }
+        if let Some(snapshot) = parse_binance_std_um_equity(payload) {
+            state.apply_account_equity(snapshot);
+        }
+    }
+    if let Some((scope, _)) = unified_scope(venue) {
+        if let Some((ts, ratio)) = parse_unified_risk(payload, scope) {
+            state.apply_unified_risk(ts, ratio);
         }
     }
 }
@@ -328,6 +326,9 @@ fn parse_wallet_asset(payload: &[u8]) -> Option<WalletAssetSnapshot> {
     if event_type != WALLET_SNAPSHOT_TYPE {
         return None;
     }
+    if u32::from_le_bytes(payload[4..8].try_into().ok()?) != BINANCE_STD_UM_SCOPE {
+        return None;
+    }
     let body_len = u32::from_le_bytes(payload[8..12].try_into().ok()?) as usize;
     let end = EVENT_HEADER_LEN.checked_add(body_len)?;
     if payload.len() < end {
@@ -336,8 +337,8 @@ fn parse_wallet_asset(payload: &[u8]) -> Option<WalletAssetSnapshot> {
     parse_wallet_snapshot(&payload[EVENT_HEADER_LEN..end])
 }
 
-fn parse_okx_unified_risk(payload: &[u8]) -> Option<(i64, f64)> {
-    let body = account_risk_body(payload, OKEX_UNIFIED_SCOPE)?;
+fn parse_unified_risk(payload: &[u8], scope: u32) -> Option<(i64, Option<f64>)> {
+    let body = account_risk_body(payload, scope)?;
     if body.len() < ACCOUNT_RISK_MARGIN_RATIO_OFFSET + 8 {
         return None;
     }
@@ -347,10 +348,12 @@ fn parse_okx_unified_risk(payload: &[u8]) -> Option<(i64, f64)> {
             .try_into()
             .ok()?,
     );
-    if ts_ms < 0 || !uni_mmr.is_finite() || uni_mmr < 0.0 {
+    if ts_ms < 0 || uni_mmr.is_nan() || uni_mmr < 0.0 {
         return None;
     }
-    Some((ts_ms, uni_mmr))
+    // No required maintenance margin is encoded as +infinity. Clear an older
+    // finite ratio without serializing infinity or inventing a numerical value.
+    Some((ts_ms, uni_mmr.is_finite().then_some(uni_mmr)))
 }
 
 fn parse_binance_std_um_equity(payload: &[u8]) -> Option<LiveEquitySnapshot> {
@@ -405,7 +408,7 @@ fn account_risk_body(payload: &[u8], expected_scope: u32) -> Option<&[u8]> {
     }
     let body_len = u32::from_le_bytes(payload[8..12].try_into().ok()?) as usize;
     let end = EVENT_HEADER_LEN.checked_add(body_len)?;
-    if payload.len() < end || body_len < 4 {
+    if payload.len() < end || body_len != 4 + 8 + 8 * 8 {
         return None;
     }
     let body = &payload[EVENT_HEADER_LEN..end];
@@ -504,6 +507,87 @@ pub fn encode_wallet_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unified_equity_and_risk_are_source_scoped_and_never_approximate_from_wallets() {
+        for (venue, scope) in [
+            ("bybit-futures", BYBIT_UNIFIED_SCOPE),
+            ("bitget-futures", BITGET_UNIFIED_SCOPE),
+        ] {
+            let mut state = SourceLiveState::default();
+            let mut wallets = WalletAssetAccumulator::default();
+            let service = format!(
+                "account/account_pubs/{}_pm",
+                venue.trim_end_matches("-futures")
+            );
+            let risk = |ts, ratio, equity: f64| {
+                let mut payload = encode_account_risk(scope, ts, ratio);
+                let offset = EVENT_HEADER_LEN + ACCOUNT_RISK_ACTUAL_EQUITY_OFFSET;
+                payload[offset..offset + 8].copy_from_slice(&equity.to_le_bytes());
+                payload
+            };
+            for foreign_scope in [
+                BINANCE_STD_UM_SCOPE,
+                OKEX_UNIFIED_SCOPE,
+                BYBIT_UNIFIED_SCOPE,
+                BITGET_UNIFIED_SCOPE,
+                14,
+            ] {
+                if foreign_scope == scope {
+                    continue;
+                }
+                apply_account_message(
+                    &mut state,
+                    &mut wallets,
+                    venue,
+                    &service,
+                    &encode_account_risk(foreign_scope, 30, 2.0),
+                );
+            }
+            apply_account_message(
+                &mut state,
+                &mut wallets,
+                venue,
+                &service,
+                &encode_wallet_event(30, 30, "USDT", true, 500.0, 500.0, 0.0, 500.0, 500.0),
+            );
+            assert!(state.reading().is_none());
+            for (ts, ratio, equity) in [(20, 2.5, 1000.0), (30, 3.0, 1100.0), (10, 1.0, 900.0)] {
+                apply_account_message(
+                    &mut state,
+                    &mut wallets,
+                    venue,
+                    &service,
+                    &risk(ts, ratio, equity),
+                );
+            }
+            let reading = state.reading().unwrap();
+            assert!(reading.unified_account);
+            assert_eq!(reading.uni_mmr, Some(3.0));
+            assert_eq!(reading.equity.unwrap().equity_usdt, 1100.0);
+            apply_account_message(
+                &mut state,
+                &mut wallets,
+                venue,
+                &service,
+                &risk(40, f64::INFINITY, 1200.0),
+            );
+            let reading = state.reading().unwrap();
+            assert_eq!(reading.uni_mmr, None);
+            assert_eq!(reading.uni_mmr_ts_ms, Some(40));
+            assert_eq!(
+                serde_json::to_value(reading.equity.unwrap()).unwrap()["equity_usdt"],
+                1200.0
+            );
+            for ratio in [f64::NAN, f64::NEG_INFINITY, -1.0] {
+                assert!(parse_unified_risk(&risk(50, ratio, 1200.0), scope).is_none());
+            }
+            let payload = risk(50, 2.0, 1200.0);
+            for len in 0..payload.len() {
+                assert!(parse_unified_risk(&payload[..len], scope).is_none());
+            }
+        }
+    }
 
     #[test]
     fn decodes_standard_um_wallet_equity() {
@@ -711,7 +795,7 @@ mod tests {
     fn rejects_invalid_account_equity_without_affecting_other_scopes() {
         assert!(parse_binance_std_um_equity(&encode_account_risk(4, 10, 1.0)).is_none());
         assert!(parse_binance_std_um_equity(&encode_account_risk(10, 10, 1.0)).is_none());
-        assert!(parse_okx_unified_risk(&encode_um_equity(10, 830_000.0)).is_none());
+        assert!(parse_unified_risk(&encode_um_equity(10, 830_000.0), OKEX_UNIFIED_SCOPE).is_none());
         for equity in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(parse_binance_std_um_equity(&encode_um_equity(10, equity)).is_none());
         }
@@ -742,14 +826,14 @@ mod tests {
     #[test]
     fn decodes_okx_unified_unimmr_and_keeps_the_newer_sample() {
         let payload = encode_account_risk(OKEX_UNIFIED_SCOPE, 1_700_000_000_000, 66.7489666667);
-        let (ts_ms, uni_mmr) = parse_okx_unified_risk(&payload).expect("okx risk");
+        let (ts_ms, uni_mmr) = parse_unified_risk(&payload, OKEX_UNIFIED_SCOPE).expect("okx risk");
         assert_eq!(ts_ms, 1_700_000_000_000);
-        assert!((uni_mmr - 66.7489666667).abs() < 1e-12);
-        assert!(parse_okx_unified_risk(&encode_account_risk(1, 1, 2.0)).is_none());
+        assert!((uni_mmr.unwrap() - 66.7489666667).abs() < 1e-12);
+        assert!(parse_unified_risk(&encode_account_risk(1, 1, 2.0), OKEX_UNIFIED_SCOPE).is_none());
 
         let mut state = SourceLiveState::default();
-        state.apply_okx_unified_risk(20, 4.5);
-        state.apply_okx_unified_risk(10, 1.1);
+        state.apply_unified_risk(20, Some(4.5));
+        state.apply_unified_risk(10, Some(1.1));
         let reading = state.reading().expect("reading");
         assert!(reading.unified_account);
         assert_eq!(reading.uni_mmr, Some(4.5));

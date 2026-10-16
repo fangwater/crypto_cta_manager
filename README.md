@@ -789,6 +789,12 @@ value; PUT records the last requested value in PostgreSQL as
 `recorded_contract_leverage`. Neither call scales published qty, writes Exec
 Redis, or notifies `exec-pre-trade`. Range is 1–125.
 
+Native Bybit and Bitget unified accounts are supported as USDT-perpetual Manager
+sources, including account IPC equity/risk, complete market-rule refresh,
+source-scoped target publication, account-mode checks, leverage and fee queries.
+See [native UTA accounts](docs/native_uta_accounts.md) for configuration, supported
+account modes and limitations. Exec runtime migration/deployment is separate.
+
 Account configure users may read and update the shared Exec order-action rate
 limits through
 `GET/PUT /api/catalog/accounts/{source_id}/exec-order-rate-limits`. Manager

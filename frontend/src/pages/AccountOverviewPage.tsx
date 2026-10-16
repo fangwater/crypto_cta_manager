@@ -31,7 +31,7 @@ import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
-import { executionMarketLabel, executionSymbolPlaceholder, feeBps, formatUniMmr, isOkxVenue, money, signedClass, timestampUs } from '../format'
+import { executionMarketLabel, executionSymbolPlaceholder, feeBps, formatUniMmr, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
 import { FieldHint, Input, Label } from '../components/ui/Field'
 import { readSourceId, routes } from '../lib/routes'
 import { cn } from '../lib/cn'
@@ -162,8 +162,8 @@ export function AccountOverviewPage() {
             eyebrow="Account Overview"
             title={account?.account ?? sourceId}
             description={
-              isOkxVenue(account?.venue ?? '')
-                ? 'OKX 账户按统一账户运行。UniMMR 来自 account monitor 推送的 mgnRatio，数值越大越安全。'
+              isUnifiedVenue(account?.venue ?? '')
+                ? '统一账户权益包含账户全部抵押资产。UniMMR 为保证金覆盖倍数，数值越大越安全；无可用比率时显示 --。'
                 : '这里只展示当前组合配置与运行摘要。修改请进入右侧独立的策略配置分区。'
             }
             actions={
@@ -554,10 +554,10 @@ function AccountMeta({
         </span>
         <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
           {account.venue === 'binance-futures' && <FundingStatusBadge value={account.funding} />}
-        {isOkxVenue(account.venue) && (
+        {isUnifiedVenue(account.venue) && (
           <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
         )}
-        {isOkxVenue(account.venue) && (
+        {isUnifiedVenue(account.venue) && (
           <span className={uniMmrTone(account.uni_mmr, account.uni_mmr_status)}>
             UniMMR{' '}
             {account.uni_mmr_status === 'stale'
