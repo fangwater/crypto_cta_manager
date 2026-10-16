@@ -73,7 +73,7 @@ export function PositionStrategyPage() {
             renderMeta={(name) => {
               const item = positions.find((entry) => entry.strategy_name === name)
               if (!item) return ''
-              const active = Object.values(item.targets).filter((value) => value.qty !== 0).length
+              const active = Object.values(item.targets).filter((value) => value.qty !== 'clear' && value.qty !== 0).length
               return `${active} 个非零目标`
             }}
           />

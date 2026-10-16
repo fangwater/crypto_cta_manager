@@ -485,10 +485,46 @@ mod tests {
     fn strategy(name: &str, qty: f64, signal: i32, updated_at_us: i64) -> PositionStrategy {
         PositionStrategy {
             strategy_name: name.to_string(),
-            targets: BTreeMap::from([("BTCUSDT".to_string(), TargetPosition { qty, signal })]),
+            targets: BTreeMap::from([(
+                "BTCUSDT".to_string(),
+                TargetPosition {
+                    clear: false,
+                    qty,
+                    signal,
+                },
+            )]),
             symbol_order_strategy_overrides: BTreeMap::new(),
             updated_at_us,
         }
+    }
+
+    #[test]
+    fn clear_remains_explicit_in_durable_archive_and_has_zero_theoretical_quantity() {
+        let dir = TempDir::new().unwrap();
+        let archive = PositionArchive::open(ManagerDb::open(dir.path()).unwrap()).unwrap();
+        let mut strategy = strategy("cta_recovered", 0.0, 0, 11);
+        strategy.targets.insert(
+            "BTCUSDT".into(),
+            serde_json::from_value(serde_json::json!({"qty":"clear","signal":0})).unwrap(),
+        );
+        archive
+            .append(
+                1_700_000_000_000_001,
+                &strategy,
+                Vec::new(),
+                vec![published_account("fixture", "cta_recovered", 3.0)],
+            )
+            .unwrap();
+        drop(archive);
+        let archive = PositionArchive::open(ManagerDb::open(dir.path()).unwrap()).unwrap();
+        let record = archive.latest().unwrap().unwrap();
+        assert!(record.strategy.targets["BTCUSDT"].clear);
+        assert_eq!(record.strategy.targets["BTCUSDT"].qty, 0.0);
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()["strategy"]["targets"]["BTCUSDT"]["qty"],
+            "clear"
+        );
+        assert_eq!(record.published_accounts[0].effective_shares(), 3.0);
     }
 
     #[test]

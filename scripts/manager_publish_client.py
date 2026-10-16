@@ -128,6 +128,8 @@ def load_json_source(source: str) -> Dict[str, Any]:
 
 
 def normalize_target(raw: Any) -> Dict[str, Any]:
+    if raw == "clear":
+        return {"qty": "clear", "signal": 0}
     if isinstance(raw, bool) or not isinstance(raw, (int, float, dict)):
         raise ValueError("each target must be a number or {qty, signal}")
     if isinstance(raw, (int, float)):
@@ -139,7 +141,7 @@ def normalize_target(raw: Any) -> Dict[str, Any]:
             raise ValueError(f"unknown target fields: {', '.join(unknown)}")
         if "qty" not in raw:
             raise ValueError("target.qty is required")
-        qty = float(raw["qty"])
+        qty = "clear" if raw["qty"] == "clear" else float(raw["qty"])
         signal = 0 if raw.get("signal") is None else int(raw["signal"])
     if signal not in ALLOWED_SIGNALS:
         raise ValueError(f"signal must be one of {ALLOWED_SIGNALS}: {signal}")

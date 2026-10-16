@@ -2,7 +2,7 @@ import { Minus, TrendingDown, TrendingUp } from 'lucide-react'
 import { useMemo } from 'react'
 import { quantity } from '../format'
 import { cn } from '../lib/cn'
-import { signalLabel, type TargetMap } from '../lib/targetPositions'
+import { signalLabel, targetQty, type TargetMap } from '../lib/targetPositions'
 import { Badge } from './ui/Badge'
 
 function directionMeta(value: number) {
@@ -41,7 +41,7 @@ export function TargetPositionsView({
   return (
     <div className="overflow-hidden rounded-xl border border-border-soft bg-surface/70">
       <div className="flex items-center justify-between border-b border-border-soft px-4 py-2.5">
-        <p className="text-xs font-medium text-muted">非零目标</p>
+        <p className="text-xs font-medium text-muted">目标仓位</p>
         <Badge tone="neutral">{rows.length} / {total}</Badge>
       </div>
       <div className={cn('overflow-auto', compact ? 'max-h-48' : 'max-h-80')}>
@@ -56,7 +56,7 @@ export function TargetPositionsView({
           </thead>
           <tbody>
             {visible.map(({ symbol, value }) => {
-              const meta = directionMeta(value.qty)
+              const meta = directionMeta(targetQty(value))
               const Icon = meta.icon
               return (
                 <tr key={symbol} className="border-b border-border-soft/70 last:border-0">
@@ -64,11 +64,11 @@ export function TargetPositionsView({
                   <td className="px-3 py-2">
                     <span className="inline-flex items-center gap-1 text-[11px] text-muted">
                       <Icon size={12} />
-                      {meta.label}
+                      {value.qty === 'clear' ? '清仓' : meta.label}
                     </span>
                   </td>
                   <td className={cn('px-4 py-2 text-right font-mono tabular-nums text-[13px]', meta.valueClass)}>
-                    {quantity(value.qty)}
+                    {value.qty === 'clear' ? '完全清仓' : quantity(value.qty)}
                   </td>
                   <td className="px-3 py-2 text-[12px] text-muted">
                     {value.signal} · {signalLabel(value.signal)}
@@ -81,7 +81,7 @@ export function TargetPositionsView({
       </div>
       {compact && rows.length > visible.length && (
         <p className="border-t border-border-soft px-4 py-2 text-[11px] text-subtle">
-          另有 {rows.length - visible.length} 个非零品种未展示
+          另有 {rows.length - visible.length} 个品种未展示
         </p>
       )}
     </div>

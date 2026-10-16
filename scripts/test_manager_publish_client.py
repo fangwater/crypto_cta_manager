@@ -18,6 +18,12 @@ SPEC.loader.exec_module(CLIENT)
 
 
 class ManagerPublishClientTests(unittest.TestCase):
+    def test_preserves_explicit_clear(self) -> None:
+        for target in ["clear", {"qty": "clear", "signal": -1}]:
+            output = CLIENT.normalize_position_payload({"strategy_name": "CTA_A", "targets": {"BTCUSDT": target}})
+            self.assertEqual(output["targets"]["BTCUSDT"]["qty"], "clear")
+        self.assertEqual(CLIENT.normalize_target({"qty": 0, "signal": 0})["qty"], 0)
+
     def test_normalizes_legacy_qty_and_signal_object(self) -> None:
         payload = CLIENT.normalize_position_payload(
             {

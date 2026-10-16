@@ -894,15 +894,10 @@ fn decode_exec_strategy_target_state(
     let mut targets = BTreeMap::new();
     for (symbol, target) in raw_targets {
         validate_exec_symbol(symbol).map_err(anyhow::Error::msg)?;
-        let qty = target
-            .as_f64()
-            .or_else(|| target.get("qty").and_then(serde_json::Value::as_f64))
-            .filter(|value| value.is_finite())
-            .with_context(|| {
-                format!(
-                    "{family} Redis config has invalid target quantity: {strategy_name}/{symbol}"
-                )
-            })?;
+        let parsed: TargetPosition = serde_json::from_value(target.clone()).with_context(|| {
+            format!("{family} Redis config has invalid target quantity: {strategy_name}/{symbol}")
+        })?;
+        let qty = parsed.qty;
         targets.insert(symbol.clone(), qty);
     }
     Ok(ExecStrategyTargetState {
@@ -1034,6 +1029,7 @@ fn filter_runtime_target_signals(
                 *target
             } else {
                 TargetPosition {
+                    clear: target.clear,
                     qty: target.qty,
                     signal: 0,
                 }
@@ -1050,9 +1046,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clear_survives_scaling_runtime_filter_and_readback() {
+        let request: crate::strategy_catalog::SavePositionStrategyRequest =
+            serde_json::from_value(serde_json::json!({
+            "strategy_name":"cta_recovered", "targets":{
+                "BTCUSDT":{"qty":"clear","signal":-1},
+                "ETHUSDT":{"qty":2.0,"signal":1},
+                "SOLUSDT":{"qty":0.0,"signal":0}}}))
+            .unwrap();
+        crate::strategy_catalog::validate_targets(&request.targets).unwrap();
+        let mut parameters = valid_parameters();
+        parameters.signal_execution_enabled = false;
+        for shares in [0.0, 1.0, 3.0] {
+            let scaled = crate::strategy_catalog::scale_targets(&request.targets, shares);
+            let runtime = filter_runtime_target_signals(&parameters, &BTreeMap::new(), &scaled);
+            let encoded = serde_json::to_value(&runtime).unwrap();
+            assert_eq!(encoded["BTCUSDT"]["qty"], "clear");
+            assert_eq!(encoded["BTCUSDT"]["signal"], 0);
+            assert_eq!(encoded["ETHUSDT"]["qty"], 2.0 * shares);
+            assert_eq!(encoded["SOLUSDT"]["qty"], 0.0);
+            let state = decode_exec_strategy_target_state(
+                "batch_exec",
+                "cta_recovered",
+                &serde_json::json!({
+                "updated_at_us":100,"targets":encoded}),
+            )
+            .unwrap();
+            assert_eq!(state.targets["BTCUSDT"], 0.0);
+            assert_eq!(state.targets["ETHUSDT"], 2.0 * shares);
+        }
+    }
+
+    #[test]
     fn bnbusdc_reservation_is_shared_and_source_scoped_and_allows_clear() {
         let runtime = RedisRuntime::connect(RedisSettings::default()).unwrap();
-        let targets = BTreeMap::from([("BNBUSDC".into(), TargetPosition { qty: 1., signal: 0 })]);
+        let targets = BTreeMap::from([(
+            "BNBUSDC".into(),
+            TargetPosition {
+                clear: false,
+                qty: 1.,
+                signal: 0,
+            },
+        )]);
         assert!(runtime.validate_cta_targets("trade03", &targets).is_ok());
         runtime.set_bnb_symbol_reserved("trade03", true);
         assert!(
@@ -1062,7 +1097,14 @@ mod tests {
                 .is_err()
         );
         assert!(runtime.validate_cta_targets("trade04", &targets).is_ok());
-        let zero = BTreeMap::from([("BNBUSDC".into(), TargetPosition { qty: 0., signal: 0 })]);
+        let zero = BTreeMap::from([(
+            "BNBUSDC".into(),
+            TargetPosition {
+                clear: false,
+                qty: 0.,
+                signal: 0,
+            },
+        )]);
         assert!(runtime.validate_cta_targets("trade03", &zero).is_ok());
         runtime.set_bnb_symbol_reserved("trade03", false);
         assert!(
@@ -1159,6 +1201,7 @@ mod tests {
             (
                 "BTCUSDT".into(),
                 TargetPosition {
+                    clear: false,
                     qty: 0.2,
                     signal: 1,
                 },
@@ -1166,6 +1209,7 @@ mod tests {
             (
                 "BTCUSDC".into(),
                 TargetPosition {
+                    clear: false,
                     qty: 0.3,
                     signal: 0,
                 },
@@ -1173,6 +1217,7 @@ mod tests {
             (
                 "BTCUSD".into(),
                 TargetPosition {
+                    clear: false,
                     qty: 0.01,
                     signal: -1,
                 },
@@ -1197,7 +1242,10 @@ mod tests {
             uta.id = id.into();
             uta.venue = venue.into();
             uta.rocksdb_path = dir.path().join(id).join("data/persist_manager");
-            let targets = BTreeMap::from([("BTCUSDT".into(), TargetPosition { qty, signal: 0 })]);
+            let targets: BTreeMap<String, TargetPosition> = serde_json::from_value(
+                serde_json::json!({"BTCUSDT": {"qty": qty, "signal": 0}, "ETHUSDT": {"qty": "clear", "signal": -1}}),
+            )
+            .unwrap();
             runtime
                 .publish_strategy(&uta, "uta_shared", &parameters, &BTreeMap::new(), &targets)
                 .await
@@ -1206,10 +1254,20 @@ mod tests {
             let raw: String = connection.get(&key).await.unwrap();
             let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
             assert_eq!(value["targets"]["BTCUSDT"]["qty"], qty);
+            assert_eq!(value["targets"]["ETHUSDT"]["qty"], "clear");
+            assert_eq!(
+                runtime
+                    .load_exec_target_snapshot(&uta)
+                    .await
+                    .unwrap()
+                    .aggregate_targets["ETHUSDT"],
+                0.0
+            );
             for symbol in ["BTC", "BTCUSD", "BTCUSDC"] {
                 let wrong = BTreeMap::from([(
                     symbol.into(),
                     TargetPosition {
+                        clear: false,
                         qty: 1.0,
                         signal: 0,
                     },
@@ -1258,6 +1316,30 @@ mod tests {
             )
             .await
             .unwrap();
+        let clear_targets: BTreeMap<String, TargetPosition> =
+            serde_json::from_value(serde_json::json!({
+            "BTCUSDT":{"qty":"clear","signal":1},"ETHUSDT":{"qty":0.0,"signal":0}}))
+            .unwrap();
+        runtime
+            .publish_strategy(
+                &source,
+                "recovered",
+                &parameters,
+                &BTreeMap::new(),
+                &clear_targets,
+            )
+            .await
+            .unwrap();
+        let clear_raw: String = connection
+            .get("fixture_um:binance-futures:batch_exec:recovered")
+            .await
+            .unwrap();
+        let clear_json: serde_json::Value = serde_json::from_str(&clear_raw).unwrap();
+        assert_eq!(clear_json["targets"]["BTCUSDT"]["qty"], "clear");
+        assert_eq!(clear_json["targets"]["ETHUSDT"]["qty"], 0.0);
+        let clear_state =
+            decode_exec_strategy_target_state("batch_exec", "recovered", &clear_json).unwrap();
+        assert_eq!(clear_state.targets["BTCUSDT"], 0.0);
         let um_key = "fixture_um:binance-futures:batch_exec:shared";
         let cm_key = "fixture_cm:binance-coin-futures:batch_exec:shared";
         let um_raw: String = connection.get(um_key).await.unwrap();
@@ -1269,8 +1351,9 @@ mod tests {
         assert_eq!(cm["targets"]["BTCUSD"]["qty"], 0.01);
         assert_eq!(cm["symbol_overrides"]["BTCUSD"]["single_order_usdt"], 250.0);
         let snapshot = runtime.load_exec_target_snapshot(&source).await.unwrap();
-        assert_eq!(snapshot.strategies.len(), 1);
-        assert_eq!(snapshot.aggregate_targets.len(), 2);
+        assert_eq!(snapshot.strategies.len(), 2);
+        assert_eq!(snapshot.aggregate_targets.len(), 3);
+        assert_eq!(snapshot.strategies["recovered"].targets["BTCUSDT"], 0.0);
         assert!(!snapshot.aggregate_targets.contains_key("BTCUSD"));
         let coin_snapshot = runtime
             .load_exec_target_snapshot(&coin_source)
@@ -1339,7 +1422,7 @@ mod tests {
                 .get::<_, String>("fixture_um:binance-futures:batch_exec:strategy_names")
                 .await
                 .unwrap(),
-            r#"["shared"]"#
+            r#"["recovered","shared"]"#
         );
         let foreign_keys: Vec<String> = connection
             .keys("fixture_cm:binance-futures:*")
@@ -1361,6 +1444,7 @@ mod tests {
             (
                 "BTC".into(),
                 TargetPosition {
+                    clear: false,
                     qty: 1.0,
                     signal: 1,
                 },
@@ -1368,6 +1452,7 @@ mod tests {
             (
                 "BTCUSDT".into(),
                 TargetPosition {
+                    clear: false,
                     qty: -1.0,
                     signal: -1,
                 },
@@ -1437,6 +1522,7 @@ mod tests {
             (
                 "BTCUSDT".to_string(),
                 TargetPosition {
+                    clear: false,
                     qty: 0.1,
                     signal: 1,
                 },
@@ -1444,6 +1530,7 @@ mod tests {
             (
                 "ETHUSDT".to_string(),
                 TargetPosition {
+                    clear: false,
                     qty: -2.0,
                     signal: -1,
                 },
@@ -1451,6 +1538,7 @@ mod tests {
             (
                 "SOLUSDT".to_string(),
                 TargetPosition {
+                    clear: false,
                     qty: 3.0,
                     signal: 2,
                 },
@@ -1582,6 +1670,7 @@ mod tests {
         let targets = BTreeMap::from([(
             "BTCUSDT".to_string(),
             TargetPosition {
+                clear: false,
                 qty: 0.1,
                 signal: 0,
             },

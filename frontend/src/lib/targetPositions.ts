@@ -3,7 +3,7 @@ export const ALLOWED_TARGET_SIGNALS = [-2, -1, 0, 1, 2] as const
 export type TargetSignal = (typeof ALLOWED_TARGET_SIGNALS)[number]
 
 export interface TargetPosition {
-  qty: number
+  qty: number | 'clear'
   signal: TargetSignal
 }
 
@@ -14,15 +14,17 @@ export function isTargetSignal(value: number): value is TargetSignal {
 }
 
 export function normalizeTargetPosition(raw: unknown): TargetPosition | null {
+  if (raw === 'clear') return { qty: 'clear', signal: 0 }
   if (typeof raw === 'number') {
     if (!Number.isFinite(raw)) return null
     return { qty: raw, signal: 0 }
   }
   if (!raw || typeof raw !== 'object') return null
-  const qty = Number((raw as { qty?: unknown }).qty)
+  const value = (raw as { qty?: unknown }).qty
+  const qty = value === 'clear' ? 'clear' : Number(value)
   const signalRaw = (raw as { signal?: unknown }).signal
   const signal = signalRaw == null || signalRaw === '' ? 0 : Number(signalRaw)
-  if (!Number.isFinite(qty) || !Number.isInteger(signal) || !isTargetSignal(signal)) {
+  if ((qty !== 'clear' && !Number.isFinite(qty)) || !Number.isInteger(signal) || !isTargetSignal(signal)) {
     return null
   }
   return { qty, signal }
@@ -40,7 +42,7 @@ export function normalizeTargetMap(raw: unknown): TargetMap {
 
 export function targetQty(target: TargetPosition | number | undefined) {
   if (target == null) return 0
-  return typeof target === 'number' ? target : target.qty
+  return typeof target === 'number' ? target : target.qty === 'clear' ? 0 : target.qty
 }
 
 export function signalLabel(signal: number) {

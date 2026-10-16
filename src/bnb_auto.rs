@@ -1170,6 +1170,7 @@ impl BnbManager {
                 (
                     symbol.clone(),
                     TargetPosition {
+                        clear: false,
                         qty: *qty,
                         signal: 0,
                     },
@@ -1447,8 +1448,14 @@ mod tests {
             )
             .unwrap()
         };
-        let targets =
-            BTreeMap::from([(HEDGE_SYMBOL.into(), TargetPosition { qty: 1., signal: 0 })]);
+        let targets = BTreeMap::from([(
+            HEDGE_SYMBOL.into(),
+            TargetPosition {
+                clear: false,
+                qty: 1.,
+                signal: 0,
+            },
+        )]);
         let hub = create();
         assert!(redis.validate_cta_targets(&source.id, &targets).is_ok());
         hub.save(source, Settings::default()).await.unwrap();

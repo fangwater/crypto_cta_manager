@@ -5,6 +5,7 @@ import { cn } from '../lib/cn'
 import {
   ALLOWED_TARGET_SIGNALS,
   signalLabel,
+  targetQty,
   type TargetMap,
   type TargetPosition,
   type TargetSignal,
@@ -61,7 +62,7 @@ export function TargetPositionsEditor({
 
   const stats = useMemo(() => {
     const entries = Object.entries(targets)
-    const quantities = entries.map(([, value]) => value.qty)
+    const quantities = entries.map(([, value]) => targetQty(value))
     return {
       total: entries.length,
       active: quantities.filter((value) => value !== 0).length,
@@ -198,7 +199,7 @@ export function TargetPositionsEditor({
             </thead>
             <tbody>
               {rows.map(({ symbol, value }) => {
-                const meta = directionMeta(value.qty)
+                const meta = directionMeta(targetQty(value))
                 const DirectionIcon = meta.icon
                 return (
                   <tr
@@ -222,23 +223,29 @@ export function TargetPositionsEditor({
                       <span
                         className={cn(
                           'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
-                          value.qty > 0 && 'bg-emerald-50 text-emerald-700',
-                          value.qty < 0 && 'bg-amber-50 text-amber-700',
-                          value.qty === 0 && 'bg-slate-100 text-subtle',
+                          targetQty(value) > 0 && 'bg-emerald-50 text-emerald-700',
+                          targetQty(value) < 0 && 'bg-amber-50 text-amber-700',
+                          targetQty(value) === 0 && 'bg-slate-100 text-subtle',
                         )}
                       >
                         <DirectionIcon size={12} />
-                        {meta.label}
+                        {value.qty === 'clear' ? '清仓' : meta.label}
                       </span>
                     </td>
                     <td className="px-3 py-2.5">
                       <Input
                         type="number"
                         step="any"
-                        value={Number.isFinite(value.qty) ? value.qty : 0}
+                        value={targetQty(value)}
+                        disabled={value.qty === 'clear'}
                         onChange={(event) => updateQuantity(symbol, event.target.value)}
                         className={cn('h-9 tabular-nums text-right font-mono text-[13px]', meta.valueClass)}
                       />
+                      <label className="mt-1 flex items-center gap-1 text-xs text-muted">
+                        <input type="checkbox" checked={value.qty === 'clear'}
+                          onChange={(event) => updateTarget(symbol, { qty: event.target.checked ? 'clear' : 0 })} />
+                        完全清仓
+                      </label>
                     </td>
                     <td className="px-3 py-2.5">
                       <select
@@ -326,7 +333,7 @@ export function TargetPositionsEditor({
           <p className="mt-2 text-[11px] text-subtle">
             当前共 {stats.total} 个品种，其中 {stats.active} 个非零仓位。
             {stats.active > 0 &&
-              ` 预览：${quantity(Object.values(targets).reduce((sum, value) => sum + Math.abs(value.qty), 0))} 绝对量合计。`}
+              ` 预览：${quantity(Object.values(targets).reduce((sum, value) => sum + Math.abs(targetQty(value)), 0))} 绝对量合计。`}
             {stats.taker > 0 && ' ±1 表示该品种本轮全部用 taker，不走 taker 转 maker。'}
           </p>
         )}

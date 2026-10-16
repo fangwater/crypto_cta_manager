@@ -337,7 +337,7 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'target-signal',
     group: '策略目录',
     title: 'qty 与 signal',
-    lead: 'POST 可以用裸数字；写入 Redis 后每条仓位都是 {qty, signal}。下单策略可统一启用或关闭 signal 的执行语义。',
+    lead: 'POST 可以用裸数字或 {qty, signal}。qty 写 clear 表示明确清仓，按份数缩放后仍保留 clear；普通数字 0 保留执行容差。下单策略可统一启用或关闭 signal 的执行语义。',
     content: (
       <>
         <CodeBlock label="发布到 Redis 的 targets">{`{

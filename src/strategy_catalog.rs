@@ -128,6 +128,7 @@ pub fn scale_targets(
             (
                 symbol.clone(),
                 TargetPosition {
+                    clear: target.clear,
                     qty: if shares == 0.0 {
                         0.0
                     } else {
@@ -143,6 +144,9 @@ pub fn scale_targets(
 pub fn validate_targets(targets: &BTreeMap<String, TargetPosition>) -> Result<(), String> {
     for (symbol, target) in targets {
         validate_exec_symbol(symbol)?;
+        if target.clear && target.qty != 0.0 {
+            return Err(format!("targets.{symbol}: clear requires zero quantity"));
+        }
         if !target.qty.is_finite() {
             return Err(format!("targets.{symbol}.qty must be finite"));
         }
@@ -1455,6 +1459,7 @@ mod tests {
         let targets = BTreeMap::from([(
             "BTCUSDT".into(),
             TargetPosition {
+                clear: false,
                 qty: -0.006,
                 signal: -1,
             },
@@ -1473,6 +1478,7 @@ mod tests {
         let targets = BTreeMap::from([(
             "BTCUSDT".to_string(),
             TargetPosition {
+                clear: false,
                 qty: 0.1,
                 signal: 0,
             },
@@ -1505,6 +1511,7 @@ mod tests {
         let targets = BTreeMap::from([(
             "龙虾USDT".to_string(),
             TargetPosition {
+                clear: false,
                 qty: 0.1,
                 signal: 0,
             },

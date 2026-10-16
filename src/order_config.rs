@@ -544,8 +544,10 @@ struct StrategyResponse {
 
 pub const ALLOWED_TARGET_SIGNALS: [i32; 5] = [-2, -1, 0, 1, 2];
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TargetPosition {
+    /// Explicit close-to-zero instruction; numeric zero keeps ordinary tolerance.
+    pub clear: bool,
     pub qty: f64,
     pub signal: i32,
 }
@@ -556,7 +558,33 @@ impl TargetPosition {
             return Err("qty must be finite".to_string());
         }
         validate_target_signal(signal)?;
-        Ok(Self { qty, signal })
+        Ok(Self {
+            qty,
+            signal,
+            clear: false,
+        })
+    }
+}
+
+impl Serialize for TargetPosition {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        if self.clear && self.qty != 0.0 {
+            return Err(serde::ser::Error::custom(
+                "clear target must have zero numeric quantity",
+            ));
+        }
+        let mut result = serializer.serialize_struct("TargetPosition", 2)?;
+        if self.clear {
+            result.serialize_field("qty", "clear")?;
+        } else {
+            result.serialize_field("qty", &self.qty)?;
+        }
+        result.serialize_field("signal", &self.signal)?;
+        result.end()
     }
 }
 
@@ -567,27 +595,35 @@ impl<'de> Deserialize<'de> for TargetPosition {
     {
         #[derive(Deserialize)]
         #[serde(untagged)]
+        enum Quantity {
+            Number(f64),
+            Command(String),
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
         enum TargetPositionDe {
-            Qty(f64),
+            Qty(Quantity),
             Object(TargetPositionObject),
         }
-
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct TargetPositionObject {
-            qty: f64,
+            qty: Quantity,
             #[serde(default)]
             signal: Option<i32>,
         }
-
-        match TargetPositionDe::deserialize(deserializer)? {
-            TargetPositionDe::Qty(qty) => {
-                TargetPosition::new(qty, 0).map_err(serde::de::Error::custom)
+        let (qty, signal) = match TargetPositionDe::deserialize(deserializer)? {
+            TargetPositionDe::Qty(qty) => (qty, 0),
+            TargetPositionDe::Object(value) => (value.qty, value.signal.unwrap_or(0)),
+        };
+        match qty {
+            Quantity::Number(qty) => Self::new(qty, signal).map_err(serde::de::Error::custom),
+            Quantity::Command(command) if command == "clear" => {
+                let mut target = Self::new(0.0, signal).map_err(serde::de::Error::custom)?;
+                target.clear = true;
+                Ok(target)
             }
-            TargetPositionDe::Object(value) => {
-                TargetPosition::new(value.qty, value.signal.unwrap_or(0))
-                    .map_err(serde::de::Error::custom)
-            }
+            Quantity::Command(_) => Err(serde::de::Error::custom("qty must be a number or clear")),
         }
     }
 }
@@ -1059,6 +1095,35 @@ mod tests {
     }
 
     #[test]
+    fn explicit_clear_round_trips_without_turning_numeric_zero_into_a_command() {
+        for input in [
+            serde_json::json!("clear"),
+            serde_json::json!({"qty":"clear","signal":-1}),
+        ] {
+            let target: TargetPosition = serde_json::from_value(input).unwrap();
+            assert!(target.clear);
+            assert_eq!(target.qty, 0.0);
+            let output = serde_json::to_value(target).unwrap();
+            assert_eq!(output["qty"], "clear");
+            assert_eq!(
+                serde_json::from_value::<TargetPosition>(output).unwrap(),
+                target
+            );
+        }
+        let numeric: TargetPosition =
+            serde_json::from_value(serde_json::json!({"qty":0.0})).unwrap();
+        assert!(!numeric.clear);
+        assert_eq!(serde_json::to_value(numeric).unwrap()["qty"], 0.0);
+        for input in [
+            serde_json::json!({"qty":"close"}),
+            serde_json::json!({"qty":"clear","signal":3}),
+            serde_json::json!({"qty":null}),
+        ] {
+            assert!(serde_json::from_value::<TargetPosition>(input).is_err());
+        }
+    }
+
+    #[test]
     fn coin_symbols_roundtrip_between_catalog_and_exchange_contracts() {
         assert_eq!(normalize_exec_symbol(" btcusd_perp ").unwrap(), "BTCUSD");
         assert_eq!(binance_coin_wire_symbol("BTCUSD").unwrap(), "BTCUSD_PERP");
@@ -1257,6 +1322,7 @@ mod tests {
         assert_eq!(
             legacy,
             TargetPosition {
+                clear: false,
                 qty: -0.006,
                 signal: 0
             }
@@ -1269,6 +1335,7 @@ mod tests {
         assert_eq!(
             object,
             TargetPosition {
+                clear: false,
                 qty: -0.54,
                 signal: -1
             }

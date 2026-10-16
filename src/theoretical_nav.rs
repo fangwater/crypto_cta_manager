@@ -1175,6 +1175,7 @@ mod tests {
             targets: BTreeMap::from([(
                 "BTCUSDT".into(),
                 crate::order_config::TargetPosition {
+                    clear: false,
                     qty: 1.0,
                     signal: -1,
                 },
@@ -1316,6 +1317,7 @@ mod tests {
             targets: BTreeMap::from([(
                 "BTCUSDT".into(),
                 crate::order_config::TargetPosition {
+                    clear: false,
                     qty: 1.0,
                     signal: 0,
                 },
@@ -1430,6 +1432,7 @@ mod tests {
             targets: BTreeMap::from([(
                 "BTCUSDT".into(),
                 crate::order_config::TargetPosition {
+                    clear: false,
                     qty: 5.0,
                     signal: 0,
                 },
@@ -2005,6 +2008,7 @@ mod tests {
             strategy.targets.insert(
                 "BTCUSD".into(),
                 crate::order_config::TargetPosition {
+                    clear: false,
                     qty: (index % 3) as f64,
                     signal: 0,
                 },
@@ -2012,6 +2016,7 @@ mod tests {
             strategy.targets.insert(
                 "BTCUSDT".into(),
                 crate::order_config::TargetPosition {
+                    clear: false,
                     qty: (index % 11) as f64 * 0.1,
                     signal: 0,
                 },
@@ -2019,6 +2024,7 @@ mod tests {
             strategy.targets.insert(
                 "ETHUSDT".into(),
                 crate::order_config::TargetPosition {
+                    clear: false,
                     qty: -(index % 7) as f64,
                     signal: 0,
                 },
@@ -2038,6 +2044,7 @@ mod tests {
                 strategy.targets.insert(
                     "BTCUSDT".into(),
                     crate::order_config::TargetPosition {
+                        clear: false,
                         qty: 3.0,
                         signal: 0,
                     },
