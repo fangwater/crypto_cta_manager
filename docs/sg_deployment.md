@@ -1,6 +1,6 @@
 # SG Manager deployment
 
-Last verified: 2026-10-16 10:15 UTC.
+Last verified: 2026-10-16 10:29 UTC.
 
 Independent installation at `/home/ubuntu/crypto_cta_manager`, reachable through
 `http://47.131.162.78:4191/manager/`. Backend listens only on `127.0.0.1:18201`.
@@ -8,8 +8,9 @@ PostgreSQL 16 is local on `127.0.0.1:5432`; Redis uses `127.0.0.1:6379/0`.
 Manager and PostgreSQL use housekeeping CPUs 0–7. The existing trading/IRQ
 cores 8–15 and all trading processes are unaffected.
 
-Runtime binaries and frontend were built locally from `399c9b0`, uploaded to
-explicit temporary names, SHA-256 verified and atomically installed. The release
+Runtime binaries and frontend were built locally from `d2248e7`, uploaded to
+explicit temporary names, SHA-256 verified and atomically installed as release
+`20261016T102806Z`. The release
 manifest is `webroot/RELEASE-MANIFEST.txt`. Service:
 `systemctl --user status crypto-cta-manager-web.service` (enabled).
 
@@ -54,11 +55,29 @@ with JP's live `binance_exec_trade05`: ctaker, 100 USDT per order, one order per
 batch, max_batch 1, rate limits 400/minute and 200/10 seconds. Initial targets
 are numeric zero, and the live RX02 publisher is not connected to SG.
 
-Before connecting live RX02 publications, align SG Manager with RX02's explicit
-`qty: "clear"` target contract; runtime `399c9b0` predates that change. Deployment
-of the Exec and its zero-target configuration does not validate that future
-live publication path. Its private future publish token is held only in
+Manager now preserves RX02's explicit `qty: "clear"` contract through parsing,
+catalog storage, immutable target archives, shares scaling, Redis publication,
+Exec Config readback and the target editor. Numeric zero retains its separate
+meaning. No database schema change was needed. The private future publish token is held only in
 `~/.config/crypto-cta-manager/bybit02-publish.env` (0600).
+
+An authenticated publication through SG's Nginx gateway changed the prepared
+`lgq_cta_symbol_mean` BTCUSDT target to `clear`, confirmed that the catalog and
+archive retained signal -1 while the disabled signal-execution setting emitted
+signal 0 to Exec, and read `clear` back through Exec Config. An invalid `close`
+command returned HTTP 422 without changing the target. All original numeric-zero
+targets were then restored through Manager. These two accepted publications
+remain as factual audit messages; no execution process was started or exchange
+order submitted. The live RX02 publisher remains unconnected to SG.
+
+Local validation passed 349 Rust tests, the independent Redis integration test
+(including native Bybit and Bitget clear publication/readback), seven Python
+publisher tests, 18 frontend tests and the production frontend build. All four
+installed Manager binary hashes and the running executable match the release
+manifest. Ten protected process identities, trading configuration hashes,
+binding/follow settings and risk/order parameters were unchanged. The temporary
+verification session was removed. Evidence is in Manager's
+`artifacts/sg_clear_support/20261016T102336Z/live-validation.json`.
 
 The authenticated `/exec_trade02/`, `/exec_trade02/config/` and snapshot routes
 return 200; its WebSocket upgrade returns 101. Anonymous requests return 401.
