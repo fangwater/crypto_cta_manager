@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build Manager locally, then deploy one independent host stack.
-# Usage: scripts/deploy_host.sh --target el01|jp-meta [--skip-build] [--manager-only]
+# Usage: scripts/deploy_host.sh --target el01|jp-meta|sg [--skip-build] [--manager-only]
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,7 +11,7 @@ NODE_BIN="${CTA_NODE_BIN:-}"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/deploy_host.sh --target el01|jp-meta [--skip-build] [--manager-only]
+Usage: scripts/deploy_host.sh --target el01|jp-meta|sg [--skip-build] [--manager-only]
 
 Compile cta_web and the frontend on this machine, then upload to one
 independent host. el01 and jp-meta do not share binaries, config,
@@ -19,6 +19,7 @@ PostgreSQL, Redis, Nginx, or Exec accounts.
 
   --target el01      SSH cta_exec, /home/el01/crypto_cta_manager
   --target jp-meta   SSH jp-meta-elvpn, /home/ubuntu/crypto_cta_manager
+  --target sg        SSH sg, /home/ubuntu/crypto_cta_manager (Manager only)
   --skip-build       Reuse the already-built local artifacts
   --manager-only     Update Manager API, frontend and analysis tools;
                      leave Nginx and the monitor unchanged
@@ -68,8 +69,20 @@ case "$TARGET" in
         EXPECTED_USER="ubuntu"
         RESTART_NGINX=0
         ;;
+    sg)
+        SSH_HOST="sg"
+        REMOTE_ROOT="/home/ubuntu/crypto_cta_manager"
+        DEPLOY_DIR="$ROOT/deploy/sg"
+        UNIT_NAME="crypto-cta-manager-web.service"
+        EXPECTED_USER="ubuntu"
+        RESTART_NGINX=0
+        if [[ $MANAGER_ONLY -ne 1 ]]; then
+            echo "SG requires --manager-only; provision its gateway separately" >&2
+            exit 2
+        fi
+        ;;
     *)
-        echo "--target must be el01 or jp-meta" >&2
+        echo "--target must be el01, jp-meta or sg" >&2
         usage >&2
         exit 2
         ;;

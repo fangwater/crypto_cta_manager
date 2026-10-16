@@ -34,6 +34,18 @@ while [[ $# -gt 0 ]]; do
             SSH_HOST="${2:?--ssh needs a host}"
             shift 2
             ;;
+        --target)
+            case "${2:?--target needs jp-meta or sg}" in
+                jp-meta) ;;
+                sg)
+                    SSH_HOST="sg"
+                    SNIPPET_LOCAL="$ROOT/deploy/sg/crypto-cta-nginx-snippet.conf"
+                    FRAGMENT_LOCAL="$ROOT/deploy/sg/nginx-locations.fragment.txt"
+                    ;;
+                *) echo "unsupported gateway target" >&2; exit 2 ;;
+            esac
+            shift 2
+            ;;
         --no-reload)
             DO_RELOAD=0
             shift

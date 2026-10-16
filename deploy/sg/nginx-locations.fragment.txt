@@ -1,0 +1,4 @@
+# BEGIN managed: crypto cta manager
+# Keep the SPA and authenticated API routes in this external snippet.
+/manager/ external:/etc/nginx/snippets/crypto_cta_manager.conf
+# END managed: crypto cta manager

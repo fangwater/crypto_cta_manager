@@ -1,0 +1,41 @@
+# SG Manager starts with reserved, disabled Exec sources. Enable only after
+# each independent Exec is provisioned; never point these at intra history.
+[database]
+url_env = "CRYPTO_CTA_LOCAL_DATABASE_URL"
+max_connections = 8
+[dashboard]
+refresh_secs = 60
+[redis]
+url = "redis://127.0.0.1:6379/0"
+[kline]
+enabled = false
+rocksdb_path = "/home/ubuntu/crypto_cta_manager/db"
+local_ip = "172.31.10.217"
+public_ip = "47.128.92.224"
+[funding_rates]
+enabled = false
+[monitor]
+enabled = false
+host_tag = "sg"
+
+[[sources]]
+id = "bybit_exec_trade02"
+account = "trade02"
+alias = "Bybit UTA (reserved)"
+venue = "bybit-futures"
+rocksdb_path = "/home/ubuntu/bybit_exec_trade02/data/persist_manager"
+enabled = false
+monitor_enabled = false
+ipc_namespace = "bybit_exec_trade02"
+account_ipc_service = "account_pubs/bybit_pm"
+
+[[sources]]
+id = "bitget_exec_trade01"
+account = "trade01"
+alias = "Bitget UTA (reserved)"
+venue = "bitget-futures"
+rocksdb_path = "/home/ubuntu/bitget_exec_trade01/data/persist_manager"
+enabled = false
+monitor_enabled = false
+ipc_namespace = "bitget_exec_trade01"
+account_ipc_service = "account_pubs/bitget_pm"
