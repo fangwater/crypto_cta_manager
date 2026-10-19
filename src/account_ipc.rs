@@ -92,6 +92,8 @@ pub struct LiveAccountReading {
     pub unified_account: bool,
     pub uni_mmr: Option<f64>,
     pub uni_mmr_ts_ms: Option<i64>,
+    pub initial_margin_usd: Option<f64>,
+    pub initial_margin_ts_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,6 +103,8 @@ struct SourceLiveState {
     unified_account: bool,
     uni_mmr: Option<f64>,
     uni_mmr_ts_ms: Option<i64>,
+    initial_margin_usd: Option<f64>,
+    initial_margin_ts_ms: Option<i64>,
 }
 
 impl SourceLiveState {
@@ -140,6 +144,8 @@ impl SourceLiveState {
             unified_account: self.unified_account,
             uni_mmr: self.uni_mmr,
             uni_mmr_ts_ms: self.uni_mmr_ts_ms,
+            initial_margin_usd: self.initial_margin_usd,
+            initial_margin_ts_ms: self.initial_margin_ts_ms,
         })
     }
 
@@ -311,11 +317,43 @@ fn apply_account_message(
             state.apply_account_equity(snapshot);
         }
     }
+    let risk_scope = rapidx_account_scope(service)
+        .filter(|scope| match venue {
+            "binance-futures" => *scope == BINANCE_UNIFIED_SCOPE,
+            "okex-futures" => *scope == OKEX_UNIFIED_SCOPE,
+            _ => false,
+        })
+        .or_else(|| unified_scope(venue).map(|(scope, _)| scope))
+        .or_else(|| (venue == "binance-futures").then_some(BINANCE_STD_UM_SCOPE));
+    if let Some((ts, margin)) = risk_scope.and_then(|scope| parse_initial_margin(payload, scope)) {
+        if state
+            .initial_margin_ts_ms
+            .is_none_or(|previous| ts >= previous)
+        {
+            state.initial_margin_usd = margin;
+            state.initial_margin_ts_ms = Some(ts);
+        }
+    }
     if let Some((scope, _)) = unified_scope(venue) {
         if let Some((ts, ratio)) = parse_unified_risk(payload, scope) {
             state.apply_unified_risk(ts, ratio);
         }
     }
+}
+
+// Initial margin is exchange-reported collateral in use, not maintenance margin
+// or available balance. NaN on the wire means unavailable, not zero.
+fn parse_initial_margin(payload: &[u8], scope: u32) -> Option<(i64, Option<f64>)> {
+    let body = account_risk_body(payload, scope)?;
+    let ts_ms = i64::from_le_bytes(body.get(4..12)?.try_into().ok()?);
+    if ts_ms < 0 {
+        return None;
+    }
+    let margin = f64::from_le_bytes(body.get(36..44)?.try_into().ok()?);
+    Some((
+        ts_ms,
+        (margin.is_finite() && margin >= 0.0).then_some(margin),
+    ))
 }
 
 fn parse_wallet_asset(payload: &[u8]) -> Option<WalletAssetSnapshot> {
@@ -838,5 +876,25 @@ mod tests {
         assert!(reading.unified_account);
         assert_eq!(reading.uni_mmr, Some(4.5));
         assert!(reading.equity.is_none());
+    }
+    #[test]
+    fn initial_margin_preserves_zero_and_missing_without_using_maintenance() {
+        let mut payload = encode_account_risk(BINANCE_STD_UM_SCOPE, 123, 3.0);
+        let offset = EVENT_HEADER_LEN + 36;
+        for (value, expected) in [
+            (42.5, Some(42.5)),
+            (0.0, Some(0.0)),
+            (f64::NAN, None),
+            (-1.0, None),
+            (f64::INFINITY, None),
+        ] {
+            payload[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+            assert_eq!(
+                parse_initial_margin(&payload, BINANCE_STD_UM_SCOPE),
+                Some((123, expected))
+            );
+        }
+        assert!(parse_initial_margin(&payload, OKEX_UNIFIED_SCOPE).is_none());
+        assert!(parse_initial_margin(&payload[..offset + 3], BINANCE_STD_UM_SCOPE).is_none());
     }
 }

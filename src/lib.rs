@@ -1,4 +1,5 @@
 pub mod account_ipc;
+pub mod account_overview;
 pub mod acquisition_cost;
 pub mod analysis;
 pub mod auth;

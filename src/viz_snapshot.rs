@@ -66,6 +66,47 @@ pub struct ExecStateRowSnapshot {
     pub account_position_qty: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountRiskSnapshot {
+    pub ts_ms: i64,
+    pub long_notional_usdt: f64,
+    pub short_notional_usdt: f64,
+}
+
+fn extract_account_risk(value: &serde_json::Value, venue: &str) -> Result<AccountRiskSnapshot> {
+    let entry = value
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.get("type").and_then(serde_json::Value::as_str) == Some("exec_pre_trade_risk")
+            })
+        })
+        .and_then(|message| message.get("entry"))
+        .context("Exec account risk snapshot is unavailable")?;
+    anyhow::ensure!(
+        entry.get("venue").and_then(serde_json::Value::as_str) == Some(venue),
+        "Exec account risk venue mismatch"
+    );
+    let ts_ms = entry
+        .get("ts_ms")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value > 0)
+        .context("invalid Exec account risk timestamp")?;
+    let amount = |key| {
+        entry
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .with_context(|| format!("invalid Exec account risk {key}"))
+    };
+    Ok(AccountRiskSnapshot {
+        ts_ms,
+        long_notional_usdt: amount("long_notional_usdt")?,
+        short_notional_usdt: amount("short_notional_usdt")?,
+    })
+}
+
 #[derive(Clone)]
 pub struct VizSnapshotClient {
     http: Client,
@@ -79,6 +120,21 @@ impl VizSnapshotClient {
             .build()
             .context("failed to build Exec Viz snapshot client")?;
         Ok(Self { http })
+    }
+
+    pub async fn load_account_risk(
+        &self,
+        base_url: &str,
+        venue: &str,
+    ) -> Result<AccountRiskSnapshot> {
+        let response = self
+            .http
+            .get(snapshot_url(base_url)?)
+            .send()
+            .await?
+            .error_for_status()
+            .context("Exec risk snapshot request failed")?;
+        extract_account_risk(&response.json::<serde_json::Value>().await?, venue)
     }
 
     pub async fn load_strategy_positions(
@@ -472,6 +528,24 @@ fn normalize_symbol(raw: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn account_risk_rejects_foreign_venue_and_missing_or_negative_values() {
+        let mut snapshot = serde_json::json!({"entries": [{"type": "exec_pre_trade_risk", "entry": {
+            "venue": "binance-futures", "ts_ms": 100, "long_notional_usdt": 200.0, "short_notional_usdt": 0.0
+        }}]});
+        let risk = super::extract_account_risk(&snapshot, "binance-futures").unwrap();
+        assert_eq!(risk.long_notional_usdt, 200.0);
+        assert_eq!(risk.short_notional_usdt, 0.0);
+        assert!(super::extract_account_risk(&snapshot, "okex-futures").is_err());
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!(-1.0),
+            serde_json::json!("200"),
+        ] {
+            snapshot["entries"][0]["entry"]["long_notional_usdt"] = invalid;
+            assert!(super::extract_account_risk(&snapshot, "binance-futures").is_err());
+        }
+    }
     #[test]
     fn extracts_only_the_requested_strategy_current_qty() {
         let snapshot = serde_json::json!({

@@ -215,6 +215,7 @@ struct WebState {
     redis_runtime: RedisRuntime,
     reload_notify: ReloadNotifyHub,
     live_equity: LiveEquityHub,
+    account_overview: crate::account_overview::AccountOverview,
     position_archive: Arc<PositionArchive>,
     theoretical_targets: Arc<crate::theoretical_nav::TheoreticalTargetCache>,
     klines: Arc<KlineStore>,
@@ -429,6 +430,12 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let viz_snapshot = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
     crate::kline::validate_host_configs(&config)?;
     let manager_db = ManagerDb::open(&config.kline.rocksdb_path)?;
+    let account_overview = crate::account_overview::AccountOverview::open(manager_db.clone())?;
+    account_overview.spawn(
+        config.sources.clone(),
+        live_equity.clone(),
+        viz_snapshot.clone(),
+    );
     let position_archive = Arc::new(PositionArchive::open(manager_db.clone())?);
     let klines = Arc::new(KlineStore::from_db(manager_db, config.kline.clone())?);
     klines.spawn_defaults();
@@ -502,6 +509,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         redis_runtime,
         reload_notify,
         live_equity,
+        account_overview,
         position_archive,
         theoretical_targets,
         klines,
@@ -532,6 +540,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/manager_sdk.py", get(manager_sdk))
         .route("/api/manager_pnl_sdk.py", get(manager_sdk))
         .route("/api/dashboard", get(dashboard))
+        .route("/api/account-overview", get(account_overview_report))
         .route("/api/symbols", get(list_symbols))
         .route("/api/timeline", get(timeline))
         .route("/api/account-timeline", get(account_timeline))
@@ -1134,6 +1143,43 @@ async fn load_request_user(
         return Ok(None);
     };
     Ok(auth::load_session(pool, &token).await?)
+}
+
+#[derive(Default, Deserialize)]
+struct AccountOverviewQuery {
+    date: Option<String>,
+}
+
+async fn account_overview_report(
+    State(state): State<WebState>,
+    Query(query): Query<AccountOverviewQuery>,
+    Extension(visible): Extension<VisibleSources>,
+) -> Result<Response, ApiError> {
+    let date = match query
+        .date
+        .as_deref()
+        .map(crate::account_overview::selected_day)
+        .transpose()
+    {
+        Ok(date) => date,
+        Err(error) => return Ok(bad_request(error.to_string())),
+    };
+    if date.is_some_and(|date| date > crate::account_overview::day_start(unix_now_ms())) {
+        return Ok(bad_request("future date is unavailable".into()));
+    }
+    let sources = state
+        .config
+        .sources
+        .iter()
+        .filter(|source| source.enabled && visible.0.contains(&source.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let hub = state.account_overview.clone();
+    let settings = state.config.dashboard.overview_alerts.clone();
+    let report = tokio::task::spawn_blocking(move || hub.report(&sources, date, &settings))
+        .await
+        .map_err(|error| anyhow::anyhow!("account overview task failed: {error}"))??;
+    Ok((NO_STORE, Json(report)).into_response())
 }
 
 async fn dashboard(

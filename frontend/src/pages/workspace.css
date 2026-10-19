@@ -116,3 +116,36 @@
 .overview-account-name .overview-venue { white-space: nowrap; }
 .overview-scroll-hint { display: none; }
 @media (max-width: 767px) { .overview-account-name { display: block; } .overview-account-name .overview-venue { margin-top: 4px; } .overview-scroll-hint { display: block; color: #8a96a8; font-size: 10px; padding: 0 12px 10px; } }
+
+/* Match the reference's compact toolbar and sixteen-column table. */
+.overview-toolbar { flex-wrap: wrap; gap: 20px; padding: 18px 20px; margin-bottom: 16px; }
+.overview-stats { display: flex; flex-wrap: wrap; gap: 16px 20px; }
+.overview-stat { min-width: 0; padding: 0 0 0 18px; }
+.overview-stat strong { font-size: 19px; }
+.overview-stat p { color: #64748b; }
+.overview-table-title h2 { font-size: 14px; font-weight: 600; }
+.overview-table { min-width: 1750px; }
+.overview-table thead th { height: 44px; padding: 12px 10px; color: #526177; }
+.overview-table td { height: 48px; padding: 10px; }
+.overview-table th:nth-child(2) { min-width: 155px; }
+.overview-table .overview-account-cell { padding: 10px 12px; }
+.overview-account-cell a { max-width: 200px; }
+.overview-table .overview-stale { color: #b45309; background: #fff5e5; }
+.overview-table .overview-positive { color: #047857; }
+.overview-table .overview-negative { color: #c73450; }
+.overview-table .overview-time { color: #64748b; }
+.overview-table-scroll { max-height: calc(100vh - 270px); }
+@media (max-width: 1399px) {
+ .overview-toolbar { align-items: stretch; flex-direction: column; gap: 18px; }
+ .overview-stats { border-top: 1px solid #edf0f5; padding-top: 16px; justify-content: space-between; }
+ .overview-stat:first-child { border-left: 0; padding-left: 0; }
+ .overview-table-scroll { max-height: 640px; }
+}
+@media (max-width: 767px) {
+ .overview-toolbar { padding: 16px; }
+ .overview-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+ .overview-stat { border-left: 0; padding: 0; min-width: 0; }
+ .overview-stat strong { font-size: 17px; overflow-wrap: anywhere; }
+ .overview-table th:nth-child(2) { min-width: 140px; max-width: 150px; }
+ .overview-account-cell a { max-width: 125px; }
+}

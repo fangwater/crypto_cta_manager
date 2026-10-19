@@ -572,10 +572,17 @@ while account metadata is loading. Keep the selected account when moving between
 NAV and cost pages. The workspace at `/manager/workspace/` displays a Chinese account monitoring
 table with filtering, sorting and optional 15-second refresh. Independent account
 cards and configuration/Exec entry points live at `/manager/accounts/`. Show
-account counts without summing account PnL or exposure. Label cumulative order
-NAV distinctly from daily PnL; unavailable historical equity, drawdown and margin
-metrics must not be fabricated. Estimated leverage requires positive, fresh
-equity and compatible currency units. A pending health request is
+only the reference table metrics: yesterday equity, equity, daily profit and
+return, long/short exposure and leverage, net exposure, 15-day maximum drawdown,
+initial margin and its ratio, data time and query time. Do not substitute
+cumulative order NAV or add extra metric columns. The reference toolbar includes
+filtered account count, total equity, total daily profit and leverage/timeout
+alert counts. Sum only complete inputs; unknown facts and unconfigured alert
+thresholds stay unknown, never zero. Historical equity is sampled independently
+into Manager-owned RocksDB; never derive historical balances from order NAV.
+Original historical records and alert thresholds must be supplied to backfill or
+match the original service. Leverage requires positive, fresh equity and
+compatible currency units. A pending health request is
 "checking", not "data delayed"; only a returned degraded health status indicates
 delayed data.
 Keep theoretical-data notices in normal document flow above the chart.

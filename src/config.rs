@@ -126,6 +126,7 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DashboardConfig {
+    pub overview_alerts: crate::account_overview::OverviewAlertSettings,
     pub refresh_secs: u64,
     /// CPU computation only; independent of Binance request concurrency/budget.
     pub compute_threads: usize,
@@ -329,6 +330,7 @@ impl Default for FundingConfig {
 impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
+            overview_alerts: Default::default(),
             refresh_secs: 60,
             compute_threads: crate::analysis::default_threads(),
         }
@@ -510,6 +512,24 @@ impl AppConfig {
         }
         if self.database.max_connections == 0 {
             bail!("database.max_connections must be greater than zero");
+        }
+        let alerts = &self.dashboard.overview_alerts;
+        for limit in [alerts.long_leverage_limit, alerts.short_leverage_limit]
+            .into_iter()
+            .flatten()
+        {
+            if !limit.is_finite() || limit <= 0.0 {
+                bail!("dashboard.overview_alerts leverage limits must be finite and positive");
+            }
+        }
+        if alerts.long_leverage_limit.is_some() != alerts.short_leverage_limit.is_some() {
+            bail!("dashboard.overview_alerts requires both long and short leverage limits");
+        }
+        if alerts
+            .timeout_secs
+            .is_some_and(|seconds| seconds == 0 || seconds > 86400)
+        {
+            bail!("dashboard.overview_alerts.timeout_secs must be between 1 and 86400");
         }
         if self.dashboard.refresh_secs == 0 {
             bail!("dashboard.refresh_secs must be greater than zero");

@@ -1,3 +1,4 @@
+import type { AccountOverview } from './lib/accountOverview'
 import { normalizeTargetMap } from './lib/targetPositions'
 import { serverClock } from './lib/serverClock'
 import type {
@@ -699,4 +700,8 @@ export function saveAccountFunding(sourceId: string, enabled: boolean, refreshSe
   return requestJson<FundingSettings>(`/catalog/accounts/${encodeURIComponent(sourceId)}/funding`, {
     method: 'PUT', body: { enabled, refresh_secs: refreshSecs, enable_token: enableToken }, signal,
   })
+}
+
+export function getAccountOverview(date: string, signal?: AbortSignal) {
+  return requestJson<AccountOverview>(`/account-overview${date ? `?date=${encodeURIComponent(date)}` : ''}`, { signal })
 }
