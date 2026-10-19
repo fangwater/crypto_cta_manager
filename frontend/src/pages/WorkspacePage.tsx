@@ -14,7 +14,7 @@ import './workspace.css'
 type ValueKey = 'yesterday_equity' | 'equity' | 'today_profit' | 'profit_percent' | 'long_position' | 'short_position' | 'long_leverage' | 'short_leverage' | 'net_position' | 'max_drawdown_15d_percent' | 'margin' | 'margin_percent' | 'date_ms' | 'queried_at_ms'
 type SortKey = 'account' | ValueKey
 const columns: { key: ValueKey; label: string; digits?: number; reason: string }[] = [
-  { key: 'yesterday_equity', label: '昨日权益', reason: '缺少前一日的历史权益记录' },
+  { key: 'yesterday_equity', label: '昨日权益', reason: 'UTC 零点权益尚在按账户净值重算，或账户历史不足' },
   { key: 'equity', label: '权益', reason: '尚未收到账户权益' },
   { key: 'today_profit', label: '今日盈利', reason: '缺少当日或昨日权益，无法计算今日盈利' },
   { key: 'profit_percent', label: '盈亏比例(%)', digits: 4, reason: '缺少权益记录，或昨日权益不大于零' },
@@ -117,7 +117,9 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
       const className = alert ? 'overview-stale' : profit && value != null && value !== 0 ? value > 0 ? 'overview-positive' : 'overview-negative' : time ? 'overview-time' : column.key === 'equity' ? 'overview-equity' : ''
       const side = sideClass(column.key)
       const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)
-      return <td key={column.key} className={className} title={value == null ? column.reason : time ? 'UTC' : undefined}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}</td>
+      const reconstructed = row.history_rebuilt_at_ms != null && ['yesterday_equity', 'today_profit', 'profit_percent', 'max_drawdown_15d_percent'].includes(column.key)
+      const title = value == null ? column.reason : time ? 'UTC' : reconstructed ? `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算；更新时间 ${dateTime.format(row.history_rebuilt_at_ms!)} UTC` : undefined
+      return <td key={column.key} className={className} title={title}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}</td>
     })}
   </tr>
 }

@@ -982,6 +982,23 @@ impl NavTimelineCache {
         )
     }
 
+    /// The same source-specific anchor used by an account timeline request.
+    pub fn account_start_ts_us(&self, source_id: &str, end_ts_us: i64) -> Option<i64> {
+        let source = self.sources.get(&(source_id.to_owned(), false))?;
+        source
+            .prepared
+            .snapshot_ts_us
+            .filter(|ts| *ts <= end_ts_us)
+            .or_else(|| {
+                source
+                    .prepared
+                    .fill_events
+                    .get(0)
+                    .map(|fill| fill.fill_ts_us)
+                    .filter(|ts| *ts <= end_ts_us)
+            })
+    }
+
     pub fn rebuild(
         &self,
         mut request: NavTimelineRequest,

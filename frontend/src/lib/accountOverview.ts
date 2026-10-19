@@ -19,6 +19,7 @@ export interface OverviewRow {
   leverage_alert: boolean | null
   timeout_alert: boolean | null
   history_start_ms: number | null
+  history_rebuilt_at_ms?: number | null
 }
 
 export interface AccountOverview {

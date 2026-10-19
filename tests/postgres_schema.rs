@@ -629,3 +629,78 @@ async fn quote_fee_settings_roundtrip_preserve_defaults_and_explicit_clear() -> 
     assert_business_data(&db.pool, &snapshot).await?;
     db.remove().await
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn daily_equity_is_atomic_source_scoped_and_runs_once_per_utc_day() -> Result<()> {
+    use crypto_cta_manager::account_overview::daily::{self, EquityAnchor};
+    let database = TestDatabase::create().await?;
+    postgres::initialize(&database.pool).await?;
+    let snapshot = seed_business_data(&database.pool).await?;
+    let day = 86_400_000;
+    let start = 20 * day;
+    let build = |end, equity| {
+        let nav = (0..=((end - start) / day))
+            .map(|i| (start + i * day, i as f64 * 10.0))
+            .collect::<Vec<_>>();
+        daily::reconstruct(
+            "test-source",
+            EquityAnchor {
+                day_ms: end,
+                ts_ms: end,
+                equity,
+                nav_change_quote: 0.0,
+                coverage_start_ms: start,
+                nav_generated_at_us: end * 1000,
+                funding_mode: "estimated".into(),
+                computed_at_ms: end,
+                drawdown_15d_percent: None,
+            },
+            &nav,
+        )
+        .unwrap()
+    };
+    let rows = build(start + 2 * day, 120.0);
+    assert!(daily::save(&database.pool, &rows).await?);
+    assert!(!daily::save(&database.pool, &build(start + 2 * day, 999.0)).await?);
+    assert_eq!(daily::load(&database.pool, "test-source").await?, rows);
+    assert!(
+        daily::load(&database.pool, "hidden-source")
+            .await?
+            .is_empty()
+    );
+    let next = build(start + 3 * day, 130.0);
+    let mut invalid = next.clone();
+    invalid.last_mut().unwrap().boundary_ts_ms += 1;
+    assert!(daily::save(&database.pool, &invalid).await.is_err());
+    assert_eq!(daily::load(&database.pool, "test-source").await?, rows);
+    let (a, b) = tokio::join!(
+        daily::save(&database.pool, &next),
+        daily::save(&database.pool, &next)
+    );
+    assert_ne!(a?, b?);
+    assert_eq!(daily::load(&database.pool, "test-source").await?, next);
+    assert_business_data(&database.pool, &snapshot).await?;
+    database.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn explicit_daily_equity_schema_preserves_existing_catalog_and_snapshots() -> Result<()> {
+    let database = TestDatabase::create().await?;
+    postgres::initialize(&database.pool).await?;
+    let snapshot = seed_business_data(&database.pool).await?;
+    sqlx::raw_sql("DROP TABLE cta_account_equity_daily")
+        .execute(&database.pool)
+        .await?;
+    sqlx::raw_sql(include_str!("../scripts/apply_account_equity_schema.sql"))
+        .execute(&database.pool)
+        .await?;
+    assert_business_data(&database.pool, &snapshot).await?;
+    assert!(
+        crypto_cta_manager::account_overview::daily::load(&database.pool, "test-source")
+            .await?
+            .is_empty()
+    );
+    database.remove().await
+}

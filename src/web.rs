@@ -46,6 +46,8 @@ use crate::strategy_catalog::{
 use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
 use crate::{nav, postgres};
 
+mod equity_history;
+
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");
 const MANAGER_PNL_SDK: &[u8] = include_bytes!("../scripts/manager_pnl_sdk.py");
@@ -521,6 +523,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         funding_rates,
     };
     spawn_funding_collectors(&state);
+    equity_history::spawn(state.clone());
 
     let app = Router::new()
         .route("/api/auth/status", get(auth_status))

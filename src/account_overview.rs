@@ -15,6 +15,7 @@ use crate::config::SourceConfig;
 use crate::manager_db::ManagerDb;
 use crate::viz_snapshot::VizSnapshotClient;
 
+pub mod daily;
 mod margin;
 
 const CF: &str = "account_observations";
@@ -88,6 +89,7 @@ pub struct OverviewRow {
     pub leverage_alert: Option<bool>,
     pub timeout_alert: Option<bool>,
     pub history_start_ms: Option<i64>,
+    pub history_rebuilt_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -103,6 +105,7 @@ pub struct OverviewResponse {
 struct State {
     latest: BTreeMap<String, AccountObservation>,
     history: BTreeMap<String, Vec<AccountObservation>>,
+    daily: BTreeMap<String, BTreeMap<i64, daily::DailyEquity>>,
     loading: bool,
 }
 
@@ -156,6 +159,57 @@ fn record_key(source: &str, timestamp: i64) -> Vec<u8> {
 }
 
 impl AccountOverview {
+    pub fn set_daily(&self, source: &str, rows: Vec<daily::DailyEquity>) -> Result<()> {
+        ensure!(
+            rows.iter().all(|row| row.source_id == source),
+            "mixed daily equity sources"
+        );
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| anyhow::anyhow!("account overview lock poisoned"))?;
+        let history = state.daily.entry(source.into()).or_default();
+        history.extend(rows.into_iter().map(|row| (row.boundary_ts_ms, row)));
+        Ok(())
+    }
+
+    pub fn rebuilt_day(&self, source: &str) -> Option<i64> {
+        self.state
+            .read()
+            .ok()?
+            .daily
+            .get(source)?
+            .values()
+            .map(|row| row.anchor.day_ms)
+            .max()
+    }
+
+    /// Anchor equity must precede the NAV generation's read, so recent fills are
+    /// available in that generation. Do not rebuild from a disconnected live feed.
+    pub fn reconstruction_anchor(
+        &self,
+        source: &str,
+        through_ms: i64,
+        max_age_ms: i64,
+    ) -> Option<AccountObservation> {
+        let state = self.state.read().ok()?;
+        let now = now_ms();
+        let current = state.latest.get(source)?;
+        if !(0..=SAMPLE_FRESH_MS).contains(&(now - current.equity_at_ms)) {
+            return None;
+        }
+        state
+            .history
+            .get(source)?
+            .iter()
+            .rev()
+            .find(|row| {
+                row.equity_at_ms <= through_ms
+                    && (0..=max_age_ms).contains(&(now - row.equity_at_ms))
+            })
+            .cloned()
+    }
+
     pub fn open(db: ManagerDb) -> Result<Self> {
         db.ensure_column_family(CF)?;
         Ok(Self {
@@ -391,14 +445,23 @@ impl AccountOverview {
             }
             let before_end = history.partition_point(|row| row.observed_at_ms <= end);
             let history = &history[..before_end];
-            let current = if selected.is_none() {
+            let current = if selected.is_none() || selected == Some(day_start(now)) {
                 state.latest.get(&source.id).or_else(|| history.last())
             } else {
                 history
                     .last()
                     .filter(|row| row.observed_at_ms >= day_start(end))
             };
-            accounts.push(make_row(source, current, history, end, now, alerts));
+            let mut row = make_row(source, current, history, end, now, alerts);
+            if let Some(daily) = state.daily.get(&source.id) {
+                for boundary in daily.keys().filter(|ts| **ts <= day_start(now)) {
+                    if daily.contains_key(&(boundary - DAY_MS)) {
+                        dates.insert(boundary - DAY_MS);
+                    }
+                }
+                apply_daily(&mut row, daily, selected, now);
+            }
+            accounts.push(row);
         }
         Ok(OverviewResponse {
             accounts,
@@ -510,7 +573,71 @@ fn make_row(
         leverage_alert,
         timeout_alert,
         history_start_ms: history.first().map(|row| row.equity_at_ms),
+        history_rebuilt_at_ms: None,
     }
+}
+
+fn apply_daily(
+    row: &mut OverviewRow,
+    daily: &BTreeMap<i64, daily::DailyEquity>,
+    selected: Option<i64>,
+    now: i64,
+) {
+    let day = selected.unwrap_or_else(|| day_start(now));
+    let historical = day < day_start(now);
+    if historical {
+        let Some(closing) = daily.get(&(day + DAY_MS)) else {
+            return;
+        };
+        if row
+            .date_ms
+            .is_none_or(|ts| ts < closing.boundary_ts_ms - SAMPLE_FRESH_MS)
+        {
+            row.long_position = None;
+            row.short_position = None;
+            row.net_position = None;
+            row.margin = None;
+        }
+        row.equity = Some(closing.equity);
+        row.yesterday_equity = closing.previous_equity;
+        row.date_ms = Some(closing.boundary_ts_ms);
+        row.max_drawdown_15d_percent = closing.drawdown_15d_percent;
+        row.history_rebuilt_at_ms = Some(closing.anchor.computed_at_ms);
+        // Historical risk values still require factual samples; reconstructed
+        // equity alone must not manufacture exposure or collateral.
+        row.long_leverage = row
+            .long_position
+            .filter(|_| closing.equity > 0.0)
+            .map(|value| value / closing.equity);
+        row.short_leverage = row
+            .short_position
+            .filter(|_| closing.equity > 0.0)
+            .map(|value| value / closing.equity);
+        row.margin_percent = row
+            .margin
+            .filter(|_| closing.equity > 0.0)
+            .map(|value| value / closing.equity * 100.0);
+        row.leverage_alert = None;
+        row.timeout_alert = None;
+    } else {
+        let Some(baseline) = daily.get(&day) else {
+            return;
+        };
+        row.yesterday_equity = Some(baseline.equity);
+        row.max_drawdown_15d_percent = baseline.anchor.drawdown_15d_percent;
+        row.history_rebuilt_at_ms = Some(baseline.anchor.computed_at_ms);
+    }
+    row.today_profit = row
+        .equity
+        .filter(|_| row.date_ms.is_some_and(|ts| ts >= day))
+        .zip(row.yesterday_equity)
+        .map(|(equity, previous)| equity - previous);
+    row.profit_percent = row
+        .today_profit
+        .zip(row.yesterday_equity)
+        .filter(|(_, previous)| *previous > 0.0)
+        .map(|(profit, previous)| profit / previous * 100.0);
+    row.history_start_ms = daily.keys().next().copied();
 }
 
 fn maximum_drawdown(values: impl IntoIterator<Item = f64>) -> Option<f64> {
@@ -555,6 +682,70 @@ rocksdb_path = "/unused"
             initial_margin: Some(83613.10),
             margin_at_ms: Some(ts),
         }
+    }
+    #[test]
+    fn daily_reconstruction_populates_history_without_inventing_risk_or_exposing_sources() {
+        let now = now_ms();
+        let today = day_start(now);
+        let start = today - 2 * DAY_MS;
+        let rows = daily::reconstruct(
+            "one",
+            daily::EquityAnchor {
+                day_ms: today,
+                ts_ms: now,
+                equity: 125.0,
+                nav_change_quote: 0.0,
+                coverage_start_ms: start,
+                nav_generated_at_us: now * 1000,
+                funding_mode: "estimated".into(),
+                computed_at_ms: now,
+                drawdown_15d_percent: None,
+            },
+            &[
+                (start, 0.0),
+                (today - DAY_MS, 30.0),
+                (today, 10.0),
+                (now, 25.0),
+            ],
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = AccountOverview::open(ManagerDb::open(tmp.path()).unwrap()).unwrap();
+        hub.set_daily("one", rows).unwrap();
+        hub.state
+            .write()
+            .unwrap()
+            .latest
+            .insert("one".into(), observation(now, 125.0));
+        let latest = hub
+            .report(&[source()], None, &OverviewAlertSettings::default())
+            .unwrap();
+        assert_eq!(latest.accounts[0].yesterday_equity, Some(110.0));
+        assert_eq!(latest.accounts[0].today_profit, Some(15.0));
+        assert_eq!(latest.accounts[0].equity, Some(125.0));
+        let past = hub
+            .report(
+                &[source()],
+                Some(today - DAY_MS),
+                &OverviewAlertSettings::default(),
+            )
+            .unwrap();
+        assert_eq!(past.accounts[0].yesterday_equity, Some(130.0));
+        assert_eq!(past.accounts[0].equity, Some(110.0));
+        assert_eq!(past.accounts[0].today_profit, Some(-20.0));
+        assert_eq!(past.accounts[0].long_position, None);
+        assert_eq!(past.accounts[0].margin, None);
+        assert_eq!(
+            past.dates,
+            vec![date_label(today - DAY_MS), date_label(start)]
+        );
+        assert_eq!(hub.rebuilt_day("one"), Some(today));
+        assert!(
+            hub.report(&[], None, &OverviewAlertSettings::default())
+                .unwrap()
+                .dates
+                .is_empty()
+        );
     }
     #[test]
     fn daily_profit_and_risk_use_factual_equity_without_order_nav() {
