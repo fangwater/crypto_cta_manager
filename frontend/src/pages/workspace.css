@@ -134,6 +134,11 @@
 .overview-table .overview-positive { color: #047857; }
 .overview-table .overview-negative { color: #c73450; }
 .overview-table .overview-time { color: #64748b; }
+.overview-long { --overview-side-color: #28745d; --overview-side-rgb: 44, 137, 105; }
+.overview-short { --overview-side-color: #a65363; --overview-side-rgb: 177, 85, 108; }
+.overview-table thead th:is(.overview-long, .overview-short) { color: var(--overview-side-color); box-shadow: inset 0 -2px rgba(var(--overview-side-rgb), .14); }
+.overview-side-value { display: inline-block; padding: 4px 7px; border-radius: 5px; color: var(--overview-side-color); background: rgba(var(--overview-side-rgb), .045); box-shadow: 0 2px 5px rgba(var(--overview-side-rgb), .06), inset 0 0 0 1px rgba(var(--overview-side-rgb), .07); }
+.overview-stale .overview-side-value { color: inherit; background: transparent; box-shadow: none; }
 .overview-table-scroll { max-height: calc(100vh - 270px); }
 @media (max-width: 1399px) {
  .overview-toolbar { align-items: stretch; flex-direction: column; gap: 18px; }

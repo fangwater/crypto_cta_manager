@@ -579,9 +579,12 @@ cumulative order NAV or add extra metric columns. The reference toolbar includes
 filtered account count, total equity, total daily profit and leverage/timeout
 alert counts. Sum only complete inputs; unknown facts and unconfigured alert
 thresholds stay unknown, never zero. Historical equity is sampled independently
-into Manager-owned RocksDB; never derive historical balances from order NAV.
-Original historical records and alert thresholds must be supplied to backfill or
-match the original service. Leverage requires positive, fresh equity and
+into Manager-owned RocksDB. Daily settlement, date selection and overview time
+display use UTC, with a UTC 00:00 boundary (operator instruction 2026-10-19).
+Historical equity may come from factual snapshots or reconciliation of complete
+account equity movements; order NAV alone is insufficient without account cash
+flows, factual fees/funding and boundary valuation. Original alert thresholds
+are still required to match the original service. Leverage requires positive, fresh equity and
 compatible currency units. A pending health request is
 "checking", not "data delayed"; only a returned degraded health status indicates
 delayed data.

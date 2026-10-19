@@ -29,8 +29,9 @@ const columns: { key: ValueKey; label: string; digits?: number; reason: string }
   { key: 'date_ms', label: '日期', reason: '尚未收到权益数据时间' },
   { key: 'queried_at_ms', label: '查询时间', reason: '尚未查询' },
 ]
-const dateTime = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+const dateTime = new Intl.DateTimeFormat('zh-CN', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
 const number = (value: number | null) => value === null ? '—' : money(value)
+const sideClass = (key: SortKey) => key === 'long_position' || key === 'long_leverage' ? 'overview-long' : key === 'short_position' || key === 'short_leverage' ? 'overview-short' : ''
 
 export function WorkspacePage() {
   const [date, setDate] = useState('')
@@ -56,7 +57,7 @@ export function WorkspacePage() {
   function sortColumn(key: SortKey, label: string) {
     const active = sort.key === key
     const Icon = active ? sort.descending ? ArrowDown : ArrowUp : ArrowDownUp
-    return <th scope="col" key={key} aria-sort={active ? sort.descending ? 'descending' : 'ascending' : 'none'}><button type="button" className="overview-sort" onClick={() => setSort({ key, descending: active ? !sort.descending : key !== 'account' })}>{label}<Icon size={12} /></button></th>
+    return <th scope="col" key={key} className={sideClass(key)} aria-sort={active ? sort.descending ? 'descending' : 'ascending' : 'none'}><button type="button" className="overview-sort" onClick={() => setSort({ key, descending: active ? !sort.descending : key !== 'account' })}>{label}<Icon size={12} /></button></th>
   }
   const leverageAlerts = data ? overviewAlertCount(rows, 'leverage_alert') : null
   const timeoutAlerts = data ? overviewAlertCount(rows, 'timeout_alert') : null
@@ -64,7 +65,7 @@ export function WorkspacePage() {
     <section className="overview-toolbar" aria-label="总览筛选与统计">
       <div className="overview-filters">
         <label>账户类型<select aria-label="账户类型" value={venue} onChange={event => setVenue(event.target.value)}><option value="all">全部类型</option>{venues.map(value => <option key={value} value={value}>{accountVenueLabel(value)}</option>)}</select></label>
-        <label>日期<select aria-label="日期" value={date} onChange={event => setDate(event.target.value)}><option value="">最新</option>{[...new Set([...(date ? [date] : []), ...(data?.dates ?? [])])].sort().reverse().map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+        <label title="每日以 UTC 00:00 为结算边界，表内时间均为 UTC">日期（UTC）<select aria-label="日期" value={date} onChange={event => setDate(event.target.value)}><option value="">最新</option>{[...new Set([...(date ? [date] : []), ...(data?.dates ?? [])])].sort().reverse().map(value => <option key={value} value={value}>{value}</option>)}</select></label>
         <label className="overview-auto"><input type="checkbox" checked={autoRefresh} onChange={event => setAutoRefresh(event.target.checked)} />自动刷新<span>{refreshing ? '更新中' : autoRefresh ? `${countdown} 秒` : '已暂停'}</span></label>
       </div>
       <div className="overview-stats" aria-live="polite">
@@ -114,7 +115,9 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
       const profit = column.key === 'today_profit' || column.key === 'profit_percent'
       const alert = column.key === 'date_ms' && row.timeout_alert || (column.key === 'long_leverage' || column.key === 'short_leverage') && row.leverage_alert
       const className = alert ? 'overview-stale' : profit && value != null && value !== 0 ? value > 0 ? 'overview-positive' : 'overview-negative' : time ? 'overview-time' : column.key === 'equity' ? 'overview-equity' : ''
-      return <td key={column.key} className={className} title={value == null ? column.reason : undefined}>{value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)}</td>
+      const side = sideClass(column.key)
+      const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)
+      return <td key={column.key} className={className} title={value == null ? column.reason : time ? 'UTC' : undefined}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}</td>
     })}
   </tr>
 }

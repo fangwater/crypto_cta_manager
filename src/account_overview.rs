@@ -19,7 +19,6 @@ mod margin;
 
 const CF: &str = "account_observations";
 const DAY_MS: i64 = 86_400_000;
-const SHANGHAI_MS: i64 = 8 * 3_600_000;
 const SAMPLE_FRESH_MS: i64 = 45_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -122,7 +121,7 @@ fn now_ms() -> i64 {
 }
 
 pub fn day_start(ts_ms: i64) -> i64 {
-    (ts_ms + SHANGHAI_MS).div_euclid(DAY_MS) * DAY_MS - SHANGHAI_MS
+    ts_ms.div_euclid(DAY_MS) * DAY_MS
 }
 
 pub fn selected_day(date: &str) -> Result<i64> {
@@ -135,12 +134,11 @@ pub fn selected_day(date: &str) -> Result<i64> {
         .and_hms_opt(0, 0, 0)
         .unwrap()
         .and_utc()
-        .timestamp_millis()
-        - SHANGHAI_MS)
+        .timestamp_millis())
 }
 
 fn date_label(ts_ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ts_ms + SHANGHAI_MS)
+    chrono::DateTime::from_timestamp_millis(ts_ms)
         .map(|date| date.format("%Y-%m-%d").to_string())
         .unwrap_or_default()
 }
@@ -423,8 +421,8 @@ fn make_row(
     let start = day_start(end);
     let previous = history
         .iter()
-        .rev()
-        .find(|row| row.equity_at_ms < start && row.equity_at_ms >= start - DAY_MS);
+        .filter(|row| row.equity_at_ms <= start && row.equity_at_ms >= start - SAMPLE_FRESH_MS)
+        .max_by_key(|row| row.equity_at_ms);
     let yesterday = previous.map(|row| row.equity);
     let equity = current.map(|row| row.equity);
     let today_profit = current
@@ -581,6 +579,50 @@ rocksdb_path = "/unused"
         assert_eq!(row.max_drawdown_15d_percent, None);
     }
     #[test]
+    fn daily_baseline_does_not_reset_at_shanghai_midnight() {
+        let start = selected_day("2026-10-19").unwrap();
+        let history = [
+            observation(start - 1, 100.0),
+            observation(start + 16 * 3_600_000 - 1, 120.0),
+        ];
+        let now = start + 17 * 3_600_000;
+        let current = observation(now, 130.0);
+        let row = make_row(
+            &source(),
+            Some(&current),
+            &history,
+            now,
+            now,
+            &OverviewAlertSettings::default(),
+        );
+        assert_eq!(row.yesterday_equity, Some(100.0));
+        assert_eq!(row.today_profit, Some(30.0));
+        assert_eq!(row.profit_percent, Some(30.0));
+    }
+    #[test]
+    fn daily_baseline_requires_a_fresh_sample_at_the_utc_boundary() {
+        let start = selected_day("2026-10-19").unwrap();
+        let now = start + 3_600_000;
+        let current = observation(now, 130.0);
+        for (sample_at, expected) in [
+            (start - SAMPLE_FRESH_MS - 1, None),
+            (start - SAMPLE_FRESH_MS, Some(100.0)),
+            (start, Some(100.0)),
+            (start + 1, None),
+        ] {
+            let row = make_row(
+                &source(),
+                Some(&current),
+                &[observation(sample_at, 100.0)],
+                now,
+                now,
+                &OverviewAlertSettings::default(),
+            );
+            assert_eq!(row.yesterday_equity, expected);
+            assert_eq!(row.today_profit, expected.map(|equity| 130.0 - equity));
+        }
+    }
+    #[test]
     fn missing_baselines_stale_equity_and_zero_margin_are_distinct() {
         let now = selected_day("2026-10-19").unwrap() + 12 * 3_600_000;
         let mut current = observation(now - 60_000, 100.0);
@@ -678,10 +720,14 @@ rocksdb_path = "/unused"
         );
     }
     #[test]
-    fn shanghai_date_boundaries_and_drawdown_order() {
+    fn utc_date_boundaries_and_drawdown_order() {
         let start = selected_day("2026-10-19").unwrap();
+        assert_eq!(start, 1_792_368_000_000);
         assert_eq!(day_start(start - 1), start - DAY_MS);
         assert_eq!(day_start(start + DAY_MS - 1), start);
+        assert_eq!(day_start(start + 16 * 3_600_000), start);
+        assert_eq!(date_label(start - 1), "2026-10-18");
+        assert_eq!(date_label(start + 16 * 3_600_000), "2026-10-19");
         assert_eq!(date_label(start), "2026-10-19");
         assert!(selected_day("2026-2-1").is_err());
         assert_eq!(maximum_drawdown([100.0, 120.0, 90.0, 110.0]), Some(0.25));
