@@ -1,15 +1,85 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FeeRates {
     pub maker: f64,
     pub taker: f64,
+    pub by_quote: BTreeMap<String, QuoteFeeRates>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuoteFeeRates {
+    pub maker_fee_rate: f64,
+    pub taker_fee_rate: f64,
+    pub theoretical_twap_fee_rate: f64,
+}
+
+/// Native linear symbols retain their quote suffix; bare RapidX cash assets use USDT.
+pub fn symbol_quote(symbol: &str) -> &'static str {
+    if symbol.ends_with("USDC") {
+        "USDC"
+    } else if symbol.ends_with("USD") {
+        "USD"
+    } else {
+        "USDT"
+    }
+}
+
+impl FeeRates {
+    pub fn for_symbol(&self, symbol: &str) -> (f64, f64) {
+        self.by_quote
+            .get(symbol_quote(symbol))
+            .map_or((self.maker, self.taker), |rates| {
+                (rates.maker_fee_rate, rates.taker_fee_rate)
+            })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TheoreticalFeeRates {
+    pub default: f64,
+    pub by_quote: BTreeMap<String, f64>,
+}
+
+impl From<f64> for TheoreticalFeeRates {
+    fn from(default: f64) -> Self {
+        Self {
+            default,
+            by_quote: BTreeMap::new(),
+        }
+    }
+}
+
+impl TheoreticalFeeRates {
+    pub fn for_symbol(&self, symbol: &str) -> f64 {
+        self.by_quote
+            .get(symbol_quote(symbol))
+            .copied()
+            .unwrap_or(self.default)
+    }
+}
+
+pub fn validate_quote_fee_rates(rates: &BTreeMap<String, QuoteFeeRates>) -> Result<()> {
+    for (quote, rate) in rates {
+        anyhow::ensure!(
+            matches!(quote.as_str(), "USDT" | "USDC" | "USD"),
+            "unsupported fee quote: {quote}"
+        );
+        anyhow::ensure!(
+            rate.maker_fee_rate.is_finite()
+                && rate.taker_fee_rate.is_finite()
+                && rate.theoretical_twap_fee_rate.is_finite(),
+            "fee rates for {quote} must be finite"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,6 +249,9 @@ pub struct SourceConfig {
     pub maker_fee_rate: Option<f64>,
     /// Taker fee fraction.
     pub taker_fee_rate: Option<f64>,
+    /// Account-specific quote overrides; absent quotes use the default fee rates.
+    #[serde(default)]
+    pub quote_fee_rates: BTreeMap<String, QuoteFeeRates>,
     /// Same-origin gateway path for this account's Exec Viz, for example /exec_trade01.
     pub gateway_prefix: Option<String>,
     /// Loopback-only Exec Config service used by the Manager backend.
@@ -609,6 +682,7 @@ impl AppConfig {
         let mut gateway_prefixes = HashSet::new();
         let mut enabled = 0usize;
         for source in &self.sources {
+            validate_quote_fee_rates(&source.quote_fee_rates)?;
             validate_source_id(&source.id)?;
             if source.account.trim().is_empty() {
                 bail!("source {} has an empty account", source.id);
@@ -700,6 +774,7 @@ impl AppConfig {
             if let Some(rates) = rates.get(&source.id) {
                 source.maker_fee_rate = Some(rates.maker);
                 source.taker_fee_rate = Some(rates.taker);
+                source.quote_fee_rates = rates.by_quote.clone();
             }
         }
         self
@@ -710,6 +785,7 @@ impl SourceConfig {
     pub fn nav_fee_rates(&self) -> Result<FeeRates> {
         let legacy = self.estimated_fee_rate;
         let rates = FeeRates {
+            by_quote: self.quote_fee_rates.clone(),
             maker: self
                 .maker_fee_rate
                 .or(legacy)
@@ -719,7 +795,7 @@ impl SourceConfig {
                 .or(legacy)
                 .with_context(|| format!("source {} requires taker_fee_rate", self.id))?,
         };
-        validate_fee_rates(rates)?;
+        validate_fee_rates(&rates)?;
         Ok(rates)
     }
 
@@ -786,14 +862,14 @@ impl SourceConfig {
     }
 }
 
-pub fn validate_fee_rates(rates: FeeRates) -> Result<()> {
+pub fn validate_fee_rates(rates: &FeeRates) -> Result<()> {
     if !rates.maker.is_finite() {
         bail!("maker_fee_rate must be finite");
     }
     if !rates.taker.is_finite() {
         bail!("taker_fee_rate must be finite");
     }
-    Ok(())
+    validate_quote_fee_rates(&rates.by_quote)
 }
 
 fn validate_source_id(value: &str) -> Result<()> {
@@ -980,6 +1056,7 @@ mod tests {
             estimated_fee_rate: Some(0.0004),
             maker_fee_rate: None,
             taker_fee_rate: None,
+            quote_fee_rates: Default::default(),
             gateway_prefix: Some(format!("/{id}")),
             exec_config_url: None,
             exec_viz_url: None,
@@ -1148,6 +1225,32 @@ mod tests {
     }
 
     #[test]
+    fn quote_fee_validation_and_selection_preserve_zero_and_negative_rates() {
+        let mut rates = FeeRates {
+            maker: 0.0001,
+            taker: 0.0003,
+            by_quote: BTreeMap::from([(
+                "USDC".into(),
+                QuoteFeeRates {
+                    maker_fee_rate: -0.00001,
+                    taker_fee_rate: 0.0,
+                    theoretical_twap_fee_rate: -0.000005,
+                },
+            )]),
+        };
+        validate_fee_rates(&rates).unwrap();
+        assert_eq!(rates.for_symbol("BTCUSDC"), (-0.00001, 0.0));
+        assert_eq!(rates.for_symbol("BTCUSDT"), (0.0001, 0.0003));
+        assert_eq!(rates.for_symbol("BTCUSD"), (0.0001, 0.0003));
+        assert_eq!(rates.for_symbol("BTC"), (0.0001, 0.0003));
+        rates.by_quote.get_mut("USDC").unwrap().taker_fee_rate = f64::NAN;
+        assert!(validate_fee_rates(&rates).is_err());
+        rates.by_quote.get_mut("USDC").unwrap().taker_fee_rate = 0.0;
+        rates.by_quote.insert("usdc".into(), rates.by_quote["USDC"]);
+        assert!(validate_fee_rates(&rates).is_err());
+    }
+
+    #[test]
     fn fee_rates_overlay_replaces_matching_sources_only() {
         let config = config_with_sources(vec![
             source("binance_exec_trade01", "/srv/trade01/persist_manager"),
@@ -1156,6 +1259,7 @@ mod tests {
         .with_fee_rates(&std::collections::BTreeMap::from([(
             "binance_exec_trade02".to_string(),
             FeeRates {
+                by_quote: Default::default(),
                 maker: -0.0001,
                 taker: 0.0008,
             },

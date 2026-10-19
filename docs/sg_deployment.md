@@ -76,8 +76,7 @@ publisher tests, 18 frontend tests and the production frontend build. All four
 installed Manager binary hashes and the running executable match the release
 manifest. Ten protected process identities, trading configuration hashes,
 binding/follow settings and risk/order parameters were unchanged. The temporary
-verification session was removed. Evidence is in Manager's
-`artifacts/sg_clear_support/20261016T102336Z/live-validation.json`.
+verification session was removed.
 
 The authenticated `/exec_trade02/`, `/exec_trade02/config/` and snapshot routes
 return 200; its WebSocket upgrade returns 101. Anonymous requests return 401.

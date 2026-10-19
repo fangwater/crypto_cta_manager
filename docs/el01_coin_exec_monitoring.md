@@ -742,3 +742,50 @@ root filesystem (53% used); inode use was 3%, and `/dev/shm` had 6.8 GiB free.
 Recovery configuration and sanitized verification evidence are retained under
 `/home/el01/crypto_cta_manager/backups/hxl_2025_trade14_20261015`.
 Temporary verification sessions were deleted. No exchange state was changed.
+
+### trade14 trading activation, 2026-10-15
+
+At the operator's subsequent request, enabled Binance USD-M Multi-Assets Mode
+for `binance_exec_trade14` / `hxl_2025`; a signed query bound to its unchanged
+trading IP `154.197.32.6` confirmed `multiAssetsMargin=true`, one-way positions
+and `canTrade=true`. Existing strategy publication then succeeded.
+
+Trading was activated at approximately 06:36 UTC / 14:36 Shanghai using the
+environment-local persistence, trade-engine and pre-trade wrappers. The three
+initial active bindings were each published with their existing 33 shares:
+`USDC_C40V5D3Pos_filter`, `USDC_C40V6D3Pos_filter`, and
+`USDC_C4V6D3Pos_filter`, all using `attemp4_h45_o2`. Later concurrent catalog
+updates were preserved. Venue-active rules and account mode were checked before
+startup; the standard account-scoped USD-M startup cancellation ran. The missing
+risk hash was initialized with the deployed `sync_exec_risk_params.py` defaults
+(10 pending orders, 10 per side, 400/minute and 200/10 seconds).
+
+The previously locally built and published `arbmm` release `b8611bd1` was reused
+from trade13, with every installed binary checked against its release manifest.
+No source rebuild or replacement of the existing account-monitor, Viz or Config
+was needed. `trade_signal` remains stopped. The active local Exec source branch
+was verified as `arbmm`, synchronized with `origin/arbmm` at `133bf23f` before
+the operation.
+
+Before execution, the source had no order records or position anchor. Its four
+factual carried USDT positions were frozen in an immutable PostgreSQL account
+snapshot at `1792046151333311` us (06:35:51.333311 UTC), using contemporaneous
+exchange mark prices. This defines zero PnL at activation; it does not assign
+historical inventory to named strategies. Runtime live equity is shown
+separately from the reconstructed NAV change.
+
+The 06:39 UTC check reported `position_ready=true`, 1,898 order events and 734
+fill records, with fee-adjusted NAV change approximately `26.51` quote units.
+Live equity was approximately `498126.87 USDT`, status `ok`; Manager health was
+`ok`. All 87 captured existing protected processes and all captured account,
+Manager and gateway configuration hashes remained unchanged. The target's
+`TRADING-RELEASE.json` records the new processes. Sanitized startup, snapshot,
+publication and verification evidence is retained under
+`/home/el01/crypto_cta_manager/backups/hxl_2025_trade14_start_20261015`.
+
+Live Chromium checks of the deployed Manager passed at 1440×1000 and 390×1100.
+The `hxl_2025` workspace equity matched the dashboard API to display precision,
+with status `ok`; the NAV page selected only trade14, returned factual fills,
+and rendered its charts. No JavaScript errors, failed HTTP responses or mobile
+horizontal overflow were observed. Temporary sessions and the isolated browser
+profile were removed.

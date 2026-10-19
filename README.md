@@ -74,6 +74,11 @@ The password is stored as a salted PBKDF2-HMAC-SHA256 record in Manager's
 PostgreSQL; session tokens are stored only as SHA-256 hashes. Do not copy the
 database credential file or session values into this repository.
 
+Account fee settings support separate USDT/USDC/USD overrides through
+`quote_fee_rates`. Facts use the fill symbol's quote; new theoretical targets
+freeze those overrides in the archive. Existing frozen fees stay unchanged.
+See [quote fee settings and explicit database maintenance](docs/quote_fee_rates.md).
+
 Set `maker_fee_rate` and `taker_fee_rate` on every source used for NAV
 reconstruction. Both accept any finite decimal rate; negative values represent
 rebates. Each fill uses `price * amount_update * role_fee_rate`. Liquidity role
@@ -239,6 +244,11 @@ channel retries failed
 webhook requests with exponential backoff. Notifications are sent on state
 transitions, repeated at `repeat_alert_secs`, and followed by a recovery notice;
 the monitor does not send every poll.
+
+Long alert messages are truncated at a UTF-8 character boundary before sending,
+so a burst of Chinese order/position alerts cannot panic the monitor. This fix
+was published independently to el01 on 2026-10-18; monitor recovery did not
+restart Manager web, Nginx, or any Exec components.
 
 `GET /api/catalog/position-updates` returns a raw JSON page from
 `position_updates` (default `limit=100`, maximum `1000`). Each array member is

@@ -1,6 +1,6 @@
 //! On-demand theoretical execution from immutable targets and minute candles.
 //! No PostgreSQL materialization cursor or realtime BBO dependency.
-use crate::config::AppConfig;
+use crate::config::{AppConfig, TheoreticalFeeRates};
 use crate::kline::{KlineStore, MINUTE_US, first_complete_open, now_us};
 use crate::position_archive::{PositionArchive, PositionUpdateMsg};
 use anyhow::{Context, Result, bail, ensure};
@@ -104,7 +104,7 @@ struct CurveQueryKey {
     end: i64,
     max_points: usize,
     sources: Vec<String>,
-    fees: Vec<(String, u64)>,
+    fees: Vec<(String, u64, Vec<(String, u64)>)>,
     target_revision: u64,
     candle_revision: u64,
 }
@@ -242,7 +242,7 @@ impl TheoreticalTargetCache {
     }
     async fn query(
         self: &Arc<Self>,
-        fee_rates: BTreeMap<String, f64>,
+        fee_rates: BTreeMap<String, TheoreticalFeeRates>,
         end: i64,
         source_ids: &[String],
         strategy: Option<&str>,
@@ -257,7 +257,7 @@ impl TheoreticalTargetCache {
     /// every old delta to establish the requested window's initial inventory.
     async fn query_inputs(
         self: &Arc<Self>,
-        fee_rates: BTreeMap<String, f64>,
+        fee_rates: BTreeMap<String, TheoreticalFeeRates>,
         end: i64,
         source_ids: &[String],
         strategy: Option<&str>,
@@ -333,10 +333,12 @@ impl TheoreticalTargetCache {
                 }
                 let mut delta = delta.clone();
                 if delta.legacy_fee {
-                    delta.fee_rate =
-                        fee_rates.get(&delta.source_id).copied().with_context(|| {
+                    delta.fee_rate = fee_rates
+                        .get(&delta.source_id)
+                        .with_context(|| {
                             format!("missing theoretical fee for {}", delta.source_id)
-                        })?;
+                        })?
+                        .for_symbol(&delta.symbol);
                 }
                 ensure!(delta.fee_rate.is_finite(), "invalid theoretical fee");
                 deltas.push(delta);
@@ -371,9 +373,10 @@ fn ingest_target(
             update_seq: message.seq,
         };
         if target_positions_changed(state.latest.get(&key), &next) {
-            let fee_rate = account.theoretical_fee_rate.unwrap_or(0.0);
-            ensure!(fee_rate.is_finite(), "invalid archived theoretical fee");
             for (symbol, quantity) in target_deltas(state.latest.get(&key), &next) {
+                let archived_fee = account.fee_for_symbol(&symbol);
+                let fee_rate = archived_fee.unwrap_or(0.0);
+                ensure!(fee_rate.is_finite(), "invalid archived theoretical fee");
                 let target_signal = message
                     .strategy
                     .targets
@@ -394,7 +397,7 @@ fn ingest_target(
                     seq: next.update_seq,
                     delta_qty: quantity,
                     fee_rate,
-                    legacy_fee: account.theoretical_fee_rate.is_none(),
+                    legacy_fee: archived_fee.is_none(),
                     target_signal,
                 });
                 let index = state.markets.entry(market).or_default();
@@ -467,7 +470,7 @@ fn add_range(ranges: &mut BTreeMap<String, (i64, i64)>, symbol: &str, start: i64
         .or_insert((start, end));
 }
 pub async fn prepare_acquisition(
-    fees: BTreeMap<String, f64>,
+    fees: BTreeMap<String, TheoreticalFeeRates>,
     targets: &Arc<TheoreticalTargetCache>,
     store: &KlineStore,
     start: i64,
@@ -501,7 +504,7 @@ pub async fn prepare_acquisition(
 }
 
 pub async fn load_timeline(
-    fees: BTreeMap<String, f64>,
+    fees: BTreeMap<String, TheoreticalFeeRates>,
     targets: &Arc<TheoreticalTargetCache>,
     store: &KlineStore,
     start: i64,
@@ -529,7 +532,16 @@ pub async fn load_timeline(
     }
     let curve_fees: Vec<_> = fees
         .iter()
-        .map(|(source, rate)| (source.clone(), rate.to_bits()))
+        .map(|(source, rate)| {
+            (
+                source.clone(),
+                rate.default.to_bits(),
+                rate.by_quote
+                    .iter()
+                    .map(|(quote, fee)| (quote.clone(), fee.to_bits()))
+                    .collect(),
+            )
+        })
         .collect();
     let effective_end = end.min(now_us().div_euclid(MINUTE_US) * MINUTE_US - 4 * MINUTE_US);
     if effective_end < start {
@@ -1157,6 +1169,89 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn quote_fees_freeze_per_symbol_and_preserve_old_archived_rates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive = Arc::new(
+            PositionArchive::open(crate::manager_db::ManagerDb::open(dir.path()).unwrap()).unwrap(),
+        );
+        let config: AppConfig =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        let source = config.sources[0].id.clone();
+        let cache = TheoreticalTargetCache::new(Arc::new(config), archive.clone());
+        let mut strategy = crate::strategy_catalog::PositionStrategy {
+            strategy_name: "mixed".into(),
+            targets: ["BTCUSDT", "BTCUSDC"]
+                .into_iter()
+                .map(|symbol| {
+                    (
+                        symbol.into(),
+                        crate::order_config::TargetPosition {
+                            clear: false,
+                            qty: 1.0,
+                            signal: 0,
+                        },
+                    )
+                })
+                .collect(),
+            symbol_order_strategy_overrides: BTreeMap::new(),
+            updated_at_us: 1,
+        };
+        let mut account = crate::position_archive::published_account(&source, "mixed", 1.0);
+        account.theoretical_fee_rate = Some(0.0004);
+        archive
+            .append(100, &strategy, Vec::new(), vec![account.clone()])
+            .unwrap();
+        account.set_theoretical_fees(Some(TheoreticalFeeRates {
+            default: 0.0004,
+            by_quote: BTreeMap::from([("USDC".into(), 0.0000825)]),
+        }));
+        for target in strategy.targets.values_mut() {
+            target.qty = 2.0;
+        }
+        archive
+            .append(200, &strategy, Vec::new(), vec![account])
+            .unwrap();
+        // A legacy message with no frozen fees follows the current per-quote fallback.
+        for target in strategy.targets.values_mut() {
+            target.qty = 3.0;
+        }
+        archive
+            .append(
+                300,
+                &strategy,
+                Vec::new(),
+                vec![crate::position_archive::published_account(
+                    &source, "mixed", 1.0,
+                )],
+            )
+            .unwrap();
+        let fees = BTreeMap::from([(
+            source.clone(),
+            TheoreticalFeeRates {
+                default: 0.0007,
+                by_quote: BTreeMap::from([("USDC".into(), -0.0001)]),
+            },
+        )]);
+        let deltas = cache
+            .query(fees, 300, &[source], None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(deltas.len(), 6);
+        for delta in deltas {
+            let expected = match (delta.received_at_us, delta.symbol.as_str()) {
+                (100, _) | (200, "BTCUSDT") => 0.0004,
+                (200, "BTCUSDC") => 0.0000825,
+                (300, "BTCUSDC") => -0.0001,
+                (300, "BTCUSDT") => 0.0007,
+                _ => panic!("unexpected delta"),
+            };
+            assert_eq!(delta.fee_rate, expected);
+            assert_eq!(delta.legacy_fee, delta.received_at_us == 300);
+        }
+    }
+
+    #[tokio::test]
     async fn target_cache_coalesces_reads_keeps_fee_and_source_identity_and_resumes_same_timestamp()
     {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1197,7 +1292,7 @@ mod tests {
         archive
             .append(101, &strategy, Vec::new(), vec![a, b])
             .unwrap();
-        let fees = BTreeMap::from([(first_source.clone(), 0.0004)]);
+        let fees = BTreeMap::from([(first_source.clone(), 0.0004.into())]);
         let scope_a = vec![first_source.clone()];
         let scope_b = vec![second_source.clone()];
         let (a, b) = tokio::join!(
@@ -1227,7 +1322,7 @@ mod tests {
         archive
             .append(101, &strategy, Vec::new(), vec![stopped])
             .unwrap();
-        let changed_fees = BTreeMap::from([(first_source.clone(), 0.0008)]);
+        let changed_fees = BTreeMap::from([(first_source.clone(), 0.0008.into())]);
         let resumed = cache
             .query(changed_fees.clone(), 101, &scope_a, None)
             .await
@@ -1284,7 +1379,7 @@ mod tests {
         assert_eq!(late.seq, 2);
         let repaired = cache
             .query(
-                BTreeMap::from([(first_source, 0.0008)]),
+                BTreeMap::from([(first_source, 0.0008.into())]),
                 101,
                 &scope_a,
                 None,
@@ -1326,7 +1421,7 @@ mod tests {
             updated_at_us: 1,
         };
         let end = now_us();
-        let fees = BTreeMap::from([(source.clone(), 0.0004)]);
+        let fees = BTreeMap::from([(source.clone(), 0.0004.into())]);
         let accounts = vec![crate::position_archive::published_account(
             &source, "alpha", 2.0,
         )];
@@ -1447,7 +1542,7 @@ mod tests {
             .append(start, &strategy, Vec::new(), accounts.clone())
             .unwrap();
         let sources = [source.clone()];
-        let rates = BTreeMap::from([(source.clone(), 0.0002)]);
+        let rates = BTreeMap::from([(source.clone(), 0.0002.into())]);
         let first = load_timeline(
             rates.clone(),
             &targets,
@@ -1476,7 +1571,7 @@ mod tests {
         assert_eq!(store.status().cache_hits, reads.cache_hits);
         assert_eq!(store.status().pricing_cache_hits, reads.pricing_cache_hits);
         let higher_fee = load_timeline(
-            BTreeMap::from([(source, 0.0004)]),
+            BTreeMap::from([(source, 0.0004.into())]),
             &targets,
             &store,
             start,
@@ -2038,7 +2133,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let rates = BTreeMap::from([(source.clone(), 0.0004)]);
+        let rates = BTreeMap::from([(source.clone(), 0.0004.into())]);
         for late in [false, true] {
             if late {
                 strategy.targets.insert(

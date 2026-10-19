@@ -1567,6 +1567,7 @@ mod tests {
             estimated_fee_rate: Some(0.0),
             maker_fee_rate: Some(0.0),
             taker_fee_rate: Some(0.0),
+            quote_fee_rates: Default::default(),
             gateway_prefix: None,
             exec_config_url: None,
             exec_viz_url: None,

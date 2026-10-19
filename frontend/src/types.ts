@@ -70,6 +70,7 @@ export interface SourceNavReport extends NavTotals {
   estimated_fee_rate: number
   maker_fee_rate: number
   taker_fee_rate: number
+  quote_fee_rates: Record<string, QuoteFeeRates>
   initial_position_snapshot_ts_us: number | null
   initial_position_count: number
   order_event_count: number
@@ -221,6 +222,7 @@ export interface AccountStudio {
   estimated_fee_rate: number
   maker_fee_rate: number
   taker_fee_rate: number
+  quote_fee_rates: Record<string, QuoteFeeRates>
   theoretical_twap_fee_rate: number
   bindings: AccountBinding[]
   configuration: AccountConfiguration
@@ -638,4 +640,10 @@ export interface FundingEstimate {
   boundary_fill_count: number
   points: FundingNavPoint[]
   strategies: StrategyFundingEstimate[]
+}
+
+export interface QuoteFeeRates {
+  maker_fee_rate: number
+  taker_fee_rate: number
+  theoretical_twap_fee_rate: number
 }

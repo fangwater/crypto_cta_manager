@@ -4,12 +4,16 @@ use anyhow::{Context, Result};
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
-use crate::config::{FeeRates, SourceConfig, validate_fee_rates};
+use crate::config::{
+    FeeRates, QuoteFeeRates, SourceConfig, TheoreticalFeeRates, validate_fee_rates,
+    validate_quote_fee_rates,
+};
 #[cfg(test)]
 use crate::model::UniformOrderEvent;
 use crate::snapshot::{
     PositionSnapshot, SnapshotPosition, StrategyPositionSnapshot, StrategySnapshotPosition,
 };
+use std::collections::BTreeMap;
 
 pub async fn connect(database_url: &str, max_connections: u32) -> Result<PgPool> {
     PgPoolOptions::new()
@@ -41,6 +45,7 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
         // Seed estimated_fee_rate only on first insert. Later operator edits in
         // PostgreSQL must not be overwritten by toml on every cta_web restart.
         let seed_fee_rates = source.nav_fee_rates().unwrap_or(FeeRates {
+            by_quote: Default::default(),
             maker: 0.0004,
             taker: 0.0004,
         });
@@ -49,9 +54,9 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
             INSERT INTO cta_order_sources (
                 source_id, account_label, venue_label, rocksdb_path, enabled,
                 estimated_fee_rate, maker_fee_rate, taker_fee_rate,
-                theoretical_twap_fee_rate
+                theoretical_twap_fee_rate, quote_fee_rates
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (source_id) DO UPDATE SET
                 account_label = EXCLUDED.account_label,
                 venue_label = EXCLUDED.venue_label,
@@ -69,6 +74,7 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
         .bind(seed_fee_rates.maker)
         .bind(seed_fee_rates.taker)
         .bind(seed_fee_rates.maker * 0.5 + seed_fee_rates.taker * 0.5)
+        .bind(sqlx::types::Json(&seed_fee_rates.by_quote))
         .execute(pool)
         .await
         .with_context(|| format!("failed to register source {}", source.id))?;
@@ -76,135 +82,89 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
     Ok(())
 }
 
-/// Load per-source estimated fee rates from PostgreSQL.
-/// Missing rows are omitted; callers should fall back to toml defaults.
-/// Load actual and legacy-theory fee fallbacks in one PostgreSQL statement so
-/// every immutable analysis generation uses a coherent catalog view.
+/// Read all fee settings from one catalog snapshot for a coherent analysis generation.
 pub async fn load_analysis_fee_rates(
     pool: &PgPool,
 ) -> Result<(
-    std::collections::BTreeMap<String, FeeRates>,
-    std::collections::BTreeMap<String, f64>,
+    BTreeMap<String, FeeRates>,
+    BTreeMap<String, TheoreticalFeeRates>,
 )> {
-    let rows = sqlx::query("SELECT source_id, maker_fee_rate, taker_fee_rate, theoretical_twap_fee_rate FROM cta_order_sources")
+    let rows = sqlx::query("SELECT source_id, maker_fee_rate, taker_fee_rate, theoretical_twap_fee_rate, quote_fee_rates FROM cta_order_sources")
         .fetch_all(pool).await.context("failed to load analysis fee rates")?;
-    let mut actual = std::collections::BTreeMap::new();
-    let mut theoretical = std::collections::BTreeMap::new();
+    let mut actual = BTreeMap::new();
+    let mut theoretical = BTreeMap::new();
     for row in rows {
         let source: String = row.try_get("source_id")?;
-        let rates = FeeRates {
-            maker: row.try_get("maker_fee_rate")?,
-            taker: row.try_get("taker_fee_rate")?,
-        };
-        let theory = row.try_get("theoretical_twap_fee_rate")?;
-        validate_fee_rates(rates)?;
-        validate_theoretical_twap_fee_rate(theory)?;
+        let (rates, theory) = decode_fee_rates(&row)?;
         actual.insert(source.clone(), rates);
         theoretical.insert(source, theory);
     }
     Ok((actual, theoretical))
 }
 
-pub async fn load_fee_rates(pool: &PgPool) -> Result<std::collections::BTreeMap<String, FeeRates>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT source_id, maker_fee_rate, taker_fee_rate
-        FROM cta_order_sources
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load estimated fee rates")?;
-    let mut out = std::collections::BTreeMap::new();
-    for row in rows {
-        let source_id: String = row
-            .try_get("source_id")
-            .context("failed to decode source_id for estimated fee rate")?;
-        let rates = FeeRates {
-            maker: row
-                .try_get("maker_fee_rate")
-                .with_context(|| format!("failed to decode maker_fee_rate for {source_id}"))?,
-            taker: row
-                .try_get("taker_fee_rate")
-                .with_context(|| format!("failed to decode taker_fee_rate for {source_id}"))?,
-        };
-        validate_fee_rates(rates)?;
-        out.insert(source_id, rates);
-    }
-    Ok(out)
+fn decode_fee_rates(row: &sqlx::postgres::PgRow) -> Result<(FeeRates, TheoreticalFeeRates)> {
+    let sqlx::types::Json(by_quote) =
+        row.try_get::<sqlx::types::Json<BTreeMap<String, QuoteFeeRates>>, _>("quote_fee_rates")?;
+    let rates = FeeRates {
+        maker: row.try_get("maker_fee_rate")?,
+        taker: row.try_get("taker_fee_rate")?,
+        by_quote,
+    };
+    validate_fee_rates(&rates)?;
+    let default = row.try_get("theoretical_twap_fee_rate")?;
+    validate_theoretical_twap_fee_rate(default)?;
+    let theory = TheoreticalFeeRates {
+        default,
+        by_quote: rates
+            .by_quote
+            .iter()
+            .map(|(quote, fee)| (quote.clone(), fee.theoretical_twap_fee_rate))
+            .collect(),
+    };
+    Ok((rates, theory))
 }
 
-pub async fn load_fee_rate(pool: &PgPool, source_id: &str) -> Result<Option<FeeRates>> {
-    let row = sqlx::query(
-        r#"
-        SELECT maker_fee_rate, taker_fee_rate
-        FROM cta_order_sources
-        WHERE source_id = $1
-        "#,
-    )
-    .bind(source_id)
-    .fetch_optional(pool)
-    .await
-    .with_context(|| format!("failed to load fee rates for {source_id}"))?;
-    row.map(|row| {
-        let rates = FeeRates {
-            maker: row.try_get("maker_fee_rate")?,
-            taker: row.try_get("taker_fee_rate")?,
-        };
-        validate_fee_rates(rates)?;
-        Ok(rates)
-    })
-    .transpose()
+pub async fn load_fee_rates(pool: &PgPool) -> Result<BTreeMap<String, FeeRates>> {
+    Ok(load_analysis_fee_rates(pool).await?.0)
+}
+
+pub async fn load_account_fee_rates(
+    pool: &PgPool,
+    source_id: &str,
+) -> Result<Option<(FeeRates, TheoreticalFeeRates)>> {
+    let row = sqlx::query("SELECT maker_fee_rate, taker_fee_rate, theoretical_twap_fee_rate, quote_fee_rates FROM cta_order_sources WHERE source_id = $1")
+        .bind(source_id).fetch_optional(pool).await
+        .with_context(|| format!("failed to load account fee rates for {source_id}"))?;
+    row.as_ref().map(decode_fee_rates).transpose()
 }
 
 pub async fn load_theoretical_twap_fee_rates(
     pool: &PgPool,
-) -> Result<std::collections::BTreeMap<String, f64>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT source_id, theoretical_twap_fee_rate
-        FROM cta_order_sources
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load theoretical TWAP fee rates")?;
-    let mut out = std::collections::BTreeMap::new();
-    for row in rows {
-        let source_id: String = row.try_get("source_id")?;
-        let fee_rate: f64 = row.try_get("theoretical_twap_fee_rate")?;
-        validate_theoretical_twap_fee_rate(fee_rate)?;
-        out.insert(source_id, fee_rate);
-    }
-    Ok(out)
+) -> Result<BTreeMap<String, TheoreticalFeeRates>> {
+    Ok(load_analysis_fee_rates(pool).await?.1)
 }
 
-pub async fn load_theoretical_twap_fee_rate(pool: &PgPool, source_id: &str) -> Result<Option<f64>> {
-    let fee_rate = sqlx::query_scalar(
-        r#"
-        SELECT theoretical_twap_fee_rate
-        FROM cta_order_sources
-        WHERE source_id = $1
-        "#,
-    )
-    .bind(source_id)
-    .fetch_optional(pool)
-    .await
-    .with_context(|| format!("failed to load theoretical TWAP fee rate for {source_id}"))?;
-    if let Some(fee_rate) = fee_rate {
-        validate_theoretical_twap_fee_rate(fee_rate)?;
-    }
-    Ok(fee_rate)
+pub async fn load_theoretical_twap_fee_rate(
+    pool: &PgPool,
+    source_id: &str,
+) -> Result<Option<TheoreticalFeeRates>> {
+    Ok(load_account_fee_rates(pool, source_id)
+        .await?
+        .map(|(_, theory)| theory))
 }
 
 pub async fn save_fee_rates(
     pool: &PgPool,
     source_id: &str,
-    rates: FeeRates,
+    rates: &FeeRates,
     theoretical_twap_fee_rate: f64,
+    quote_fee_rates: Option<&BTreeMap<String, QuoteFeeRates>>,
 ) -> Result<()> {
     validate_fee_rates(rates)?;
     validate_theoretical_twap_fee_rate(theoretical_twap_fee_rate)?;
+    if let Some(overrides) = quote_fee_rates {
+        validate_quote_fee_rates(overrides)?;
+    }
     let result = sqlx::query(
         r#"
         UPDATE cta_order_sources
@@ -212,6 +172,7 @@ pub async fn save_fee_rates(
             taker_fee_rate = $3,
             estimated_fee_rate = $3,
             theoretical_twap_fee_rate = $4,
+            quote_fee_rates = COALESCE($5, quote_fee_rates),
             updated_at = now()
         WHERE source_id = $1
         "#,
@@ -220,6 +181,7 @@ pub async fn save_fee_rates(
     .bind(rates.maker)
     .bind(rates.taker)
     .bind(theoretical_twap_fee_rate)
+    .bind(quote_fee_rates.map(sqlx::types::Json))
     .execute(pool)
     .await
     .with_context(|| format!("failed to save account fee rates for {source_id}"))?;
@@ -237,11 +199,13 @@ pub async fn save_estimated_fee_rate(
     save_fee_rates(
         pool,
         source_id,
-        FeeRates {
+        &FeeRates {
+            by_quote: Default::default(),
             maker: estimated_fee_rate,
             taker: estimated_fee_rate,
         },
         estimated_fee_rate,
+        None,
     )
     .await
 }

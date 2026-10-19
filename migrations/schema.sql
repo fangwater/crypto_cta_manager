@@ -77,6 +77,7 @@ CREATE TABLE cta_order_sources (
     maker_fee_rate double precision DEFAULT 0.0004 NOT NULL,
     taker_fee_rate double precision DEFAULT 0.0004 NOT NULL,
     theoretical_twap_fee_rate double precision DEFAULT 0.0004 NOT NULL,
+    quote_fee_rates jsonb DEFAULT '{}'::jsonb NOT NULL CHECK (jsonb_typeof(quote_fee_rates) = 'object'),
     funding_enabled boolean DEFAULT false NOT NULL,
     funding_refresh_secs integer DEFAULT 300 NOT NULL CHECK (funding_refresh_secs BETWEEN 60 AND 86400),
     funding_verified_at_us bigint,

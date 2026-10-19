@@ -110,3 +110,9 @@ export function strategyLabel(strategy: string) {
   if (strategy.toLowerCase() === 'system_position_close') return '系统平仓'
   return strategy
 }
+
+export function accountFeeSummary(source: { maker_fee_rate: number; taker_fee_rate: number; quote_fee_rates: Record<string, { maker_fee_rate: number; taker_fee_rate: number }> }) {
+  const overrides = Object.entries(source.quote_fee_rates)
+  const base = `${feeBps(source.maker_fee_rate)} / ${feeBps(source.taker_fee_rate)}`
+  return overrides.length ? [`默认 ${base}`, ...overrides.map(([quote, rates]) => `${quote} ${feeBps(rates.maker_fee_rate)} / ${feeBps(rates.taker_fee_rate)}`)].join(' · ') : base
+}

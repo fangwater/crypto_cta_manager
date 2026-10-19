@@ -174,7 +174,7 @@ async fn manager_operations_ignore_old_migration_history() -> Result<()> {
     .await?;
     assert_business_data(&database.pool, &snapshot).await?;
     assert!(
-        postgres::load_fee_rate(&database.pool, "test-source")
+        postgres::load_account_fee_rates(&database.pool, "test-source")
             .await?
             .is_some()
     );
@@ -569,5 +569,63 @@ async fn virtual_owner_and_manager_grants_survive_edits_and_revoke_immediately()
             .await?,
         0
     );
+    db.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn quote_fee_settings_roundtrip_preserve_defaults_and_explicit_clear() -> Result<()> {
+    use crypto_cta_manager::config::{FeeRates, QuoteFeeRates};
+    use std::collections::BTreeMap;
+    let db = TestDatabase::create().await?;
+    postgres::initialize(&db.pool).await?;
+    let snapshot = seed_business_data(&db.pool).await?;
+    // Exercise explicit maintenance against the previous schema too.
+    sqlx::raw_sql("ALTER TABLE cta_order_sources DROP COLUMN quote_fee_rates")
+        .execute(&db.pool)
+        .await?;
+    sqlx::raw_sql(include_str!("../scripts/apply_quote_fee_schema.sql"))
+        .execute(&db.pool)
+        .await?;
+    let defaults = FeeRates {
+        maker: 0.0001,
+        taker: 0.0003,
+        by_quote: BTreeMap::new(),
+    };
+    let quotes = BTreeMap::from([(
+        "USDC".into(),
+        QuoteFeeRates {
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.000165,
+            theoretical_twap_fee_rate: 0.0000825,
+        },
+    )]);
+    postgres::save_fee_rates(&db.pool, "test-source", &defaults, 0.0004, Some(&quotes)).await?;
+    let (actual, theory) = postgres::load_analysis_fee_rates(&db.pool).await?;
+    assert_eq!(
+        actual["test-source"].for_symbol("BTCUSDT"),
+        (0.0001, 0.0003)
+    );
+    assert_eq!(actual["test-source"].for_symbol("BTCUSDC"), (0.0, 0.000165));
+    assert_eq!(theory["test-source"].for_symbol("BTCUSDC"), 0.0000825);
+    // Old API clients omit overrides. They must not silently erase them.
+    postgres::save_estimated_fee_rate(&db.pool, "test-source", -0.0001).await?;
+    let studio =
+        crypto_cta_manager::strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
+    assert_eq!(studio.quote_fee_rates, quotes);
+    assert_eq!(studio.maker_fee_rate, -0.0001);
+    postgres::save_fee_rates(
+        &db.pool,
+        "test-source",
+        &defaults,
+        0.0004,
+        Some(&BTreeMap::new()),
+    )
+    .await?;
+    let (rates, _) = postgres::load_account_fee_rates(&db.pool, "test-source")
+        .await?
+        .unwrap();
+    assert_eq!(rates.for_symbol("BTCUSDC"), (0.0001, 0.0003));
+    assert_business_data(&db.pool, &snapshot).await?;
     db.remove().await
 }

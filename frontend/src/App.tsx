@@ -1,3 +1,5 @@
+import { accountFeeSummary } from './format'
+import { serverClock } from './lib/serverClock'
 import {
   Activity,
   CalendarRange,
@@ -38,7 +40,6 @@ import { ExecutionSlippagePanel } from './components/ExecutionSlippagePanel'
 import { FundingPanel } from './components/FundingPanel'
 import { FundingEstimatePanel } from './components/FundingEstimatePanel'
 import {
-  feeBps,
   fundingMoney,
   formatUniMmr,
   integer,
@@ -276,7 +277,7 @@ function NavPage() {
     initialized.current = true
     const nextMode = defaultPnlMode(dashboard, scope)
     setPnlMode(nextMode)
-    const nextEnd = Date.now()
+    const nextEnd = serverClock.now()
     const nextStart = Math.max(
       scopeStartMs(dashboard, scope, nextEnd, nextMode),
       nextEnd - DAY_MS,
@@ -471,7 +472,7 @@ function NavPage() {
     )
   }, [dashboard, scope, timeline])
   const effectiveStartMs = dashboard
-    ? scopeStartMs(dashboard, scope, endMs ?? Date.now(), pnlMode)
+    ? scopeStartMs(dashboard, scope, endMs ?? serverClock.now(), pnlMode)
     : 0
 
   function applyRange() {
@@ -502,7 +503,7 @@ function NavPage() {
   ) {
     if (!dashboard) return
     const parsedEnd = fromDatetimeLocal(endInput)
-    const nextEnd = endOverride ?? (Number.isFinite(parsedEnd) ? parsedEnd : Date.now())
+    const nextEnd = endOverride ?? (Number.isFinite(parsedEnd) ? parsedEnd : serverClock.now())
     const earliest = scopeStartMs(dashboard, nextScope, nextEnd, mode)
     const days = rangeOptions.find((option) => option.key === key)?.days ?? null
     const requestedStart =
@@ -593,7 +594,7 @@ function NavPage() {
 
   async function manualRefresh() {
     await refreshDashboard(undefined, true)
-    if (activeRange) applyQuickRange(activeRange, scope, Date.now())
+    if (activeRange) applyQuickRange(activeRange, scope, serverClock.now())
     else setTimelineRevision((current) => current + 1)
   }
 
@@ -1256,7 +1257,7 @@ function NavPage() {
                 <SourceDatum label="累计成交" value={integer(source.fill_count)} />
                 <SourceDatum
                   label="Maker / Taker 费率"
-                  value={`${feeBps(source.maker_fee_rate)} / ${feeBps(source.taker_fee_rate)}`}
+                  value={accountFeeSummary(source)}
                 />
                 <SourceDatum
                   label="累计费后净值"

@@ -1,3 +1,4 @@
+import { accountFeeSummary } from '../format'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import {
   Activity,
@@ -17,7 +18,7 @@ import { AppShell, PageIntro, StatTile } from '../components/AppShell'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
-import { executionMarketLabel, feeBps, formatUniMmr, integer, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
+import { executionMarketLabel, formatUniMmr, integer, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
 import { cn } from '../lib/cn'
 import { routes } from '../lib/routes'
 import type {
@@ -286,7 +287,7 @@ function AccountCard({
           <Metric label="当前持仓" value={report ? `${openPositions} symbols` : '--'} />
           <Metric
             label="Maker / Taker 费率"
-            value={report ? `${feeBps(report.maker_fee_rate)} / ${feeBps(report.taker_fee_rate)}` : '--'}
+            value={report ? accountFeeSummary(report) : '--'}
           />
           <Metric label="最近成交" value={timestampUs(report?.last_fill_ts_us ?? null)} />
         </div>

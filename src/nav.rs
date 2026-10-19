@@ -128,8 +128,8 @@ impl NavSourceHistory {
     ) -> Result<f64> {
         let rates = source.nav_fee_rates()?;
         let rate = match liquidity_role_for_event(event, &self.liquidity_by_order) {
-            LiquidityRole::Maker => rates.maker,
-            LiquidityRole::Taker | LiquidityRole::Unknown => rates.taker,
+            LiquidityRole::Maker => rates.for_symbol(&event.symbol).0,
+            LiquidityRole::Taker | LiquidityRole::Unknown => rates.for_symbol(&event.symbol).1,
             LiquidityRole::InternalCross => 0.0,
         };
         let fee = event.price * event.amount_update * rate;
@@ -236,6 +236,7 @@ pub struct SourceNavReport {
     pub estimated_fee_rate: f64,
     pub maker_fee_rate: f64,
     pub taker_fee_rate: f64,
+    pub quote_fee_rates: BTreeMap<String, crate::config::QuoteFeeRates>,
     pub initial_position_snapshot_ts_us: Option<i64>,
     pub initial_position_count: usize,
     pub order_event_count: u64,
@@ -769,6 +770,7 @@ impl CachedTimelineSource {
             estimated_fee_rate: state.fee_rates.taker,
             maker_fee_rate: state.fee_rates.maker,
             taker_fee_rate: state.fee_rates.taker,
+            quote_fee_rates: state.fee_rates.by_quote.clone(),
             initial_position_snapshot_ts_us: prepared.snapshot_ts_us,
             initial_position_count,
             order_event_count: prepared.order_event_count,
@@ -1067,7 +1069,7 @@ impl TimelineSourceState {
             .apply_fill(
                 &fill.event,
                 fill.side,
-                self.fee_rates,
+                &self.fee_rates,
                 fill.liquidity,
                 fill.fill_ts_us,
             )
@@ -1089,7 +1091,7 @@ impl TimelineSourceState {
                 .apply_fill(
                     &fill.event,
                     fill.side,
-                    self.fee_rates,
+                    &self.fee_rates,
                     fill.liquidity,
                     fill.fill_ts_us,
                 )
@@ -1268,7 +1270,7 @@ impl VenueState {
         &mut self,
         event: &NavEvent,
         side: Side,
-        fee_rates: FeeRates,
+        fee_rates: &FeeRates,
         liquidity: LiquidityRole,
         fill_ts_us: i64,
     ) -> Result<()> {
@@ -1286,8 +1288,8 @@ impl VenueState {
         }
         let notional = event.price * quantity;
         let fee_rate = match liquidity {
-            LiquidityRole::Maker => fee_rates.maker,
-            LiquidityRole::Taker | LiquidityRole::Unknown => fee_rates.taker,
+            LiquidityRole::Maker => fee_rates.for_symbol(&event.symbol).0,
+            LiquidityRole::Taker | LiquidityRole::Unknown => fee_rates.for_symbol(&event.symbol).1,
             LiquidityRole::InternalCross => 0.0,
         };
         let fee = notional * fee_rate;
@@ -2213,7 +2215,7 @@ fn estimate_source_events_with_snapshot_and_liquidity<E: Into<Arc<NavEvent>>>(
             .apply_fill(
                 &fill.event,
                 fill.side,
-                fee_rates,
+                &fee_rates,
                 fill.liquidity,
                 fill.fill_ts_us,
             )
@@ -2263,6 +2265,7 @@ fn estimate_source_events_with_snapshot_and_liquidity<E: Into<Arc<NavEvent>>>(
         estimated_fee_rate: fee_rates.taker,
         maker_fee_rate: fee_rates.maker,
         taker_fee_rate: fee_rates.taker,
+        quote_fee_rates: fee_rates.by_quote.clone(),
         initial_position_snapshot_ts_us: snapshot_ts_us,
         initial_position_count: snapshot.map_or(0, |value| value.positions.len()),
         order_event_count,
@@ -3686,6 +3689,7 @@ mod tests {
             estimated_fee_rate: fee_rate,
             maker_fee_rate: None,
             taker_fee_rate: None,
+            quote_fee_rates: Default::default(),
             gateway_prefix: None,
             exec_config_url: None,
             exec_viz_url: None,
@@ -4134,6 +4138,133 @@ mod tests {
         assert_close(report.totals.estimated_trading_fee_quote, 0.21);
         assert_close(report.totals.realized_pnl_after_fee_quote, 9.79);
         assert_close(report.totals.nav_change_after_fee_quote, 9.79);
+    }
+
+    #[test]
+    fn quote_fees_separate_mixed_fills_and_refresh_cached_account_and_strategy_nav() {
+        use crate::config::QuoteFeeRates;
+        use crate::model::FillLiquidity;
+        let mut config = app_config(vec![
+            source("trade01", Some(0.0001)),
+            source("trade02", Some(0.0001)),
+        ]);
+        for source in &mut config.sources {
+            source.taker_fee_rate = Some(0.0003);
+        }
+        let mut fills = Vec::new();
+        for (i, (symbol, role)) in [
+            ("BTCUSDT", FillLiquidity::Maker),
+            ("BTCUSDT", FillLiquidity::Taker),
+            ("BTCUSDC", FillLiquidity::Maker),
+            ("BTCUSDC", FillLiquidity::Taker),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ts = (i as i64 + 1) * CHECKPOINT_US;
+            let mut fill = strategy_event_at(ts, ts, symbol, 1, 1, 100.0, 1.0, "alpha");
+            fill.fill_liquidity = Some(role);
+            fills.push(fill);
+        }
+        let history = NavSourceHistory {
+            events: fills.iter().cloned().map(Arc::<NavEvent>::from).collect(),
+            ..Default::default()
+        };
+        let histories = Arc::new(BTreeMap::from([
+            ("trade01".into(), history.clone()),
+            ("trade02".into(), history.clone()),
+        ]));
+        let snapshots = Arc::new(BTreeMap::new());
+        let strategies = Arc::new(BTreeMap::new());
+        let before = NavTimelineCache::build(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+        )
+        .unwrap();
+        config.sources[0].quote_fee_rates.insert(
+            "USDC".into(),
+            QuoteFeeRates {
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.000165,
+                theoretical_twap_fee_rate: 0.0000825,
+            },
+        );
+        let after = NavTimelineCache::refresh(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+            Some(&before),
+        )
+        .unwrap();
+        let direct =
+            estimate_source_events(&config.sources[0], fills.clone(), &BTreeMap::new()).unwrap();
+        assert_close(direct.totals.estimated_trading_fee_quote, 0.0565);
+        assert_close(
+            direct
+                .symbols
+                .iter()
+                .find(|s| s.symbol == "BTCUSDT")
+                .unwrap()
+                .totals
+                .estimated_trading_fee_quote,
+            0.04,
+        );
+        assert_close(
+            direct
+                .symbols
+                .iter()
+                .find(|s| s.symbol == "BTCUSDC")
+                .unwrap()
+                .totals
+                .estimated_trading_fee_quote,
+            0.0165,
+        );
+        // Acquisition-cost factual fees use this same history helper.
+        assert_close(
+            history
+                .estimated_fee_quote(&config.sources[0], &history.events[2])
+                .unwrap(),
+            0.0,
+        );
+        assert_close(
+            history
+                .estimated_fee_quote(&config.sources[0], &history.events[3])
+                .unwrap(),
+            0.0165,
+        );
+        for allocation in [false, true] {
+            let key = ("trade01".into(), allocation);
+            assert!(!Arc::ptr_eq(&before.sources[&key], &after.sources[&key]));
+            assert!(Arc::ptr_eq(
+                &before.sources[&("trade02".into(), allocation)],
+                &after.sources[&("trade02".into(), allocation)]
+            ));
+            let request = timeline_request(
+                CHECKPOINT_US,
+                5 * CHECKPOINT_US,
+                vec!["trade01".into()],
+                Vec::new(),
+            );
+            let old = before.rebuild(request.clone(), allocation).unwrap();
+            let new = after.rebuild(request, allocation).unwrap();
+            assert_close(old.summary.estimated_trading_fee_quote, 0.08);
+            assert_close(new.summary.estimated_trading_fee_quote, 0.0565);
+            assert_close(
+                new.strategy_points
+                    .iter()
+                    .map(|s| s.summary.estimated_trading_fee_quote)
+                    .sum(),
+                0.0565,
+            );
+            assert_close(
+                old.summary.nav_change_before_fee_quote,
+                new.summary.nav_change_before_fee_quote,
+            );
+        }
+        assert_refreshed_cache_matches_full(&after, &config, &snapshots, &strategies, &histories);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, TheoreticalFeeRates};
 use crate::nav;
 
 pub const DEFAULT_PAGE_SIZE: usize = 25;
@@ -468,7 +468,7 @@ fn finish_breakdowns(
 }
 
 pub async fn report_acquisition_cost(
-    theoretical_fees: BTreeMap<String, f64>,
+    theoretical_fees: BTreeMap<String, TheoreticalFeeRates>,
     config: &AppConfig,
     targets: &std::sync::Arc<crate::theoretical_nav::TheoreticalTargetCache>,
     klines: &crate::kline::KlineStore,

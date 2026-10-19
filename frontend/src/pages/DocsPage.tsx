@@ -491,7 +491,11 @@ curl --noproxy '*' -sS -X PUT \\
             },
             {
               field: 'theoretical_twap_fee_rate',
-              detail: '分钟 VWAP 定价的理论 TWAP 成交费率；省略时取本次 Maker/Taker 平均值，可按账户修改',
+              detail: '理论 TWAP 默认费率；省略时取本次 Maker/Taker 平均值，已归档目标保持发布时的费率',
+            },
+            {
+              field: 'quote_fee_rates',
+              detail: '可按 USDT、USDC、USD 单独设置 maker_fee_rate、taker_fee_rate、theoretical_twap_fee_rate。省略保留已有设置，空对象清除；未单独设置的报价币使用默认费率',
             },
             {
               field: 'exec_order_rate_limit_per_min / exec_order_rate_limit_10s',

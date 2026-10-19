@@ -28,7 +28,7 @@ use tracing::{error, info, warn};
 use crate::account_ipc::{LiveAccountReading, LiveEquityHub};
 use crate::auth::{self, AuthUser};
 use crate::bfusd_auto::{AccountSettings as BfusdAccountSettings, AutoEarnHub};
-use crate::config::{AppConfig, FeeRates, SourceConfig};
+use crate::config::{AppConfig, FeeRates, SourceConfig, TheoreticalFeeRates};
 use crate::kline::KlineStore;
 use crate::manager_db::ManagerDb;
 use crate::order_config::{
@@ -186,7 +186,7 @@ struct CacheState {
     position_snapshots: Arc<nav::SourcePositionSnapshots>,
     strategy_position_snapshots: Arc<nav::SourceStrategyPositionSnapshots>,
     nav_timelines: Arc<nav::NavTimelineCache>,
-    theoretical_fees: Arc<BTreeMap<String, f64>>,
+    theoretical_fees: Arc<BTreeMap<String, TheoreticalFeeRates>>,
     fee_rates: Arc<BTreeMap<String, FeeRates>>,
     last_attempt_at_us: i64,
     last_refresh_error: Option<String>,
@@ -198,7 +198,7 @@ struct DashboardBuild {
     position_snapshots: Arc<nav::SourcePositionSnapshots>,
     strategy_position_snapshots: Arc<nav::SourceStrategyPositionSnapshots>,
     nav_timelines: Arc<nav::NavTimelineCache>,
-    theoretical_fees: Arc<BTreeMap<String, f64>>,
+    theoretical_fees: Arc<BTreeMap<String, TheoreticalFeeRates>>,
     fee_rates: Arc<BTreeMap<String, FeeRates>>,
 }
 
@@ -2970,6 +2970,7 @@ async fn save_account_fee_rates(
         return Ok(bad_request(error));
     }
     let rates = FeeRates {
+        by_quote: Default::default(),
         maker: request.maker_fee_rate,
         taker: request.taker_fee_rate,
     };
@@ -2981,7 +2982,19 @@ async fn save_account_fee_rates(
         Ok(value) => value,
         Err(error) => return Ok(bad_request(error)),
     };
-    match postgres::save_fee_rates(&state.pool, &source_id, rates, theoretical_twap_fee_rate).await
+    if let Some(overrides) = &request.quote_fee_rates {
+        if let Err(error) = crate::config::validate_quote_fee_rates(overrides) {
+            return Ok(bad_request(error.to_string()));
+        }
+    }
+    match postgres::save_fee_rates(
+        &state.pool,
+        &source_id,
+        &rates,
+        theoretical_twap_fee_rate,
+        request.quote_fee_rates.as_ref(),
+    )
+    .await
     {
         Ok(()) => {
             info!(
@@ -3762,13 +3775,13 @@ async fn stop_binding(
     let position = loaded.0;
     let mut archived_account =
         crate::position_archive::published_account(source_id, binding_name, 0.0);
-    archived_account.theoretical_fee_rate =
-        postgres::load_theoretical_twap_fee_rate(&state.pool, source_id)
-            .await
-            .map_err(|error| PublishFailure {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: format!("load stop archive fee: {error}"),
-            })?;
+    let archived_fees = postgres::load_theoretical_twap_fee_rate(&state.pool, source_id)
+        .await
+        .map_err(|error| PublishFailure {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("load stop archive fee: {error}"),
+        })?;
+    archived_account.set_theoretical_fees(archived_fees);
     let factual_positions = load_factual_position(state, source_id, binding_name)
         .await
         .into_iter()
@@ -3965,14 +3978,14 @@ async fn load_published_accounts(
         .map(|snapshot| {
             let fee = fees
                 .get(&snapshot.source_id)
-                .copied()
+                .cloned()
                 .context("missing theoretical fee for archived account")?;
             let mut account = crate::position_archive::published_account(
                 snapshot.source_id,
                 snapshot.binding_name,
                 snapshot.shares,
             );
-            account.theoretical_fee_rate = Some(fee);
+            account.set_theoretical_fees(Some(fee));
             Ok(account)
         })
         .collect()
@@ -5402,6 +5415,7 @@ mod tests {
                 estimated_fee_rate: None,
                 maker_fee_rate: None,
                 taker_fee_rate: None,
+                quote_fee_rates: Default::default(),
                 gateway_prefix: Some("/exec_trade01".into()),
                 exec_config_url: Some("http://127.0.0.1:18161/".into()),
                 exec_viz_url: None,
@@ -5456,6 +5470,7 @@ mod tests {
             estimated_fee_rate: None,
             maker_fee_rate: None,
             taker_fee_rate: None,
+            quote_fee_rates: Default::default(),
             gateway_prefix: None,
             exec_config_url: None,
             exec_viz_url: None,
@@ -6234,8 +6249,8 @@ async fn archive_configuration_binding(
             .await?
             .context("pending binding disappeared")?;
     let mut account = crate::position_archive::published_account(source, binding, shares);
-    account.theoretical_fee_rate =
-        postgres::load_theoretical_twap_fee_rate(&state.pool, source).await?;
+    account
+        .set_theoretical_fees(postgres::load_theoretical_twap_fee_rate(&state.pool, source).await?);
     let factual = load_factual_position(state, source, binding)
         .await
         .into_iter()

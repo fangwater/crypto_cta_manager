@@ -1,3 +1,4 @@
+import { AccountFeeEditor } from '../components/AccountFeeEditor'
 import { FundingSettingsPanel } from '../components/FundingSettingsPanel'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import {
@@ -31,8 +32,7 @@ import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
-import { executionMarketLabel, executionSymbolPlaceholder, feeBps, formatUniMmr, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
-import { FieldHint, Input, Label } from '../components/ui/Field'
+import { executionMarketLabel, executionSymbolPlaceholder, formatUniMmr, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
 import { readSourceId, routes } from '../lib/routes'
 import { cn } from '../lib/cn'
 import { usesActualFunding } from '../lib/fundingPresentation'
@@ -65,9 +65,6 @@ export function AccountOverviewPage() {
   const [contractSymbol, setContractSymbol] = useState('')
   const [contractLeverage, setContractLeverage] = useState('5')
   const [queriedContractLeverage, setQueriedContractLeverage] = useState<string | null>(null)
-  const [makerFeeRateInput, setMakerFeeRateInput] = useState('')
-  const [takerFeeRateInput, setTakerFeeRateInput] = useState('')
-  const [theoreticalTwapFeeRateInput, setTheoreticalTwapFeeRateInput] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -77,9 +74,6 @@ export function AccountOverviewPage() {
     const nextStudio = await getAccountStudio(sourceId, signal)
     setDashboard(snapshot)
     setStudio(nextStudio)
-    setMakerFeeRateInput(String(nextStudio.maker_fee_rate))
-    setTakerFeeRateInput(String(nextStudio.taker_fee_rate))
-    setTheoreticalTwapFeeRateInput(String(nextStudio.theoretical_twap_fee_rate))
   }, [sourceId])
 
   useEffect(() => {
@@ -195,85 +189,18 @@ export function AccountOverviewPage() {
                 <div>
                   <CardTitle className="text-base">估算费率</CardTitle>
                   <CardDescription className="mt-1">
-                    按账户设置事实成交和理论 TWAP 的估算费率。理论 TWAP 使用分钟 VWAP 定价，每分钟等量执行 1/5。保存后立即写入
-                    PostgreSQL，无需重启。
+                    按账户和合约报价币设置成交及理论 TWAP 费率。未单独设置的报价币使用默认费率。保存后自动更新。
                   </CardDescription>
                 </div>
               </CardHeader>
               <CardContent className="space-y-3 pt-5">
-                <div className="flex flex-wrap items-end gap-3">
-                  <Label className="min-w-[12rem] flex-1">
-                    Maker 费率（小数）
-                    <Input
-                      inputMode="decimal"
-                      value={makerFeeRateInput}
-                      onChange={(event) => setMakerFeeRateInput(event.target.value)}
-                      placeholder="-0.00005"
-                      disabled={saving || !canConfigure}
-                    />
-                  </Label>
-                  <Label className="min-w-[12rem] flex-1">
-                    Taker 费率（小数）
-                    <Input
-                      inputMode="decimal"
-                      value={takerFeeRateInput}
-                      onChange={(event) => setTakerFeeRateInput(event.target.value)}
-                      placeholder="0.000146"
-                      disabled={saving || !canConfigure}
-                    />
-                  </Label>
-                  <Label className="min-w-[12rem] flex-1">
-                    理论 TWAP 费率（小数）
-                    <Input
-                      inputMode="decimal"
-                      value={theoreticalTwapFeeRateInput}
-                      onChange={(event) => setTheoreticalTwapFeeRateInput(event.target.value)}
-                      placeholder="0.000048"
-                      disabled={saving || !canConfigure}
-                    />
-                  </Label>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={saving || !canConfigure}
-                    onClick={() =>
-                      void withWrite(async () => {
-                        const maker = Number(makerFeeRateInput.trim())
-                        const taker = Number(takerFeeRateInput.trim())
-                        const theoreticalTwap = Number(theoreticalTwapFeeRateInput.trim())
-                        if (
-                          !Number.isFinite(maker) ||
-                          !Number.isFinite(taker) ||
-                          !Number.isFinite(theoreticalTwap)
-                        ) {
-                          throw new Error('Maker、Taker 和理论 TWAP 费率必须是有限数字')
-                        }
-                        const next = await saveAccountFeeRates(
-                          sourceId,
-                          maker,
-                          taker,
-                          theoreticalTwap,
-                        )
-                        setStudio(next)
-                        setMakerFeeRateInput(String(next.maker_fee_rate))
-                        setTakerFeeRateInput(String(next.taker_fee_rate))
-                        setTheoreticalTwapFeeRateInput(
-                          String(next.theoretical_twap_fee_rate),
-                        )
-                        await refresh()
-                        return `已保存 Maker ${feeBps(next.maker_fee_rate)} / Taker ${feeBps(next.taker_fee_rate)} / 理论 TWAP ${feeBps(next.theoretical_twap_fee_rate)}；理论费率对后续信号生效`
-                      })
-                    }
-                  >
-                    保存
-                  </Button>
-                </div>
-                <FieldHint>
-                  当前 Maker {studio ? `${feeBps(studio.maker_fee_rate)}（${studio.maker_fee_rate}）` : '--'}
-                  {' · '}Taker {studio ? `${feeBps(studio.taker_fee_rate)}（${studio.taker_fee_rate}）` : '--'}
-                  {' · '}理论 TWAP {studio ? `${feeBps(studio.theoretical_twap_fee_rate)}（${studio.theoretical_twap_fee_rate}）` : '--'}。
-                  负数表示返佣；理论 TWAP 初始默认 Maker/Taker 的平均值。
-                </FieldHint>
+                {studio && <AccountFeeEditor studio={studio} disabled={saving || !canConfigure}
+                  onSave={(maker, taker, theory, quotes) => void withWrite(async () => {
+                    const next = await saveAccountFeeRates(sourceId, maker, taker, theory, quotes)
+                    setStudio(next)
+                    await refresh()
+                    return '已保存报价币费率；成交手续费重新估算，理论费率对后续目标生效'
+                  })} />}
                 <div className="space-y-2 border-t border-border-soft pt-3">
                   <div className="flex items-center justify-between text-sm">
                     <span className="font-medium text-ink">成交名义比例</span>

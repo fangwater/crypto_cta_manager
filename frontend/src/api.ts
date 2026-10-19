@@ -1,4 +1,5 @@
 import { normalizeTargetMap } from './lib/targetPositions'
+import { serverClock } from './lib/serverClock'
 import type {
   AccountStudio,
   FundingSettings,
@@ -67,6 +68,7 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
     credentials: 'same-origin',
     signal: options.signal,
   })
+  serverClock.observe(response.headers.get('Date'))
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as
       | { error?: string }
@@ -490,6 +492,7 @@ export function saveAccountFeeRates(
   makerFeeRate: number,
   takerFeeRate: number,
   theoreticalTwapFeeRate: number,
+  quoteFeeRates: AccountStudio['quote_fee_rates'],
 ) {
   return requestJson<AccountStudio>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/fee-rates`,
@@ -499,6 +502,7 @@ export function saveAccountFeeRates(
         maker_fee_rate: makerFeeRate,
         taker_fee_rate: takerFeeRate,
         theoretical_twap_fee_rate: theoreticalTwapFeeRate,
+        quote_fee_rates: quoteFeeRates,
       },
     },
   )

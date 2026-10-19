@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
@@ -37,11 +37,27 @@ pub struct ArchivedPublishedAccount {
     /// Frozen at publication; absence in old messages is reported as a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theoretical_fee_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub theoretical_fee_rates_by_quote: BTreeMap<String, f64>,
     #[serde(default, rename = "leverage", skip_serializing_if = "Option::is_none")]
     legacy_leverage: Option<f64>,
 }
 
 impl ArchivedPublishedAccount {
+    pub fn set_theoretical_fees(&mut self, fees: Option<crate::config::TheoreticalFeeRates>) {
+        if let Some(fees) = fees {
+            self.theoretical_fee_rate = Some(fees.default);
+            self.theoretical_fee_rates_by_quote = fees.by_quote;
+        }
+    }
+
+    pub fn fee_for_symbol(&self, symbol: &str) -> Option<f64> {
+        self.theoretical_fee_rates_by_quote
+            .get(crate::config::symbol_quote(symbol))
+            .copied()
+            .or(self.theoretical_fee_rate)
+    }
+
     pub fn effective_shares(&self) -> f64 {
         self.shares * self.legacy_leverage.unwrap_or(1.0)
     }
@@ -90,6 +106,7 @@ pub fn published_account(
         binding_name: binding_name.into(),
         shares,
         theoretical_fee_rate: None,
+        theoretical_fee_rates_by_quote: BTreeMap::new(),
         legacy_leverage: None,
     }
 }

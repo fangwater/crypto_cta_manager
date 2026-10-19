@@ -1466,7 +1466,11 @@ impl DingTalkSender {
             content.push_str(&format!("另有 {} 条告警未展开\n", notices.len() - 30));
         }
         if content.len() > 4_000 {
-            content.truncate(3_980);
+            let mut end = 3_980;
+            while !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            content.truncate(end);
             content.push_str("...\n");
         }
         content
@@ -1685,6 +1689,7 @@ mod tests {
             estimated_fee_rate: None,
             maker_fee_rate: None,
             taker_fee_rate: None,
+            quote_fee_rates: Default::default(),
             gateway_prefix: None,
             exec_config_url: None,
             exec_viz_url: None,
@@ -2712,5 +2717,28 @@ mod tests {
             content,
             "[el01][crypto_cta_manager] CTA 运行监控\n[心跳] 行情监控运行正常，无未恢复告警\n"
         );
+    }
+
+    #[test]
+    fn long_unicode_notice_is_truncated_on_a_character_boundary() {
+        let sender = DingTalkSender {
+            client: Client::new(),
+            webhook_url: Url::parse("https://example.test/hook").unwrap(),
+            secret: None,
+            at_mobiles: Vec::new(),
+            is_at_all: false,
+            host_tag: "el01".to_string(),
+        };
+        for padding in 0..4 {
+            let notice = PendingNotice {
+                key: "test".to_string(),
+                recovery: false,
+                message: format!("{}{}", "a".repeat(padding), "订单状态未知".repeat(400)),
+            };
+            let content = sender.notice_content(&[notice]);
+            assert!(content.len() <= 4_000);
+            assert!(content.ends_with("...\n"));
+            assert!(content.starts_with("[el01]"));
+        }
     }
 }

@@ -131,6 +131,9 @@ exec_config_url = "http://127.0.0.1:18161/"
 exec_viz_url = "http://127.0.0.1:10041/"
 # Effective fee charged per unit of fill notional (4 bps in this example).
 estimated_fee_rate = 0.0004
+# Optional per-quote overrides; existing accounts are managed in the account UI/PostgreSQL.
+# quote_fee_rates = { USDC = { maker_fee_rate = 0.0, taker_fee_rate = 0.000165, theoretical_twap_fee_rate = 0.0000825 } }
+
 # Iceoryx namespace of this Exec's account_monitor. Defaults to source id.
 ipc_namespace = "binance_exec_trade01"
 account_ipc_service = "account_pubs/binance_pm"

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use sqlx::postgres::PgPool;
 
-use crate::config::{FeeRates, validate_fee_rates};
+use crate::config::{FeeRates, QuoteFeeRates, validate_fee_rates};
 use crate::order_config::{
     ExecutionAlgorithm, OrderParameters, TargetPosition, validate_exec_symbol,
     validate_strategy_name,
@@ -50,6 +50,7 @@ pub struct AccountStudio {
     pub taker_fee_rate: f64,
     /// Fee rate frozen onto newly staged theoretical TWAP executions.
     pub theoretical_twap_fee_rate: f64,
+    pub quote_fee_rates: BTreeMap<String, QuoteFeeRates>,
     pub bindings: Vec<AccountBinding>,
     pub configuration: crate::virtual_accounts::AccountConfiguration,
     pub pending_publishes: Vec<crate::virtual_accounts::PendingPublish>,
@@ -66,6 +67,8 @@ pub struct SaveFeeRatesRequest {
     pub taker_fee_rate: f64,
     #[serde(default)]
     pub theoretical_twap_fee_rate: Option<f64>,
+    #[serde(default)]
+    pub quote_fee_rates: Option<BTreeMap<String, QuoteFeeRates>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,7 +200,12 @@ pub fn validate_estimated_fee_rate(value: f64) -> Result<(), String> {
 }
 
 pub fn validate_account_fee_rates(maker: f64, taker: f64) -> Result<(), String> {
-    validate_fee_rates(FeeRates { maker, taker }).map_err(|error| error.to_string())
+    validate_fee_rates(&FeeRates {
+        maker,
+        taker,
+        by_quote: Default::default(),
+    })
+    .map_err(|error| error.to_string())
 }
 
 pub fn validate_theoretical_twap_fee_rate(value: f64) -> Result<(), String> {
@@ -250,6 +258,7 @@ impl AccountStudio {
             maker_fee_rate: fee_rates.maker,
             taker_fee_rate: fee_rates.taker,
             theoretical_twap_fee_rate,
+            quote_fee_rates: fee_rates.by_quote,
             bindings,
             configuration: Default::default(),
             pending_publishes: Vec::new(),
@@ -989,21 +998,15 @@ pub async fn delete_order_strategy(pool: &PgPool, strategy_name: &str) -> Result
 
 pub async fn load_account_studio(pool: &PgPool, source_id: &str) -> Result<AccountStudio> {
     let bindings = list_bindings(pool, source_id).await?;
-    let fee_rates = crate::postgres::load_fee_rate(pool, source_id)
+    let (fee_rates, theoretical) = crate::postgres::load_account_fee_rates(pool, source_id)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!("source {source_id} is not registered in cta_order_sources")
         })?;
-    let theoretical_twap_fee_rate =
-        crate::postgres::load_theoretical_twap_fee_rate(pool, source_id)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("source {source_id} is not registered in cta_order_sources")
-            })?;
     let mut studio = AccountStudio::from_parts(
         source_id.to_string(),
         fee_rates,
-        theoretical_twap_fee_rate,
+        theoretical.default,
         bindings,
     );
     studio.configuration = crate::virtual_accounts::configuration(pool, source_id).await?;
