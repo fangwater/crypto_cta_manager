@@ -108,7 +108,7 @@ function Summary({ label, value, title, warn }: { label: string; value: string; 
 function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
   return <tr data-source={row.source_id}>
     <td className="overview-index">{index + 1}</td>
-    <th scope="row" className="overview-account-cell"><a href={routes.account(row.source_id)} title={row.source_id}>{row.account}</a></th>
+    <th scope="row" className="overview-account-cell"><a href={routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a></th>
     {columns.map(column => {
       const value = row[column.key]
       const time = column.key === 'date_ms' || column.key === 'queried_at_ms'
