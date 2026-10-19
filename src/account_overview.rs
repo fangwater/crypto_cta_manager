@@ -15,6 +15,8 @@ use crate::config::SourceConfig;
 use crate::manager_db::ManagerDb;
 use crate::viz_snapshot::VizSnapshotClient;
 
+mod margin;
+
 const CF: &str = "account_observations";
 const DAY_MS: i64 = 86_400_000;
 const SHANGHAI_MS: i64 = 8 * 3_600_000;
@@ -228,6 +230,7 @@ impl AccountOverview {
 
     pub fn spawn(&self, sources: Vec<SourceConfig>, live: LiveEquityHub, viz: VizSnapshotClient) {
         let hub = self.clone();
+        let margin_reader = margin::MarginReader::default();
         tokio::spawn(async move {
             // Initialize each account once. Later samples increment the in-memory
             // window so browser polling never rescans weeks of RocksDB JSON.
@@ -266,6 +269,7 @@ impl AccountOverview {
                         let source = source.clone();
                         let live = live.clone();
                         let viz = viz.clone();
+                        let margin_reader = margin_reader.clone();
                         tasks.spawn(async move {
                             let risk = if let Some(url) = &source.exec_viz_url {
                                 viz.load_account_risk(url, &source.venue).await.ok()
@@ -281,6 +285,18 @@ impl AccountOverview {
                             {
                                 return None;
                             }
+                            let ipc_margin = reading.initial_margin_ts_ms
+                                .filter(|ts| (0..=SAMPLE_FRESH_MS).contains(&now.saturating_sub(*ts)))
+                                .zip(reading.initial_margin_usd);
+                            let margin = if let Some(value) = ipc_margin {
+                                Some(value)
+                            } else {
+                                match margin_reader.get(&source).await {
+                                    Ok(value) => value.map(|row| (row.ts_ms, row.initial_margin)),
+                                    Err(_) => { warn!(source_id = %source.id, "read-only account margin query unavailable"); None }
+                                }
+                            };
+                            let now = now_ms();
                             let fresh_risk = risk.filter(|risk| {
                                 (0..=SAMPLE_FRESH_MS).contains(&now.saturating_sub(risk.ts_ms))
                             });
@@ -292,13 +308,8 @@ impl AccountOverview {
                                 long_position: fresh_risk.as_ref().map(|r| r.long_notional_usdt),
                                 short_position: fresh_risk.as_ref().map(|r| r.short_notional_usdt),
                                 position_at_ms: fresh_risk.map(|r| r.ts_ms),
-                                initial_margin: reading
-                                    .initial_margin_ts_ms
-                                    .filter(|ts| {
-                                        (0..=SAMPLE_FRESH_MS).contains(&now.saturating_sub(*ts))
-                                    })
-                                    .and(reading.initial_margin_usd),
-                                margin_at_ms: reading.initial_margin_ts_ms,
+                                initial_margin: margin.map(|(_, value)| value),
+                                margin_at_ms: margin.map(|(ts, _)| ts),
                             })
                         });
                     }

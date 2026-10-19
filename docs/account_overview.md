@@ -13,6 +13,11 @@
 - 权益来自对应 source 的现有账户 IPC 实际权益消息。
 - 保证金来自同一账户、同一 scope 的 `AccountRisk.initial_margin_usd`，
   不使用维持保证金或可用余额替代；未知值与有效零值分别保留。
+  对没有提供保证金 IPC 的原生 STANDARD 账户，复用现有签名只读客户端
+  `GET /fapi/v2/account`，明确绑定该账户当前第一个交易 IP，禁用代理。
+  每账户最多每 30 秒一次，复用 Manager 的 IP 权重预算与 Retry-After 冷却；
+  IPC 恢复后立即优先使用 IPC。不会重启 Exec 账户监控或交易服务。
+  字段定义见 [Binance 官方账户接口](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account)。
 - 多空持仓来自该 source 的 Exec Viz `exec_pre_trade_risk` 实时名义金额。
   不再用 Manager FIFO 的最近成交价估值替代当前账户风险快照。
 - 多空杠杆分别为多空持仓 / 正权益，轧差为多头减空头，保证金占比为
@@ -27,7 +32,7 @@
 
 Manager 每 15 秒独立读取账户事实，写入自身 RocksDB 的
 `account_observations` 列族。使用显式 `source_id` 和采集时间作为不可覆盖的键；
-不写 Exec RocksDB，不修改 PostgreSQL schema，不调用交易所 REST。
+不写 Exec RocksDB，不修改 PostgreSQL schema。
 历史以账户隔离，初始化后通过增量内存窗口提供最近 30 日查询。
 原始事实保留在 Manager 存储中，不随 Kline 清理。
 
