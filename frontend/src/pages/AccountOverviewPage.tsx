@@ -120,10 +120,10 @@ export function AccountOverviewPage() {
 
   if (!sourceId) {
     return (
-      <AppShell active="workspace" title="账户配置" subtitle="只读概览" icon={WalletCards}>
-        <Alert tone="warning">缺少 source 参数。请从总览页进入某个账户。</Alert>
-        <a href={routes.workspace} className="mt-4 inline-flex text-sm font-medium text-brand">
-          返回总览
+      <AppShell active="accounts" title="账户配置" subtitle="只读概览" icon={WalletCards}>
+        <Alert tone="warning">缺少 source 参数。请从账户页进入某个账户。</Alert>
+        <a href={routes.accounts} className="mt-4 inline-flex text-sm font-medium text-brand">
+          返回账户列表
         </a>
       </AppShell>
     )
@@ -131,7 +131,7 @@ export function AccountOverviewPage() {
 
   return (
     <AppShell
-      active="workspace"
+      active="accounts"
       title={account?.account ?? sourceId}
       subtitle="账户配置概览"
       icon={WalletCards}

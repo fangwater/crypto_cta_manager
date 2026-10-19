@@ -1,10 +1,10 @@
-import { Activity, BookOpen, LayoutDashboard, LogOut, Settings, Shield, Scale, PiggyBank, Layers3 } from 'lucide-react'
+import { Activity, BookOpen, LayoutDashboard, LogOut, Settings, Shield, Scale, PiggyBank, Layers3, WalletCards } from 'lucide-react'
 import { useLayoutEffect, useRef } from 'react'
 import { useAuth } from './AuthGate'
 import { cn } from '../lib/cn'
 import { readSourceId, routes } from '../lib/routes'
 
-export type AppNavId = 'workspace' | 'manager' | 'acquisition-cost' | 'config' | 'virtual' | 'auto-earn' | 'docs' | 'admin'
+export type AppNavId = 'workspace' | 'accounts' | 'manager' | 'acquisition-cost' | 'config' | 'virtual' | 'auto-earn' | 'docs' | 'admin'
 
 const links: Array<{
   id: AppNavId
@@ -13,10 +13,11 @@ const links: Array<{
   icon: typeof LayoutDashboard
 }> = [
   { id: 'workspace', href: '/manager/workspace/', label: '总览', icon: LayoutDashboard },
+  { id: 'accounts', href: routes.accounts, label: '账户', icon: WalletCards },
   { id: 'manager', href: '/manager/', label: '净值', icon: Activity },
   { id: 'acquisition-cost', href: '/manager/acquisition-cost/', label: '成本', icon: Scale },
   { id: 'config', href: '/manager/config/position/', label: '策略', icon: Settings },
-  { id: 'virtual', href: routes.virtualAccounts, label: 'Virtual', icon: Layers3 },
+  { id: 'virtual', href: routes.virtualAccounts, label: '虚拟账户', icon: Layers3 },
   { id: 'auto-earn', href: '/manager/auto-earn/', label: '自动理财', icon: PiggyBank },
   { id: 'docs', href: '/manager/docs/', label: '文档', icon: BookOpen },
   { id: 'admin', href: '/manager/admin/', label: '权限', icon: Shield },

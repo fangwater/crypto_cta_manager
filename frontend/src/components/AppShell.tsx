@@ -11,6 +11,7 @@ export function AppShell({
   children,
   actions,
   className,
+  wide = false,
 }: {
   active: AppNavId
   title: string
@@ -19,11 +20,12 @@ export function AppShell({
   children: ReactNode
   actions?: ReactNode
   className?: string
+  wide?: boolean
 }) {
   return (
     <div className="min-h-screen bg-canvas">
       <header className="sticky top-0 z-40 border-b border-border bg-surface/90 backdrop-blur-md">
-        <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-6 px-4 py-3 sm:px-6 lg:px-8">
+        <div className={cn("mx-auto flex w-full items-center justify-between gap-6 px-4 py-3 sm:px-6 lg:px-8", wide ? "max-w-[1920px]" : "max-w-7xl")}>
           <div className="flex min-w-0 items-center gap-3">
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-brand-ring/50 bg-brand-soft text-brand">
               <Icon size={18} strokeWidth={2.2} />
@@ -42,7 +44,7 @@ export function AppShell({
           <AppNav active={active} mobile />
         </div>
       </header>
-      <main className={cn('mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8', className)}>
+      <main className={cn('mx-auto w-full px-4 py-6 sm:px-6 lg:px-8', wide ? 'max-w-[1920px]' : 'max-w-7xl', className)}>
         {children}
       </main>
     </div>

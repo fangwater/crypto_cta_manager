@@ -18,6 +18,7 @@ import './nav-dashboard.css'
 import { getAccountTimeline, getDashboard, getHealth, getTimeline } from './api'
 import { AppShell } from './components/AppShell'
 import { WorkspacePage } from './pages/WorkspacePage'
+import { AccountsPage } from './pages/AccountsPage'
 import { AccountOverviewPage } from './pages/AccountOverviewPage'
 import { PositionStrategyPage } from './pages/config/PositionStrategyPage'
 import { OrderStrategyPage } from './pages/config/OrderStrategyPage'
@@ -183,6 +184,7 @@ export default function App() {
 function AuthenticatedApp() {
   const path = normalizePath(window.location.pathname)
   if (path === '/' || path === '/manager/workspace') return <WorkspacePage />
+  if (path === '/manager/accounts') return <AccountsPage />
   if (path === '/manager/account') return <AccountOverviewPage />
   if (path === '/manager/config') {
     const source = readSourceId()

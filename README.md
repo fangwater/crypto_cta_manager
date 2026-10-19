@@ -733,6 +733,12 @@ jp-meta  http://13.115.227.29:4191/exec_trade01/
 jp-meta  http://13.115.227.29:4191/exec_trade01/config/
 ```
 
+The Chinese overview at `/manager/workspace/` shows a sortable account table,
+account/type/status filters, and optional 15-second refresh. Each account keeps
+its own equity, order NAV, exposure and estimated leverage; account values are
+not aggregated. Account cards and configuration/Exec entry points live separately
+at `/manager/accounts/`.
+
 On el01, `/` redirects into `/manager/workspace/`. On jp-meta, `/` stays the
 host Nginx welcome page; the CTA workspace is `/manager/workspace/`.
 `/manager/` is the NAV timeline. `/manager/config/` owns strategy catalog,

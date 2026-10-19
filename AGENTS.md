@@ -569,8 +569,13 @@ There is no combined/all-account option. If the URL omits `source` or names an
 unavailable account, select the first visible source and update the URL before
 querying. Always send that source ID explicitly; never issue an unscoped query
 while account metadata is loading. Keep the selected account when moving between
-NAV and cost pages. The workspace lists independent account cards and account
-counts without summing account PnL or exposure. A pending health request is
+NAV and cost pages. The workspace at `/manager/workspace/` displays a Chinese account monitoring
+table with filtering, sorting and optional 15-second refresh. Independent account
+cards and configuration/Exec entry points live at `/manager/accounts/`. Show
+account counts without summing account PnL or exposure. Label cumulative order
+NAV distinctly from daily PnL; unavailable historical equity, drawdown and margin
+metrics must not be fabricated. Estimated leverage requires positive, fresh
+equity and compatible currency units. A pending health request is
 "checking", not "data delayed"; only a returned degraded health status indicates
 delayed data.
 Keep theoretical-data notices in normal document flow above the chart.

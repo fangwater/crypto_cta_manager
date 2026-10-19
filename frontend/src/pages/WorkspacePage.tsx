@@ -1,387 +1,130 @@
-import { accountFeeSummary } from '../format'
-import { FundingStatusBadge } from '../components/FundingStatusBadge'
-import {
-  Activity,
-  ArrowRight,
-  BookOpen,
-  Clock3,
-  ExternalLink,
-  LayoutDashboard,
-  Layers3,
-  RefreshCw,
-  Scale,
-  Settings,
-} from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getDashboard, getHealth } from '../api'
-import { AppShell, PageIntro, StatTile } from '../components/AppShell'
-import { Alert, Badge } from '../components/ui/Badge'
+import { ArrowDown, ArrowDownUp, ArrowRight, ArrowUp, Check, ChevronDown, Clock3, Filter, LayoutDashboard, RefreshCw, Search, WalletCards, X } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { AppShell } from '../components/AppShell'
+import { Alert } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
-import { executionMarketLabel, formatUniMmr, integer, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
-import { cn } from '../lib/cn'
+import { useWorkspaceData } from '../hooks/useWorkspaceData'
+import { money } from '../format'
 import { routes } from '../lib/routes'
-import type {
-  DashboardAccount,
-  DashboardSnapshot,
-  HealthResponse,
-  SourceNavReport,
-} from '../types'
+import { accountMetrics, accountVenueLabel, workspaceAccounts } from '../lib/workspace'
+import type { DashboardAccount, SourceNavReport } from '../types'
+import './workspace.css'
 
-const UI_POLL_MS = 15_000
-
-function fallbackAccounts(dashboard: DashboardSnapshot): DashboardAccount[] {
-  return dashboard.report.sources.map((source) => ({
-    source_id: source.source_id,
-    account: source.account,
-    venue: source.configured_venue,
-    enabled: true,
-    gateway_prefix: null,
-    configurable: false,
-  }))
-}
-
-function venueMark(venue: string) {
-  const normalized = venue.toLowerCase()
-  if (normalized.includes('binance')) return 'B'
-  if (normalized.includes('bybit')) return 'Y'
-  if (normalized.includes('gate')) return 'G'
-  if (normalized.includes('okx') || normalized.includes('okex')) return 'O'
-  if (normalized.includes('bitget')) return 'BG'
-  return venue.slice(0, 2).toUpperCase()
-}
+type SortKey = 'account' | 'equity' | 'pnl' | 'long' | 'short' | 'longLeverage' | 'shortLeverage' | 'net'
+const dateTime = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+const displayTime = (ms: number | null | undefined) => ms == null ? '—' : dateTime.format(ms)
+const number = (value: number | null) => value === null ? '—' : money(value)
+const multiple = (value: number | null) => value === null ? '—' : `${value.toFixed(3)}×`
 
 export function WorkspacePage() {
-  const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
-  const [health, setHealth] = useState<HealthResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { dashboard, health, error, refreshing, autoRefresh, setAutoRefresh, countdown, receivedAt, refresh } = useWorkspaceData()
+  const [search, setSearch] = useState('')
+  const [venue, setVenue] = useState('all')
+  const [status, setStatus] = useState('all')
+  const [filterOpen, setFilterOpen] = useState(false)
+  const [hidden, setHidden] = useState<Set<string>>(new Set())
+  const [sort, setSort] = useState<{ key: SortKey; descending: boolean }>({ key: 'account', descending: false })
+  const accounts = useMemo(() => workspaceAccounts(dashboard), [dashboard])
+  const reports = useMemo(() => new Map(dashboard?.report.sources.map(report => [report.source_id, report]) ?? []), [dashboard])
+  const venues = [...new Set(accounts.map(account => account.venue))].sort()
+  const rows = accounts.filter(account => {
+    const query = search.trim().toLowerCase()
+    return !hidden.has(account.source_id)
+      && (venue === 'all' || account.venue === venue)
+      && (status === 'all' || (status === 'enabled' ? account.enabled : !account.enabled))
+      && (!query || `${account.account} ${account.source_id}`.toLowerCase().includes(query))
+  }).map(account => ({ account, report: reports.get(account.source_id), metrics: accountMetrics(account, reports.get(account.source_id)) }))
+  rows.sort((a, b) => {
+    if (sort.key === 'account') return a.account.account.localeCompare(b.account.account, 'zh-CN', { numeric: true }) * (sort.descending ? -1 : 1)
+    const av = a.metrics[sort.key], bv = b.metrics[sort.key]
+    if (av === null) return bv === null ? 0 : 1
+    if (bv === null) return -1
+    return (av - bv) * (sort.descending ? -1 : 1)
+  })
+  const enabled = rows.filter(row => row.account.enabled).length
+  const fresh = rows.filter(row => row.account.enabled && row.metrics.equity !== null && row.account.live_equity_status === 'ok').length
+  const stale = rows.filter(row => row.account.enabled && row.account.live_equity_status === 'stale').length
+  const waiting = rows.filter(row => row.account.enabled && (row.metrics.equity === null || !['ok', 'stale'].includes(row.account.live_equity_status ?? ''))).length
+  const filtered = search !== '' || venue !== 'all' || status !== 'all' || hidden.size > 0
+  const healthLabel = error ? '连接异常' : !health ? '检查中' : health.status === 'ok' ? '服务在线' : '数据延迟'
 
-  const refresh = useCallback(async (signal?: AbortSignal, manual = false) => {
-    if (manual) setRefreshing(true)
-    try {
-      const [nextDashboard, nextHealth] = await Promise.all([
-        getDashboard(signal),
-        getHealth(signal),
-      ])
-      setDashboard(nextDashboard)
-      setHealth(nextHealth)
-      setError(null)
-    } catch (reason: unknown) {
-      if (reason instanceof DOMException && reason.name === 'AbortError') return
-      setError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      setLoading(false)
-      if (manual) setRefreshing(false)
-    }
-  }, [])
+  function sortColumn(key: SortKey, label: string, unit?: string) {
+    const selected = sort.key === key
+    const Icon = selected ? sort.descending ? ArrowDown : ArrowUp : ArrowDownUp
+    return <th scope="col" aria-sort={selected ? sort.descending ? 'descending' : 'ascending' : 'none'}>
+      <button type="button" className="overview-sort" onClick={() => setSort({ key, descending: selected ? !sort.descending : key !== 'account' })}>
+        <span>{label}{unit && <small>{unit}</small>}</span><Icon size={12} />
+      </button>
+    </th>
+  }
 
-  useEffect(() => {
-    const controller = new AbortController()
-    void refresh(controller.signal)
-    const timer = window.setInterval(() => void refresh(), UI_POLL_MS)
-    return () => {
-      controller.abort()
-      window.clearInterval(timer)
-    }
-  }, [refresh])
-
-  const accounts = useMemo(
-    () =>
-      dashboard
-        ? dashboard.accounts?.length
-          ? dashboard.accounts
-          : fallbackAccounts(dashboard)
-        : [],
-    [dashboard],
-  )
-  const reportsBySource = useMemo(
-    () => new Map((dashboard?.report.sources ?? []).map((source) => [source.source_id, source])),
-    [dashboard],
-  )
-  const activeAccounts = accounts.filter(
-    (account) => account.enabled && reportsBySource.has(account.source_id),
-  ).length
-
-  return (
-    <AppShell
-      active="workspace"
-      title="CTA Manager"
-      subtitle="独立账户工作台"
-      icon={LayoutDashboard}
-      actions={
-        <div className="flex items-center gap-2">
-          <Badge tone={health?.status === 'ok' ? 'success' : health || error ? 'warning' : 'neutral'} className="hidden sm:inline-flex">
-            {health ? health.status === 'ok' ? '服务在线' : '数据延迟' : error ? '连接失败' : '检查中'}
-          </Badge>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={refreshing}
-            onClick={() => void refresh(undefined, true)}
-            aria-label="刷新数据"
-          >
-            <RefreshCw size={15} className={refreshing ? 'animate-spin-slow' : ''} />
-          </Button>
-        </div>
-      }
-    >
-      <PageIntro
-        eyebrow="Workspace"
-        title="盘子总览"
-        description="从这里进入各账户配置概览、净值曲线与 Exec Viz。"
-        actions={
-          <div className="flex items-center gap-2 text-xs text-muted">
-            <Clock3 size={14} />
-            {timestampUs(dashboard?.generated_at_us ?? null)}
-          </div>
-        }
-      />
-
-      {error && <Alert tone="error" className="mb-4">数据请求失败：{error}</Alert>}
-      {health?.last_refresh_error && (
-        <Alert tone="warning" className="mb-4">
-          最近一次服务端重算失败，当前显示上一份有效数据
-        </Alert>
-      )}
-
-      <div className="mb-8 grid gap-3 sm:grid-cols-2">
-        <StatTile label="运行账户" value={dashboard ? integer(activeAccounts) : '--'} />
-        <StatTile label="已配置账户" value={dashboard ? integer(accounts.length) : '--'} />
-      </div>
-
-      <a href={routes.virtualAccounts} className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-border bg-surface p-5 transition hover:border-brand-ring">
-        <div className="flex min-w-0 items-center gap-3"><Layers3 size={20} className="shrink-0 text-brand" /><div><p className="font-semibold text-ink">Virtual 账户管理</p><p className="mt-1 text-sm text-muted">维护策略组合，查看跟随倍率与同步状态。</p></div></div>
-        <ArrowRight size={18} className="shrink-0 text-muted" />
-      </a>
-
-      <a
-        href="/manager/docs/"
-        className="mb-8 flex flex-col gap-4 rounded-2xl border border-brand-ring/40 bg-gradient-to-br from-brand-soft to-surface p-5 shadow-[var(--shadow-card)] transition hover:border-brand/40 sm:flex-row sm:items-center sm:justify-between"
-      >
-        <div className="flex items-start gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-xl bg-surface text-brand shadow-sm">
-            <BookOpen size={20} />
-          </div>
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-brand">Documentation</p>
-            <h3 className="mt-1 text-lg font-semibold text-ink">操作文档</h3>
-            <p className="mt-1 text-sm text-muted">策略组合、账户入口、推送仓位与 Config API</p>
-          </div>
-        </div>
-        <span className="inline-flex items-center gap-2 text-sm font-medium text-brand">
-          打开文档 <ArrowRight size={16} />
-        </span>
-      </a>
-
-      <div className="mb-4 flex items-end justify-between gap-3">
-        <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-brand">Accounts</p>
-          <h3 className="mt-1 text-xl font-semibold text-ink">账户入口</h3>
-        </div>
-        <span className="text-xs text-muted">重算 {dashboard?.generation_duration_ms ?? 0} ms</span>
-      </div>
-
-      {loading && !dashboard ? (
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="h-56 animate-pulse rounded-2xl bg-border-soft" />
-          <div className="h-56 animate-pulse rounded-2xl bg-border-soft" />
-        </div>
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2">
-          {accounts.map((account) => (
-            <AccountCard
-              key={account.source_id}
-              account={account}
-              report={reportsBySource.get(account.source_id)}
-              health={health}
-            />
-          ))}
-          {accounts.length === 0 && (
-            <Card>
-              <CardContent className="py-12 text-center text-sm text-muted">暂无已配置账户</CardContent>
-            </Card>
-          )}
-        </div>
-      )}
-    </AppShell>
-  )
-}
-
-function AccountCard({
-  account,
-  report,
-  health,
-}: {
-  account: DashboardAccount
-  report?: SourceNavReport
-  health: HealthResponse | null
-}) {
-  const ready = account.enabled && report !== undefined
-  const status = !account.enabled
-    ? '待接入'
-    : !report
-      ? '等待数据'
-      : !health
-        ? '检查中'
-        : health.status === 'ok'
-        ? '数据就绪'
-        : '数据延迟'
-  const gatewayReady = ready && account.gateway_prefix !== null
-  const openPositions =
-    report?.symbols.filter(
-      (symbol) =>
-        Math.abs(symbol.long_position_value_quote) > 1e-9 ||
-        Math.abs(symbol.short_position_value_quote) > 1e-9,
-    ).length ?? 0
-
-  return (
-    <Card className={cn(!ready && 'opacity-80')}>
-      <CardHeader className="flex flex-row items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <div className="grid h-10 w-10 place-items-center rounded-xl bg-canvas text-sm font-bold text-brand">
-            {venueMark(account.venue)}
-          </div>
-          <div>
-            <CardTitle className="text-base">{account.account}</CardTitle>
-            <CardDescription className="font-mono text-[11px]">{account.source_id}</CardDescription>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
-          {account.venue === 'binance-futures' && <FundingStatusBadge value={account.funding} />}
-          {isUnifiedVenue(account.venue) && (
-            <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
-          )}
-          <Badge tone={ready && health ? health.status === 'ok' ? 'success' : 'warning' : 'neutral'}>{status}</Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4 pt-0">
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <Metric
-            label="累计费后净值"
-            value={report ? `${money(report.nav_change_after_fee_quote)} 报价币` : '--'}
-            tone={report ? signedClass(report.nav_change_after_fee_quote) : ''}
-          />
-          <Metric
-            label="实时权益"
-            value={
-              account.live_equity_usdt != null
-                ? `${money(account.live_equity_usdt)} USDT`
-                : '--'
-            }
-          />
-          {isUnifiedVenue(account.venue) && (
-            <Metric
-              label="UniMMR"
-              value={
-                account.uni_mmr_status === 'stale'
-                  ? `${formatUniMmr(account.uni_mmr)} 延迟`
-                  : formatUniMmr(account.uni_mmr)
-              }
-              tone={uniMmrTone(account.uni_mmr, account.uni_mmr_status)}
-            />
-          )}
-          <Metric label="当前持仓" value={report ? `${openPositions} symbols` : '--'} />
-          <Metric
-            label="Maker / Taker 费率"
-            value={report ? accountFeeSummary(report) : '--'}
-          />
-          <Metric label="最近成交" value={timestampUs(report?.last_fill_ts_us ?? null)} />
-        </div>
-        <div className="flex flex-wrap gap-2 border-t border-border-soft pt-4">
-          {ready ? (
-            <>
-              <ActionLink
-                href={routes.account(account.source_id)}
-                primary
-                icon={<Settings size={15} />}
-                label="查看配置"
-              />
-              <ActionLink
-                href={routes.nav(account.source_id)}
-                icon={<Activity size={15} />}
-                label="净值"
-              />
-              <ActionLink
-                href={routes.executionCost(account.source_id)}
-                icon={<Scale size={15} />}
-                label="成本"
-              />
-            </>
-          ) : (
-            <>
-              <ActionDisabled icon={<Settings size={15} />} label="查看配置" />
-              <ActionDisabled icon={<Activity size={15} />} label="净值" />
-              <ActionDisabled icon={<Scale size={15} />} label="成本" />
-            </>
-          )}
-          {gatewayReady ? (
-            <ActionLink
-              href={`${account.gateway_prefix}/`}
-              icon={<ExternalLink size={15} />}
-              label="Exec Viz"
-            />
-          ) : (
-            <ActionDisabled icon={<ExternalLink size={15} />} label="Exec Viz" />
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function uniMmrTone(value: number | null | undefined, status?: string | null) {
-  if (status === 'stale' || value == null || !Number.isFinite(value)) return 'text-muted'
-  if (value <= 1.05) return 'text-rose-700'
-  if (value <= 1.5) return 'text-warning'
-  return ''
-}
-
-function Metric({ label, value, tone = '' }: { label: string; value: string; tone?: string }) {
-  return (
-    <div>
-      <p className="text-xs text-muted">{label}</p>
-      <p className={cn('mt-1 font-medium tabular-nums text-ink', tone)}>{value}</p>
+  return <AppShell active="workspace" title="CTA 管理平台" subtitle="账户监控总览" icon={LayoutDashboard} wide className="overview-page">
+    <div className="overview-heading">
+      <div><p className="overview-eyebrow">账户监控</p><h2>总览<span>实时掌握每个账户的运行状态</span></h2></div>
+      <div className="overview-heading-actions"><span className={`overview-service ${!error && health?.status === 'ok' ? 'is-online' : ''}`}><i />{healthLabel}</span><a href={routes.accounts}>账户管理 <ArrowRight size={15} /></a></div>
     </div>
-  )
+
+    <section className="overview-toolbar" aria-label="总览筛选与统计">
+      <div className="overview-filters">
+        <label>账户类型<select value={venue} onChange={event => setVenue(event.target.value)}><option value="all">全部类型</option>{venues.map(value => <option key={value} value={value}>{accountVenueLabel(value)}</option>)}</select></label>
+        <label>账户状态<select value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部账户</option><option value="enabled">已启用</option><option value="disabled">未启用</option></select></label>
+        <label className="overview-auto"><input type="checkbox" checked={autoRefresh} onChange={event => setAutoRefresh(event.target.checked)} />自动刷新<span>{refreshing ? '更新中' : autoRefresh ? `${countdown} 秒` : '已暂停'}</span></label>
+      </div>
+      <div className="overview-stats" aria-live="polite">
+        <Summary label="当前账户" value={dashboard ? rows.length : null} detail={dashboard ? `共 ${accounts.length} 个` : '正在载入'} />
+        <Summary label="已启用" value={dashboard ? enabled : null} detail="独立运行账户" />
+        <Summary label="权益正常" value={dashboard ? fresh : null} detail="实时数据可用" tone="good" />
+        <Summary label="权益延迟" value={dashboard ? stale : null} detail={dashboard ? `${waiting} 个等待数据` : '正在检查'} tone={stale ? 'warn' : ''} />
+      </div>
+    </section>
+
+    {error && <Alert tone="error" className="mb-4">更新失败：{error}。{dashboard ? '当前保留上次数据，请刷新重试。' : '请刷新重试。'}</Alert>}
+    {health?.last_refresh_error && <Alert tone="warning" className="mb-4">报表更新暂时失败，当前展示上一份有效数据。</Alert>}
+
+    <section className="overview-panel" aria-labelledby="overview-table-title">
+      <div className="overview-table-toolbar">
+        <div className="overview-table-title"><h3 id="overview-table-title">账户数据</h3><span>{dashboard ? `${rows.length} 个账户` : '正在载入'}</span><span className="overview-latest">最新快照</span></div>
+        <div className="overview-table-actions">
+          <label className="overview-search"><Search size={16} /><input type="search" aria-label="搜索账户" placeholder="搜索账户名称或标识" value={search} onChange={event => setSearch(event.target.value)} /></label>
+          <Button type="button" onClick={() => setFilterOpen(value => !value)} aria-expanded={filterOpen} aria-controls="overview-account-filter"><Filter size={14} />账户筛选{hidden.size > 0 && <span>({hidden.size})</span>}<ChevronDown size={13} /></Button>
+          <Button type="button" onClick={() => void refresh()} disabled={refreshing} aria-label="刷新数据"><RefreshCw size={14} className={refreshing ? 'animate-spin-slow' : ''} /><span className="hidden sm:inline">刷新</span></Button>
+        </div>
+      </div>
+      {filterOpen && <div id="overview-account-filter" className="overview-account-filter">
+        <div><strong>选择展示的账户</strong><button type="button" onClick={() => setHidden(new Set())}>全选</button><button type="button" onClick={() => setHidden(new Set(accounts.map(account => account.source_id)))}>全不选</button><button type="button" aria-label="收起账户筛选" onClick={() => setFilterOpen(false)}><X size={16} /></button></div>
+        <fieldset><legend className="sr-only">展示账户</legend>{accounts.map(account => <label key={account.source_id}><input type="checkbox" checked={!hidden.has(account.source_id)} onChange={() => setHidden(previous => { const next = new Set(previous); if (next.has(account.source_id)) next.delete(account.source_id); else next.add(account.source_id); return next })} />{account.account}</label>)}</fieldset>
+      </div>}
+      <p className="overview-scroll-hint">左右滑动表格，查看更多指标</p>
+      <div className="overview-table-scroll" tabIndex={0} role="region" aria-label="账户监控数据表，可横向滚动" aria-busy={refreshing}>
+        <table className="overview-table">
+          <thead><tr><th scope="col" className="overview-index">序号</th>{sortColumn('account', '账户')}<th scope="col">权益状态</th>{sortColumn('equity', '实时权益', 'USDT')}{sortColumn('pnl', '累计费后净值', '报价币')}{sortColumn('long', '多头持仓', '报价币')}{sortColumn('short', '空头持仓', '报价币')}{sortColumn('longLeverage', '多头杠杆', '估算倍数')}{sortColumn('shortLeverage', '空头杠杆', '估算倍数')}{sortColumn('net', '净敞口', '报价币')}<th scope="col">最近成交<small>上海时间</small></th><th scope="col">查看</th></tr></thead>
+          <tbody>
+            {!dashboard && !error ? Array.from({ length: 6 }, (_, index) => <tr key={index} className="overview-skeleton" aria-hidden="true">{Array.from({ length: 12 }, (_, col) => <td key={col}><span /></td>)}</tr>) : rows.map(({ account, report, metrics }, index) => <AccountRow key={account.source_id} account={account} report={report} metrics={metrics} index={index} />)}
+          </tbody>
+        </table>
+        {(!dashboard && error || dashboard && rows.length === 0) && <div className="overview-empty"><WalletCards size={32} /><h4>{error && !dashboard ? '暂时无法加载账户' : accounts.length === 0 ? '暂无可查看账户' : '没有匹配的账户'}</h4><p>{accounts.length === 0 ? '已授权账户将在这里展示。' : '调整筛选条件，或清除搜索后重试。'}</p>{filtered && <Button type="button" onClick={() => { setSearch(''); setVenue('all'); setStatus('all'); setHidden(new Set()) }}>清除筛选</Button>}</div>}
+      </div>
+      <div className="overview-table-footer"><span><Check size={13} />账户独立展示 · 持仓按最近成交价估值</span><span><Clock3 size={13} />最近获取 {displayTime(receivedAt)}<span className="overview-footer-divider">/</span>报表时间 {displayTime(dashboard ? dashboard.generated_at_us / 1000 : null)}</span></div>
+    </section>
+    <div className="overview-notes"><p>累计费后净值为快照起点以来的订单损益，已扣估算交易手续费，不含资金费。多空杠杆以持仓名义金额除以实时权益估算；混合 USDT / USDC 按等值估算，权益延迟或币本位账户不显示杠杆。</p><p>“—”表示数据暂不可用。当前提供最新快照；昨日权益、今日盈亏、回撤与保证金尚未接入。</p></div>
+  </AppShell>
 }
 
-function ActionLink({
-  href,
-  icon,
-  label,
-  primary = false,
-}: {
-  href: string
-  icon: React.ReactNode
-  label: string
-  primary?: boolean
-}) {
-  return (
-    <a
-      href={href}
-      className={cn(
-        'inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-        primary
-          ? 'bg-brand text-white hover:bg-brand-hover'
-          : 'border border-border bg-surface text-ink hover:bg-canvas',
-      )}
-    >
-      {icon}
-      {label}
-      {primary && <ArrowRight size={14} />}
-    </a>
-  )
+function Summary({ label, value, detail, tone = '' }: { label: string; value: number | null; detail: string; tone?: string }) {
+  return <div className={`overview-stat ${tone}`}><p>{label}</p><strong>{value ?? '—'}</strong><small>{detail}</small></div>
 }
 
-function ActionDisabled({ icon, label }: { icon: React.ReactNode; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-2 rounded-lg border border-border-soft px-3 py-2 text-sm text-subtle">
-      {icon}
-      {label}
-    </span>
-  )
+function AccountRow({ account, report, metrics, index }: { account: DashboardAccount; report?: SourceNavReport; metrics: ReturnType<typeof accountMetrics>; index: number }) {
+  const status = !account.enabled ? '未启用' : metrics.equity === null ? '等待数据' : account.live_equity_status === 'ok' ? '正常' : account.live_equity_status === 'stale' ? '延迟' : '等待数据'
+  const tone = status === '正常' ? 'good' : status === '延迟' ? 'warn' : 'neutral'
+  return <tr>
+    <td className="overview-index">{String(index + 1).padStart(2, '0')}</td>
+    <th scope="row" className="overview-account-cell"><div className="overview-account-name"><a href={routes.account(account.source_id)}>{account.account}</a><span className={`overview-venue ${account.venue === 'binance-coin-futures' ? 'coin' : ''}`}>{accountVenueLabel(account.venue)}</span></div><small title={account.source_id}>{account.source_id}</small></th>
+    <td><span className={`overview-status ${tone}`}><i />{status}</span></td>
+    <td className={account.live_equity_status === 'stale' ? 'overview-stale' : 'overview-equity'}>{number(metrics.equity)}</td>
+    <td className={metrics.pnl !== null ? metrics.pnl > 0 ? 'overview-positive' : metrics.pnl < 0 ? 'overview-negative' : '' : ''}>{metrics.pnl !== null && metrics.pnl > 0 ? '+' : ''}{number(metrics.pnl)}</td>
+    <td>{number(metrics.long)}</td><td>{number(metrics.short)}</td><td>{multiple(metrics.longLeverage)}</td><td>{multiple(metrics.shortLeverage)}</td><td>{number(metrics.net)}</td>
+    <td className="overview-time">{displayTime(report?.last_fill_ts_us == null ? null : report.last_fill_ts_us / 1000)}</td>
+    <td>{account.enabled && report ? <a className="overview-detail" href={routes.nav(account.source_id)} aria-label={`查看 ${account.account} 净值`}>净值 <ArrowRight size={13} /></a> : <span className="overview-muted">—</span>}</td>
+  </tr>
 }
