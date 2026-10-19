@@ -34,7 +34,7 @@ pub struct DailyEquity {
 }
 
 /// Each input is the fee-after, funding-selected account NAV at its timestamp.
-/// Preserve the NAV engine's samples and exact UTC ticks, never interpolate across fills.
+/// Preserve the NAV engine's samples and exact Shanghai ticks, never interpolate across fills.
 pub fn reconstruct(
     source_id: &str,
     mut anchor: EquityAnchor,
@@ -104,12 +104,12 @@ pub fn reconstruct(
     ensure!(
         rows.last()
             .is_some_and(|row| row.boundary_ts_ms == anchor.day_ms),
-        "missing current UTC baseline"
+        "missing current Shanghai baseline"
     );
     ensure!(
         rows.windows(2)
             .all(|w| w[0].boundary_ts_ms + DAY_MS == w[1].boundary_ts_ms),
-        "missing UTC NAV boundary"
+        "missing Shanghai NAV boundary"
     );
     Ok(rows)
 }
@@ -147,7 +147,7 @@ pub async fn load(pool: &PgPool, source_id: &str) -> Result<Vec<DailyEquity>> {
         .collect()
 }
 
-/// One complete account generation per UTC day. Failed transactions retain the old generation.
+/// One complete account generation per Shanghai day. Failed transactions retain the old generation.
 /// A per-source transaction lock also prevents duplicate daily commits from overlapping workers.
 pub async fn save(pool: &PgPool, rows: &[DailyEquity]) -> Result<bool> {
     let first = rows.first().context("empty daily equity batch")?;
@@ -199,7 +199,7 @@ mod tests {
     }
     #[test]
     fn reverse_nav_preserves_signed_daily_changes_and_anchor() {
-        let start = 20 * DAY_MS;
+        let start = day_start(20 * DAY_MS);
         let end = start + 2 * DAY_MS + 3_600_000;
         let nav = [
             (start, 0.0),
@@ -222,7 +222,7 @@ mod tests {
     }
     #[test]
     fn drawdown_includes_intraday_nav_and_requires_full_coverage() {
-        let start = 20 * DAY_MS;
+        let start = day_start(20 * DAY_MS);
         let end = start + 15 * DAY_MS;
         let mut nav = (0..=15)
             .map(|d| (start + d * DAY_MS, 0.0))
@@ -235,7 +235,7 @@ mod tests {
     }
     #[test]
     fn missing_boundary_invalid_nav_and_misaligned_anchor_are_rejected() {
-        let start = 20 * DAY_MS;
+        let start = day_start(20 * DAY_MS);
         let end = start + 2 * DAY_MS;
         assert!(
             reconstruct(

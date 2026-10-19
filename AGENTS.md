@@ -580,7 +580,8 @@ filtered account count, total equity, total daily profit and leverage/timeout
 alert counts. Sum only complete inputs; unknown facts and unconfigured alert
 thresholds stay unknown, never zero. Historical equity is sampled independently
 into Manager-owned RocksDB. Daily settlement, date selection and overview time
-display use UTC, with a UTC 00:00 boundary (operator instruction 2026-10-19).
+display use Asia/Shanghai, with a Shanghai 00:00 boundary (latest operator
+instruction 2026-10-19, replacing the earlier UTC boundary).
 By final operator instruction on 2026-10-19, reconstruct historical equity as
 live anchor equity minus the change in the existing account fee-after NAV,
 including actual funding when collection is enabled and estimates when disabled.
@@ -589,11 +590,11 @@ with actual funding, strategy allocation mode with estimated funding. The latter
 must include the existing strategy initial snapshot in the whole-account total;
 missing account-only snapshots must not silently turn that known opening position
 into zero. Record the allocation mode in the reconstruction anchor.
-Persist UTC daily results and their audit anchors in PostgreSQL
-`cta_account_equity_daily`; bootstrap the available recent 30 UTC boundaries,
-then successfully recompute once per UTC day per source, preserving older rows.
+Persist Shanghai daily results and their audit anchors in PostgreSQL
+`cta_account_equity_daily`; bootstrap the available recent 30 Shanghai boundaries,
+then successfully recompute once per Shanghai day per source, preserving older rows.
 Use explicit schema maintenance, never startup DDL. Daily profit and return use
-the persisted UTC opening equity and may refresh with live equity. Compute the
+the persisted Shanghai opening equity and may refresh with live equity. Compute the
 15-day drawdown from the same reconstructed NAV curve, retaining unknown for
 insufficient coverage. Keep reconstructed records separate from immutable
 exchange observations. Original alert thresholds

@@ -70,7 +70,7 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
     let day = day_start(unix_now_ms());
     anyhow::ensure!(
         observation.equity_at_ms >= day,
-        "waiting for equity after UTC midnight"
+        "waiting for equity after Shanghai midnight"
     );
     // Match the NAV page default: actual funding uses account mode; otherwise
     // include the existing strategy allocation snapshot in the account total.
@@ -85,11 +85,11 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
         .context("account NAV history unavailable")?;
     // The public funding cache and overview cover the most recent month. Existing
     // daily database records outside this moving rebuild window are retained.
-    let first_boundary_ms = ((earliest + DAY_MS * 1000 - 1) / (DAY_MS * 1000)) * DAY_MS;
+    let first_boundary_ms = first_settlement_boundary_ms(earliest);
     let start = first_boundary_ms.max(day - 29 * DAY_MS);
     anyhow::ensure!(
         start <= day,
-        "account has not crossed its first UTC settlement boundary"
+        "account has not crossed its first Shanghai settlement boundary"
     );
     let snapshot = rebuild_timeline_snapshot(
         state.clone(),
@@ -163,4 +163,35 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
         },
         &values,
     )
+}
+
+/// Never extend the available NAV backwards across an incomplete first local day.
+fn first_settlement_boundary_ms(earliest_us: i64) -> i64 {
+    let opening = day_start(earliest_us.div_euclid(1000));
+    if opening * 1000 < earliest_us {
+        opening + DAY_MS
+    } else {
+        opening
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shanghai_first_boundary_respects_microsecond_history_start() {
+        let midnight = crate::account_overview::selected_day("2026-10-19").unwrap();
+        assert_eq!(first_settlement_boundary_ms(midnight * 1000 - 1), midnight);
+        assert_eq!(first_settlement_boundary_ms(midnight * 1000), midnight);
+        assert_eq!(
+            first_settlement_boundary_ms(midnight * 1000 + 1),
+            midnight + DAY_MS
+        );
+        // UTC midnight is already 08:00 Shanghai: the next complete boundary is tomorrow.
+        assert_eq!(
+            first_settlement_boundary_ms((midnight + 8 * 3_600_000) * 1000),
+            midnight + DAY_MS
+        );
+    }
 }

@@ -20,6 +20,7 @@ mod margin;
 
 const CF: &str = "account_observations";
 const DAY_MS: i64 = 86_400_000;
+const SHANGHAI_OFFSET_MS: i64 = 8 * 3_600_000;
 const SAMPLE_FRESH_MS: i64 = 45_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -124,7 +125,7 @@ fn now_ms() -> i64 {
 }
 
 pub fn day_start(ts_ms: i64) -> i64 {
-    ts_ms.div_euclid(DAY_MS) * DAY_MS
+    (ts_ms + SHANGHAI_OFFSET_MS).div_euclid(DAY_MS) * DAY_MS - SHANGHAI_OFFSET_MS
 }
 
 pub fn selected_day(date: &str) -> Result<i64> {
@@ -137,11 +138,12 @@ pub fn selected_day(date: &str) -> Result<i64> {
         .and_hms_opt(0, 0, 0)
         .unwrap()
         .and_utc()
-        .timestamp_millis())
+        .timestamp_millis()
+        - SHANGHAI_OFFSET_MS)
 }
 
 fn date_label(ts_ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ts_ms)
+    chrono::DateTime::from_timestamp_millis(ts_ms + SHANGHAI_OFFSET_MS)
         .map(|date| date.format("%Y-%m-%d").to_string())
         .unwrap_or_default()
 }
@@ -771,13 +773,13 @@ rocksdb_path = "/unused"
         assert_eq!(row.max_drawdown_15d_percent, None);
     }
     #[test]
-    fn daily_baseline_does_not_reset_at_shanghai_midnight() {
+    fn daily_baseline_does_not_reset_at_utc_midnight() {
         let start = selected_day("2026-10-19").unwrap();
         let history = [
             observation(start - 1, 100.0),
-            observation(start + 16 * 3_600_000 - 1, 120.0),
+            observation(start + 8 * 3_600_000 - 1, 120.0),
         ];
-        let now = start + 17 * 3_600_000;
+        let now = start + 9 * 3_600_000;
         let current = observation(now, 130.0);
         let row = make_row(
             &source(),
@@ -790,9 +792,22 @@ rocksdb_path = "/unused"
         assert_eq!(row.yesterday_equity, Some(100.0));
         assert_eq!(row.today_profit, Some(30.0));
         assert_eq!(row.profit_percent, Some(30.0));
+        let next = start + DAY_MS;
+        let now = next + 3_600_000;
+        let current = observation(now, 130.0);
+        let row = make_row(
+            &source(),
+            Some(&current),
+            &[history[0].clone(), observation(next - 1, 120.0)],
+            now,
+            now,
+            &OverviewAlertSettings::default(),
+        );
+        assert_eq!(row.yesterday_equity, Some(120.0));
+        assert_eq!(row.today_profit, Some(10.0));
     }
     #[test]
-    fn daily_baseline_requires_a_fresh_sample_at_the_utc_boundary() {
+    fn daily_baseline_requires_a_fresh_sample_at_the_shanghai_boundary() {
         let start = selected_day("2026-10-19").unwrap();
         let now = start + 3_600_000;
         let current = observation(now, 130.0);
@@ -912,14 +927,16 @@ rocksdb_path = "/unused"
         );
     }
     #[test]
-    fn utc_date_boundaries_and_drawdown_order() {
+    fn shanghai_date_boundaries_and_drawdown_order() {
         let start = selected_day("2026-10-19").unwrap();
-        assert_eq!(start, 1_792_368_000_000);
+        assert_eq!(start, 1_792_339_200_000);
         assert_eq!(day_start(start - 1), start - DAY_MS);
         assert_eq!(day_start(start + DAY_MS - 1), start);
-        assert_eq!(day_start(start + 16 * 3_600_000), start);
+        assert_eq!(day_start(start + 8 * 3_600_000), start);
+        assert_eq!(day_start(start + DAY_MS), start + DAY_MS);
         assert_eq!(date_label(start - 1), "2026-10-18");
-        assert_eq!(date_label(start + 16 * 3_600_000), "2026-10-19");
+        assert_eq!(date_label(start + 8 * 3_600_000), "2026-10-19");
+        assert_eq!(date_label(start + DAY_MS), "2026-10-20");
         assert_eq!(date_label(start), "2026-10-19");
         assert!(selected_day("2026-2-1").is_err());
         assert_eq!(maximum_drawdown([100.0, 120.0, 90.0, 110.0]), Some(0.25));

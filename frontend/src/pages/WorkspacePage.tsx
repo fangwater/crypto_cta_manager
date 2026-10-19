@@ -14,7 +14,7 @@ import './workspace.css'
 type ValueKey = 'yesterday_equity' | 'equity' | 'today_profit' | 'profit_percent' | 'long_position' | 'short_position' | 'long_leverage' | 'short_leverage' | 'net_position' | 'max_drawdown_15d_percent' | 'margin' | 'margin_percent' | 'date_ms' | 'queried_at_ms'
 type SortKey = 'account' | ValueKey
 const columns: { key: ValueKey; label: string; digits?: number; reason: string }[] = [
-  { key: 'yesterday_equity', label: '昨日权益', reason: 'UTC 零点权益尚在按账户净值重算，或账户历史不足' },
+  { key: 'yesterday_equity', label: '昨日权益', reason: '上海时间零点权益尚在按账户净值重算，或账户历史不足' },
   { key: 'equity', label: '权益', reason: '尚未收到账户权益' },
   { key: 'today_profit', label: '今日盈利', reason: '缺少当日或昨日权益，无法计算今日盈利' },
   { key: 'profit_percent', label: '盈亏比例(%)', digits: 4, reason: '缺少权益记录，或昨日权益不大于零' },
@@ -29,7 +29,7 @@ const columns: { key: ValueKey; label: string; digits?: number; reason: string }
   { key: 'date_ms', label: '日期', reason: '尚未收到权益数据时间' },
   { key: 'queried_at_ms', label: '查询时间', reason: '尚未查询' },
 ]
-const dateTime = new Intl.DateTimeFormat('zh-CN', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+const dateTime = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
 const number = (value: number | null) => value === null ? '—' : money(value)
 const sideClass = (key: SortKey) => key === 'long_position' || key === 'long_leverage' ? 'overview-long' : key === 'short_position' || key === 'short_leverage' ? 'overview-short' : ''
 
@@ -65,7 +65,7 @@ export function WorkspacePage() {
     <section className="overview-toolbar" aria-label="总览筛选与统计">
       <div className="overview-filters">
         <label>账户类型<select aria-label="账户类型" value={venue} onChange={event => setVenue(event.target.value)}><option value="all">全部类型</option>{venues.map(value => <option key={value} value={value}>{accountVenueLabel(value)}</option>)}</select></label>
-        <label title="每日以 UTC 00:00 为结算边界，表内时间均为 UTC">日期（UTC）<select aria-label="日期" value={date} onChange={event => setDate(event.target.value)}><option value="">最新</option>{[...new Set([...(date ? [date] : []), ...(data?.dates ?? [])])].sort().reverse().map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+        <label title="每日以上海时间 00:00 为结算边界，表内时间均为上海时间">日期（上海时间）<select aria-label="日期" value={date} onChange={event => setDate(event.target.value)}><option value="">最新</option>{[...new Set([...(date ? [date] : []), ...(data?.dates ?? [])])].sort().reverse().map(value => <option key={value} value={value}>{value}</option>)}</select></label>
         <label className="overview-auto"><input type="checkbox" checked={autoRefresh} onChange={event => setAutoRefresh(event.target.checked)} />自动刷新<span>{refreshing ? '更新中' : autoRefresh ? `${countdown} 秒` : '已暂停'}</span></label>
       </div>
       <div className="overview-stats" aria-live="polite">
@@ -118,7 +118,7 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
       const side = sideClass(column.key)
       const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)
       const reconstructed = row.history_rebuilt_at_ms != null && ['yesterday_equity', 'today_profit', 'profit_percent', 'max_drawdown_15d_percent'].includes(column.key)
-      const title = value == null ? column.reason : time ? 'UTC' : reconstructed ? `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算；更新时间 ${dateTime.format(row.history_rebuilt_at_ms!)} UTC` : undefined
+      const title = value == null ? column.reason : time ? '上海时间' : reconstructed ? `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算；更新时间 ${dateTime.format(row.history_rebuilt_at_ms!)} 上海时间` : undefined
       return <td key={column.key} className={className} title={title}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}</td>
     })}
   </tr>

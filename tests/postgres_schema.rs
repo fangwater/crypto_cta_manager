@@ -632,13 +632,13 @@ async fn quote_fee_settings_roundtrip_preserve_defaults_and_explicit_clear() -> 
 
 #[tokio::test]
 #[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
-async fn daily_equity_is_atomic_source_scoped_and_runs_once_per_utc_day() -> Result<()> {
+async fn daily_equity_is_atomic_source_scoped_and_runs_once_per_shanghai_day() -> Result<()> {
     use crypto_cta_manager::account_overview::daily::{self, EquityAnchor};
     let database = TestDatabase::create().await?;
     postgres::initialize(&database.pool).await?;
     let snapshot = seed_business_data(&database.pool).await?;
     let day = 86_400_000;
-    let start = 20 * day;
+    let start = crypto_cta_manager::account_overview::day_start(20 * day);
     let build = |end, equity| {
         let nav = (0..=((end - start) / day))
             .map(|i| (start + i * day, i as f64 * 10.0))
@@ -703,5 +703,45 @@ async fn explicit_daily_equity_schema_preserves_existing_catalog_and_snapshots()
             .await?
             .is_empty()
     );
+    database.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn shanghai_settlement_maintenance_invalidates_utc_derived_rows_only() -> Result<()> {
+    let database = TestDatabase::create().await?;
+    postgres::initialize(&database.pool).await?;
+    let snapshot = seed_business_data(&database.pool).await?;
+    // Reproduce the previously deployed UTC table and a persisted UTC generation.
+    sqlx::raw_sql("ALTER TABLE cta_account_equity_daily DROP CONSTRAINT cta_account_equity_daily_boundary_ts_ms_check; ALTER TABLE cta_account_equity_daily ADD CONSTRAINT cta_account_equity_daily_boundary_ts_ms_check CHECK (boundary_ts_ms >= 0 AND boundary_ts_ms % 86400000 = 0); INSERT INTO cta_account_equity_daily(source_id,boundary_ts_ms,equity,nav_change_quote,anchor) VALUES('test-source',1792368000000,100,0,'{}')")
+        .execute(&database.pool).await?;
+    sqlx::raw_sql(include_str!("../scripts/apply_account_equity_shanghai.sql"))
+        .execute(&database.pool)
+        .await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM cta_account_equity_daily")
+        .fetch_one(&database.pool)
+        .await?;
+    assert_eq!(count, 0);
+    let insert = "INSERT INTO cta_account_equity_daily(source_id,boundary_ts_ms,equity,nav_change_quote,anchor) VALUES('test-source',$1,100,0,'{}')";
+    assert!(
+        sqlx::query(insert)
+            .bind(1_792_368_000_000_i64)
+            .execute(&database.pool)
+            .await
+            .is_err()
+    );
+    sqlx::query(insert)
+        .bind(1_792_339_200_000_i64)
+        .execute(&database.pool)
+        .await?;
+    // Re-running maintenance preserves already reconstructed Shanghai records.
+    sqlx::raw_sql(include_str!("../scripts/apply_account_equity_shanghai.sql"))
+        .execute(&database.pool)
+        .await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM cta_account_equity_daily")
+        .fetch_one(&database.pool)
+        .await?;
+    assert_eq!(count, 1);
+    assert_business_data(&database.pool, &snapshot).await?;
     database.remove().await
 }
