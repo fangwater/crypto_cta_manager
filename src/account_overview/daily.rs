@@ -15,6 +15,9 @@ pub struct EquityAnchor {
     pub coverage_start_ms: i64,
     pub nav_generated_at_us: i64,
     pub funding_mode: String,
+    /// False also describes records created before allocation provenance was saved.
+    #[serde(default)]
+    pub strategy_allocation: bool,
     pub computed_at_ms: i64,
     pub drawdown_15d_percent: Option<f64>,
 }
@@ -189,6 +192,7 @@ mod tests {
             coverage_start_ms: start,
             nav_generated_at_us: ts * 1000,
             funding_mode: "estimated".into(),
+            strategy_allocation: true,
             computed_at_ms: ts,
             drawdown_15d_percent: None,
         }

@@ -653,6 +653,7 @@ async fn daily_equity_is_atomic_source_scoped_and_runs_once_per_utc_day() -> Res
                 coverage_start_ms: start,
                 nav_generated_at_us: end * 1000,
                 funding_mode: "estimated".into(),
+                strategy_allocation: true,
                 computed_at_ms: end,
                 drawdown_15d_percent: None,
             },

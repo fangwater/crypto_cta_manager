@@ -1,4 +1,4 @@
-//! Background-only daily equity reconstruction using the account NAV API path.
+//! Background-only daily equity reconstruction using the NAV page's default account view.
 use super::*;
 use crate::account_overview::{daily, day_start};
 
@@ -72,8 +72,16 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
         observation.equity_at_ms >= day,
         "waiting for equity after UTC midnight"
     );
+    // Match the NAV page default: actual funding uses account mode; otherwise
+    // include the existing strategy allocation snapshot in the account total.
+    // Starting from zero when only a strategy snapshot exists can invert PnL.
+    let strategy_allocation = !state.funding.settings(&source.id).enabled;
     let earliest = timelines
-        .account_start_ts_us(&source.id, observation.equity_at_ms * 1000)
+        .start_ts_us(
+            &source.id,
+            observation.equity_at_ms * 1000,
+            strategy_allocation,
+        )
         .context("account NAV history unavailable")?;
     // The public funding cache and overview cover the most recent month. Existing
     // daily database records outside this moving rebuild window are retained.
@@ -93,12 +101,16 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
             max_points: Some(10_000),
             include_theoretical: Some(false),
         },
-        false,
+        strategy_allocation,
         BTreeSet::from([source.id.clone()]),
     )
     .await
     .map_err(|error| error.0)?
     .map_err(|_| anyhow::anyhow!("account NAV range is not ready"))?;
+    anyhow::ensure!(
+        strategy_allocation == !state.funding.settings(&source.id).enabled,
+        "funding selection changed during reconstruction"
+    );
     let (funding_mode, values) = if snapshot.funding.summary.enabled {
         anyhow::ensure!(
             snapshot.funding.summary.status == "ok",
@@ -145,6 +157,7 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
             coverage_start_ms: start,
             nav_generated_at_us: snapshot.generated_at_us,
             funding_mode: funding_mode.into(),
+            strategy_allocation,
             computed_at_ms: unix_now_ms(),
             drawdown_15d_percent: None,
         },

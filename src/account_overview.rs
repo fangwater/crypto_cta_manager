@@ -698,6 +698,7 @@ rocksdb_path = "/unused"
                 coverage_start_ms: start,
                 nav_generated_at_us: now * 1000,
                 funding_mode: "estimated".into(),
+                strategy_allocation: true,
                 computed_at_ms: now,
                 drawdown_15d_percent: None,
             },

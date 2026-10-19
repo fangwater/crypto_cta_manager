@@ -982,9 +982,16 @@ impl NavTimelineCache {
         )
     }
 
-    /// The same source-specific anchor used by an account timeline request.
-    pub fn account_start_ts_us(&self, source_id: &str, end_ts_us: i64) -> Option<i64> {
-        let source = self.sources.get(&(source_id.to_owned(), false))?;
+    /// Use the same source-specific anchor and allocation mode as the requested NAV.
+    pub fn start_ts_us(
+        &self,
+        source_id: &str,
+        end_ts_us: i64,
+        strategy_allocation: bool,
+    ) -> Option<i64> {
+        let source = self
+            .sources
+            .get(&(source_id.to_owned(), strategy_allocation))?;
         source
             .prepared
             .snapshot_ts_us
@@ -5942,6 +5949,47 @@ mod tests {
         let histories = store.refresh(&config).unwrap();
         assert_eq!(history_event_timestamps(&histories["trade01"]), [1]);
         assert!(histories["trade02"].events.is_empty());
+    }
+
+    #[test]
+    fn strategy_only_initial_position_preserves_nav_direction_and_history_start() {
+        let config = app_config(vec![source("trade01", Some(0.0))]);
+        let histories = NavSourceHistories::from([(
+            "trade01".into(),
+            NavSourceHistory {
+                events: vec![
+                    strategy_event_at(10, 10, "BTCUSDT", 1, 2, 100.0, 5.0, "alpha"),
+                    strategy_event_at(20, 20, "BTCUSDT", 1, 1, 110.0, 1.0, "alpha"),
+                ]
+                .into_iter()
+                .map(Arc::<NavEvent>::from)
+                .collect(),
+                ..Default::default()
+            },
+        )]);
+        let strategies = SourceStrategyPositionSnapshots::from([(
+            "trade01".into(),
+            strategy_position_snapshot("trade01", 1, vec![("alpha", "BTCUSDT", 10.0, 100.0)]),
+        )]);
+        let cache = NavTimelineCache::build(
+            config,
+            Arc::new(BTreeMap::new()),
+            Arc::new(strategies),
+            Arc::new(histories),
+        )
+        .unwrap();
+        assert_eq!(cache.start_ts_us("trade01", 20, true), Some(1));
+        assert_eq!(cache.start_ts_us("trade01", 20, false), Some(10));
+        assert_eq!(cache.start_ts_us("unknown", 20, true), None);
+        let request = timeline_request(10, 20, vec!["trade01".into()], Vec::new());
+        let with_opening = cache.rebuild(request.clone(), true).unwrap();
+        let from_zero = cache.rebuild(request, false).unwrap();
+        assert_close(with_opening.summary.nav_change_after_fee_quote, 50.0);
+        assert_close(from_zero.summary.nav_change_after_fee_quote, -50.0);
+        assert_eq!(
+            with_opening.summary.fill_count,
+            from_zero.summary.fill_count
+        );
     }
 
     #[test]

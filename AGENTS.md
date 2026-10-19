@@ -584,6 +584,11 @@ display use UTC, with a UTC 00:00 boundary (operator instruction 2026-10-19).
 By final operator instruction on 2026-10-19, reconstruct historical equity as
 live anchor equity minus the change in the existing account fee-after NAV,
 including actual funding when collection is enabled and estimates when disabled.
+Use the NAV page's default mode and its matching history start: account mode
+with actual funding, strategy allocation mode with estimated funding. The latter
+must include the existing strategy initial snapshot in the whole-account total;
+missing account-only snapshots must not silently turn that known opening position
+into zero. Record the allocation mode in the reconstruction anchor.
 Persist UTC daily results and their audit anchors in PostgreSQL
 `cta_account_equity_daily`; bootstrap the available recent 30 UTC boundaries,
 then successfully recompute once per UTC day per source, preserving older rows.
