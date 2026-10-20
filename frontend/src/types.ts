@@ -130,11 +130,8 @@ export interface OrderParameters {
 }
 
 export interface GridParameters {
-  open_buy_vol_scale: [number, number]
-  open_sell_vol_scale: [number, number]
-  open_offset_lower: number
-  vol_stale_ms: number
-  quote_stale_ms: number
+  spot: { orders_per_batch: number; maker_timeout_ms: number; max_maker_requotes: number }
+  futures: { orders_per_batch: number; maker_timeout_ms: number }
 }
 
 export interface PovParameters {

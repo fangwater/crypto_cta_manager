@@ -767,8 +767,10 @@ async fn grid_schema_maintenance_and_catalog_preserve_existing_orders() -> Resul
         .await?;
     let mut parameters = OrderParameters::default();
     parameters.algorithm = ExecutionAlgorithm::Grid;
-    parameters.grid.open_buy_vol_scale = [0.25, 0.75];
-    parameters.grid.open_offset_lower = 0.002;
+    parameters.grid.spot.orders_per_batch = 2;
+    parameters.grid.spot.maker_timeout_ms = 2000;
+    parameters.grid.futures.orders_per_batch = 5;
+    parameters.grid.futures.maker_timeout_ms = 9000;
     let request = SaveOrderStrategyRequest {
         strategy_name: "vol-grid".into(),
         order_parameters: parameters.clone(),
@@ -791,7 +793,7 @@ async fn grid_schema_maintenance_and_catalog_preserve_existing_orders() -> Resul
             .order_parameters,
         parameters
     );
-    parameters.grid.open_sell_vol_scale = [0.5, 1.5];
+    parameters.grid.futures.maker_timeout_ms = 12000;
     strategy_catalog::upsert_order_strategy(
         &db.pool,
         &SaveOrderStrategyRequest {
@@ -874,6 +876,63 @@ async fn order_template_ownership_preserves_shared_templates_and_creator() -> Re
             .await?
             .len(),
         2
+    );
+    db.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn grid_market_maintenance_preserves_execution_values_and_independent_edits() -> Result<()> {
+    use crypto_cta_manager::{
+        order_config::{ExecutionAlgorithm, OrderParameters},
+        strategy_catalog::{self, SaveOrderStrategyRequest},
+    };
+    let db = TestDatabase::create().await?;
+    postgres::initialize(&db.pool).await?;
+    let request = SaveOrderStrategyRequest {
+        strategy_name: "lgq_grid".into(),
+        order_parameters: OrderParameters {
+            algorithm: ExecutionAlgorithm::Grid,
+            single_order_usdt: 125.0,
+            orders_per_batch: 4,
+            maker_timeout_ms: 2500,
+            max_maker_requotes: 6,
+            ..Default::default()
+        },
+    };
+    strategy_catalog::upsert_order_strategy(&db.pool, &request, 10, None).await?;
+    sqlx::raw_sql("UPDATE cta_order_strategies SET grid = '{\"open_buy_vol_scale\":[0,1],\"open_sell_vol_scale\":[0,1],\"open_offset_lower\":0,\"vol_stale_ms\":15000,\"quote_stale_ms\":1000}'::jsonb")
+        .execute(&db.pool).await?;
+    sqlx::raw_sql(include_str!("../scripts/apply_grid_market_parameters.sql"))
+        .execute(&db.pool)
+        .await?;
+    let mut saved = strategy_catalog::list_order_strategies(&db.pool)
+        .await?
+        .remove(0);
+    assert_eq!(saved.updated_at_us, 10);
+    assert_eq!(saved.order_parameters.single_order_usdt, 125.0);
+    assert_eq!(saved.order_parameters.grid.spot.orders_per_batch, 4);
+    assert_eq!(saved.order_parameters.grid.futures.orders_per_batch, 4);
+    assert_eq!(saved.order_parameters.grid.spot.maker_timeout_ms, 2500);
+    assert_eq!(saved.order_parameters.grid.futures.maker_timeout_ms, 2500);
+    assert_eq!(saved.order_parameters.grid.spot.max_maker_requotes, 6);
+    saved.order_parameters.grid.spot.orders_per_batch = 2;
+    saved.order_parameters.grid.futures.orders_per_batch = 5;
+    saved.order_parameters.grid.futures.maker_timeout_ms = 9000;
+    let updated = SaveOrderStrategyRequest {
+        strategy_name: saved.strategy_name,
+        order_parameters: saved.order_parameters.clone(),
+    };
+    strategy_catalog::upsert_order_strategy(&db.pool, &updated, 20, None).await?;
+    sqlx::raw_sql(include_str!("../scripts/apply_grid_market_parameters.sql"))
+        .execute(&db.pool)
+        .await?;
+    assert_eq!(
+        strategy_catalog::list_order_strategies(&db.pool)
+            .await?
+            .remove(0)
+            .order_parameters,
+        saved.order_parameters
     );
     db.remove().await
 }

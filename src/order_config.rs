@@ -66,45 +66,66 @@ impl ExecutionFamily {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GridParameters {
-    pub open_buy_vol_scale: [f64; 2],
-    pub open_sell_vol_scale: [f64; 2],
-    pub open_offset_lower: f64,
-    pub vol_stale_ms: u32,
-    pub quote_stale_ms: u32,
+    pub spot: GridSpotParameters,
+    pub futures: GridFuturesParameters,
 }
 
-impl Default for GridParameters {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GridSpotParameters {
+    pub orders_per_batch: u32,
+    pub maker_timeout_ms: u32,
+    pub max_maker_requotes: u32,
+}
+
+impl Default for GridSpotParameters {
     fn default() -> Self {
         Self {
-            open_buy_vol_scale: [0.0, 1.0],
-            open_sell_vol_scale: [0.0, 1.0],
-            open_offset_lower: 0.0,
-            vol_stale_ms: 15_000,
-            quote_stale_ms: 1_000,
+            orders_per_batch: 3,
+            maker_timeout_ms: 1_000,
+            max_maker_requotes: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GridFuturesParameters {
+    pub orders_per_batch: u32,
+    pub maker_timeout_ms: u32,
+}
+
+impl Default for GridFuturesParameters {
+    fn default() -> Self {
+        Self {
+            orders_per_batch: 3,
+            maker_timeout_ms: 1_000,
         }
     }
 }
 
 impl GridParameters {
     pub fn validate(&self) -> std::result::Result<(), String> {
-        for (name, range) in [
-            ("open_buy_vol_scale", self.open_buy_vol_scale),
-            ("open_sell_vol_scale", self.open_sell_vol_scale),
+        for (market, count, timeout) in [
+            (
+                "spot",
+                self.spot.orders_per_batch,
+                self.spot.maker_timeout_ms,
+            ),
+            (
+                "futures",
+                self.futures.orders_per_batch,
+                self.futures.maker_timeout_ms,
+            ),
         ] {
-            if !range.iter().all(|v| v.is_finite()) || range[0] < 0.0 || range[1] < range[0] {
+            if count == 0 || timeout == 0 {
                 return Err(format!(
-                    "grid.{name} must be a finite ordered non-negative range"
+                    "grid.{market} split count and maker duration must be positive"
                 ));
             }
-        }
-        if !self.open_offset_lower.is_finite() || self.open_offset_lower < 0.0 {
-            return Err("grid.open_offset_lower must be finite and non-negative".into());
-        }
-        if self.vol_stale_ms == 0 || self.quote_stale_ms == 0 {
-            return Err("grid freshness limits must be positive".into());
         }
         Ok(())
     }
@@ -1210,8 +1231,10 @@ mod tests {
         let base = valid_parameters();
         let mut grid = base.clone();
         grid.algorithm = ExecutionAlgorithm::Grid;
-        grid.grid.open_buy_vol_scale = [0.2, 0.8];
-        grid.grid.open_offset_lower = 0.001;
+        grid.grid.spot.orders_per_batch = 2;
+        grid.grid.spot.maker_timeout_ms = 2000;
+        grid.grid.futures.orders_per_batch = 5;
+        grid.grid.futures.maker_timeout_ms = 9000;
         grid.validate().unwrap();
         assert_eq!(grid.algorithm.family(), ExecutionFamily::BatchExec);
         assert!(!grid.algorithm.is_experimental());
@@ -1221,18 +1244,30 @@ mod tests {
         let wire = runtime_order_parameters(&grid).unwrap();
         assert_eq!(wire["algorithm"], "grid");
         assert_eq!(
-            wire["grid"]["open_buy_vol_scale"],
-            serde_json::json!([0.2, 0.8])
+            wire["grid"]["spot"]["orders_per_batch"],
+            serde_json::json!(2)
         );
         assert_eq!(
             decode_runtime_order_parameters(wire, ExecutionFamily::BatchExec).unwrap(),
             grid
         );
-        grid.grid.open_sell_vol_scale = [0.5, 0.1];
+        grid.grid.futures.orders_per_batch = 0;
         assert!(grid.validate().is_err());
         grid.grid = GridParameters::default();
-        grid.grid.vol_stale_ms = 0;
+        grid.grid.spot.maker_timeout_ms = 0;
         assert!(grid.validate().is_err());
+        assert!(
+            serde_json::from_value::<GridParameters>(
+                serde_json::json!({"futures":{"max_maker_requotes":2}})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<GridParameters>(
+                serde_json::json!({"open_buy_vol_scale":[0,1]})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1353,7 +1388,7 @@ mod tests {
     #[test]
     fn grid_parameters_only_travel_with_the_grid_algorithm() {
         let mut defaults = valid_parameters();
-        defaults.grid.open_offset_lower = 0.002;
+        defaults.grid.futures.maker_timeout_ms = 2000;
         for algorithm in [
             ExecutionAlgorithm::Batch,
             ExecutionAlgorithm::Pov,
@@ -1367,7 +1402,7 @@ mod tests {
                     .is_none()
             );
             let mut selected = defaults.clone();
-            selected.grid.open_offset_lower = 0.003;
+            selected.grid.futures.maker_timeout_ms = 3000;
             assert!(
                 OrderParameterOverrides::from_templates(&defaults, &selected)
                     .grid
@@ -1386,8 +1421,8 @@ mod tests {
         }
         defaults.algorithm = ExecutionAlgorithm::Grid;
         assert_eq!(
-            runtime_order_parameters(&defaults).unwrap()["grid"]["open_offset_lower"],
-            0.002
+            runtime_order_parameters(&defaults).unwrap()["grid"]["futures"]["maker_timeout_ms"],
+            2000
         );
     }
 

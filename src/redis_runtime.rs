@@ -1617,7 +1617,7 @@ mod tests {
 
     #[test]
     fn redis_payload_omits_empty_overrides_and_preserves_symbol_overrides() {
-        let parameters = valid_parameters();
+        let mut parameters = valid_parameters();
         let targets = BTreeMap::new();
         let empty = BTreeMap::new();
         let without_overrides = serde_json::to_value(StoredBatchExecConfig {
@@ -1649,6 +1649,10 @@ mod tests {
                 ..Default::default()
             },
         )]);
+        parameters.algorithm = ExecutionAlgorithm::Grid;
+        parameters.grid.spot.orders_per_batch = 2;
+        parameters.grid.futures.orders_per_batch = 5;
+        parameters.grid.futures.maker_timeout_ms = 9000;
         let with_overrides = serde_json::to_value(StoredBatchExecConfig {
             algorithm: parameters.algorithm,
             pov: &parameters.pov,
@@ -1667,6 +1671,15 @@ mod tests {
             updated_at_us: 1,
         })
         .unwrap();
+        assert_eq!(with_overrides["grid"]["spot"]["orders_per_batch"], 2);
+        assert_eq!(with_overrides["grid"]["futures"]["orders_per_batch"], 5);
+        assert_eq!(with_overrides["grid"]["futures"]["maker_timeout_ms"], 9000);
+        assert!(
+            with_overrides["grid"]["futures"]
+                .get("max_maker_requotes")
+                .is_none()
+        );
+        assert!(with_overrides["grid"].get("open_buy_vol_scale").is_none());
         assert_eq!(
             with_overrides["symbol_overrides"]["BTCUSDT"]["single_order_usdt"],
             250.0

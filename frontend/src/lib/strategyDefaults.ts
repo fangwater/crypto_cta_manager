@@ -5,11 +5,8 @@ export const DEFAULT_ORDER: OrderParameters = {
   algorithm: 'batch',
   signal_execution_enabled: true,
   grid: {
-    open_buy_vol_scale: [0, 1],
-    open_sell_vol_scale: [0, 1],
-    open_offset_lower: 0,
-    vol_stale_ms: 15000,
-    quote_stale_ms: 1000,
+    spot: { orders_per_batch: 3, maker_timeout_ms: 1000, max_maker_requotes: 2 },
+    futures: { orders_per_batch: 3, maker_timeout_ms: 1000 },
   },
   pov: {
     participation_rate: 0.1,

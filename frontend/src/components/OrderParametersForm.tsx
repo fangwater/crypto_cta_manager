@@ -10,7 +10,7 @@ import { formatDuration, maxEstimatedExecutionMs } from '../lib/executionTiming'
 
 const algorithmOptions = [
   { value: 'batch', label: 'Batch' },
-  { value: 'grid', label: 'Grid · Vol 网格' },
+  { value: 'grid', label: 'Grid · 网格' },
   { value: 'ctaker', label: 'CTaker · 直接市价' },
   { value: 'pov', label: 'POV' },
   { value: 'chase', label: 'Chase' },
@@ -94,14 +94,13 @@ export function OrderParametersForm({
 
       {value.algorithm === 'ctaker' ? (
         <p className="text-sm text-muted">每次直接以 Taker 执行完整仓位差额。平仓按该策略的实际 qty，数量按交易所步长对齐。</p>
+      ) : value.algorithm === 'grid' ? (
+        <GridOrderFields value={value} onChange={onChange} />
       ) : value.algorithm !== 'chase' ? (
         <>
           <div className="grid gap-4 sm:grid-cols-2">
-            {ORDER_PARAMETER_FIELDS.filter((field) => value.algorithm !== 'grid' || !['max_batch', 'tick_spacing'].includes(field)).map((field) => {
-              const gridRounds = value.algorithm === 'grid' && field === 'max_maker_requotes'
-              const meta = gridRounds
-                ? { ...orderParameterMeta[field], label: '现货 Maker 挂单次数', min: '1', hint: '包含首次挂单；用尽后转 Taker。合约不受次数限制，持续撤挂。' }
-                : orderParameterMeta[field]
+            {ORDER_PARAMETER_FIELDS.map((field) => {
+              const meta = orderParameterMeta[field]
               return (
                 <Label key={field}>
                   {meta.label}
@@ -109,9 +108,9 @@ export function OrderParametersForm({
                     type="number"
                     step={meta.step}
                     min={meta.min}
-                    value={gridRounds ? value.max_maker_requotes + 1 : value[field]}
+                    value={value[field]}
                     onChange={(event) =>
-                      onChange({ ...value, [field]: Number(event.target.value) - (gridRounds ? 1 : 0) })
+                      onChange({ ...value, [field]: Number(event.target.value) })
                     }
                   />
                   <FieldHint>{meta.hint}</FieldHint>
@@ -119,7 +118,7 @@ export function OrderParametersForm({
               )
             })}
           </div>
-          {value.algorithm !== 'grid' && <Label>
+          <Label>
             {orderParameterMeta.maker_price_anchor.label}
             <Select
               value={value.maker_price_anchor}
@@ -145,7 +144,7 @@ export function OrderParametersForm({
                 )?.hint
               }
             </FieldHint>
-          </Label>}
+          </Label>
         </>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
@@ -165,38 +164,6 @@ export function OrderParametersForm({
             以实际 Chase 策略名汇总全部 symbol 的新单和改单；0 关闭对应窗口，并与账户 Exec 限频叠加。
           </FieldHint>
         </div>
-      )}
-
-      {value.algorithm === 'grid' && (
-        <section className="border-t border-border pt-5">
-          <div className="mb-4 text-sm font-semibold text-ink">Vol 网格参数</div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            {(['open_buy_vol_scale', 'open_sell_vol_scale'] as const).flatMap((field) =>
-              ([0, 1] as const).map((index) => (
-                <Label key={`${field}-${index}`}>
-                  {field === 'open_buy_vol_scale' ? '买侧' : '卖侧'} Vol {index === 0 ? '下限' : '上限'}倍数
-                  <Input type="number" step="0.1" min="0" value={value.grid[field][index]}
-                    onChange={(event) => {
-                      const range: [number, number] = [...value.grid[field]]
-                      range[index] = Number(event.target.value)
-                      onChange({ ...value, grid: { ...value.grid, [field]: range } })
-                    }} />
-                </Label>
-              )),
-            )}
-            {([
-              ['open_offset_lower', '最小内档偏移（比例）', '0.0001', '0'],
-              ['vol_stale_ms', 'Vol 有效期 (ms)', '1', '1'],
-              ['quote_stale_ms', '盘口有效期 (ms)', '1', '1'],
-            ] as const).map(([field, label, step, min]) => (
-              <Label key={field}>{label}
-                <Input type="number" step={step} min={min} value={value.grid[field]}
-                  onChange={(event) => onChange({ ...value, grid: { ...value.grid, [field]: Number(event.target.value) } })} />
-              </Label>
-            ))}
-          </div>
-          <FieldHint>仅限 RapidX 和已支持的原生统一账户。现货、合约共用单手量和拆单参数；各自使用同市场 Vol。Vol 未就绪或过期时撤单等待。合约不因次数转 Taker；启用 signal 时 ±1 仍主动走 Taker。</FieldHint>
-        </section>
       )}
 
       {value.algorithm === 'pov' && (
@@ -265,5 +232,43 @@ export function OrderParametersForm({
         </div>
       )}
     </div>
+  )
+}
+
+function GridOrderFields({ value, onChange }: { value: OrderParameters; onChange: (value: OrderParameters) => void }) {
+  return (
+    <>
+      <Label>
+        单手量（现货、合约共用）
+        <Input type="number" min="0.01" step="0.01" value={value.single_order_usdt}
+          onChange={(event) => onChange({ ...value, single_order_usdt: Number(event.target.value) })} />
+        <FieldHint>每笔订单的名义金额，单位为报价币。</FieldHint>
+      </Label>
+      {(['spot', 'futures'] as const).map((market) => {
+        const label = market === 'spot' ? '现货' : '合约'
+        const parameters = value.grid[market]
+        return (
+          <section key={market} className="border-t border-border pt-5">
+            <h3 className="mb-4 text-sm font-semibold text-ink">{label}参数</h3>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Label>{label}拆单数
+                <Input type="number" min="1" step="1" value={parameters.orders_per_batch}
+                  onChange={(event) => onChange({ ...value, grid: { ...value.grid, [market]: { ...parameters, orders_per_batch: Number(event.target.value) } } })} />
+              </Label>
+              <Label>{label} Maker 挂单时长 (ms)
+                <Input type="number" min="1" step="1" value={parameters.maker_timeout_ms}
+                  onChange={(event) => onChange({ ...value, grid: { ...value.grid, [market]: { ...parameters, maker_timeout_ms: Number(event.target.value) } } })} />
+              </Label>
+              {market === 'spot' && <Label>现货 Maker 挂单次数
+                <Input type="number" min="1" step="1" value={value.grid.spot.max_maker_requotes + 1}
+                  onChange={(event) => onChange({ ...value, grid: { ...value.grid, spot: { ...value.grid.spot, max_maker_requotes: Number(event.target.value) - 1 } } })} />
+                <FieldHint>包含首次挂单；次数用尽后，剩余量合并为 Taker。</FieldHint>
+              </Label>}
+            </div>
+            {market === 'futures' && <FieldHint>合约对冲 Maker 挂单次数不限，按合约挂单时长持续撤挂。</FieldHint>}
+          </section>
+        )
+      })}
+    </>
   )
 }
