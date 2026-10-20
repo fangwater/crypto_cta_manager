@@ -212,6 +212,8 @@ export interface SavedPositionStrategy extends PositionStrategy {
 }
 
 export interface CatalogOrderStrategy {
+  owner?: string | null
+  can_configure?: boolean
   strategy_name: string
   order_parameters: OrderParameters
   updated_at_us: number

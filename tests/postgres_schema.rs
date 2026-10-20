@@ -281,6 +281,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
                 order_parameters: OrderParameters::default(),
             },
             1,
+            None,
         )
         .await?;
     }
@@ -757,7 +758,7 @@ async fn grid_schema_maintenance_and_catalog_preserve_existing_orders() -> Resul
         strategy_name: "old-batch".into(),
         order_parameters: OrderParameters::default(),
     };
-    strategy_catalog::upsert_order_strategy(&db.pool, &old, 1).await?;
+    strategy_catalog::upsert_order_strategy(&db.pool, &old, 1, None).await?;
     // Recreate the pre-Grid schema, then exercise the explicit maintenance SQL.
     sqlx::raw_sql("ALTER TABLE cta_order_strategies DROP COLUMN grid; ALTER TABLE cta_order_strategies DROP CONSTRAINT cta_order_strategies_algorithm_check; ALTER TABLE cta_order_strategies ADD CONSTRAINT cta_order_strategies_algorithm_check CHECK (algorithm IN ('batch','pov','chase','ctaker'))")
         .execute(&db.pool).await?;
@@ -772,7 +773,7 @@ async fn grid_schema_maintenance_and_catalog_preserve_existing_orders() -> Resul
         strategy_name: "vol-grid".into(),
         order_parameters: parameters.clone(),
     };
-    strategy_catalog::upsert_order_strategy(&db.pool, &request, 2).await?;
+    strategy_catalog::upsert_order_strategy(&db.pool, &request, 2, None).await?;
     let stored = strategy_catalog::list_order_strategies(&db.pool).await?;
     assert_eq!(
         stored
@@ -798,6 +799,7 @@ async fn grid_schema_maintenance_and_catalog_preserve_existing_orders() -> Resul
             order_parameters: parameters.clone(),
         },
         3,
+        None,
     )
     .await?;
     let stored = strategy_catalog::list_order_strategies(&db.pool).await?;
@@ -808,6 +810,70 @@ async fn grid_schema_maintenance_and_catalog_preserve_existing_orders() -> Resul
             .unwrap()
             .order_parameters,
         parameters
+    );
+    db.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn order_template_ownership_preserves_shared_templates_and_creator() -> Result<()> {
+    use crypto_cta_manager::{
+        auth::AuthUser,
+        order_config::OrderParameters,
+        strategy_catalog::{self, SaveOrderStrategyRequest},
+    };
+    let db = TestDatabase::create().await?;
+    postgres::initialize(&db.pool).await?;
+    let request = SaveOrderStrategyRequest {
+        strategy_name: "shared".into(),
+        order_parameters: OrderParameters::default(),
+    };
+    strategy_catalog::upsert_order_strategy(&db.pool, &request, 1, None).await?;
+    sqlx::raw_sql("ALTER TABLE cta_order_strategies DROP COLUMN created_by_user_id")
+        .execute(&db.pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../scripts/apply_order_strategy_ownership.sql"
+    ))
+    .execute(&db.pool)
+    .await?;
+    let user_id: i64 = sqlx::query_scalar(
+        "INSERT INTO cta_users(username,password_hash) VALUES('lgq','test') RETURNING user_id",
+    )
+    .fetch_one(&db.pool)
+    .await?;
+    let owner = AuthUser {
+        user_id,
+        username: "lgq".into(),
+        role: "user".into(),
+    };
+    let other = AuthUser {
+        user_id: user_id + 1,
+        username: "other".into(),
+        role: "user".into(),
+    };
+    let admin = AuthUser {
+        role: "admin".into(),
+        ..other.clone()
+    };
+    let owned = SaveOrderStrategyRequest {
+        strategy_name: "lgq_grid".into(),
+        ..request
+    };
+    strategy_catalog::upsert_order_strategy(&db.pool, &owned, 2, Some(user_id)).await?;
+    // Subsequent saves never transfer or clear the creator.
+    strategy_catalog::upsert_order_strategy(&db.pool, &owned, 3, None).await?;
+    let owners = strategy_catalog::list_order_strategy_owners(&db.pool).await?;
+    assert_eq!(owners["lgq_grid"].username.as_deref(), Some("lgq"));
+    assert!(owners["lgq_grid"].can_configure(&owner));
+    assert!(owners["lgq_grid"].can_configure(&admin));
+    assert!(!owners["lgq_grid"].can_configure(&other));
+    assert!(owners["shared"].can_configure(&other));
+    assert_eq!(
+        strategy_catalog::list_order_strategies(&db.pool)
+            .await?
+            .len(),
+        2
     );
     db.remove().await
 }

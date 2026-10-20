@@ -103,6 +103,7 @@ CREATE TABLE cta_account_equity_daily (
 
 CREATE TABLE cta_order_strategies (
     strategy_name text NOT NULL,
+    created_by_user_id bigint,
     single_order_usdt double precision NOT NULL,
     orders_per_batch integer NOT NULL,
     maker_price_anchor text NOT NULL,
@@ -280,6 +281,9 @@ CREATE TABLE cta_users (
     CONSTRAINT cta_users_pkey PRIMARY KEY (user_id),
     CONSTRAINT cta_users_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'user'::text])))
 );
+
+ALTER TABLE cta_order_strategies ADD CONSTRAINT cta_order_strategies_created_by_user_id_fkey
+    FOREIGN KEY (created_by_user_id) REFERENCES cta_users(user_id);
 
 ALTER TABLE cta_account_strategy_bindings ADD CONSTRAINT cta_account_strategy_bindings_order_strategy_name_fkey
     FOREIGN KEY (order_strategy_name) REFERENCES cta_order_strategies(strategy_name);

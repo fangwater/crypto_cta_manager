@@ -887,6 +887,36 @@ pub async fn delete_position_strategy(pool: &PgPool, strategy_name: &str) -> Res
     Ok(result.rows_affected() > 0)
 }
 
+#[derive(Debug, Clone)]
+pub struct OrderStrategyOwner {
+    pub user_id: Option<i64>,
+    pub username: Option<String>,
+}
+
+impl OrderStrategyOwner {
+    pub fn can_configure(&self, user: &crate::auth::AuthUser) -> bool {
+        user.is_admin() || self.user_id.is_none_or(|owner| owner == user.user_id)
+    }
+}
+
+pub async fn list_order_strategy_owners(
+    pool: &PgPool,
+) -> Result<BTreeMap<String, OrderStrategyOwner>> {
+    let rows = sqlx::query("SELECT o.strategy_name, o.created_by_user_id, u.username FROM cta_order_strategies o LEFT JOIN cta_users u ON u.user_id = o.created_by_user_id")
+        .fetch_all(pool).await.context("failed to load order strategy owners")?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("strategy_name")?,
+                OrderStrategyOwner {
+                    user_id: row.try_get("created_by_user_id")?,
+                    username: row.try_get("username")?,
+                },
+            ))
+        })
+        .collect()
+}
+
 pub async fn list_order_strategies(pool: &PgPool) -> Result<Vec<OrderStrategy>> {
     let rows = sqlx::query(
         r#"
@@ -908,6 +938,7 @@ pub async fn upsert_order_strategy(
     pool: &PgPool,
     request: &SaveOrderStrategyRequest,
     updated_at_us: i64,
+    created_by_user_id: Option<i64>,
 ) -> Result<OrderStrategy> {
     validate_strategy_name(&request.strategy_name).map_err(|error| anyhow::anyhow!(error))?;
     request
@@ -924,9 +955,9 @@ pub async fn upsert_order_strategy(
             strategy_name, algorithm, pov, chase, signal_execution_enabled,
             single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
             tick_spacing, batch_interval_ms, maker_timeout_ms, max_maker_requotes,
-            target_tolerance_usdt, updated_at_us, grid
+            target_tolerance_usdt, updated_at_us, grid, created_by_user_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         ON CONFLICT (strategy_name) DO UPDATE SET
             algorithm = EXCLUDED.algorithm,
             pov = EXCLUDED.pov,
@@ -961,6 +992,7 @@ pub async fn upsert_order_strategy(
     .bind(request.order_parameters.target_tolerance_usdt)
     .bind(updated_at_us)
     .bind(serde_json::to_value(&request.order_parameters.grid)?)
+    .bind(created_by_user_id)
     .execute(&mut *tx)
     .await
     .with_context(|| format!("failed to save order strategy {}", request.strategy_name))?;

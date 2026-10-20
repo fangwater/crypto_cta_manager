@@ -388,7 +388,10 @@ impl OrderParameterOverrides {
         Self {
             algorithm: (selected.algorithm != defaults.algorithm).then_some(selected.algorithm),
             pov: (selected.pov != defaults.pov).then(|| selected.pov.clone()),
-            grid: (selected.grid != defaults.grid).then(|| selected.grid.clone()),
+            grid: (selected.algorithm == ExecutionAlgorithm::Grid
+                && (defaults.algorithm != ExecutionAlgorithm::Grid
+                    || selected.grid != defaults.grid))
+                .then(|| selected.grid.clone()),
             single_order_usdt: (selected.single_order_usdt != defaults.single_order_usdt)
                 .then_some(selected.single_order_usdt),
             orders_per_batch: (selected.orders_per_batch != defaults.orders_per_batch)
@@ -1046,20 +1049,26 @@ fn runtime_order_parameters(
     parameters: &OrderParameters,
 ) -> std::result::Result<serde_json::Value, ExecConfigError> {
     match parameters.algorithm.family() {
-        ExecutionFamily::BatchExec => Ok(serde_json::json!({
-            "algorithm": parameters.algorithm,
-            "pov": parameters.pov,
-            "grid": parameters.grid,
-            "single_order_usdt": parameters.single_order_usdt,
-            "orders_per_batch": parameters.orders_per_batch,
-            "max_batch": parameters.max_batch,
-            "maker_price_anchor": parameters.maker_price_anchor,
-            "tick_spacing": parameters.tick_spacing,
-            "batch_interval_ms": parameters.batch_interval_ms,
-            "maker_timeout_ms": parameters.maker_timeout_ms,
-            "max_maker_requotes": parameters.max_maker_requotes,
-            "target_tolerance_usdt": parameters.target_tolerance_usdt,
-        })),
+        ExecutionFamily::BatchExec => {
+            let mut value = serde_json::json!({
+                "algorithm": parameters.algorithm,
+                "pov": parameters.pov,
+                "single_order_usdt": parameters.single_order_usdt,
+                "orders_per_batch": parameters.orders_per_batch,
+                "max_batch": parameters.max_batch,
+                "maker_price_anchor": parameters.maker_price_anchor,
+                "tick_spacing": parameters.tick_spacing,
+                "batch_interval_ms": parameters.batch_interval_ms,
+                "maker_timeout_ms": parameters.maker_timeout_ms,
+                "max_maker_requotes": parameters.max_maker_requotes,
+                "target_tolerance_usdt": parameters.target_tolerance_usdt,
+            });
+            if parameters.algorithm == ExecutionAlgorithm::Grid {
+                value["grid"] =
+                    serde_json::to_value(&parameters.grid).map_err(ExecConfigError::transport)?;
+            }
+            Ok(value)
+        }
         ExecutionFamily::ChaseExec => {
             serde_json::to_value(&parameters.chase).map_err(ExecConfigError::transport)
         }
@@ -1339,6 +1348,47 @@ mod tests {
             }
         });
         assert!(serde_json::from_value::<SaveOrderParametersRequest>(payload).is_err());
+    }
+
+    #[test]
+    fn grid_parameters_only_travel_with_the_grid_algorithm() {
+        let mut defaults = valid_parameters();
+        defaults.grid.open_offset_lower = 0.002;
+        for algorithm in [
+            ExecutionAlgorithm::Batch,
+            ExecutionAlgorithm::Pov,
+            ExecutionAlgorithm::Ctaker,
+        ] {
+            defaults.algorithm = algorithm;
+            assert!(
+                runtime_order_parameters(&defaults)
+                    .unwrap()
+                    .get("grid")
+                    .is_none()
+            );
+            let mut selected = defaults.clone();
+            selected.grid.open_offset_lower = 0.003;
+            assert!(
+                OrderParameterOverrides::from_templates(&defaults, &selected)
+                    .grid
+                    .is_none()
+            );
+            // A Grid override carries its entire settings even if they match
+            // unused Grid fields of the non-Grid base template.
+            selected.algorithm = ExecutionAlgorithm::Grid;
+            selected.grid = defaults.grid.clone();
+            let overrides = OrderParameterOverrides::from_templates(&defaults, &selected);
+            assert_eq!(overrides.grid, Some(selected.grid.clone()));
+            let wire = runtime_order_parameters(&defaults).unwrap();
+            let runtime_defaults =
+                decode_runtime_order_parameters(wire, ExecutionFamily::BatchExec).unwrap();
+            assert_eq!(overrides.apply_to(&runtime_defaults).grid, selected.grid);
+        }
+        defaults.algorithm = ExecutionAlgorithm::Grid;
+        assert_eq!(
+            runtime_order_parameters(&defaults).unwrap()["grid"]["open_offset_lower"],
+            0.002
+        );
     }
 
     #[test]

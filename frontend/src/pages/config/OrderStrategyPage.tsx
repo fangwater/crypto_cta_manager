@@ -1,6 +1,7 @@
 import { LoaderCircle, Save, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { deleteOrderStrategy, saveOrderStrategy } from '../../api'
+import { useAuth } from '../../components/AuthGate'
 import { ConfigShell } from '../../components/ConfigShell'
 import { OrderParametersForm } from '../../components/OrderParametersForm'
 import { StrategyPicker } from '../../components/StrategyPicker'
@@ -14,10 +15,14 @@ import { DEFAULT_ORDER_STRATEGY_NAME, orderParameterMeta } from '../../lib/order
 import { emptyOrder } from '../../lib/strategyDefaults'
 
 export function OrderStrategyPage() {
+  const { user } = useAuth()
   const { orders, loading, error, reloadCatalog } = useStrategyCatalog()
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [selectedOrder, setSelectedOrder] = useState(emptyOrder)
   const [experimentalToken, setExperimentalToken] = useState('')
+  const originalOrder = orders.find((entry) => entry.strategy_name === selectedOrder.strategy_name)
+  const canEdit = !originalOrder || originalOrder.can_configure === true
+  const owner = originalOrder ? (originalOrder.owner ?? '共享模板') : user?.username
   const isExperimental = ['pov', 'chase'].includes(selectedOrder.order_parameters.algorithm)
 
   return (
@@ -69,7 +74,7 @@ export function OrderStrategyPage() {
           <Card>
             <CardHeader>
               <CardTitle>编辑模板</CardTitle>
-              <CardDescription>每个字段下方都有说明。这不是 CTA 仓位策略名，而是执行层参数集合。</CardDescription>
+              <CardDescription>归属：{owner}。{canEdit ? '可配置执行参数。' : '仅归属用户和管理员可修改。'}</CardDescription>
             </CardHeader>
             <CardContent>
               <Alert tone="warning" className="mb-4">
@@ -79,6 +84,7 @@ export function OrderStrategyPage() {
                 className="grid gap-4"
                 onSubmit={(event) => {
                   event.preventDefault()
+                  if (!canEdit) return
                   void withWrite(async () => {
                     const saved = await saveOrderStrategy(selectedOrder, experimentalToken)
                     setSelectedOrder(saved)
@@ -98,32 +104,34 @@ export function OrderStrategyPage() {
                   />
                   <FieldHint>例如 {DEFAULT_ORDER_STRATEGY_NAME}，不要复用 CTA 仓位策略名。</FieldHint>
                 </Label>
-                <OrderParametersForm
-                  value={selectedOrder.order_parameters}
-                  onChange={(order_parameters) => setSelectedOrder({ ...selectedOrder, order_parameters })}
-                />
-                {isExperimental && (
-                  <Label>
-                    实验算法 Token
-                    <Input
-                      type="password"
-                      autoComplete="off"
-                      value={experimentalToken}
-                      onChange={(event) => setExperimentalToken(event.target.value)}
-                      required
-                    />
-                    <FieldHint>保存 POV 或 Chase 参数时必须提供。</FieldHint>
-                  </Label>
-                )}
+                <fieldset disabled={!canEdit || saving} className="grid gap-4">
+                  <OrderParametersForm
+                    value={selectedOrder.order_parameters}
+                    onChange={(order_parameters) => setSelectedOrder({ ...selectedOrder, order_parameters })}
+                  />
+                  {isExperimental && (
+                    <Label>
+                      实验算法 Token
+                      <Input
+                        type="password"
+                        autoComplete="off"
+                        value={experimentalToken}
+                        onChange={(event) => setExperimentalToken(event.target.value)}
+                        required
+                      />
+                      <FieldHint>保存 POV 或 Chase 参数时必须提供。</FieldHint>
+                    </Label>
+                  )}
+                </fieldset>
                 <div className="flex flex-wrap gap-2">
-                  <Button type="submit" variant="primary" disabled={saving}>
+                  <Button type="submit" variant="primary" disabled={saving || !canEdit}>
                     <Save size={15} /> 保存
                   </Button>
                   {selectedOrder.strategy_name && (
                     <Button
                       type="button"
                       variant="danger"
-                      disabled={saving}
+                      disabled={saving || !canEdit}
                       onClick={() =>
                         void withWrite(async () => {
                           await deleteOrderStrategy(selectedOrder.strategy_name)

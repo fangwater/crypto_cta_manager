@@ -39,7 +39,8 @@ struct StoredExecAlgorithmSwitch {
 struct StoredBatchExecConfig<'a> {
     algorithm: ExecutionAlgorithm,
     pov: &'a PovParameters,
-    grid: &'a GridParameters,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grid: Option<&'a GridParameters>,
     single_order_usdt: f64,
     orders_per_batch: u32,
     max_batch: u32,
@@ -402,7 +403,7 @@ impl RedisRuntime {
                         ExecutionFamily::BatchExec => serde_json::to_string(&StoredBatchExecConfig {
                             algorithm: order_parameters.algorithm,
                             pov: &order_parameters.pov,
-                            grid: &order_parameters.grid,
+                            grid: (order_parameters.algorithm == ExecutionAlgorithm::Grid).then_some(&order_parameters.grid),
                             single_order_usdt: order_parameters.single_order_usdt,
                             orders_per_batch: order_parameters.orders_per_batch,
                             max_batch: order_parameters.max_batch,
@@ -1622,7 +1623,7 @@ mod tests {
         let without_overrides = serde_json::to_value(StoredBatchExecConfig {
             algorithm: parameters.algorithm,
             pov: &parameters.pov,
-            grid: &parameters.grid,
+            grid: (parameters.algorithm == ExecutionAlgorithm::Grid).then_some(&parameters.grid),
             single_order_usdt: parameters.single_order_usdt,
             orders_per_batch: parameters.orders_per_batch,
             max_batch: parameters.max_batch,
@@ -1637,6 +1638,7 @@ mod tests {
             updated_at_us: 1,
         })
         .unwrap();
+        assert!(without_overrides.get("grid").is_none());
         assert!(without_overrides.get("symbol_overrides").is_none());
         assert!(without_overrides.get("signal_execution_enabled").is_none());
 
@@ -1650,7 +1652,7 @@ mod tests {
         let with_overrides = serde_json::to_value(StoredBatchExecConfig {
             algorithm: parameters.algorithm,
             pov: &parameters.pov,
-            grid: &parameters.grid,
+            grid: (parameters.algorithm == ExecutionAlgorithm::Grid).then_some(&parameters.grid),
             single_order_usdt: parameters.single_order_usdt,
             orders_per_batch: parameters.orders_per_batch,
             max_batch: parameters.max_batch,

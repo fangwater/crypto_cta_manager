@@ -2716,28 +2716,80 @@ async fn delete_fallback_token(
     }
 }
 
-async fn list_order_strategies(State(state): State<WebState>) -> Result<Response, ApiError> {
+#[derive(Serialize)]
+struct OrderStrategyCatalogView {
+    #[serde(flatten)]
+    strategy: strategy_catalog::OrderStrategy,
+    owner: Option<String>,
+    can_configure: bool,
+}
+
+async fn list_order_strategies(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Response, ApiError> {
     let strategies = strategy_catalog::list_order_strategies(&state.pool).await?;
-    Ok((NO_STORE, Json(strategies)).into_response())
+    let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
+    let views: Vec<_> = strategies
+        .into_iter()
+        .map(|strategy| {
+            let owner = owners.get(&strategy.strategy_name);
+            OrderStrategyCatalogView {
+                owner: owner.and_then(|entry| entry.username.clone()),
+                can_configure: owner.is_some_and(|entry| entry.can_configure(&user)),
+                strategy,
+            }
+        })
+        .collect();
+    Ok((NO_STORE, Json(views)).into_response())
 }
 
 async fn save_order_strategy(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     headers: HeaderMap,
     Json(request): Json<SaveOrderStrategyRequest>,
 ) -> Result<Response, ApiError> {
     let _configuration_guard = state.configuration_lock.lock().await;
+    let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
+    if owners
+        .get(&request.strategy_name)
+        .is_some_and(|entry| !entry.can_configure(&user))
+    {
+        return Ok(forbidden(
+            "only the order strategy owner or an admin may edit this template",
+        ));
+    }
     if let Err(message) = require_experimental_algorithm_token(
         &headers,
         request.order_parameters.algorithm.is_experimental(),
     ) {
         return Ok(forbidden(message));
     }
-    match strategy_catalog::upsert_order_strategy(&state.pool, &request, unix_now_us()).await {
+    match strategy_catalog::upsert_order_strategy(
+        &state.pool,
+        &request,
+        unix_now_us(),
+        Some(user.user_id),
+    )
+    .await
+    {
         Ok(saved) => {
             virtual_accounts::enqueue_order_followers(&state.pool, &request.strategy_name).await?;
             state.configuration_notify.notify_one();
-            Ok((NO_STORE, Json(saved)).into_response())
+            let owner = match owners.get(&request.strategy_name) {
+                Some(entry) => entry.username.clone(),
+                None => Some(user.username),
+            };
+            Ok((
+                NO_STORE,
+                Json(OrderStrategyCatalogView {
+                    strategy: saved,
+                    owner,
+                    can_configure: true,
+                }),
+            )
+                .into_response())
         }
         Err(error) => Ok(catalog_error(error)),
     }
@@ -2745,9 +2797,19 @@ async fn save_order_strategy(
 
 async fn delete_order_strategy(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
     let _configuration_guard = state.configuration_lock.lock().await;
+    let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
+    if owners
+        .get(&name)
+        .is_some_and(|entry| !entry.can_configure(&user))
+    {
+        return Ok(forbidden(
+            "only the order strategy owner or an admin may delete this template",
+        ));
+    }
     match strategy_catalog::delete_order_strategy(&state.pool, &name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("order strategy was not found")),
