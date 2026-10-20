@@ -893,7 +893,7 @@ pub async fn list_order_strategies(pool: &PgPool) -> Result<Vec<OrderStrategy>> 
         SELECT strategy_name, algorithm, pov, chase, signal_execution_enabled,
                single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
                tick_spacing, batch_interval_ms, maker_timeout_ms, max_maker_requotes,
-               target_tolerance_usdt, updated_at_us
+               target_tolerance_usdt, updated_at_us, grid
         FROM cta_order_strategies
         ORDER BY strategy_name
         "#,
@@ -924,12 +924,13 @@ pub async fn upsert_order_strategy(
             strategy_name, algorithm, pov, chase, signal_execution_enabled,
             single_order_usdt, orders_per_batch, max_batch, maker_price_anchor,
             tick_spacing, batch_interval_ms, maker_timeout_ms, max_maker_requotes,
-            target_tolerance_usdt, updated_at_us
+            target_tolerance_usdt, updated_at_us, grid
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         ON CONFLICT (strategy_name) DO UPDATE SET
             algorithm = EXCLUDED.algorithm,
             pov = EXCLUDED.pov,
+            grid = EXCLUDED.grid,
             chase = EXCLUDED.chase,
             signal_execution_enabled = EXCLUDED.signal_execution_enabled,
             single_order_usdt = EXCLUDED.single_order_usdt,
@@ -959,6 +960,7 @@ pub async fn upsert_order_strategy(
     .bind(i32::try_from(request.order_parameters.max_maker_requotes)?)
     .bind(request.order_parameters.target_tolerance_usdt)
     .bind(updated_at_us)
+    .bind(serde_json::to_value(&request.order_parameters.grid)?)
     .execute(&mut *tx)
     .await
     .with_context(|| format!("failed to save order strategy {}", request.strategy_name))?;
@@ -1220,6 +1222,7 @@ pub async fn load_binding_parts(
             o.strategy_name AS order_name,
             o.algorithm,
             o.pov,
+            o.grid,
             o.chase,
             o.signal_execution_enabled,
             o.single_order_usdt,
@@ -1349,6 +1352,7 @@ fn decode_order_parameters(row: &sqlx::postgres::PgRow) -> Result<OrderParameter
     let parameters = OrderParameters {
         algorithm,
         pov: serde_json::from_value(row.try_get("pov")?)?,
+        grid: serde_json::from_value(row.try_get("grid")?)?,
         chase: serde_json::from_value(row.try_get("chase")?)?,
         signal_execution_enabled: row.try_get("signal_execution_enabled")?,
         single_order_usdt: row.try_get("single_order_usdt")?,
@@ -1371,6 +1375,7 @@ fn parse_execution_algorithm(value: &str) -> Result<ExecutionAlgorithm> {
         "pov" => Ok(ExecutionAlgorithm::Pov),
         "chase" => Ok(ExecutionAlgorithm::Chase),
         "ctaker" => Ok(ExecutionAlgorithm::Ctaker),
+        "grid" => Ok(ExecutionAlgorithm::Grid),
         value => bail!("unknown order strategy algorithm: {value}"),
     }
 }

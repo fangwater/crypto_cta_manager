@@ -5,6 +5,24 @@ import {
 import type { OrderParameters } from '../types'
 
 export function OrderParametersView({ value }: { value: OrderParameters }) {
+  if (value.algorithm === 'grid') {
+    return <ParameterRows rows={[
+      { label: '算法', value: 'Grid · Vol 网格' },
+      { label: 'Signal 执行', value: value.signal_execution_enabled ? '启用' : '关闭' },
+      { label: '单手量', value: `${value.single_order_usdt} 报价币` },
+      { label: '拆单数', value: String(value.orders_per_batch) },
+      { label: '批次间隔', value: `${value.batch_interval_ms} ms` },
+      { label: 'Maker 挂单时长', value: `${value.maker_timeout_ms} ms` },
+      { label: '现货 Maker 挂单次数', value: String(value.max_maker_requotes + 1) },
+      { label: '合约 Maker 挂单次数', value: '不限' },
+      { label: '目标容差', value: `${value.target_tolerance_usdt} 报价币` },
+      { label: '买侧 Vol 倍数', value: value.grid.open_buy_vol_scale.join(' → ') },
+      { label: '卖侧 Vol 倍数', value: value.grid.open_sell_vol_scale.join(' → ') },
+      { label: '最小内档偏移', value: String(value.grid.open_offset_lower) },
+      { label: 'Vol 有效期', value: `${value.grid.vol_stale_ms} ms` },
+      { label: '盘口有效期', value: `${value.grid.quote_stale_ms} ms` },
+    ]} />
+  }
   if (value.algorithm === 'ctaker') {
     return <ParameterRows rows={[{ label: '算法', value: 'CTaker' }, { label: '执行', value: '全部仓位差额直接市价；按原 qty 平仓' }]} />
   }

@@ -2241,6 +2241,13 @@ async fn save_order_parameters(
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
+    if let Err(error) = crate::exec_routing::validate_grid_account(
+        source,
+        &request.order_parameters,
+        &BTreeMap::new(),
+    ) {
+        return Ok(bad_request(error.to_string()));
+    }
     let exec_config_url = source.exec_config_url.as_deref().unwrap_or_default();
     let previous = match state
         .exec_config
@@ -3523,10 +3530,19 @@ async fn save_account_binding(
     let existing =
         strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.binding_name)
             .await?;
-    let selected_order = strategy_catalog::list_order_strategies(&state.pool)
-        .await?
-        .into_iter()
+    let order_strategies = strategy_catalog::list_order_strategies(&state.pool).await?;
+    let selected_order = order_strategies
+        .iter()
         .find(|strategy| strategy.strategy_name == request.order_strategy_name);
+    if let Some(order) = selected_order {
+        if let Err(error) = crate::exec_routing::validate_grid_account(
+            source,
+            &order.order_parameters,
+            &BTreeMap::new(),
+        ) {
+            return Ok(bad_request(error.to_string()));
+        }
+    }
     let enables_experimental = experimental_binding_change_requires_token(
         selected_order
             .as_ref()
@@ -3568,6 +3584,25 @@ async fn save_account_binding(
         .into_iter()
         .find(|position| position.strategy_name == request.position_strategy_name)
     {
+        if let Some(order) = selected_order {
+            let overrides = position
+                .symbol_order_strategy_overrides
+                .iter()
+                .filter_map(|(symbol, name)| {
+                    order_strategies
+                        .iter()
+                        .find(|candidate| &candidate.strategy_name == name)
+                        .map(|candidate| (symbol.clone(), candidate.order_parameters.clone()))
+                })
+                .collect();
+            if let Err(error) = crate::exec_routing::validate_grid_account(
+                source,
+                &order.order_parameters,
+                &overrides,
+            ) {
+                return Ok(bad_request(error.to_string()));
+            }
+        }
         if request.shares > 0.0
             && let Err(error) = state
                 .redis_runtime

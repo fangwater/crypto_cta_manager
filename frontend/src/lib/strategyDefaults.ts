@@ -4,6 +4,13 @@ import { DEFAULT_ORDER_STRATEGY_NAME } from './orderParametersMeta'
 export const DEFAULT_ORDER: OrderParameters = {
   algorithm: 'batch',
   signal_execution_enabled: true,
+  grid: {
+    open_buy_vol_scale: [0, 1],
+    open_sell_vol_scale: [0, 1],
+    open_offset_lower: 0,
+    vol_stale_ms: 15000,
+    quote_stale_ms: 1000,
+  },
   pov: {
     participation_rate: 0.1,
     max_batch_usdt: 300,

@@ -745,3 +745,69 @@ async fn shanghai_settlement_maintenance_invalidates_utc_derived_rows_only() -> 
     assert_business_data(&database.pool, &snapshot).await?;
     database.remove().await
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn grid_schema_maintenance_and_catalog_preserve_existing_orders() -> Result<()> {
+    use crypto_cta_manager::order_config::{ExecutionAlgorithm, OrderParameters};
+    use crypto_cta_manager::strategy_catalog::{self, SaveOrderStrategyRequest};
+    let db = TestDatabase::create().await?;
+    postgres::initialize(&db.pool).await?;
+    let old = SaveOrderStrategyRequest {
+        strategy_name: "old-batch".into(),
+        order_parameters: OrderParameters::default(),
+    };
+    strategy_catalog::upsert_order_strategy(&db.pool, &old, 1).await?;
+    // Recreate the pre-Grid schema, then exercise the explicit maintenance SQL.
+    sqlx::raw_sql("ALTER TABLE cta_order_strategies DROP COLUMN grid; ALTER TABLE cta_order_strategies DROP CONSTRAINT cta_order_strategies_algorithm_check; ALTER TABLE cta_order_strategies ADD CONSTRAINT cta_order_strategies_algorithm_check CHECK (algorithm IN ('batch','pov','chase','ctaker'))")
+        .execute(&db.pool).await?;
+    sqlx::raw_sql(include_str!("../scripts/apply_grid_order_schema.sql"))
+        .execute(&db.pool)
+        .await?;
+    let mut parameters = OrderParameters::default();
+    parameters.algorithm = ExecutionAlgorithm::Grid;
+    parameters.grid.open_buy_vol_scale = [0.25, 0.75];
+    parameters.grid.open_offset_lower = 0.002;
+    let request = SaveOrderStrategyRequest {
+        strategy_name: "vol-grid".into(),
+        order_parameters: parameters.clone(),
+    };
+    strategy_catalog::upsert_order_strategy(&db.pool, &request, 2).await?;
+    let stored = strategy_catalog::list_order_strategies(&db.pool).await?;
+    assert_eq!(
+        stored
+            .iter()
+            .find(|item| item.strategy_name == "old-batch")
+            .unwrap()
+            .order_parameters,
+        old.order_parameters
+    );
+    assert_eq!(
+        stored
+            .iter()
+            .find(|item| item.strategy_name == "vol-grid")
+            .unwrap()
+            .order_parameters,
+        parameters
+    );
+    parameters.grid.open_sell_vol_scale = [0.5, 1.5];
+    strategy_catalog::upsert_order_strategy(
+        &db.pool,
+        &SaveOrderStrategyRequest {
+            strategy_name: "vol-grid".into(),
+            order_parameters: parameters.clone(),
+        },
+        3,
+    )
+    .await?;
+    let stored = strategy_catalog::list_order_strategies(&db.pool).await?;
+    assert_eq!(
+        stored
+            .iter()
+            .find(|item| item.strategy_name == "vol-grid")
+            .unwrap()
+            .order_parameters,
+        parameters
+    );
+    db.remove().await
+}

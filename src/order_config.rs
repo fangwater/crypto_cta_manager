@@ -14,6 +14,7 @@ pub enum ExecutionAlgorithm {
     Pov,
     Chase,
     Ctaker,
+    Grid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +30,7 @@ impl ExecutionAlgorithm {
 
     pub const fn family(self) -> ExecutionFamily {
         match self {
-            Self::Batch | Self::Pov | Self::Ctaker => ExecutionFamily::BatchExec,
+            Self::Batch | Self::Pov | Self::Ctaker | Self::Grid => ExecutionFamily::BatchExec,
             Self::Chase => ExecutionFamily::ChaseExec,
         }
     }
@@ -40,6 +41,7 @@ impl ExecutionAlgorithm {
             Self::Pov => "pov",
             Self::Chase => "chase",
             Self::Ctaker => "ctaker",
+            Self::Grid => "grid",
         }
     }
 }
@@ -61,6 +63,50 @@ impl ExecutionFamily {
             Self::BatchExec => Self::ChaseExec,
             Self::ChaseExec => Self::BatchExec,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GridParameters {
+    pub open_buy_vol_scale: [f64; 2],
+    pub open_sell_vol_scale: [f64; 2],
+    pub open_offset_lower: f64,
+    pub vol_stale_ms: u32,
+    pub quote_stale_ms: u32,
+}
+
+impl Default for GridParameters {
+    fn default() -> Self {
+        Self {
+            open_buy_vol_scale: [0.0, 1.0],
+            open_sell_vol_scale: [0.0, 1.0],
+            open_offset_lower: 0.0,
+            vol_stale_ms: 15_000,
+            quote_stale_ms: 1_000,
+        }
+    }
+}
+
+impl GridParameters {
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        for (name, range) in [
+            ("open_buy_vol_scale", self.open_buy_vol_scale),
+            ("open_sell_vol_scale", self.open_sell_vol_scale),
+        ] {
+            if !range.iter().all(|v| v.is_finite()) || range[0] < 0.0 || range[1] < range[0] {
+                return Err(format!(
+                    "grid.{name} must be a finite ordered non-negative range"
+                ));
+            }
+        }
+        if !self.open_offset_lower.is_finite() || self.open_offset_lower < 0.0 {
+            return Err("grid.open_offset_lower must be finite and non-negative".into());
+        }
+        if self.vol_stale_ms == 0 || self.quote_stale_ms == 0 {
+            return Err("grid freshness limits must be positive".into());
+        }
+        Ok(())
     }
 }
 
@@ -195,6 +241,8 @@ pub struct OrderParameters {
     #[serde(default)]
     pub pov: PovParameters,
     #[serde(default)]
+    pub grid: GridParameters,
+    #[serde(default)]
     pub chase: ChaseParameters,
     #[serde(default = "default_signal_execution_enabled")]
     pub signal_execution_enabled: bool,
@@ -215,6 +263,7 @@ impl Default for OrderParameters {
         Self {
             algorithm: ExecutionAlgorithm::Batch,
             pov: PovParameters::default(),
+            grid: GridParameters::default(),
             chase: ChaseParameters::default(),
             signal_execution_enabled: default_signal_execution_enabled(),
             single_order_usdt: 100.0,
@@ -259,6 +308,7 @@ impl OrderParameters {
         if self.algorithm == ExecutionAlgorithm::Pov {
             self.pov.validate()?;
         }
+        self.grid.validate()?;
         Ok(())
     }
 }
@@ -270,6 +320,8 @@ pub struct OrderParameterOverrides {
     pub algorithm: Option<ExecutionAlgorithm>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pov: Option<PovParameters>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grid: Option<GridParameters>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub single_order_usdt: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,6 +346,7 @@ impl OrderParameterOverrides {
     pub fn is_empty(&self) -> bool {
         self.algorithm.is_none()
             && self.pov.is_none()
+            && self.grid.is_none()
             && self.single_order_usdt.is_none()
             && self.orders_per_batch.is_none()
             && self.max_batch.is_none()
@@ -310,6 +363,7 @@ impl OrderParameterOverrides {
             signal_execution_enabled: defaults.signal_execution_enabled,
             algorithm: self.algorithm.unwrap_or(defaults.algorithm),
             pov: self.pov.clone().unwrap_or_else(|| defaults.pov.clone()),
+            grid: self.grid.clone().unwrap_or_else(|| defaults.grid.clone()),
             chase: defaults.chase.clone(),
             single_order_usdt: self.single_order_usdt.unwrap_or(defaults.single_order_usdt),
             orders_per_batch: self.orders_per_batch.unwrap_or(defaults.orders_per_batch),
@@ -334,6 +388,7 @@ impl OrderParameterOverrides {
         Self {
             algorithm: (selected.algorithm != defaults.algorithm).then_some(selected.algorithm),
             pov: (selected.pov != defaults.pov).then(|| selected.pov.clone()),
+            grid: (selected.grid != defaults.grid).then(|| selected.grid.clone()),
             single_order_usdt: (selected.single_order_usdt != defaults.single_order_usdt)
                 .then_some(selected.single_order_usdt),
             orders_per_batch: (selected.orders_per_batch != defaults.orders_per_batch)
@@ -649,6 +704,8 @@ struct ExecConfigPayload {
     algorithm: ExecutionAlgorithm,
     #[serde(default)]
     pov: PovParameters,
+    #[serde(default)]
+    grid: GridParameters,
     single_order_usdt: f64,
     orders_per_batch: u32,
     #[serde(default = "default_max_batch")]
@@ -708,6 +765,7 @@ impl ExecConfigPayload {
         OrderParameters {
             algorithm: self.algorithm,
             pov: self.pov.clone(),
+            grid: self.grid.clone(),
             chase: ChaseParameters::default(),
             signal_execution_enabled: default_signal_execution_enabled(),
             single_order_usdt: self.single_order_usdt,
@@ -991,6 +1049,7 @@ fn runtime_order_parameters(
         ExecutionFamily::BatchExec => Ok(serde_json::json!({
             "algorithm": parameters.algorithm,
             "pov": parameters.pov,
+            "grid": parameters.grid,
             "single_order_usdt": parameters.single_order_usdt,
             "orders_per_batch": parameters.orders_per_batch,
             "max_batch": parameters.max_batch,
@@ -1135,6 +1194,36 @@ mod tests {
         assert!(binance_coin_wire_symbol("BTCUSDC").is_err());
         assert!(normalize_exec_symbol("BTC_USDT").is_err());
         assert!(normalize_exec_symbol("BTCUSD_PERP_EXTRA").is_err());
+    }
+
+    #[test]
+    fn grid_catalog_overrides_and_runtime_roundtrip() {
+        let base = valid_parameters();
+        let mut grid = base.clone();
+        grid.algorithm = ExecutionAlgorithm::Grid;
+        grid.grid.open_buy_vol_scale = [0.2, 0.8];
+        grid.grid.open_offset_lower = 0.001;
+        grid.validate().unwrap();
+        assert_eq!(grid.algorithm.family(), ExecutionFamily::BatchExec);
+        assert!(!grid.algorithm.is_experimental());
+        let overrides = OrderParameterOverrides::from_templates(&base, &grid);
+        overrides.validate().unwrap();
+        assert_eq!(overrides.apply_to(&base), grid);
+        let wire = runtime_order_parameters(&grid).unwrap();
+        assert_eq!(wire["algorithm"], "grid");
+        assert_eq!(
+            wire["grid"]["open_buy_vol_scale"],
+            serde_json::json!([0.2, 0.8])
+        );
+        assert_eq!(
+            decode_runtime_order_parameters(wire, ExecutionFamily::BatchExec).unwrap(),
+            grid
+        );
+        grid.grid.open_sell_vol_scale = [0.5, 0.1];
+        assert!(grid.validate().is_err());
+        grid.grid = GridParameters::default();
+        grid.grid.vol_stale_ms = 0;
+        assert!(grid.validate().is_err());
     }
 
     #[test]

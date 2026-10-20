@@ -2,6 +2,37 @@ use anyhow::{Result, bail};
 
 use crate::config::SourceConfig;
 
+pub(crate) fn validate_grid_account(
+    source: &SourceConfig,
+    parameters: &crate::order_config::OrderParameters,
+    overrides: &std::collections::BTreeMap<String, crate::order_config::OrderParameters>,
+) -> Result<()> {
+    use crate::order_config::ExecutionAlgorithm;
+    if !std::iter::once(parameters)
+        .chain(overrides.values())
+        .any(|p| p.algorithm == ExecutionAlgorithm::Grid)
+    {
+        return Ok(());
+    }
+    let values = crate::market_rules::source_values(source)?;
+    let backend = crate::market_rules::execution_backend(&source.venue, &values)?;
+    let allowed = match (backend, source.venue.as_str()) {
+        ("ltp", "binance-futures" | "okex-futures") => true,
+        ("native", "binance-futures" | "binance-coin-futures") => values
+            .get("BINANCE_ACCOUNT_MODE")
+            .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("UNIFIED")),
+        // Native Exec startup verifies these supported unified account modes.
+        ("native", "okex-futures" | "bybit-futures" | "bitget-futures") => true,
+        _ => false,
+    };
+    anyhow::ensure!(
+        allowed,
+        "Grid requires RapidX or a supported native unified account: {}",
+        source.id
+    );
+    Ok(())
+}
+
 /// RapidX linear Execs own a perpetual market and its USDT cash market.
 pub(crate) fn markets(source: &SourceConfig) -> Result<Vec<String>> {
     let values = crate::market_rules::source_values(source)?;
@@ -89,6 +120,42 @@ pub(crate) fn archived_symbol_market(configured_venue: &str, symbol: &str) -> Re
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn grid_binding_gate_covers_base_and_symbol_algorithms() {
+        use crate::order_config::{ExecutionAlgorithm, OrderParameters};
+        let dir = tempfile::tempdir().unwrap();
+        let env = dir.path().join("fixture.env");
+        let mut source: SourceConfig = toml::from_str(&format!("id='fixture'\naccount='fixture'\nvenue='binance-futures'\nrocksdb_path='{}'\nenv_path='{}'\n", dir.path().join("data/persist_manager").display(), env.display())).unwrap();
+        let base = OrderParameters::default();
+        let grid = OrderParameters {
+            algorithm: ExecutionAlgorithm::Grid,
+            ..base.clone()
+        };
+        let overrides = BTreeMap::from([("BTCUSDT".into(), grid.clone())]);
+        for body in [
+            "TRADE_ENGINE_EXEC_BACKEND=native\n",
+            "BINANCE_ACCOUNT_MODE=STANDARD\n",
+        ] {
+            std::fs::write(&env, body).unwrap();
+            assert!(validate_grid_account(&source, &base, &BTreeMap::new()).is_ok());
+            assert!(validate_grid_account(&source, &grid, &BTreeMap::new()).is_err());
+            assert!(validate_grid_account(&source, &base, &overrides).is_err());
+        }
+        for body in [
+            "BINANCE_ACCOUNT_MODE=UNIFIED\n",
+            "TRADE_ENGINE_EXEC_BACKEND_MAP='binance=rapidx'\n",
+        ] {
+            std::fs::write(&env, body).unwrap();
+            assert!(validate_grid_account(&source, &grid, &BTreeMap::new()).is_ok());
+            assert!(validate_grid_account(&source, &base, &overrides).is_ok());
+        }
+        std::fs::write(&env, "TRADE_ENGINE_EXEC_BACKEND=native\n").unwrap();
+        for venue in ["okex-futures", "bybit-futures", "bitget-futures"] {
+            source.venue = venue.into();
+            assert!(validate_grid_account(&source, &grid, &BTreeMap::new()).is_ok());
+        }
+    }
 
     #[test]
     fn native_uta_sources_keep_usdt_market_and_account_namespaces() {

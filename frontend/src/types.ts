@@ -113,8 +113,9 @@ export interface DashboardAccount {
 }
 
 export interface OrderParameters {
-  algorithm: 'batch' | 'pov' | 'chase' | 'ctaker'
+  algorithm: 'batch' | 'pov' | 'chase' | 'ctaker' | 'grid'
   pov: PovParameters
+  grid: GridParameters
   chase: ChaseParameters
   signal_execution_enabled: boolean
   single_order_usdt: number
@@ -126,6 +127,14 @@ export interface OrderParameters {
   maker_timeout_ms: number
   max_maker_requotes: number
   target_tolerance_usdt: number
+}
+
+export interface GridParameters {
+  open_buy_vol_scale: [number, number]
+  open_sell_vol_scale: [number, number]
+  open_offset_lower: number
+  vol_stale_ms: number
+  quote_stale_ms: number
 }
 
 export interface PovParameters {
@@ -152,8 +161,9 @@ export interface ChaseParameters {
 }
 
 export interface OrderParameterOverrides {
-  algorithm?: 'batch' | 'pov' | 'ctaker'
+  algorithm?: 'batch' | 'pov' | 'ctaker' | 'grid'
   pov?: PovParameters
+  grid?: GridParameters
   single_order_usdt?: number
   orders_per_batch?: number
   max_batch?: number

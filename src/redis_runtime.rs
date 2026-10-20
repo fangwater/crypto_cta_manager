@@ -12,9 +12,9 @@ use tracing::{info, warn};
 use crate::config::{RedisSettings, SourceConfig};
 use crate::market_rules::MarketRulesSnapshot;
 use crate::order_config::{
-    ChaseParameterOverrides, ExecutionAlgorithm, ExecutionFamily, OrderParameterOverrides,
-    OrderParameters, OrderStrategyView, PovParameters, TargetPosition, validate_exec_symbol,
-    validate_strategy_name,
+    ChaseParameterOverrides, ExecutionAlgorithm, ExecutionFamily, GridParameters,
+    OrderParameterOverrides, OrderParameters, OrderStrategyView, PovParameters, TargetPosition,
+    validate_exec_symbol, validate_strategy_name,
 };
 
 const POSITION_CLOSE_STRATEGY_NAME: &str = "SYSTEM_POSITION_CLOSE";
@@ -39,6 +39,7 @@ struct StoredExecAlgorithmSwitch {
 struct StoredBatchExecConfig<'a> {
     algorithm: ExecutionAlgorithm,
     pov: &'a PovParameters,
+    grid: &'a GridParameters,
     single_order_usdt: f64,
     orders_per_batch: u32,
     max_batch: u32,
@@ -227,6 +228,11 @@ impl RedisRuntime {
         crate::order_config::validate_runtime_strategy_name(strategy_name)
             .map_err(anyhow::Error::msg)?;
         order_parameters.validate().map_err(anyhow::Error::msg)?;
+        crate::exec_routing::validate_grid_account(
+            source,
+            order_parameters,
+            symbol_order_parameters,
+        )?;
         for (symbol, selected) in symbol_order_parameters {
             validate_exec_symbol(symbol).map_err(anyhow::Error::msg)?;
             selected.validate().map_err(anyhow::Error::msg)?;
@@ -396,6 +402,7 @@ impl RedisRuntime {
                         ExecutionFamily::BatchExec => serde_json::to_string(&StoredBatchExecConfig {
                             algorithm: order_parameters.algorithm,
                             pov: &order_parameters.pov,
+                            grid: &order_parameters.grid,
                             single_order_usdt: order_parameters.single_order_usdt,
                             orders_per_batch: order_parameters.orders_per_batch,
                             max_batch: order_parameters.max_batch,
@@ -1615,6 +1622,7 @@ mod tests {
         let without_overrides = serde_json::to_value(StoredBatchExecConfig {
             algorithm: parameters.algorithm,
             pov: &parameters.pov,
+            grid: &parameters.grid,
             single_order_usdt: parameters.single_order_usdt,
             orders_per_batch: parameters.orders_per_batch,
             max_batch: parameters.max_batch,
@@ -1642,6 +1650,7 @@ mod tests {
         let with_overrides = serde_json::to_value(StoredBatchExecConfig {
             algorithm: parameters.algorithm,
             pov: &parameters.pov,
+            grid: &parameters.grid,
             single_order_usdt: parameters.single_order_usdt,
             orders_per_batch: parameters.orders_per_batch,
             max_batch: parameters.max_batch,
