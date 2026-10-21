@@ -11,11 +11,13 @@ export function OrderParametersView({ value }: { value: OrderParameters }) {
       { label: 'Signal 执行', value: value.signal_execution_enabled ? '启用' : '关闭' },
       { label: '单手量（现货、合约共用）', value: `${value.single_order_usdt} 报价币` },
       { label: '现货拆单数', value: String(value.grid.spot.orders_per_batch) },
+      { label: '现货 Vol 倍数', value: String(value.grid.spot.vol_multiplier) },
       { label: '现货 Maker 挂单时长', value: `${value.grid.spot.maker_timeout_ms} ms` },
-      { label: '现货 Maker 挂单次数', value: String(value.grid.spot.max_maker_requotes + 1) },
+      { label: '现货 Maker 挂单轮数', value: value.grid.spot.max_maker_requotes === null ? '无限轮' : `${value.grid.spot.max_maker_requotes + 1} 轮后转 Taker` },
       { label: '合约拆单数', value: String(value.grid.futures.orders_per_batch) },
+      { label: '合约 Vol 倍数', value: String(value.grid.futures.vol_multiplier) },
       { label: '合约 Maker 挂单时长', value: `${value.grid.futures.maker_timeout_ms} ms` },
-      { label: '合约 Maker 挂单次数', value: '不限' },
+      { label: '合约 Maker 挂单轮数', value: value.grid.futures.max_maker_requotes === null ? '无限轮' : `${value.grid.futures.max_maker_requotes + 1} 轮后转 Taker` },
     ]} />
   }
   if (value.algorithm === 'ctaker') {

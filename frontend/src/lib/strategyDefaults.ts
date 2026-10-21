@@ -5,8 +5,8 @@ export const DEFAULT_ORDER: OrderParameters = {
   algorithm: 'batch',
   signal_execution_enabled: true,
   grid: {
-    spot: { orders_per_batch: 3, maker_timeout_ms: 1000, max_maker_requotes: 2 },
-    futures: { orders_per_batch: 3, maker_timeout_ms: 1000 },
+    spot: { orders_per_batch: 3, maker_timeout_ms: 1000, vol_multiplier: 1, max_maker_requotes: 2 },
+    futures: { orders_per_batch: 3, maker_timeout_ms: 1000, vol_multiplier: 1, max_maker_requotes: null },
   },
   pov: {
     participation_rate: 0.1,

@@ -130,8 +130,16 @@ export interface OrderParameters {
 }
 
 export interface GridParameters {
-  spot: { orders_per_batch: number; maker_timeout_ms: number; max_maker_requotes: number }
-  futures: { orders_per_batch: number; maker_timeout_ms: number }
+  spot: GridMarketParameters
+  futures: GridMarketParameters
+}
+
+export interface GridMarketParameters {
+  orders_per_batch: number
+  maker_timeout_ms: number
+  vol_multiplier: number
+  /** Additional rounds after the first; null means unlimited. */
+  max_maker_requotes: number | null
 }
 
 export interface PovParameters {

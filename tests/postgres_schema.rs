@@ -915,10 +915,17 @@ async fn grid_market_maintenance_preserves_execution_values_and_independent_edit
     assert_eq!(saved.order_parameters.grid.futures.orders_per_batch, 4);
     assert_eq!(saved.order_parameters.grid.spot.maker_timeout_ms, 2500);
     assert_eq!(saved.order_parameters.grid.futures.maker_timeout_ms, 2500);
-    assert_eq!(saved.order_parameters.grid.spot.max_maker_requotes, 6);
+    assert_eq!(saved.order_parameters.grid.spot.max_maker_requotes, Some(6));
+    assert_eq!(saved.order_parameters.grid.futures.max_maker_requotes, None);
+    assert_eq!(saved.order_parameters.grid.spot.vol_multiplier, 1.0);
+    assert_eq!(saved.order_parameters.grid.futures.vol_multiplier, 1.0);
     saved.order_parameters.grid.spot.orders_per_batch = 2;
     saved.order_parameters.grid.futures.orders_per_batch = 5;
     saved.order_parameters.grid.futures.maker_timeout_ms = 9000;
+    saved.order_parameters.grid.spot.vol_multiplier = 0.5;
+    saved.order_parameters.grid.spot.max_maker_requotes = None;
+    saved.order_parameters.grid.futures.vol_multiplier = 2.0;
+    saved.order_parameters.grid.futures.max_maker_requotes = Some(4);
     let updated = SaveOrderStrategyRequest {
         strategy_name: saved.strategy_name,
         order_parameters: saved.order_parameters.clone(),
@@ -934,5 +941,77 @@ async fn grid_market_maintenance_preserves_execution_values_and_independent_edit
             .order_parameters,
         saved.order_parameters
     );
+    db.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn grid_controls_maintenance_preserves_existing_market_settings_and_null_limits() -> Result<()>
+{
+    use crypto_cta_manager::{
+        order_config::{ExecutionAlgorithm, OrderParameters},
+        strategy_catalog::{self, SaveOrderStrategyRequest},
+    };
+    let db = TestDatabase::create().await?;
+    postgres::initialize(&db.pool).await?;
+    let request = SaveOrderStrategyRequest {
+        strategy_name: "market-grid".into(),
+        order_parameters: OrderParameters {
+            algorithm: ExecutionAlgorithm::Grid,
+            ..Default::default()
+        },
+    };
+    strategy_catalog::upsert_order_strategy(&db.pool, &request, 10, None).await?;
+    // Existing per-market catalog: no multiplier or futures round control yet.
+    sqlx::raw_sql(
+        r#"UPDATE cta_order_strategies SET grid =
+        '{"spot":{"orders_per_batch":2,"maker_timeout_ms":2500,"max_maker_requotes":4},
+          "futures":{"orders_per_batch":5,"maker_timeout_ms":9000}}'::jsonb"#,
+    )
+    .execute(&db.pool)
+    .await?;
+    sqlx::raw_sql(include_str!("../scripts/apply_grid_market_parameters.sql"))
+        .execute(&db.pool)
+        .await?;
+    let saved = strategy_catalog::list_order_strategies(&db.pool)
+        .await?
+        .remove(0);
+    assert_eq!(saved.updated_at_us, 10);
+    let grid = &saved.order_parameters.grid;
+    assert_eq!(grid.spot.orders_per_batch, 2);
+    assert_eq!(grid.spot.maker_timeout_ms, 2500);
+    assert_eq!(grid.spot.max_maker_requotes, Some(4));
+    assert_eq!(grid.futures.orders_per_batch, 5);
+    assert_eq!(grid.futures.maker_timeout_ms, 9000);
+    let stored: serde_json::Value = sqlx::query_scalar("SELECT grid FROM cta_order_strategies")
+        .fetch_one(&db.pool)
+        .await?;
+    assert_eq!(stored["spot"]["vol_multiplier"], 1.0);
+    assert_eq!(stored["futures"]["vol_multiplier"], 1.0);
+    assert_eq!(
+        stored["futures"].get("max_maker_requotes"),
+        Some(&serde_json::Value::Null)
+    );
+    // A partially completed maintenance must retain explicit unlimited and finite limits.
+    sqlx::raw_sql(r#"UPDATE cta_order_strategies SET grid =
+        '{"spot":{"orders_per_batch":2,"maker_timeout_ms":2500,"max_maker_requotes":null},
+          "futures":{"orders_per_batch":5,"maker_timeout_ms":9000,"vol_multiplier":2.5,"max_maker_requotes":0}}'::jsonb"#)
+        .execute(&db.pool).await?;
+    for _ in 0..2 {
+        sqlx::raw_sql(include_str!("../scripts/apply_grid_market_parameters.sql"))
+            .execute(&db.pool)
+            .await?;
+    }
+    let saved = strategy_catalog::list_order_strategies(&db.pool)
+        .await?
+        .remove(0);
+    assert_eq!(saved.updated_at_us, 10);
+    assert_eq!(saved.order_parameters.grid.spot.max_maker_requotes, None);
+    assert_eq!(saved.order_parameters.grid.spot.vol_multiplier, 1.0);
+    assert_eq!(
+        saved.order_parameters.grid.futures.max_maker_requotes,
+        Some(0)
+    );
+    assert_eq!(saved.order_parameters.grid.futures.vol_multiplier, 2.5);
     db.remove().await
 }

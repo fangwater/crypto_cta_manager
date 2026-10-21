@@ -1653,6 +1653,10 @@ mod tests {
         parameters.grid.spot.orders_per_batch = 2;
         parameters.grid.futures.orders_per_batch = 5;
         parameters.grid.futures.maker_timeout_ms = 9000;
+        parameters.grid.spot.vol_multiplier = 0.5;
+        parameters.grid.spot.max_maker_requotes = None;
+        parameters.grid.futures.vol_multiplier = 2.0;
+        parameters.grid.futures.max_maker_requotes = Some(4);
         let with_overrides = serde_json::to_value(StoredBatchExecConfig {
             algorithm: parameters.algorithm,
             pov: &parameters.pov,
@@ -1674,11 +1678,10 @@ mod tests {
         assert_eq!(with_overrides["grid"]["spot"]["orders_per_batch"], 2);
         assert_eq!(with_overrides["grid"]["futures"]["orders_per_batch"], 5);
         assert_eq!(with_overrides["grid"]["futures"]["maker_timeout_ms"], 9000);
-        assert!(
-            with_overrides["grid"]["futures"]
-                .get("max_maker_requotes")
-                .is_none()
-        );
+        assert_eq!(with_overrides["grid"]["futures"]["max_maker_requotes"], 4);
+        assert!(with_overrides["grid"]["spot"]["max_maker_requotes"].is_null());
+        assert_eq!(with_overrides["grid"]["spot"]["vol_multiplier"], 0.5);
+        assert_eq!(with_overrides["grid"]["futures"]["vol_multiplier"], 2.0);
         assert!(with_overrides["grid"].get("open_buy_vol_scale").is_none());
         assert_eq!(
             with_overrides["symbol_overrides"]["BTCUSDT"]["single_order_usdt"],

@@ -78,7 +78,9 @@ pub struct GridParameters {
 pub struct GridSpotParameters {
     pub orders_per_batch: u32,
     pub maker_timeout_ms: u32,
-    pub max_maker_requotes: u32,
+    pub vol_multiplier: f64,
+    /// Additional maker rounds after the first; None means unlimited.
+    pub max_maker_requotes: Option<u32>,
 }
 
 impl Default for GridSpotParameters {
@@ -86,7 +88,8 @@ impl Default for GridSpotParameters {
         Self {
             orders_per_batch: 3,
             maker_timeout_ms: 1_000,
-            max_maker_requotes: 2,
+            vol_multiplier: 1.0,
+            max_maker_requotes: Some(2),
         }
     }
 }
@@ -96,6 +99,8 @@ impl Default for GridSpotParameters {
 pub struct GridFuturesParameters {
     pub orders_per_batch: u32,
     pub maker_timeout_ms: u32,
+    pub vol_multiplier: f64,
+    pub max_maker_requotes: Option<u32>,
 }
 
 impl Default for GridFuturesParameters {
@@ -103,27 +108,43 @@ impl Default for GridFuturesParameters {
         Self {
             orders_per_batch: 3,
             maker_timeout_ms: 1_000,
+            vol_multiplier: 1.0,
+            max_maker_requotes: None,
         }
     }
 }
 
 impl GridParameters {
     pub fn validate(&self) -> std::result::Result<(), String> {
-        for (market, count, timeout) in [
+        for (market, count, timeout, multiplier, requotes) in [
             (
                 "spot",
                 self.spot.orders_per_batch,
                 self.spot.maker_timeout_ms,
+                self.spot.vol_multiplier,
+                self.spot.max_maker_requotes,
             ),
             (
                 "futures",
                 self.futures.orders_per_batch,
                 self.futures.maker_timeout_ms,
+                self.futures.vol_multiplier,
+                self.futures.max_maker_requotes,
             ),
         ] {
             if count == 0 || timeout == 0 {
                 return Err(format!(
                     "grid.{market} split count and maker duration must be positive"
+                ));
+            }
+            if !multiplier.is_finite() || multiplier <= 0.0 {
+                return Err(format!(
+                    "grid.{market}.vol_multiplier must be finite and positive"
+                ));
+            }
+            if requotes == Some(u32::MAX) {
+                return Err(format!(
+                    "grid.{market}.max_maker_requotes must be less than uint32 max; use null for unlimited"
                 ));
             }
         }
@@ -1235,6 +1256,10 @@ mod tests {
         grid.grid.spot.maker_timeout_ms = 2000;
         grid.grid.futures.orders_per_batch = 5;
         grid.grid.futures.maker_timeout_ms = 9000;
+        grid.grid.spot.vol_multiplier = 0.5;
+        grid.grid.spot.max_maker_requotes = None;
+        grid.grid.futures.vol_multiplier = 2.0;
+        grid.grid.futures.max_maker_requotes = Some(4);
         grid.validate().unwrap();
         assert_eq!(grid.algorithm.family(), ExecutionFamily::BatchExec);
         assert!(!grid.algorithm.is_experimental());
@@ -1258,7 +1283,7 @@ mod tests {
         assert!(grid.validate().is_err());
         assert!(
             serde_json::from_value::<GridParameters>(
-                serde_json::json!({"futures":{"max_maker_requotes":2}})
+                serde_json::json!({"futures":{"max_maker_requotes":-1}})
             )
             .is_err()
         );
@@ -1268,6 +1293,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn grid_controls_preserve_defaults_and_reject_invalid_market_values() {
+        let defaults: GridParameters = serde_json::from_str(r#"{"spot":{},"futures":{}}"#).unwrap();
+        assert_eq!(defaults.spot.max_maker_requotes, Some(2));
+        assert_eq!(defaults.futures.max_maker_requotes, None);
+        assert_eq!(defaults.spot.vol_multiplier, 1.0);
+        assert_eq!(defaults.futures.vol_multiplier, 1.0);
+        for cash in [true, false] {
+            for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+                let mut grid = defaults.clone();
+                if cash {
+                    grid.spot.vol_multiplier = value;
+                } else {
+                    grid.futures.vol_multiplier = value;
+                }
+                assert!(grid.validate().is_err());
+            }
+            let mut grid = defaults.clone();
+            if cash {
+                grid.spot.max_maker_requotes = Some(u32::MAX);
+            } else {
+                grid.futures.max_maker_requotes = Some(u32::MAX);
+            }
+            assert!(grid.validate().is_err());
+        }
     }
 
     #[test]

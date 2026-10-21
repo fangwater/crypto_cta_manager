@@ -251,6 +251,11 @@ function GridOrderFields({ value, onChange }: { value: OrderParameters; onChange
           <section key={market} className="border-t border-border pt-5">
             <h3 className="mb-4 text-sm font-semibold text-ink">{label}参数</h3>
             <div className="grid gap-4 sm:grid-cols-2">
+              <Label>{label} Vol 倍数
+                <Input type="number" min="0.000001" step="any" value={parameters.vol_multiplier}
+                  onChange={(event) => onChange({ ...value, grid: { ...value.grid, [market]: { ...parameters, vol_multiplier: Number(event.target.value) } } })} />
+                <FieldHint>各档偏移从 0 到 Vol × 倍数均匀分布；单档偏移为 0。</FieldHint>
+              </Label>
               <Label>{label}拆单数
                 <Input type="number" min="1" step="1" value={parameters.orders_per_batch}
                   onChange={(event) => onChange({ ...value, grid: { ...value.grid, [market]: { ...parameters, orders_per_batch: Number(event.target.value) } } })} />
@@ -259,13 +264,20 @@ function GridOrderFields({ value, onChange }: { value: OrderParameters; onChange
                 <Input type="number" min="1" step="1" value={parameters.maker_timeout_ms}
                   onChange={(event) => onChange({ ...value, grid: { ...value.grid, [market]: { ...parameters, maker_timeout_ms: Number(event.target.value) } } })} />
               </Label>
-              {market === 'spot' && <Label>现货 Maker 挂单次数
-                <Input type="number" min="1" step="1" value={value.grid.spot.max_maker_requotes + 1}
-                  onChange={(event) => onChange({ ...value, grid: { ...value.grid, spot: { ...value.grid.spot, max_maker_requotes: Number(event.target.value) - 1 } } })} />
-                <FieldHint>包含首次挂单；次数用尽后，剩余量合并为 Taker。</FieldHint>
+              <Label>{label} Maker 执行方式
+                <Select value={parameters.max_maker_requotes === null ? 'unlimited' : 'limited'}
+                  onChange={(event) => onChange({ ...value, grid: { ...value.grid, [market]: { ...parameters, max_maker_requotes: event.target.value === 'unlimited' ? null : 2 } } })}>
+                  <option value="limited">有限轮后转 Taker</option>
+                  <option value="unlimited">无限轮 Maker</option>
+                </Select>
+              </Label>
+              {parameters.max_maker_requotes !== null && <Label>{label} Maker 挂单轮数
+                <Input type="number" min="1" max="4294967295" step="1" value={parameters.max_maker_requotes + 1}
+                  onChange={(event) => onChange({ ...value, grid: { ...value.grid, [market]: { ...parameters, max_maker_requotes: Number(event.target.value) - 1 } } })} />
+                <FieldHint>包含首次挂单；轮数用尽并确认撤单后，剩余量合并为 Taker。</FieldHint>
               </Label>}
             </div>
-            {market === 'futures' && <FieldHint>合约对冲 Maker 挂单次数不限，按合约挂单时长持续撤挂。</FieldHint>}
+            {parameters.max_maker_requotes === null && <FieldHint>按本市场挂单时长持续撤挂，不因轮数转为 Taker。</FieldHint>}
           </section>
         )
       })}
