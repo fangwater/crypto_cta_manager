@@ -1,0 +1,110 @@
+[
+  {
+    "can_configure": true,
+    "order_parameters": {
+      "algorithm": "grid",
+      "batch_interval_ms": 500,
+      "chase": {
+        "batch_floor_usdt": 100.0,
+        "maker_amend_cooldown_ms": 1000,
+        "maker_recenter_trigger_bps": 5.0,
+        "maker_timeout_sec": 120,
+        "max_batch": 4,
+        "max_open_batches": 2,
+        "strategy_order_rate_limit_10s": 0,
+        "strategy_order_rate_limit_per_min": 0,
+        "target_tolerance_usdt": 10.0
+      },
+      "grid": {
+        "futures": {
+          "maker_timeout_ms": 120000,
+          "max_maker_requotes": 0,
+          "orders_per_batch": 5,
+          "vol_multiplier": 1.0
+        },
+        "spot": {
+          "maker_timeout_ms": 120000,
+          "max_maker_requotes": 0,
+          "orders_per_batch": 5,
+          "vol_multiplier": 1.0
+        }
+      },
+      "maker_price_anchor": "own_best",
+      "maker_timeout_ms": 1000,
+      "max_batch": 20,
+      "max_maker_requotes": 2,
+      "orders_per_batch": 3,
+      "pov": {
+        "duration_ms": 3600000,
+        "limit_price": null,
+        "liquidity": "maker_then_taker",
+        "max_batch_usdt": 300.0,
+        "max_carry_usdt": 600.0,
+        "participation_rate": 0.1,
+        "quote_stale_ms": 1000,
+        "volume_stale_ms": 5000
+      },
+      "signal_execution_enabled": true,
+      "single_order_usdt": 100.0,
+      "target_tolerance_usdt": 10.0,
+      "tick_spacing": 1
+    },
+    "owner": "lgq",
+    "strategy_name": "lgq_grid_prep",
+    "updated_at_us": 1792569917178339
+  },
+  {
+    "can_configure": true,
+    "order_parameters": {
+      "algorithm": "grid",
+      "batch_interval_ms": 500,
+      "chase": {
+        "batch_floor_usdt": 100.0,
+        "maker_amend_cooldown_ms": 1000,
+        "maker_recenter_trigger_bps": 5.0,
+        "maker_timeout_sec": 120,
+        "max_batch": 4,
+        "max_open_batches": 2,
+        "strategy_order_rate_limit_10s": 0,
+        "strategy_order_rate_limit_per_min": 0,
+        "target_tolerance_usdt": 10.0
+      },
+      "grid": {
+        "futures": {
+          "maker_timeout_ms": 30000,
+          "max_maker_requotes": null,
+          "orders_per_batch": 5,
+          "vol_multiplier": 1.0
+        },
+        "spot": {
+          "maker_timeout_ms": 120000,
+          "max_maker_requotes": 0,
+          "orders_per_batch": 5,
+          "vol_multiplier": 1.0
+        }
+      },
+      "maker_price_anchor": "own_best",
+      "maker_timeout_ms": 1000,
+      "max_batch": 20,
+      "max_maker_requotes": 2,
+      "orders_per_batch": 3,
+      "pov": {
+        "duration_ms": 3600000,
+        "limit_price": null,
+        "liquidity": "maker_then_taker",
+        "max_batch_usdt": 300.0,
+        "max_carry_usdt": 600.0,
+        "participation_rate": 0.1,
+        "quote_stale_ms": 1000,
+        "volume_stale_ms": 5000
+      },
+      "signal_execution_enabled": true,
+      "single_order_usdt": 100.0,
+      "target_tolerance_usdt": 10.0,
+      "tick_spacing": 1
+    },
+    "owner": "lgq",
+    "strategy_name": "lgq_grid_spread",
+    "updated_at_us": 1792569917172209
+  }
+]

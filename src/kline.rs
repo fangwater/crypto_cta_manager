@@ -250,6 +250,58 @@ pub struct KlineStore {
     inner: Arc<Inner>,
 }
 
+#[derive(Default)]
+pub(crate) struct KlineWarmResult {
+    pub errors: Vec<String>,
+    pub pending: bool,
+}
+
+/// Detached backfills survive HTTP cancellation. Return coverage after at most
+/// 10s of waiting; a later query reuses the cache rather than restarting pulls.
+pub(crate) async fn warm_ranges(
+    store: &KlineStore,
+    ranges: BTreeMap<String, (i64, i64)>,
+) -> KlineWarmResult {
+    let started = std::time::Instant::now();
+    let symbol_count = ranges.len();
+    let store = store.clone();
+    let mut task = tokio::spawn(async move {
+        let mut jobs = tokio::task::JoinSet::new();
+        for (symbol, (start, end)) in ranges {
+            let store = store.clone();
+            jobs.spawn(async move { store.ensure_range(&symbol, start, end).await });
+        }
+        let mut errors = Vec::new();
+        while let Some(result) = jobs.join_next().await {
+            if let Err(error) = result.unwrap_or_else(|e| Err(e.into())) {
+                errors.push(error.to_string());
+            }
+        }
+        errors
+    });
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
+        Ok(Ok(errors)) => KlineWarmResult {
+            errors,
+            pending: false,
+        },
+        Ok(Err(error)) => KlineWarmResult {
+            errors: vec![error.to_string()],
+            pending: false,
+        },
+        Err(_) => KlineWarmResult {
+            errors: vec!["分钟 K 线正在后台补齐".into()],
+            pending: true,
+        },
+    };
+    tracing::info!(
+        symbol_count,
+        duration_ms = started.elapsed().as_millis(),
+        pending = result.pending,
+        "checked Kline coverage"
+    );
+    result
+}
+
 struct BackfillGuard(KlineStore);
 impl Drop for BackfillGuard {
     fn drop(&mut self) {

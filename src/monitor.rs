@@ -1697,6 +1697,7 @@ mod tests {
             account_ipc_service: None,
             legacy_share_unit_usdt: None,
             env_path: None,
+            target_proxy: None,
         }
     }
 

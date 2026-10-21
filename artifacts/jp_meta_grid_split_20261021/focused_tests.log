@@ -1,0 +1,28 @@
+   Compiling mkt_signal v0.1.0 (/home/fanghaizhou/mkt_signal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.92s
+     Running unittests src/lib.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/mkt_signal/debug/deps/mkt_signal-46d301d2667f85b2)
+
+running 5 tests
+test pre_trade::exec_resample_channel::tests::each_batch_disqualifier_keeps_the_row ... ok
+test pre_trade::exec_resample_channel::tests::each_chase_disqualifier_keeps_the_row ... ok
+test pre_trade::exec_resample_channel::tests::idle_snapshots_are_filtered ... ok
+test pre_trade::exec_resample_channel::tests::row_reappears_when_a_target_becomes_non_idle ... ok
+0 [I] "Config::global_config()" 
+| Using config file at "config/iceoryx2.toml" 
+test pre_trade::exec_resample_channel::tests::large_cash_and_perpetual_state_survives_ipc_round_trip ... FAILED
+
+failures:
+
+---- pre_trade::exec_resample_channel::tests::large_cash_and_perpetual_state_survives_ipc_round_trip stdout ----
+
+thread 'pre_trade::exec_resample_channel::tests::large_cash_and_perpetual_state_survives_ipc_round_trip' (3649283) panicked at src/pre_trade/exec_resample_channel.rs:480:10:
+called `Result::unwrap()` on an `Err` value: NodeCreationFailure::InternalError
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pre_trade::exec_resample_channel::tests::large_cash_and_perpetual_state_survives_ipc_round_trip
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1340 filtered out; finished in 0.19s
+
+error: test failed, to rerun pass `--lib`

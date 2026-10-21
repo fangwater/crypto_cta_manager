@@ -1,0 +1,23 @@
+{
+  "built_at": "2026-10-21T08:13:56.912552+00:00",
+  "branch": "arbmm",
+  "base_commit": "115213a6cd3c06e428d3f043f3fb99da2033d352",
+  "patch_sha256": "a525e818e9c2d8c402d973835e31c5ff19c2a72883a933d4c2d83621d00e5b55",
+  "sources": {
+    "crates/ipc_common/src/iceoryx_publisher.rs": "f46e7a93ca7f2d219c14e540d08684159d630adc3550ebf63f957e7478576cea",
+    "crates/viz_server/src/subscribers.rs": "73cf30d8aad5d6f4636a09f4f7134b6ab4aa21717314e7d5adb0bdcc5d78df34",
+    "src/pre_trade/exec_resample_channel.rs": "1bd1c4d9d7180375b3f807e70da60c6e410e74c021b5a784f12b00f1c4267892"
+  },
+  "binaries": {
+    "exec-pre-trade": "531893b4c51de4550e40098c5a1c1e1445aa18ea30a23a5247776a7e2f17aa75",
+    "viz_server": "ded2bc35ed04a63c4d5752dbb1125a9486735f0cac0f21881b7b660cf7dcc93b"
+  },
+  "tests": {
+    "mkt_signal_passed": 1342,
+    "mkt_signal_ignored": 3,
+    "viz_common_passed": 2,
+    "viz_server_passed": 6,
+    "format": "pass",
+    "check": "pass"
+  }
+}

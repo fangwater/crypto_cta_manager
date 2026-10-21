@@ -1,8 +1,0 @@
-{"kind": "account_defaults", "funding_source": "binance_exec_trade09", "funding_default": "account", "other_account_modes": ["strategy"]}
-{"kind": "funding_curve", "range": "1D", "records": 38, "points": 98, "income_quote": 0.2843520099999997, "every_point_matches_ledger": true, "zero_baseline": true, "terminal_matches_summary": true, "before_after_totals_additive": true}
-{"kind": "funding_curve", "range": "ALL", "records": 662, "points": 1975, "income_quote": -385.39771612, "every_point_matches_ledger": true, "zero_baseline": true, "terminal_matches_summary": true, "before_after_totals_additive": true}
-{"kind": "funding_curve", "range": "1D_BTC", "records": 3, "points": 98, "income_quote": 1.7589341799999998, "every_point_matches_ledger": true, "zero_baseline": true, "terminal_matches_summary": true, "before_after_totals_additive": true}
-{"kind": "frontend_served", "assets": ["/manager/assets/index-BkMASxYH.js", "/manager/assets/index-BkPi1rHQ.css"], "funding_labels_verified": true}
-{"kind": "runtime_unchanged", "processes_checked": 82, "trade_configs_checked": 13, "manager_restarted": false}
-{"kind": "verification_finished", "frontend_release": "/home/el01/crypto_cta_manager/web-releases/20261014T223225Z", "utc": "2026-10-14T22:32:39.881825+00:00"}
-{"kind": "temporary_session_removed", "removed": true}

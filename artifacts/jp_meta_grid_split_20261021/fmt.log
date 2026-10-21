@@ -1,0 +1,15 @@
+Diff in /home/fanghaizhou/mkt_signal/src/pre_trade/exec_resample_channel.rs:72:
+                 EXEC_STATE_RESAMPLE_HISTORY,
+                 EXEC_STATE_RESAMPLE_BUFFER,
+             )
+-                .map_err(|err| {
+-                    warn!("ExecResampleChannel init failed channel={EXEC_STATE_CHANNEL}: {err:#}")
+-                })
+-                .ok(),
++            .map_err(|err| {
++                warn!("ExecResampleChannel init failed channel={EXEC_STATE_CHANNEL}: {err:#}")
++            })
++            .ok(),
+             risk_pub: ResamplePublisher::new_with_prefix("viz_pubs", EXEC_RISK_CHANNEL)
+                 .map_err(|err| {
+                     warn!("ExecResampleChannel init failed channel={EXEC_RISK_CHANNEL}: {err:#}")

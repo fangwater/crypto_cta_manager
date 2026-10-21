@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './nav-dashboard.css'
-import { getAccountTimeline, getDashboard, getHealth, getTimeline } from './api'
+import { ApiError, getAccountTimeline, getDashboard, getHealth, getTimeline } from './api'
 import { AppShell } from './components/AppShell'
 import { WorkspacePage } from './pages/WorkspacePage'
 import { AccountsPage } from './pages/AccountsPage'
@@ -238,6 +238,7 @@ function NavPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [timelineError, setTimelineError] = useState<string | null>(null)
+  const [navPricingLoading, setNavPricingLoading] = useState(false)
   const [timelineRevision, setTimelineRevision] = useState(0)
   const initialized = useRef(false)
   const scopeReady = Boolean(dashboard?.report.sources.some((source) => source.source_id === scope))
@@ -328,7 +329,16 @@ function NavPage() {
     const controller = new AbortController()
     let retryTimer: number | undefined
     setTimelineLoading(true)
+    setNavPricingLoading(false)
     setTimelineError(null)
+    setTimeline((previous) => previous?.report.start_ts_us === startMs * 1_000
+      && previous.report.end_ts_us === endMs * 1_000
+      && previous.report.selected_source_ids.length === 1
+      && previous.report.selected_source_ids[0] === scope
+      && (selectedSymbols === null
+        ? previous.report.selected_symbols.length === previous.report.available_symbols.length
+        : [...previous.report.selected_symbols].sort().join(',') === [...selectedSymbols].sort().join(','))
+      ? previous : null)
     const loadTimeline = pnlMode === 'account' ? getAccountTimeline : getTimeline
     const load = (includeTheoretical: boolean) => loadTimeline({
       startMs,
@@ -357,11 +367,26 @@ function NavPage() {
           return
         }
         setTimeline(next)
+        setNavPricingLoading(false)
+        setTimelineError(null)
         if (!includeTheoretical && next.theoretical.loading) void load(true)
         else if (next.theoretical.loading || next.estimated_funding?.loading) retryTimer = window.setTimeout(() => void load(true), 10_000)
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
+        if (controller.signal.aborted) return
+        if (reason instanceof ApiError && reason.navPricing) {
+          setNavPricingLoading(reason.navPricing.loading)
+          const nextStart = retainedQuickRangeStartMs(activeRange, startMs, endMs,
+            reason.navPricing.availableFromUs, 300)
+          if (nextStart !== startMs) {
+            setRetainedRangeAdjusted(true)
+            setStartInput(toDatetimeLocal(nextStart))
+            setStartMs(nextStart)
+            return
+          }
+          if (reason.navPricing.loading) retryTimer = window.setTimeout(() => void load(false), 10_000)
+        }
         setTimelineError(reason instanceof Error ? reason.message : String(reason))
       })
       .finally(() => {
@@ -641,7 +666,9 @@ function NavPage() {
     >
         {error && <div className="error-banner">数据请求失败：{error}</div>}
         {timelineError && (
-          <div className="error-banner">净值重算失败：{timelineError}</div>
+          <div className={navPricingLoading ? 'chart-notice' : 'error-banner'} role="status">
+            {navPricingLoading ? '' : '净值重算失败：'}{timelineError}
+          </div>
         )}
         {health?.last_refresh_error && (
           <div className="warning-banner">
@@ -865,6 +892,9 @@ function NavPage() {
           </div>
           {chartMode === 'strategyFunding' && <p className="chart-notice">每条曲线单独展示一个策略的累计估算 Funding，正数为收入、负数为支出。零线便于观察资金费是否相抵；可在右侧单独选择策略。</p>}
           {chartMode === 'strategyFunding' && estimate?.income_quote == null && <p className="chart-notice" role="status">{estimate?.unavailable_reason ?? '正在加载策略估算 Funding'}</p>}
+          {timeline?.report.valuation === 'quantity_fifo_closed_1m_window_delta' && (
+            <p className="chart-notice">实际持仓按已完成的 1 分钟收盘价估值；成交价格、数量和交易费按真实成交计算。</p>
+          )}
           {timeline?.theoretical.unavailable_reason && (
             <div className="chart-notice" role="status">理论净值：{timeline.theoretical.unavailable_reason}</div>
           )}
@@ -901,13 +931,13 @@ function NavPage() {
                 noStrategiesSelected && (
                   <div className="chart-empty">当前未选择策略</div>
                 )}
-              {!timeline && !timelineLoading && (
+              {!timeline && !timelineLoading && !navPricingLoading && (
                 <div className="chart-empty">暂无净值时间线</div>
               )}
-              {timelineLoading && (
+              {(timelineLoading || (navPricingLoading && !timeline)) && (
                 <div className="chart-loading">
                   <LoaderCircle size={20} />
-                  <span>计算中</span>
+                  <span>{navPricingLoading ? '补齐分钟估值价' : '计算中'}</span>
                 </div>
               )}
             </div>

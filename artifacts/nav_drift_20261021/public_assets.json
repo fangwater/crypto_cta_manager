@@ -1,0 +1,42 @@
+[
+  {
+    "path": "/manager/",
+    "http_status": 200,
+    "content_type": "text/html",
+    "bytes": 534
+  },
+  {
+    "path": "/manager/workspace/",
+    "http_status": 200,
+    "content_type": "text/html",
+    "bytes": 534
+  },
+  {
+    "path": "/manager/favicon.svg",
+    "http_status": 200,
+    "content_type": "image/svg+xml",
+    "bytes": 258,
+    "hash_matches": true
+  },
+  {
+    "path": "/manager/index.html",
+    "http_status": 200,
+    "content_type": "text/html",
+    "bytes": 534,
+    "hash_matches": true
+  },
+  {
+    "path": "/manager/assets/index-BZkMHDR7.js",
+    "http_status": 200,
+    "content_type": "application/javascript",
+    "bytes": 1106597,
+    "hash_matches": true
+  },
+  {
+    "path": "/manager/assets/index-CD8gA5wl.css",
+    "http_status": 200,
+    "content_type": "text/css",
+    "bytes": 92484,
+    "hash_matches": true
+  }
+]

@@ -1,7 +1,7 @@
 //! On-demand theoretical execution from immutable targets and minute candles.
 //! No PostgreSQL materialization cursor or realtime BBO dependency.
 use crate::config::{AppConfig, TheoreticalFeeRates};
-use crate::kline::{KlineStore, MINUTE_US, first_complete_open, now_us};
+use crate::kline::{KlineStore, MINUTE_US, first_complete_open, now_us, warm_ranges};
 use crate::position_archive::{PositionArchive, PositionUpdateMsg};
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
@@ -368,7 +368,16 @@ fn ingest_target(
         let next = LatestTargets {
             position_strategy_name: message.strategy.strategy_name.clone(),
             venue: source.venue.clone(),
-            targets: normalized_scaled_targets(message, account.effective_shares())?,
+            targets: if let Some(projection) = &account.target_projection {
+                projection
+                    .targets
+                    .iter()
+                    .filter(|(_, t)| clean_zero(t.qty) != 0.0)
+                    .map(|(symbol, target)| (symbol.clone(), clean_zero(target.qty)))
+                    .collect()
+            } else {
+                normalized_scaled_targets(message, account.effective_shares())?
+            },
             received_at_us: message.received_at_us,
             update_seq: message.seq,
         };
@@ -377,9 +386,10 @@ fn ingest_target(
                 let archived_fee = account.fee_for_symbol(&symbol);
                 let fee_rate = archived_fee.unwrap_or(0.0);
                 ensure!(fee_rate.is_finite(), "invalid archived theoretical fee");
-                let target_signal = message
-                    .strategy
-                    .targets
+                let target_signal = account
+                    .target_projection
+                    .as_ref()
+                    .map_or(&message.strategy.targets, |p| &p.targets)
                     .get(&symbol)
                     .map(|target| target.signal)
                     .unwrap_or(0);
@@ -412,54 +422,6 @@ fn ingest_target(
     Ok(())
 }
 
-#[derive(Default)]
-struct KlineWarmResult {
-    errors: Vec<String>,
-    pending: bool,
-}
-
-/// Detached backfills survive HTTP cancellation. Return coverage after at most
-/// 10s of waiting; a later query reuses the cache rather than restarting pulls.
-async fn warm_ranges(store: &KlineStore, ranges: BTreeMap<String, (i64, i64)>) -> KlineWarmResult {
-    let started = std::time::Instant::now();
-    let symbol_count = ranges.len();
-    let store = store.clone();
-    let mut task = tokio::spawn(async move {
-        let mut jobs = tokio::task::JoinSet::new();
-        for (symbol, (start, end)) in ranges {
-            let store = store.clone();
-            jobs.spawn(async move { store.ensure_range(&symbol, start, end).await });
-        }
-        let mut errors = Vec::new();
-        while let Some(result) = jobs.join_next().await {
-            if let Err(error) = result.unwrap_or_else(|e| Err(e.into())) {
-                errors.push(error.to_string());
-            }
-        }
-        errors
-    });
-    let result = match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
-        Ok(Ok(errors)) => KlineWarmResult {
-            errors,
-            pending: false,
-        },
-        Ok(Err(error)) => KlineWarmResult {
-            errors: vec![error.to_string()],
-            pending: false,
-        },
-        Err(_) => KlineWarmResult {
-            errors: vec!["分钟 K 线正在后台补齐".into()],
-            pending: true,
-        },
-    };
-    tracing::info!(
-        symbol_count,
-        duration_ms = started.elapsed().as_millis(),
-        pending = result.pending,
-        "checked theoretical Kline coverage"
-    );
-    result
-}
 fn add_range(ranges: &mut BTreeMap<String, (i64, i64)>, symbol: &str, start: i64, end: i64) {
     ranges
         .entry(symbol.into())
@@ -1167,6 +1129,81 @@ fn quantities_equal(left: f64, right: f64, scale_hint: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archived_proxy_targets_keep_account_units_signals_and_isolation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive =
+            PositionArchive::open(crate::manager_db::ManagerDb::open(dir.path()).unwrap()).unwrap();
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        let original_id = config.sources[0].id.clone();
+        let mut bybit = config.sources[0].clone();
+        bybit.id = "proxy_bybit".into();
+        bybit.venue = "bybit-futures".into();
+        config.sources.push(bybit);
+        let strategy = crate::strategy_catalog::PositionStrategy {
+            strategy_name: "shared".into(),
+            targets: serde_json::from_value(
+                serde_json::json!({"1000PEPEUSDT":{"qty":2,"signal":-1},"MISSINGUSDT":3}),
+            )
+            .unwrap(),
+            symbol_order_strategy_overrides: BTreeMap::new(),
+            updated_at_us: 1,
+        };
+        let original = crate::position_archive::published_account(&original_id, "shared", 3.0);
+        let mut projected =
+            crate::position_archive::published_account("proxy_bybit", "shared", 4.0);
+        projected.target_projection = Some(serde_json::from_value(serde_json::json!({
+            "rules_fetched_at_us":1,
+            "targets":{"PEPEUSDT":{"qty":8000,"signal":-1}},
+            "matched":{"1000PEPEUSDT":{"symbol":"PEPEUSDT","source_contract_multiplier":1000,"target_contract_multiplier":1,"quantity_multiplier":1000}},
+            "filtered":{"MISSINGUSDT":"symbol absent from Bybit cache"}
+        })).unwrap());
+        archive
+            .append(
+                100,
+                &strategy,
+                Vec::new(),
+                vec![original.clone(), projected.clone()],
+            )
+            .unwrap();
+        let message = archive.latest().unwrap().unwrap();
+        assert_eq!(message.strategy, strategy);
+        assert_eq!(message.published_accounts[1], projected);
+        let mut state = TargetCacheState::default();
+        ingest_target(&config, &mut state, &message).unwrap();
+        let original_deltas: Vec<_> = state
+            .deltas
+            .iter()
+            .filter(|d| d.source_id == original_id)
+            .collect();
+        assert_eq!(original_deltas.len(), 2);
+        assert_eq!(original_deltas[0].symbol, "1000PEPEUSDT");
+        assert_eq!(original_deltas[0].delta_qty, 6.0);
+        let bybit_deltas: Vec<_> = state
+            .deltas
+            .iter()
+            .filter(|d| d.source_id == "proxy_bybit")
+            .collect();
+        assert_eq!(bybit_deltas.len(), 1);
+        assert_eq!(bybit_deltas[0].symbol, "PEPEUSDT");
+        assert_eq!(bybit_deltas[0].venue, "bybit-futures");
+        assert_eq!(bybit_deltas[0].delta_qty, 8000.0); // shares are already frozen
+        assert_eq!(bybit_deltas[0].target_signal, -1);
+        projected
+            .target_projection
+            .as_mut()
+            .unwrap()
+            .targets
+            .clear();
+        archive
+            .append(200, &strategy, Vec::new(), vec![original, projected])
+            .unwrap();
+        ingest_target(&config, &mut state, &archive.latest().unwrap().unwrap()).unwrap();
+        assert_eq!(state.deltas.len(), 4);
+        assert_eq!(state.deltas.last().unwrap().delta_qty, -8000.0);
+    }
 
     #[tokio::test]
     async fn quote_fees_freeze_per_symbol_and_preserve_old_archived_rates() {

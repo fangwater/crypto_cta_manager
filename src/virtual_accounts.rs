@@ -496,7 +496,7 @@ pub async fn followers(pool: &PgPool, id: &str) -> Result<Vec<String>> {
 // Used by validation before a template is changed or attached to a live account.
 pub async fn validate_source_bindings(
     pool: &PgPool,
-    venue: &str,
+    source: &crate::config::SourceConfig,
     bindings: &[VirtualBinding],
 ) -> Result<()> {
     let positions = crate::strategy_catalog::list_position_strategies(pool).await?;
@@ -519,7 +519,7 @@ pub async fn validate_source_bindings(
             binding.order_strategy_name
         );
         for symbol in position.targets.keys() {
-            crate::exec_routing::symbol_market(venue, symbol)?;
+            crate::exec_routing::validate_target_symbol(source, symbol)?;
         }
     }
     Ok(())

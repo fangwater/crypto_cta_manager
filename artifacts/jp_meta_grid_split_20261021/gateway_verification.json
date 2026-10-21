@@ -1,0 +1,37 @@
+{
+  "borrow_unavailable": [
+    {
+      "completion_reason": "borrow_unavailable",
+      "delta_usdt": -19.720725511151407,
+      "strategy_name": "binance_cta_spread_rx01_TD_TI_027",
+      "symbol": "RLC"
+    },
+    {
+      "completion_reason": "borrow_unavailable",
+      "delta_usdt": -23.307253146870405,
+      "strategy_name": "binance_cta_spread_rx01_factor_164",
+      "symbol": "IOST"
+    },
+    {
+      "completion_reason": "borrow_unavailable",
+      "delta_usdt": -19.522257087779575,
+      "strategy_name": "binance_cta_spread_rx01_factor_trades_035",
+      "symbol": "KNC"
+    },
+    {
+      "completion_reason": "borrow_unavailable",
+      "delta_usdt": -19.540412644713,
+      "strategy_name": "binance_cta_spread_rx01_factor_trades_050",
+      "symbol": "KNC"
+    }
+  ],
+  "gateways": {
+    "/exec_trade06/": 200,
+    "/exec_trade06/config/": 200,
+    "/exec_trade06/ws": 101,
+    "/manager/": 200
+  },
+  "position_ready": true,
+  "rows": 1502,
+  "state_age_ms": 434.2236328125
+}

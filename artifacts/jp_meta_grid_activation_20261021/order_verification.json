@@ -1,0 +1,91 @@
+{
+  "binance_exec_trade05": {
+    "newest_event_us": 1792569073487000,
+    "newest_fill_us": 1792569073487000,
+    "orders": 60,
+    "fills": 56,
+    "exchange_fill_events": 35,
+    "trades": 35,
+    "rejects": 0,
+    "order_states": {
+      "FILLED": 55,
+      "CANCELED": 5
+    },
+    "active_orders": []
+  },
+  "binance_exec_trade06": {
+    "newest_event_us": 1792569383900000,
+    "newest_fill_us": 1792569326656000,
+    "orders": 654,
+    "fills": 48,
+    "exchange_fill_events": 14,
+    "trades": 14,
+    "rejects": 0,
+    "order_states": {
+      "FILLED": 48,
+      "CANCELED": 603,
+      "NEW": 3
+    },
+    "active_orders": [
+      {
+        "client_order_id": 1641337806754152456,
+        "created_us": 1792569383892761,
+        "fill_quantity": 0.0,
+        "liquidity": "Some(Unknown)",
+        "price": 2.287,
+        "quantity": 4.38,
+        "side": "SELL",
+        "status": "NEW",
+        "strategy": "batch_exec:binance_cta_spread_rx01_TD_TI_024",
+        "symbol": "NEOUSDT",
+        "ts_us": 1792569383899000,
+        "type": "LIMIT",
+        "venue": "BinanceFutures"
+      },
+      {
+        "client_order_id": 1641338966395322410,
+        "created_us": 1792569383895476,
+        "fill_quantity": 0.0,
+        "liquidity": "Some(Unknown)",
+        "price": 2.287,
+        "quantity": 4.38,
+        "side": "SELL",
+        "status": "NEW",
+        "strategy": "batch_exec:binance_cta_spread_rx01_baseline_105",
+        "symbol": "NEOUSDT",
+        "ts_us": 1792569383900000,
+        "type": "LIMIT",
+        "venue": "BinanceFutures"
+      },
+      {
+        "client_order_id": 1641343540535492714,
+        "created_us": 1792569383216041,
+        "fill_quantity": 0.0,
+        "liquidity": "Some(Unknown)",
+        "price": 0.0019399999999999999,
+        "quantity": 9394.4,
+        "side": "BUY",
+        "status": "NEW",
+        "strategy": "batch_exec:binance_cta_spread_rx01_factor_163",
+        "symbol": "RSRUSDT",
+        "ts_us": 1792569383243000,
+        "type": "LIMIT",
+        "venue": "BinanceMargin"
+      }
+    ]
+  },
+  "binance_exec_trade07": {
+    "newest_event_us": 1792569427674000,
+    "newest_fill_us": 1792569427674000,
+    "orders": 14,
+    "fills": 2,
+    "exchange_fill_events": 2,
+    "trades": 2,
+    "rejects": 0,
+    "order_states": {
+      "FILLED": 2,
+      "CANCELED": 12
+    },
+    "active_orders": []
+  }
+}

@@ -19,6 +19,8 @@ use crate::snapshot::{PositionSnapshot, StrategyPositionSnapshot};
 
 mod fill_recovery;
 mod funding_estimate;
+pub mod minute_marks;
+use minute_marks::MinuteMarks;
 
 pub type VenueMarkOverrides = BTreeMap<(String, i16), f64>;
 pub type SourceMarkOverrides = BTreeMap<String, VenueMarkOverrides>;
@@ -384,6 +386,7 @@ pub struct StrategyPnlRow {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StrategyPnlReport {
+    pub valuation: &'static str,
     pub source_id: String,
     pub account: String,
     pub strategy_name: String,
@@ -821,6 +824,7 @@ struct TimelineCacheKey {
     symbols: Vec<String>,
     max_points: usize,
     strategy_allocation: bool,
+    minute_marks_revision: Option<u64>,
 }
 
 /// One immutable dashboard generation. Fee/snapshot/history refreshes replace
@@ -834,6 +838,7 @@ pub struct NavTimelineCache {
     sources: BTreeMap<(String, bool), Arc<CachedTimelineSource>>,
     inputs: BTreeMap<(String, bool), TimelineSourceInputs>,
     results: Arc<crate::analysis::QueryCache<TimelineCacheKey, NavTimelineReport>>,
+    mark_plans: Arc<crate::analysis::QueryCache<TimelineCacheKey, minute_marks::Requests>>,
 }
 
 impl NavTimelineCache {
@@ -960,6 +965,12 @@ impl NavTimelineCache {
                 || Arc::new(crate::analysis::QueryCache::new(16)),
                 |previous| previous.results.clone(),
             );
+        let mark_plans = previous
+            .filter(|old| Arc::ptr_eq(&old.results, &results))
+            .map_or_else(
+                || Arc::new(crate::analysis::QueryCache::new(16)),
+                |old| old.mark_plans.clone(),
+            );
         Ok(Self {
             config,
             snapshots,
@@ -968,6 +979,7 @@ impl NavTimelineCache {
             sources,
             inputs,
             results,
+            mark_plans,
         })
     }
 
@@ -979,6 +991,18 @@ impl NavTimelineCache {
                 .filter(|source| source.enabled)
                 .map(|source| self.sources[&(source.id.clone(), true)].report.clone())
                 .collect(),
+        )
+    }
+
+    /// Strategy exports use the same resolved fees, anchors and fills as this
+    /// dashboard generation, including catalog-only fee settings.
+    pub fn rebuild_strategy_pnl(&self, request: StrategyPnlRequest) -> Result<StrategyPnlReport> {
+        rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
+            &self.config,
+            request,
+            &self.snapshots,
+            &self.strategy_snapshots,
+            &self.histories,
         )
     }
 
@@ -1008,8 +1032,17 @@ impl NavTimelineCache {
 
     pub fn rebuild(
         &self,
+        request: NavTimelineRequest,
+        strategy_allocation: bool,
+    ) -> Result<Arc<NavTimelineReport>> {
+        self.rebuild_with_prices(request, strategy_allocation, None)
+    }
+
+    fn rebuild_with_prices(
+        &self,
         mut request: NavTimelineRequest,
         strategy_allocation: bool,
+        prices: Option<&MinuteMarks>,
     ) -> Result<Arc<NavTimelineReport>> {
         request.selected_source_ids.sort();
         request.selected_source_ids.dedup();
@@ -1022,8 +1055,9 @@ impl NavTimelineCache {
             symbols: request.selected_symbols.clone(),
             max_points: request.max_points,
             strategy_allocation,
+            minute_marks_revision: prices.and_then(MinuteMarks::revision),
         };
-        self.results.get_or_compute(key, || {
+        let compute = || {
             crate::analysis::run(|| {
                 let snapshots = self
                     .snapshots
@@ -1053,9 +1087,15 @@ impl NavTimelineCache {
                     &strategies,
                     &self.histories,
                     Some((self, strategy_allocation)),
+                    prices,
                 )
             })
-        })
+        };
+        if prices.is_some_and(MinuteMarks::collecting) {
+            compute().map(Arc::new)
+        } else {
+            self.results.get_or_compute(key, compute)
+        }
     }
 }
 
@@ -2446,6 +2486,7 @@ pub fn rebuild_nav_timeline_from_histories_with_strategy_snapshots(
         strategy_snapshots,
         histories,
         None,
+        None,
     )
 }
 
@@ -2456,6 +2497,7 @@ fn rebuild_nav_timeline_with_cache(
     strategy_snapshots: &SourceStrategyPositionSnapshots,
     histories: &NavSourceHistories,
     cached: Option<(&NavTimelineCache, bool)>,
+    prices: Option<&MinuteMarks>,
 ) -> Result<NavTimelineReport> {
     if request.end_ts_us < 0 {
         bail!("end timestamp must not be negative");
@@ -2651,6 +2693,7 @@ fn rebuild_nav_timeline_with_cache(
         apply_timeline_event(&mut runtimes, event)?;
     }
 
+    minute_marks::apply(prices, &mut runtimes, &selected_symbol_set, start_ts_us)?;
     let baselines = timeline_totals_by_symbol(&runtimes);
     let strategy_baselines = timeline_totals_by_strategy_symbol(&runtimes);
     let mut points = Vec::new();
@@ -2667,7 +2710,7 @@ fn rebuild_nav_timeline_with_cache(
 
     push_timeline_sample(
         start_ts_us,
-        &runtimes,
+        &mut runtimes,
         &baselines,
         &strategy_baselines,
         &selected_symbols,
@@ -2675,7 +2718,8 @@ fn rebuild_nav_timeline_with_cache(
         &mut points,
         &mut points_by_symbol,
         &mut points_by_strategy,
-    );
+        prices,
+    )?;
 
     // The HTTP response contains fixed 15-minute points. Capture those points while
     // applying events instead of building one complete strategy/symbol series per fill.
@@ -2689,7 +2733,7 @@ fn rebuild_nav_timeline_with_cache(
         while next_tick_ts_us < event_ts_us && next_tick_ts_us < request.end_ts_us {
             push_timeline_sample(
                 next_tick_ts_us,
-                &runtimes,
+                &mut runtimes,
                 &baselines,
                 &strategy_baselines,
                 &selected_symbols,
@@ -2697,7 +2741,8 @@ fn rebuild_nav_timeline_with_cache(
                 &mut points,
                 &mut points_by_symbol,
                 &mut points_by_strategy,
-            );
+                prices,
+            )?;
             let advanced_tick_ts_us = next_tick_ts_us.saturating_add(NAV_TICK_INTERVAL_US);
             if advanced_tick_ts_us == next_tick_ts_us {
                 break;
@@ -2714,7 +2759,7 @@ fn rebuild_nav_timeline_with_cache(
         if next_tick_ts_us == event_ts_us && next_tick_ts_us <= request.end_ts_us {
             push_timeline_sample(
                 next_tick_ts_us,
-                &runtimes,
+                &mut runtimes,
                 &baselines,
                 &strategy_baselines,
                 &selected_symbols,
@@ -2722,7 +2767,8 @@ fn rebuild_nav_timeline_with_cache(
                 &mut points,
                 &mut points_by_symbol,
                 &mut points_by_strategy,
-            );
+                prices,
+            )?;
             let advanced_tick_ts_us = next_tick_ts_us.saturating_add(NAV_TICK_INTERVAL_US);
             if advanced_tick_ts_us != next_tick_ts_us {
                 next_tick_ts_us = advanced_tick_ts_us;
@@ -2732,7 +2778,7 @@ fn rebuild_nav_timeline_with_cache(
     while next_tick_ts_us < request.end_ts_us {
         push_timeline_sample(
             next_tick_ts_us,
-            &runtimes,
+            &mut runtimes,
             &baselines,
             &strategy_baselines,
             &selected_symbols,
@@ -2740,7 +2786,8 @@ fn rebuild_nav_timeline_with_cache(
             &mut points,
             &mut points_by_symbol,
             &mut points_by_strategy,
-        );
+            prices,
+        )?;
         let advanced_tick_ts_us = next_tick_ts_us.saturating_add(NAV_TICK_INTERVAL_US);
         if advanced_tick_ts_us == next_tick_ts_us {
             break;
@@ -2752,7 +2799,7 @@ fn rebuild_nav_timeline_with_cache(
     }
     push_timeline_sample(
         request.end_ts_us,
-        &runtimes,
+        &mut runtimes,
         &baselines,
         &strategy_baselines,
         &selected_symbols,
@@ -2760,10 +2807,14 @@ fn rebuild_nav_timeline_with_cache(
         &mut points,
         &mut points_by_symbol,
         &mut points_by_strategy,
-    );
+        prices,
+    )?;
 
     let current_totals = timeline_totals_by_symbol(&runtimes);
     let mut symbols = timeline_symbol_reports(&runtimes);
+    if prices.is_some() {
+        symbols.retain(|symbol| selected_symbol_set.contains(&symbol.symbol));
+    }
     for symbol in &mut symbols {
         let current = current_totals
             .get(&symbol.symbol)
@@ -2829,7 +2880,11 @@ fn rebuild_nav_timeline_with_cache(
     }
 
     Ok(NavTimelineReport {
-        valuation: "quantity_fifo_window_delta",
+        valuation: if prices.is_some() {
+            minute_marks::VALUATION
+        } else {
+            "quantity_fifo_window_delta"
+        },
         earliest_start_ts_us,
         start_ts_us,
         end_ts_us: request.end_ts_us,
@@ -2874,6 +2929,24 @@ pub fn rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
     strategy_snapshots: &SourceStrategyPositionSnapshots,
     histories: &NavSourceHistories,
 ) -> Result<StrategyPnlReport> {
+    rebuild_strategy_pnl_with_prices(
+        config,
+        request,
+        snapshots,
+        strategy_snapshots,
+        histories,
+        None,
+    )
+}
+
+fn rebuild_strategy_pnl_with_prices(
+    config: &AppConfig,
+    request: StrategyPnlRequest,
+    snapshots: &SourcePositionSnapshots,
+    strategy_snapshots: &SourceStrategyPositionSnapshots,
+    histories: &NavSourceHistories,
+    prices: Option<&MinuteMarks>,
+) -> Result<StrategyPnlReport> {
     if request.start_ts_us < 0 {
         bail!("start timestamp must not be negative");
     }
@@ -2904,6 +2977,18 @@ pub fn rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
     )
     .with_context(|| format!("failed to prepare source {} strategy PnL", source.id))?;
 
+    let symbols = prepared
+        .initial_states
+        .keys()
+        .map(|(s, _)| s.clone())
+        .chain(
+            prepared
+                .initial_strategy_states
+                .keys()
+                .map(|(_, s, _)| s.clone()),
+        )
+        .chain(prepared.fill_events.iter().map(|f| f.event.symbol.clone()))
+        .collect::<BTreeSet<_>>();
     let mut runtime = TimelineSourceState {
         source_id: source.id.clone(),
         fee_rates: source.nav_fee_rates()?,
@@ -2928,6 +3013,12 @@ pub fn rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
     for fill in prepared.fill_events.iter().take(window_start) {
         runtime.apply_fill(fill)?;
     }
+    minute_marks::apply(
+        prices,
+        std::slice::from_mut(&mut runtime),
+        &symbols,
+        request.start_ts_us,
+    )?;
     let baseline = strategy_totals(&runtime, &request.strategy_name);
     let mut rows = vec![StrategyPnlRow {
         row_kind: StrategyPnlRowKind::WindowStart,
@@ -2951,6 +3042,12 @@ pub fn rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
                 && is_system_position_close(&fill_strategy));
         runtime.apply_fill(fill)?;
         if is_strategy_fill {
+            minute_marks::apply(
+                prices,
+                std::slice::from_mut(&mut runtime),
+                &symbols,
+                fill.fill_ts_us,
+            )?;
             rows.push(StrategyPnlRow {
                 row_kind: StrategyPnlRowKind::Fill,
                 ts_us: fill.fill_ts_us,
@@ -2962,6 +3059,12 @@ pub fn rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
         }
     }
     runtime.activate_snapshot_at(request.end_ts_us);
+    minute_marks::apply(
+        prices,
+        std::slice::from_mut(&mut runtime),
+        &symbols,
+        request.end_ts_us,
+    )?;
     rows.push(StrategyPnlRow {
         row_kind: StrategyPnlRowKind::WindowEnd,
         ts_us: request.end_ts_us,
@@ -2972,6 +3075,11 @@ pub fn rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
     });
 
     Ok(StrategyPnlReport {
+        valuation: if prices.is_some() {
+            minute_marks::VALUATION
+        } else {
+            "quantity_fifo_window_delta"
+        },
         source_id: source.id.clone(),
         account: source.display_name().to_string(),
         strategy_name: request.strategy_name,
@@ -3152,11 +3260,12 @@ fn select_timeline_symbols(
 fn timeline_totals_by_symbol(runtimes: &[TimelineSourceState]) -> BTreeMap<String, NavTotals> {
     let mut totals = BTreeMap::<String, NavTotals>::new();
     for runtime in runtimes {
-        for ((symbol, _), state) in &runtime.states {
-            totals
-                .entry(symbol.clone())
-                .or_default()
-                .add(state.report(None).totals);
+        for ((symbol, venue), state) in &runtime.states {
+            totals.entry(symbol.clone()).or_default().add(
+                state
+                    .report(runtime.latest_marks.get(&(symbol.clone(), *venue)).copied())
+                    .totals,
+            );
         }
     }
     totals
@@ -3392,11 +3501,11 @@ fn timeline_symbol_reports(runtimes: &[TimelineSourceState]) -> Vec<AggregateSym
     let mut aggregate = BTreeMap::<String, AggregateSymbolBuilder>::new();
     for runtime in runtimes {
         let mut source_symbols = BTreeMap::<String, SymbolReportBuilder>::new();
-        for ((symbol, _), state) in &runtime.states {
+        for ((symbol, venue), state) in &runtime.states {
             source_symbols
                 .entry(symbol.clone())
                 .or_default()
-                .push(state.report(None));
+                .push(state.report(runtime.latest_marks.get(&(symbol.clone(), *venue)).copied()));
         }
         for (symbol, builder) in source_symbols {
             aggregate
@@ -3414,7 +3523,7 @@ fn timeline_symbol_reports(runtimes: &[TimelineSourceState]) -> Vec<AggregateSym
 #[allow(clippy::too_many_arguments)]
 fn push_timeline_sample(
     ts_us: i64,
-    runtimes: &[TimelineSourceState],
+    runtimes: &mut [TimelineSourceState],
     baselines: &BTreeMap<String, NavTotals>,
     strategy_baselines: &BTreeMap<(String, String), NavTotals>,
     selected_symbols: &[String],
@@ -3422,7 +3531,14 @@ fn push_timeline_sample(
     points: &mut Vec<NavTimelinePoint>,
     points_by_symbol: &mut BTreeMap<String, Vec<NavTimelinePoint>>,
     points_by_strategy: &mut BTreeMap<String, Vec<NavTimelinePoint>>,
-) {
+    prices: Option<&MinuteMarks>,
+) -> Result<()> {
+    minute_marks::apply(
+        prices,
+        runtimes,
+        &selected_symbols.iter().cloned().collect(),
+        ts_us,
+    )?;
     let current_by_symbol = timeline_totals_by_symbol(runtimes);
     let current_by_strategy_symbol = timeline_totals_by_strategy_symbol(runtimes);
     let position_values_by_symbol = timeline_position_values_by_symbol(runtimes);
@@ -3492,6 +3608,7 @@ fn push_timeline_sample(
             );
         }
     }
+    Ok(())
 }
 
 fn next_timeline_tick(ts_us: i64, interval_us: i64) -> i64 {
@@ -3721,6 +3838,7 @@ mod tests {
             account_ipc_service: None,
             legacy_share_unit_usdt: None,
             env_path: None,
+            target_proxy: None,
         }
     }
 
@@ -4749,6 +4867,360 @@ mod tests {
         );
     }
 
+    fn minute_mark_fixture(events: Vec<UniformOrderEvent>) -> NavTimelineCache {
+        let history = NavSourceHistory {
+            events: events.into_iter().map(Arc::<NavEvent>::from).collect(),
+            ..Default::default()
+        };
+        NavTimelineCache::build(
+            app_config(vec![source("trade01", Some(0.001))]),
+            Arc::new(BTreeMap::new()),
+            Arc::new(BTreeMap::new()),
+            Arc::new(BTreeMap::from([("trade01".into(), history)])),
+        )
+        .unwrap()
+    }
+
+    fn minute_marks(rows: &[(i64, f64)], revision: u64) -> MinuteMarks {
+        MinuteMarks::Loaded {
+            revision,
+            prices: BTreeMap::from([(
+                ("BTCUSDT".into(), 1),
+                rows.iter()
+                    .map(|(ts, price)| {
+                        (
+                            ts.div_euclid(crate::kline::MINUTE_US) * crate::kline::MINUTE_US
+                                - crate::kline::MINUTE_US,
+                            *price,
+                        )
+                    })
+                    .collect(),
+            )]),
+        }
+    }
+
+    #[test]
+    fn minute_valuation_removes_stale_start_and_marks_without_a_trade() {
+        let m = crate::kline::MINUTE_US;
+        let cache = minute_mark_fixture(vec![
+            strategy_event_at(1, 1, "BTCUSDT", 1, 1, 100.0, 2.0, "alpha"),
+            strategy_event_at(80 * m, 80 * m, "BTCUSDT", 1, 2, 126.0, 0.5, "alpha"),
+        ]);
+        let request = timeline_request(60 * m, 90 * m, vec!["trade01".into()], vec![]);
+        let prices = minute_marks(
+            &[
+                (60 * m, 120.0),
+                (75 * m, 125.0),
+                (80 * m, 127.0),
+                (90 * m, 130.0),
+            ],
+            1,
+        );
+        let raw = cache.rebuild(request.clone(), true).unwrap();
+        let marked = cache
+            .rebuild_with_prices(request.clone(), true, Some(&prices))
+            .unwrap();
+        assert_eq!(marked.valuation, minute_marks::VALUATION);
+        assert_eq!(marked.points[0].totals, NavTotals::default());
+        assert_close(marked.points[1].totals.nav_change_before_fee_quote, 10.0);
+        assert_close(raw.points[1].totals.nav_change_before_fee_quote, 0.0);
+        assert_close(raw.summary.nav_change_before_fee_quote, 52.0);
+        assert_close(marked.summary.nav_change_before_fee_quote, 18.0);
+        assert_close(marked.summary.nav_change_after_fee_quote, 17.937);
+        assert_eq!(raw.summary.fill_count, marked.summary.fill_count);
+        assert_eq!(raw.summary.volume_quote, marked.summary.volume_quote);
+        assert_eq!(
+            raw.summary.estimated_trading_fee_quote,
+            marked.summary.estimated_trading_fee_quote
+        );
+        assert_eq!(
+            raw.summary.realized_pnl_before_fee_quote,
+            marked.summary.realized_pnl_before_fee_quote
+        );
+        assert_eq!(marked.points.last().unwrap().totals, marked.summary);
+        assert_eq!(marked.strategy_points[0].summary, marked.summary);
+        assert_close(marked.symbols[0].net_position_value_quote, 195.0);
+        let exported = rebuild_strategy_pnl_with_prices(
+            &cache.config,
+            StrategyPnlRequest {
+                source_id: "trade01".into(),
+                strategy_name: "alpha".into(),
+                start_ts_us: 60 * m,
+                end_ts_us: 90 * m,
+            },
+            &cache.snapshots,
+            &cache.strategy_snapshots,
+            &cache.histories,
+            Some(&prices),
+        )
+        .unwrap();
+        assert_eq!(exported.valuation, marked.valuation);
+        assert_close(exported.rows[1].totals.nav_change_before_fee_quote, 13.5);
+        assert_eq!(exported.rows.last().unwrap().totals, marked.summary);
+        assert!(Arc::ptr_eq(
+            &marked,
+            &cache
+                .rebuild_with_prices(request.clone(), true, Some(&prices))
+                .unwrap()
+        ));
+        let revised = minute_marks(&[(60 * m, 120.0), (75 * m, 125.0), (90 * m, 131.0)], 2);
+        assert_close(
+            cache
+                .rebuild_with_prices(request, true, Some(&revised))
+                .unwrap()
+                .summary
+                .nav_change_before_fee_quote,
+            19.5,
+        );
+        assert_close(marked.summary.nav_change_before_fee_quote, 18.0);
+    }
+
+    #[test]
+    fn minute_valuation_keeps_boundary_executions_and_rebates() {
+        let m = crate::kline::MINUTE_US;
+        let mut cache = minute_mark_fixture(vec![
+            strategy_event_at(1, 1, "BTCUSDT", 1, 1, 100.0, 2.0, "alpha"),
+            strategy_event_at(60 * m, 60 * m, "BTCUSDT", 1, 2, 121.0, 1.0, "alpha"),
+        ]);
+        // Rebuild with negative configured fees to verify rebates retain their sign.
+        cache = NavTimelineCache::build(
+            app_config(vec![source("trade01", Some(-0.001))]),
+            cache.snapshots.clone(),
+            cache.strategy_snapshots.clone(),
+            cache.histories.clone(),
+        )
+        .unwrap();
+        let prices = minute_marks(&[(60 * m, 120.0), (75 * m, 125.0)], 1);
+        let request = timeline_request(60 * m, 75 * m, vec![], vec![]);
+        let report = cache
+            .rebuild_with_prices(request, true, Some(&prices))
+            .unwrap();
+        assert_eq!(report.points[0].totals, NavTotals::default());
+        assert_close(report.summary.nav_change_before_fee_quote, 6.0);
+        assert_close(report.summary.estimated_trading_fee_quote, -0.121);
+        assert_close(report.summary.nav_change_after_fee_quote, 6.121);
+        let zero = cache
+            .rebuild_with_prices(
+                timeline_request(60 * m, 60 * m, vec![], vec![]),
+                true,
+                Some(&prices),
+            )
+            .unwrap();
+        assert_eq!(zero.points.len(), 1);
+        assert_eq!(zero.points[0].totals, zero.summary);
+        assert_close(zero.summary.nav_change_before_fee_quote, 1.0);
+        assert_close(zero.summary.nav_change_after_fee_quote, 1.121);
+    }
+
+    #[test]
+    fn minute_valuation_requires_all_open_strategy_marks_even_when_account_is_flat() {
+        let m = crate::kline::MINUTE_US;
+        let strategies = BTreeMap::from([(
+            "trade01".into(),
+            strategy_position_snapshot(
+                "trade01",
+                1,
+                vec![
+                    ("alpha", "BTCUSDT", 2.0, 100.0),
+                    ("beta", "BTCUSDT", -2.0, 100.0),
+                ],
+            ),
+        )]);
+        let cache = NavTimelineCache::build(
+            app_config(vec![source("trade01", Some(0.0))]),
+            Arc::new(BTreeMap::new()),
+            Arc::new(strategies),
+            Arc::new(BTreeMap::from([(
+                "trade01".into(),
+                NavSourceHistory::default(),
+            )])),
+        )
+        .unwrap();
+        let request = timeline_request(60 * m, 75 * m, vec![], vec![]);
+        let prices = minute_marks(&[(60 * m, 120.0), (75 * m, 130.0)], 1);
+        let report = cache
+            .rebuild_with_prices(request.clone(), true, Some(&prices))
+            .unwrap();
+        assert_close(report.summary.nav_change_before_fee_quote, 0.0);
+        assert_close(
+            report
+                .strategy_points
+                .iter()
+                .find(|s| s.strategy == "alpha")
+                .unwrap()
+                .summary
+                .nav_change_before_fee_quote,
+            20.0,
+        );
+        assert_close(
+            report
+                .strategy_points
+                .iter()
+                .find(|s| s.strategy == "beta")
+                .unwrap()
+                .summary
+                .nav_change_before_fee_quote,
+            -20.0,
+        );
+        let missing = minute_marks(&[(60 * m, 120.0)], 2);
+        assert!(
+            cache
+                .rebuild_with_prices(request.clone(), true, Some(&missing))
+                .is_err()
+        );
+        let repaired = minute_marks(&[(60 * m, 120.0), (75 * m, 130.0)], 2);
+        assert!(
+            cache
+                .rebuild_with_prices(request, true, Some(&repaired))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn minute_valuation_keeps_sources_cash_perps_and_symbol_selection_isolated() {
+        let m = crate::kline::MINUTE_US;
+        let history = |events: Vec<UniformOrderEvent>| NavSourceHistory {
+            events: events.into_iter().map(Arc::<NavEvent>::from).collect(),
+            ..Default::default()
+        };
+        let histories = BTreeMap::from([
+            (
+                "a".into(),
+                history(vec![
+                    strategy_event_at(1, 1, "BTCUSDT", 1, 1, 100.0, 2.0, "alpha"),
+                    strategy_event_at(2, 2, "BTC", 0, 1, 20.0, 3.0, "alpha"),
+                    strategy_event_at(65 * m, 65 * m, "BTCUSDT", 1, 2, 130.0, 1.0, "alpha"),
+                ]),
+            ),
+            (
+                "b".into(),
+                history(vec![strategy_event_at(
+                    1, 1, "BTCUSDT", 1, 2, 200.0, 1.0, "alpha",
+                )]),
+            ),
+        ]);
+        let cache = NavTimelineCache::build(
+            app_config(vec![source("a", Some(0.0)), source("b", Some(0.0))]),
+            Arc::new(BTreeMap::new()),
+            Arc::new(BTreeMap::new()),
+            Arc::new(histories),
+        )
+        .unwrap();
+        let mut prices = minute_marks(&[(60 * m, 120.0), (75 * m, 140.0)], 1);
+        let selected = cache
+            .rebuild_with_prices(
+                timeline_request(60 * m, 75 * m, vec![], vec!["BTCUSDT".into()]),
+                true,
+                Some(&prices),
+            )
+            .unwrap();
+        assert_close(selected.summary.nav_change_before_fee_quote, 10.0);
+        assert_eq!(selected.symbols.len(), 1);
+        if let MinuteMarks::Loaded { prices, .. } = &mut prices {
+            prices.insert(
+                ("BTC".into(), 0),
+                BTreeMap::from([(59 * m, 30.0), (74 * m, 35.0)]),
+            );
+        }
+        let report = cache
+            .rebuild_with_prices(
+                timeline_request(60 * m, 75 * m, vec![], vec![]),
+                true,
+                Some(&prices),
+            )
+            .unwrap();
+        assert_close(report.summary.nav_change_before_fee_quote, 25.0);
+        assert_close(report.summary.realized_pnl_before_fee_quote, 30.0);
+        let perp = report
+            .symbols
+            .iter()
+            .find(|s| s.symbol == "BTCUSDT")
+            .unwrap();
+        assert_eq!(perp.source_count, 2);
+        assert_close(perp.long_quantity, 1.0);
+        assert_close(perp.short_quantity, 1.0);
+        assert_close(
+            report
+                .strategy_points
+                .iter()
+                .map(|s| s.summary.nav_change_before_fee_quote)
+                .sum(),
+            25.0,
+        );
+        let one = cache
+            .rebuild_with_prices(
+                timeline_request(60 * m, 75 * m, vec!["b".into()], vec![]),
+                true,
+                Some(&prices),
+            )
+            .unwrap();
+        assert_close(one.summary.nav_change_before_fee_quote, -20.0);
+        assert_close(one.summary.realized_pnl_before_fee_quote, 0.0);
+    }
+
+    #[test]
+    fn minute_valuation_system_close_stays_in_account_residual() {
+        let m = crate::kline::MINUTE_US;
+        let strategies = BTreeMap::from([(
+            "trade01".into(),
+            strategy_position_snapshot("trade01", 1, vec![("alpha", "BTCUSDT", 2.0, 100.0)]),
+        )]);
+        let history = NavSourceHistory {
+            events: vec![strategy_event_at(
+                65 * m,
+                65 * m,
+                "BTCUSDT",
+                1,
+                2,
+                125.0,
+                1.0,
+                "system_position_close",
+            )]
+            .into_iter()
+            .map(Arc::<NavEvent>::from)
+            .collect(),
+            ..Default::default()
+        };
+        let cache = NavTimelineCache::build(
+            app_config(vec![source("trade01", Some(0.001))]),
+            Arc::new(BTreeMap::new()),
+            Arc::new(strategies),
+            Arc::new(BTreeMap::from([("trade01".into(), history)])),
+        )
+        .unwrap();
+        let prices = minute_marks(&[(60 * m, 120.0), (75 * m, 130.0)], 1);
+        let report = cache
+            .rebuild_with_prices(
+                timeline_request(60 * m, 75 * m, vec![], vec![]),
+                true,
+                Some(&prices),
+            )
+            .unwrap();
+        assert_close(report.summary.nav_change_before_fee_quote, 15.0);
+        let alpha = report
+            .strategy_points
+            .iter()
+            .find(|s| s.strategy == "alpha")
+            .unwrap();
+        let residual = report
+            .strategy_points
+            .iter()
+            .find(|s| s.strategy == UNALLOCATED_STRATEGY)
+            .unwrap();
+        assert_close(alpha.summary.nav_change_before_fee_quote, 20.0);
+        assert_close(residual.summary.nav_change_before_fee_quote, -5.0);
+        assert_close(alpha.summary.estimated_trading_fee_quote, 0.0);
+        assert_close(residual.summary.estimated_trading_fee_quote, 0.125);
+        assert_close(
+            report
+                .strategy_points
+                .iter()
+                .map(|s| s.summary.nav_change_after_fee_quote)
+                .sum(),
+            report.summary.nav_change_after_fee_quote,
+        );
+    }
+
     #[test]
     fn timeline_uses_pre_window_fills_and_resets_the_window_to_zero() {
         let temp = tempfile::tempdir().unwrap();
@@ -4855,6 +5327,119 @@ mod tests {
         assert_close(report.rows[1].totals.nav_change_before_fee_quote, 0.0);
         assert_close(report.rows[2].totals.floating_pnl_quote, 40.0);
         assert_close(report.rows[2].totals.nav_change_after_fee_quote, 40.0);
+    }
+
+    #[test]
+    fn cached_strategy_pnl_uses_catalog_fees_and_the_new_empty_account_anchor() {
+        let source_id = "bybit_exec_trade01";
+        let strategy = "lgq_cta_symbol_mean";
+        let mut source = source(source_id, None);
+        source.venue = "bybit-futures".into();
+        assert!(source.nav_fee_rates().is_err());
+        let config = app_config(vec![source]);
+        let snapshots = Arc::new(SourcePositionSnapshots::from([(
+            source_id.into(),
+            PositionSnapshot {
+                source_id: source_id.into(),
+                snapshot_ts_us: 10,
+                positions: vec![],
+            },
+        )]));
+        let strategies = Arc::new(SourceStrategyPositionSnapshots::from([(
+            source_id.into(),
+            StrategyPositionSnapshot {
+                source_id: source_id.into(),
+                snapshot_ts_us: 5,
+                positions: vec![StrategySnapshotPosition {
+                    strategy_name: strategy.into(),
+                    symbol: "BTCUSDT".into(),
+                    venue_code: 5,
+                    quantity: 9.0,
+                    reference_price: 100.0,
+                }],
+            },
+        )]));
+        let histories = Arc::new(NavSourceHistories::from([(
+            source_id.into(),
+            NavSourceHistory {
+                events: vec![
+                    strategy_event_at(9, 9, "BTCUSDT", 5, 1, 1.0, 100.0, strategy),
+                    strategy_event_at(20, 20, "BTCUSDT", 5, 1, 100.0, 1.0, strategy),
+                    strategy_event_at(30, 30, "BTCUSDT", 5, 2, 110.0, 1.0, strategy),
+                ]
+                .into_iter()
+                .map(|mut event| {
+                    event.fill_liquidity = Some(crate::model::FillLiquidity::Taker);
+                    Arc::<NavEvent>::from(event)
+                })
+                .collect(),
+                ..Default::default()
+            },
+        )]));
+        let fees = |rate| {
+            BTreeMap::from([(
+                source_id.into(),
+                FeeRates {
+                    maker: -0.0001,
+                    taker: rate,
+                    by_quote: Default::default(),
+                },
+            )])
+        };
+        let cache = NavTimelineCache::build(
+            config.clone().with_fee_rates(&fees(0.001)),
+            snapshots.clone(),
+            strategies.clone(),
+            histories.clone(),
+        )
+        .unwrap();
+        let request = StrategyPnlRequest {
+            source_id: source_id.into(),
+            strategy_name: strategy.into(),
+            start_ts_us: 10,
+            end_ts_us: 30,
+        };
+        let report = cache.rebuild_strategy_pnl(request.clone()).unwrap();
+        assert_eq!(report.rows[0].totals, NavTotals::default());
+        let terminal = report.rows.last().unwrap().totals;
+        assert_eq!(terminal.fill_count, 2);
+        assert_eq!(terminal.taker_fill_count, 2);
+        assert_close(terminal.realized_pnl_before_fee_quote, 10.0);
+        assert_close(terminal.estimated_trading_fee_quote, 0.21);
+        assert_close(terminal.nav_change_after_fee_quote, 9.79);
+        let timeline = cache
+            .rebuild(
+                timeline_request(10, 30, vec![source_id.into()], vec![]),
+                true,
+            )
+            .unwrap();
+        assert_eq!(terminal, timeline.summary);
+        let dashboard = cache.dashboard_report();
+        assert_eq!(dashboard.sources[0].initial_position_count, 0);
+        assert_eq!(
+            dashboard.sources[0].initial_position_snapshot_ts_us,
+            Some(10)
+        );
+
+        let updated = NavTimelineCache::refresh(
+            config.with_fee_rates(&fees(0.002)),
+            snapshots,
+            strategies,
+            histories,
+            Some(&cache),
+        )
+        .unwrap();
+        let refreshed = updated.rebuild_strategy_pnl(request.clone()).unwrap();
+        assert_close(
+            refreshed
+                .rows
+                .last()
+                .unwrap()
+                .totals
+                .nav_change_after_fee_quote,
+            9.58,
+        );
+        assert_eq!(cache.rebuild_strategy_pnl(request).unwrap(), report);
     }
 
     #[test]

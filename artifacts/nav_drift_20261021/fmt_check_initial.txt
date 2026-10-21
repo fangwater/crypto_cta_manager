@@ -1,0 +1,559 @@
+Diff in /home/fanghaizhou/crypto_cta_manager/src/kline.rs:258:
+ 
+ /// Detached backfills survive HTTP cancellation. Return coverage after at most
+ /// 10s of waiting; a later query reuses the cache rather than restarting pulls.
+[31m-pub(crate) async fn warm_ranges(store: &KlineStore, ranges: BTreeMap<String, (i64, i64)>) -> KlineWarmResult {
+(B[m[32m+pub(crate) async fn warm_ranges(
+(B[m[32m+    store: &KlineStore,
+(B[m[32m+    ranges: BTreeMap<String, (i64, i64)>,
+(B[m[32m+) -> KlineWarmResult {
+(B[m     let started = std::time::Instant::now();
+     let symbol_count = ranges.len();
+     let store = store.clone();
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:29:
+         let open = ts.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
+         match self {
+             Self::Collect(requests) => {
+[31m-                requests.lock().unwrap().entry(market.clone()).or_default().insert(open);
+(B[m[32m+                requests
+(B[m[32m+                    .lock()
+(B[m[32m+                    .unwrap()
+(B[m[32m+                    .entry(market.clone())
+(B[m[32m+                    .or_default()
+(B[m[32m+                    .insert(open);
+(B[m                 Ok(None)
+             }
+[31m-            Self::Loaded { prices, .. } => prices.get(market).and_then(|bars| bars.get(&open))
+(B[m[31m-                .copied().map(Some).with_context(|| format!("缺少 {} 在 {ts} 的完整分钟估值价", market.0)),
+(B[m[32m+            Self::Loaded { prices, .. } => prices
+(B[m[32m+                .get(market)
+(B[m[32m+                .and_then(|bars| bars.get(&open))
+(B[m[32m+                .copied()
+(B[m[32m+                .map(Some)
+(B[m[32m+                .with_context(|| format!("缺少 {} 在 {ts} 的完整分钟估值价", market.0)),
+(B[m         }
+     }
+ }
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:52:
+         };
+         // A flat account can still have offsetting strategy positions. They need
+         // the same market mark, including the account's unallocated residual.
+[31m-        let markets = runtime.states.iter()
+(B[m[32m+        let markets = runtime
+(B[m[32m+            .states
+(B[m[32m+            .iter()
+(B[m             .filter(|((symbol, _), state)| symbols.contains(symbol) && open(state))
+             .map(|(market, _)| market.clone())
+[31m-            .chain(runtime.strategy_states.iter()
+(B[m[31m-                .filter(|((_, symbol, _), state)| symbols.contains(symbol) && open(state))
+(B[m[31m-                .map(|((_, symbol, venue), _)| (symbol.clone(), *venue)))
+(B[m[32m+            .chain(
+(B[m[32m+                runtime
+(B[m[32m+                    .strategy_states
+(B[m[32m+                    .iter()
+(B[m[32m+                    .filter(|((_, symbol, _), state)| symbols.contains(symbol) && open(state))
+(B[m[32m+                    .map(|((_, symbol, venue), _)| (symbol.clone(), *venue)),
+(B[m[32m+            )
+(B[m             .collect::<BTreeSet<_>>();
+         for market in markets {
+             if let Some(price) = prices.price(&market, ts)? {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:88:
+         error: error.into(),
+         loading,
+         available_from_us: first_complete_open(store.cutoff_us(now_us())) + MINUTE_US,
+[31m-    }.into()
+(B[m[32m+    }
+(B[m[32m+    .into()
+(B[m }
+ 
+ fn validate(store: &KlineStore, start: i64, end: i64) -> Result<()> {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:95:
+     if !store.enabled() {
+[31m-        return Err(unavailable(store, false, "实际净值需要已启用的分钟 K 线估值"));
+(B[m[32m+        return Err(unavailable(
+(B[m[32m+            store,
+(B[m[32m+            false,
+(B[m[32m+            "实际净值需要已启用的分钟 K 线估值",
+(B[m[32m+        ));
+(B[m     }
+     let now = now_us();
+     let baseline_open = start.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:100:
+     if baseline_open < store.cutoff_us(now) || end > now || end < start {
+[31m-        return Err(unavailable(store, false,
+(B[m[31m-            "分钟估值仅支持最近保留范围，起点需要前一个完整分钟；请选择最近 1–30 天"));
+(B[m[32m+        return Err(unavailable(
+(B[m[32m+            store,
+(B[m[32m+            false,
+(B[m[32m+            "分钟估值仅支持最近保留范围，起点需要前一个完整分钟；请选择最近 1–30 天",
+(B[m[32m+        ));
+(B[m     }
+     Ok(())
+ }
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:106:
+ 
+[31m-fn read_prices(store: &KlineStore, requests: &Requests) -> Result<(Prices, BTreeMap<String, (i64, i64)>)> {
+(B[m[31m-    let read = crate::analysis::run(|| requests.par_iter().map(|(market, wanted)| {
+(B[m[31m-        let opens = wanted.iter().copied().collect::<Vec<_>>();
+(B[m[31m-        let values = store.read_minutes(&market.0, &opens)?;
+(B[m[31m-        let mut prices = BTreeMap::new();
+(B[m[31m-        let mut missing: Option<(i64, i64)> = None;
+(B[m[31m-        for (open, candle) in opens.into_iter().zip(values) {
+(B[m[31m-            if let Some(candle) = candle {
+(B[m[31m-                prices.insert(open, candle.close);
+(B[m[31m-            } else {
+(B[m[31m-                let range = missing.get_or_insert((open, open + MINUTE_US));
+(B[m[31m-                range.1 = open + MINUTE_US;
+(B[m[31m-            }
+(B[m[31m-        }
+(B[m[31m-        Ok((market.clone(), prices, missing))
+(B[m[31m-    }).collect::<Result<Vec<_>>>())?;
+(B[m[32m+fn read_prices(
+(B[m[32m+    store: &KlineStore,
+(B[m[32m+    requests: &Requests,
+(B[m[32m+) -> Result<(Prices, BTreeMap<String, (i64, i64)>)> {
+(B[m[32m+    let read = crate::analysis::run(|| {
+(B[m[32m+        requests
+(B[m[32m+            .par_iter()
+(B[m[32m+            .map(|(market, wanted)| {
+(B[m[32m+                let opens = wanted.iter().copied().collect::<Vec<_>>();
+(B[m[32m+                let values = store.read_minutes(&market.0, &opens)?;
+(B[m[32m+                let mut prices = BTreeMap::new();
+(B[m[32m+                let mut missing: Option<(i64, i64)> = None;
+(B[m[32m+                for (open, candle) in opens.into_iter().zip(values) {
+(B[m[32m+                    if let Some(candle) = candle {
+(B[m[32m+                        prices.insert(open, candle.close);
+(B[m[32m+                    } else {
+(B[m[32m+                        let range = missing.get_or_insert((open, open + MINUTE_US));
+(B[m[32m+                        range.1 = open + MINUTE_US;
+(B[m[32m+                    }
+(B[m[32m+                }
+(B[m[32m+                Ok((market.clone(), prices, missing))
+(B[m[32m+            })
+(B[m[32m+            .collect::<Result<Vec<_>>>()
+(B[m[32m+    })?;
+(B[m     let mut prices = Prices::new();
+     let mut missing = BTreeMap::new();
+     for (market, bars, range) in read {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:126:
+[31m-        if let Some(range) = range { missing.insert(market.0.clone(), range); }
+(B[m[32m+        if let Some(range) = range {
+(B[m[32m+            missing.insert(market.0.clone(), range);
+(B[m[32m+        }
+(B[m         prices.insert(market, bars);
+     }
+     Ok((prices, missing))
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:130:
+ }
+ 
+[31m-async fn load_prices(store: Arc<KlineStore>, requests: Arc<Requests>, start: i64, end: i64) -> Result<MinuteMarks> {
+(B[m[32m+async fn load_prices(
+(B[m[32m+    store: Arc<KlineStore>,
+(B[m[32m+    requests: Arc<Requests>,
+(B[m[32m+    start: i64,
+(B[m[32m+    end: i64,
+(B[m[32m+) -> Result<MinuteMarks> {
+(B[m     validate(&store, start, end)?;
+     let read_store = store.clone();
+     let (requests, (mut prices, missing)) = tokio::task::spawn_blocking(move || {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:136:
+         let result = read_prices(&read_store, &requests)?;
+         Ok::<_, anyhow::Error>((requests, result))
+[31m-    }).await??;
+(B[m[32m+    })
+(B[m[32m+    .await??;
+(B[m     if !missing.is_empty() {
+         let warm = warm_ranges(&store, missing).await;
+         validate(&store, start, end)?;
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:142:
+         let read_store = store.clone();
+[31m-        let (loaded, missing) = tokio::task::spawn_blocking(move || read_prices(&read_store, &requests)).await??;
+(B[m[32m+        let (loaded, missing) =
+(B[m[32m+            tokio::task::spawn_blocking(move || read_prices(&read_store, &requests)).await??;
+(B[m         if !missing.is_empty() {
+             let reason = if warm.pending {
+                 "实际持仓的分钟估值价正在后台补齐，完成后自动重算".into()
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:147:
+             } else if warm.errors.is_empty() {
+[31m-                format!("实际净值缺少 {} 个币种的分钟估值价，请稍后重试", missing.len())
+(B[m[32m+                format!(
+(B[m[32m+                    "实际净值缺少 {} 个币种的分钟估值价，请稍后重试",
+(B[m[32m+                    missing.len()
+(B[m[32m+                )
+(B[m             } else {
+                 format!("实际净值分钟估值价暂不可用：{}", warm.errors.join("; "))
+             };
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:153:
+         }
+         prices = loaded;
+     }
+[31m-    Ok(MinuteMarks::Loaded { revision: store.revision(), prices })
+(B[m[32m+    Ok(MinuteMarks::Loaded {
+(B[m[32m+        revision: store.revision(),
+(B[m[32m+        prices,
+(B[m[32m+    })
+(B[m }
+ 
+ impl NavTimelineCache {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:160:
+[31m-    fn strategy_with_prices(&self, request: StrategyPnlRequest, prices: Option<&MinuteMarks>) -> Result<StrategyPnlReport> {
+(B[m[31m-        rebuild_strategy_pnl_with_prices(&self.config, request, &self.snapshots,
+(B[m[31m-            &self.strategy_snapshots, &self.histories, prices)
+(B[m[32m+    fn strategy_with_prices(
+(B[m[32m+        &self,
+(B[m[32m+        request: StrategyPnlRequest,
+(B[m[32m+        prices: Option<&MinuteMarks>,
+(B[m[32m+    ) -> Result<StrategyPnlReport> {
+(B[m[32m+        rebuild_strategy_pnl_with_prices(
+(B[m[32m+            &self.config,
+(B[m[32m+            request,
+(B[m[32m+            &self.snapshots,
+(B[m[32m+            &self.strategy_snapshots,
+(B[m[32m+            &self.histories,
+(B[m[32m+            prices,
+(B[m[32m+        )
+(B[m     }
+ 
+     pub async fn rebuild_strategy_pnl_priced(
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:166:
+[31m-        self: &Arc<Self>, request: StrategyPnlRequest, store: Arc<KlineStore>,
+(B[m[32m+        self: &Arc<Self>,
+(B[m[32m+        request: StrategyPnlRequest,
+(B[m[32m+        store: Arc<KlineStore>,
+(B[m     ) -> Result<StrategyPnlReport> {
+         if !self.uses_minute_marks(std::slice::from_ref(&request.source_id)) {
+             let cache = self.clone();
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:170:
+[31m-            return tokio::task::spawn_blocking(move || cache.rebuild_strategy_pnl(request)).await?;
+(B[m[32m+            return tokio::task::spawn_blocking(move || cache.rebuild_strategy_pnl(request))
+(B[m[32m+                .await?;
+(B[m         }
+         validate(&store, request.start_ts_us, request.end_ts_us)?;
+         let cache = self.clone();
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:175:
+         let requests = tokio::task::spawn_blocking(move || {
+             let collector = MinuteMarks::Collect(Mutex::new(Requests::new()));
+             cache.strategy_with_prices(planned, Some(&collector))?;
+[31m-            let MinuteMarks::Collect(requests) = collector else { unreachable!() };
+(B[m[32m+            let MinuteMarks::Collect(requests) = collector else {
+(B[m[32m+                unreachable!()
+(B[m[32m+            };
+(B[m             Ok::<_, anyhow::Error>(requests.into_inner().unwrap())
+[31m-        }).await??;
+(B[m[31m-        let prices = load_prices(store, Arc::new(requests), request.start_ts_us, request.end_ts_us).await?;
+(B[m[32m+        })
+(B[m[32m+        .await??;
+(B[m[32m+        let prices = load_prices(
+(B[m[32m+            store,
+(B[m[32m+            Arc::new(requests),
+(B[m[32m+            request.start_ts_us,
+(B[m[32m+            request.end_ts_us,
+(B[m[32m+        )
+(B[m[32m+        .await?;
+(B[m         let cache = self.clone();
+[31m-        tokio::task::spawn_blocking(move || cache.strategy_with_prices(request, Some(&prices))).await?
+(B[m[32m+        tokio::task::spawn_blocking(move || cache.strategy_with_prices(request, Some(&prices)))
+(B[m[32m+            .await?
+(B[m     }
+ 
+     pub fn uses_minute_marks(&self, sources: &[String]) -> bool {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:187:
+[31m-        self.config.sources.iter().filter(|s| s.enabled && (sources.is_empty() || sources.contains(&s.id)))
+(B[m[32m+        self.config
+(B[m[32m+            .sources
+(B[m[32m+            .iter()
+(B[m[32m+            .filter(|s| s.enabled && (sources.is_empty() || sources.contains(&s.id)))
+(B[m             .all(|s| matches!(s.venue.as_str(), "binance-futures" | "binance-margin"))
+     }
+ 
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:201:
+             return tokio::task::spawn_blocking(move || cache.rebuild(request, allocation)).await?;
+         }
+         let sources = select_sources(&self.config, &request.selected_source_ids)?;
+[31m-        let start = request.start_ts_us.unwrap_or_else(|| sources.iter()
+(B[m[31m-            .filter_map(|s| self.start_ts_us(&s.id, request.end_ts_us, allocation))
+(B[m[31m-            .min().unwrap_or(request.end_ts_us));
+(B[m[32m+        let start = request.start_ts_us.unwrap_or_else(|| {
+(B[m[32m+            sources
+(B[m[32m+                .iter()
+(B[m[32m+                .filter_map(|s| self.start_ts_us(&s.id, request.end_ts_us, allocation))
+(B[m[32m+                .min()
+(B[m[32m+                .unwrap_or(request.end_ts_us)
+(B[m[32m+        });
+(B[m         validate(&store, start, request.end_ts_us)?;
+[31m-        request.selected_source_ids.sort(); request.selected_source_ids.dedup();
+(B[m[31m-        request.selected_symbols.sort(); request.selected_symbols.dedup();
+(B[m[32m+        request.selected_source_ids.sort();
+(B[m[32m+        request.selected_source_ids.dedup();
+(B[m[32m+        request.selected_symbols.sort();
+(B[m[32m+        request.selected_symbols.dedup();
+(B[m         let key = TimelineCacheKey {
+[31m-            start: request.start_ts_us, end: request.end_ts_us,
+(B[m[31m-            sources: request.selected_source_ids.clone(), symbols: request.selected_symbols.clone(),
+(B[m[31m-            max_points: request.max_points, strategy_allocation: allocation,
+(B[m[32m+            start: request.start_ts_us,
+(B[m[32m+            end: request.end_ts_us,
+(B[m[32m+            sources: request.selected_source_ids.clone(),
+(B[m[32m+            symbols: request.selected_symbols.clone(),
+(B[m[32m+            max_points: request.max_points,
+(B[m[32m+            strategy_allocation: allocation,
+(B[m             minute_marks_revision: Some(store.revision()),
+         };
+[31m-        if let Some(report) = self.results.get(&key) { return Ok(report); }
+(B[m[32m+        if let Some(report) = self.results.get(&key) {
+(B[m[32m+            return Ok(report);
+(B[m[32m+        }
+(B[m         let cache = self.clone();
+         let plan_request = request.clone();
+         let requests = tokio::task::spawn_blocking(move || {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:220:
+[31m-            let plan_key = TimelineCacheKey { minute_marks_revision: None, ..key };
+(B[m[32m+            let plan_key = TimelineCacheKey {
+(B[m[32m+                minute_marks_revision: None,
+(B[m[32m+                ..key
+(B[m[32m+            };
+(B[m             cache.mark_plans.get_or_compute(plan_key, || {
+                 let collector = MinuteMarks::Collect(Mutex::new(Requests::new()));
+                 cache.rebuild_with_prices(plan_request, allocation, Some(&collector))?;
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav/minute_marks.rs:224:
+[31m-                let MinuteMarks::Collect(requests) = collector else { unreachable!() };
+(B[m[32m+                let MinuteMarks::Collect(requests) = collector else {
+(B[m[32m+                    unreachable!()
+(B[m[32m+                };
+(B[m                 Ok(requests.into_inner().unwrap())
+             })
+[31m-        }).await??;
+(B[m[32m+        })
+(B[m[32m+        .await??;
+(B[m         let prices = load_prices(store, requests, start, request.end_ts_us).await?;
+         let cache = self.clone();
+[31m-        tokio::task::spawn_blocking(move || cache.rebuild_with_prices(request, allocation, Some(&prices))).await?
+(B[m[32m+        tokio::task::spawn_blocking(move || {
+(B[m[32m+            cache.rebuild_with_prices(request, allocation, Some(&prices))
+(B[m[32m+        })
+(B[m[32m+        .await?
+(B[m     }
+ }
+ 
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:965:
+                 || Arc::new(crate::analysis::QueryCache::new(16)),
+                 |previous| previous.results.clone(),
+             );
+[31m-        let mark_plans = previous.filter(|old| Arc::ptr_eq(&old.results, &results))
+(B[m[31m-            .map_or_else(|| Arc::new(crate::analysis::QueryCache::new(16)), |old| old.mark_plans.clone());
+(B[m[32m+        let mark_plans = previous
+(B[m[32m+            .filter(|old| Arc::ptr_eq(&old.results, &results))
+(B[m[32m+            .map_or_else(
+(B[m[32m+                || Arc::new(crate::analysis::QueryCache::new(16)),
+(B[m[32m+                |old| old.mark_plans.clone(),
+(B[m[32m+            );
+(B[m         Ok(Self {
+             config,
+             snapshots,
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:1093:
+             self.results.get_or_compute(key, compute)
+         }
+     }
+[31m-
+(B[m }
+ 
+ impl TimelineSourceState {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:2877:
+     }
+ 
+     Ok(NavTimelineReport {
+[31m-        valuation: if prices.is_some() { minute_marks::VALUATION } else { "quantity_fifo_window_delta" },
+(B[m[32m+        valuation: if prices.is_some() {
+(B[m[32m+            minute_marks::VALUATION
+(B[m[32m+        } else {
+(B[m[32m+            "quantity_fifo_window_delta"
+(B[m[32m+        },
+(B[m         earliest_start_ts_us,
+         start_ts_us,
+         end_ts_us: request.end_ts_us,
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:2922:
+     strategy_snapshots: &SourceStrategyPositionSnapshots,
+     histories: &NavSourceHistories,
+ ) -> Result<StrategyPnlReport> {
+[31m-    rebuild_strategy_pnl_with_prices(config, request, snapshots, strategy_snapshots, histories, None)
+(B[m[32m+    rebuild_strategy_pnl_with_prices(
+(B[m[32m+        config,
+(B[m[32m+        request,
+(B[m[32m+        snapshots,
+(B[m[32m+        strategy_snapshots,
+(B[m[32m+        histories,
+(B[m[32m+        None,
+(B[m[32m+    )
+(B[m }
+ 
+ fn rebuild_strategy_pnl_with_prices(
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:2963:
+     )
+     .with_context(|| format!("failed to prepare source {} strategy PnL", source.id))?;
+ 
+[31m-    let symbols = prepared.initial_states.keys().map(|(s, _)| s.clone())
+(B[m[31m-        .chain(prepared.initial_strategy_states.keys().map(|(_, s, _)| s.clone()))
+(B[m[32m+    let symbols = prepared
+(B[m[32m+        .initial_states
+(B[m[32m+        .keys()
+(B[m[32m+        .map(|(s, _)| s.clone())
+(B[m[32m+        .chain(
+(B[m[32m+            prepared
+(B[m[32m+                .initial_strategy_states
+(B[m[32m+                .keys()
+(B[m[32m+                .map(|(_, s, _)| s.clone()),
+(B[m[32m+        )
+(B[m         .chain(prepared.fill_events.iter().map(|f| f.event.symbol.clone()))
+         .collect::<BTreeSet<_>>();
+     let mut runtime = TimelineSourceState {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:2991:
+     for fill in prepared.fill_events.iter().take(window_start) {
+         runtime.apply_fill(fill)?;
+     }
+[31m-    minute_marks::apply(prices, std::slice::from_mut(&mut runtime), &symbols, request.start_ts_us)?;
+(B[m[32m+    minute_marks::apply(
+(B[m[32m+        prices,
+(B[m[32m+        std::slice::from_mut(&mut runtime),
+(B[m[32m+        &symbols,
+(B[m[32m+        request.start_ts_us,
+(B[m[32m+    )?;
+(B[m     let baseline = strategy_totals(&runtime, &request.strategy_name);
+     let mut rows = vec![StrategyPnlRow {
+         row_kind: StrategyPnlRowKind::WindowStart,
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:3015:
+                 && is_system_position_close(&fill_strategy));
+         runtime.apply_fill(fill)?;
+         if is_strategy_fill {
+[31m-            minute_marks::apply(prices, std::slice::from_mut(&mut runtime), &symbols, fill.fill_ts_us)?;
+(B[m[32m+            minute_marks::apply(
+(B[m[32m+                prices,
+(B[m[32m+                std::slice::from_mut(&mut runtime),
+(B[m[32m+                &symbols,
+(B[m[32m+                fill.fill_ts_us,
+(B[m[32m+            )?;
+(B[m             rows.push(StrategyPnlRow {
+                 row_kind: StrategyPnlRowKind::Fill,
+                 ts_us: fill.fill_ts_us,
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:3027:
+         }
+     }
+     runtime.activate_snapshot_at(request.end_ts_us);
+[31m-    minute_marks::apply(prices, std::slice::from_mut(&mut runtime), &symbols, request.end_ts_us)?;
+(B[m[32m+    minute_marks::apply(
+(B[m[32m+        prices,
+(B[m[32m+        std::slice::from_mut(&mut runtime),
+(B[m[32m+        &symbols,
+(B[m[32m+        request.end_ts_us,
+(B[m[32m+    )?;
+(B[m     rows.push(StrategyPnlRow {
+         row_kind: StrategyPnlRowKind::WindowEnd,
+         ts_us: request.end_ts_us,
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:3038:
+     });
+ 
+     Ok(StrategyPnlReport {
+[31m-        valuation: if prices.is_some() { minute_marks::VALUATION } else { "quantity_fifo_window_delta" },
+(B[m[32m+        valuation: if prices.is_some() {
+(B[m[32m+            minute_marks::VALUATION
+(B[m[32m+        } else {
+(B[m[32m+            "quantity_fifo_window_delta"
+(B[m[32m+        },
+(B[m         source_id: source.id.clone(),
+         account: source.display_name().to_string(),
+         strategy_name: request.strategy_name,
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:3220:
+     let mut totals = BTreeMap::<String, NavTotals>::new();
+     for runtime in runtimes {
+         for ((symbol, venue), state) in &runtime.states {
+[31m-            totals
+(B[m[31m-                .entry(symbol.clone())
+(B[m[31m-                .or_default()
+(B[m[31m-                .add(state.report(runtime.latest_marks.get(&(symbol.clone(), *venue)).copied()).totals);
+(B[m[32m+            totals.entry(symbol.clone()).or_default().add(
+(B[m[32m+                state
+(B[m[32m+                    .report(runtime.latest_marks.get(&(symbol.clone(), *venue)).copied())
+(B[m[32m+                    .totals,
+(B[m[32m+            );
+(B[m         }
+     }
+     totals
+Diff in /home/fanghaizhou/crypto_cta_manager/src/nav.rs:3491:
+     points_by_strategy: &mut BTreeMap<String, Vec<NavTimelinePoint>>,
+     prices: Option<&MinuteMarks>,
+ ) -> Result<()> {
+[31m-    minute_marks::apply(prices, runtimes, &selected_symbols.iter().cloned().collect(), ts_us)?;
+(B[m[32m+    minute_marks::apply(
+(B[m[32m+        prices,
+(B[m[32m+        runtimes,
+(B[m[32m+        &selected_symbols.iter().cloned().collect(),
+(B[m[32m+        ts_us,
+(B[m[32m+    )?;
+(B[m     let current_by_symbol = timeline_totals_by_symbol(runtimes);
+     let current_by_strategy_symbol = timeline_totals_by_strategy_symbol(runtimes);
+     let position_values_by_symbol = timeline_position_values_by_symbol(runtimes);
+Diff in /home/fanghaizhou/crypto_cta_manager/src/theoretical_nav.rs:1:
+ //! On-demand theoretical execution from immutable targets and minute candles.
+ //! No PostgreSQL materialization cursor or realtime BBO dependency.
+ use crate::config::{AppConfig, TheoreticalFeeRates};
+[31m-use crate::kline::{warm_ranges, KlineStore, MINUTE_US, first_complete_open, now_us};
+(B[m[32m+use crate::kline::{KlineStore, MINUTE_US, first_complete_open, now_us, warm_ranges};
+(B[m use crate::position_archive::{PositionArchive, PositionUpdateMsg};
+ use anyhow::{Context, Result, bail, ensure};
+ use rayon::prelude::*;
+Diff in /home/fanghaizhou/crypto_cta_manager/src/web.rs:385:
+ 
+ impl IntoResponse for ApiError {
+     fn into_response(self) -> Response {
+[31m-        if let Some(pricing) = self.0.downcast_ref::<nav::minute_marks::PricingUnavailable>() {
+(B[m[32m+        if let Some(pricing) = self
+(B[m[32m+            .0
+(B[m[32m+            .downcast_ref::<nav::minute_marks::PricingUnavailable>()
+(B[m[32m+        {
+(B[m             let status = if pricing.loading {
+                 StatusCode::SERVICE_UNAVAILABLE
+             } else {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/web.rs:1625:
+     let aligned_request = request.clone();
+     let aligned_timelines = nav_timelines.clone();
+     let funding_timelines = nav_timelines.clone();
+[31m-    let report = nav_timelines.rebuild_priced(request, use_strategy_allocation, state.klines.clone()).await;
+(B[m[32m+    let report = nav_timelines
+(B[m[32m+        .rebuild_priced(request, use_strategy_allocation, state.klines.clone())
+(B[m[32m+        .await;
+(B[m     let report = match report {
+         Ok(report) => report,
+         Err(error) if is_timeline_request_error(&error) => {
+Diff in /home/fanghaizhou/crypto_cta_manager/src/web.rs:1668:
+             end_ts_us: point.ts_us,
+             ..aligned_request
+         };
+[31m-        let actual = aligned_timelines.rebuild_priced(aligned, use_strategy_allocation, state.klines.clone()).await?;
+(B[m[32m+        let actual = aligned_timelines
+(B[m[32m+            .rebuild_priced(aligned, use_strategy_allocation, state.klines.clone())
+(B[m[32m+            .await?;
+(B[m         crate::execution_slippage::ExecutionSlippage::calculate(
+             report.start_ts_us,
+             actual.summary,
+Diff in /home/fanghaizhou/crypto_cta_manager/src/web.rs:1889:
+             cache.dashboard.generated_at_us,
+         )
+     };
+[31m-    let report = timelines.rebuild_strategy_pnl_priced(request, state.klines.clone()).await?;
+(B[m[32m+    let report = timelines
+(B[m[32m+        .rebuild_strategy_pnl_priced(request, state.klines.clone())
+(B[m[32m+        .await?;
+(B[m     Ok((report, data_generated_at_us))
+ }
+ 
+Diff in /home/fanghaizhou/crypto_cta_manager/src/web.rs:4910:
+         ("source_id".to_string(), report.source_id.clone()),
+         ("start_ts_us".to_string(), report.start_ts_us.to_string()),
+         ("strategy_name".to_string(), report.strategy_name.clone()),
+[31m-        (
+(B[m[31m-            "valuation".to_string(),
+(B[m[31m-            report.valuation.to_string(),
+(B[m[31m-        ),
+(B[m[32m+        ("valuation".to_string(), report.valuation.to_string()),
+(B[m     ]);
+     let schema = Arc::new(Schema::new_with_metadata(
+         vec![

@@ -1,1 +1,0 @@
-{"kind": "independent_income_check", "source_id": "binance_exec_trade09", "symbol": "BTCUSDT", "local_ip": "154.197.32.9", "http": 200, "start_ts_us": 1790240116646000, "end_ts_us": 1790844916645000, "records": 21, "income_decimal": "-44.32452860", "ledger_matches_exchange": true}

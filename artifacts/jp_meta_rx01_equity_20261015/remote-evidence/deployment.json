@@ -1,9 +1,0 @@
-{
-  "verified_at_us": 1792036162095679,
-  "new_pid": 2309899,
-  "old_pid": 3046353,
-  "binary_sha256": "d2f560ee4e51d229508376a6229d0343cc1a34af898b53e60ac76bdac4228949",
-  "start_wrapper_exit": 0,
-  "native_start_log": "start_monitor_native.log",
-  "new_monitor_log": "[2026-10-15T03:46:52Z INFO  runtime_common::affinity] cpu pinning skipped (no --core and $ACCOUNT_MONITOR_CORE unset or invalid)\n[2026-10-15T03:47:03Z INFO  account_monitor_common::pm_forwarder] \u5f00\u59cb\u521b\u5efa PM forwarder\uff0cexchange: rapidx_binance_2208503406035269\n[2026-10-15T03:47:03Z INFO  account_monitor_common::pm_forwarder] PM forwarder \u5386\u53f2\u7f13\u5b58\u56fa\u5b9a\u4e3a 4096 \u6761\uff0c\u6700\u5927\u8ba2\u9605\u8005\u56fa\u5b9a\u4e3a 4\uff0crequired_safe_overflow=Some(false)\uff08\u4e0d\u518d\u8bfb\u53d6\u914d\u7f6e\uff09\n[2026-10-15T03:47:03Z INFO  account_monitor_common::pm_forwarder] IceOryx service \u540d\u79f0: 'binance_exec_trade06/account_pubs/rapidx_binance_2208503406035269_pm'\n[2026-10-15T03:47:03Z INFO  account_monitor_common::pm_forwarder] \u51c6\u5907\u521b\u5efa IceOryx node\uff0cnode \u540d\u79f0: 'account_monitor_rapidx_binance_2208503406035269_pm'\n0 [I] \"Config::global_config()\" \n| Using config file at \"config/iceoryx2.toml\" \n[2026-10-15T03:47:05Z INFO  account_monitor_common::pm_forwarder] IceOryx node \u521b\u5efa\u6210\u529f\n[2026-10-15T03:47:05Z INFO  account_monitor_common::pm_forwarder] \u590d\u7528\u5df2\u5b58\u5728\u7684 IceOryx service: 'binance_exec_trade06/account_pubs/rapidx_binance_2208503406035269_pm'\n[2026-10-15T03:47:05Z INFO  account_monitor_common::pm_forwarder] PM forwarder publisher \u521b\u5efa\u6210\u529f\n[2026-10-15T03:47:11Z INFO  rapidx_account_monitor] RapidX account websocket login successful exchange=BINANCE\n"
-}

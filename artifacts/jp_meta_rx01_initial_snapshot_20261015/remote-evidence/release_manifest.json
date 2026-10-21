@@ -1,9 +1,0 @@
-{
-  "release": "20261015T025315Z",
-  "base_commit": "0502f40fec1d22d3c160828156c3bea6ea02ffae",
-  "patch_sha256": "15dad8bdd872d182d7d78364105b5e73f54630c91948a91668e6c3d04b6060c7",
-  "binaries": {
-    "cta_web": "490f42f41c24655bf724e241957d42b409b2b02200323d50095b1d0f3a693d1d",
-    "nav_rebuild": "b7984872a784fe25b74c064b7bc2f8fecaba9aecaa832c2203b6199d27bfb512"
-  }
-}

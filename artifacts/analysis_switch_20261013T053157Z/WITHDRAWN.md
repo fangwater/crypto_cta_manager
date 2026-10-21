@@ -1,1 +1,0 @@
-Switch deployment withdrawn before execution by operator clarification: el01 keeps reference NAV. Runtime configuration, binary, webroot and process were not changed. Local switch edits were reversed; remote staging was removed. Built switch artifact must not be deployed.

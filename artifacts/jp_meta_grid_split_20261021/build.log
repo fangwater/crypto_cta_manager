@@ -1,0 +1,7 @@
+   Compiling ipc_common v0.1.0 (/home/fanghaizhou/mkt_signal/crates/ipc_common)
+   Compiling trade_signal v0.1.0 (/home/fanghaizhou/mkt_signal/crates/trade_signal)
+   Compiling period_pbs v0.1.0 (/home/fanghaizhou/mkt_signal/crates/period_pbs)
+   Compiling trade_engine v0.1.0 (/home/fanghaizhou/mkt_signal/crates/trade_engine)
+   Compiling viz_server v0.1.0 (/home/fanghaizhou/mkt_signal/crates/viz_server)
+   Compiling mkt_signal v0.1.0 (/home/fanghaizhou/mkt_signal)
+    Finished `release` profile [optimized] target(s) in 1m 35s

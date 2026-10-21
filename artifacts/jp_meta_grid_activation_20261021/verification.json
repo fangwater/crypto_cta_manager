@@ -1,0 +1,34 @@
+{
+  "accounts": {
+    "binance_exec_trade05": {
+      "active_bindings": 1,
+      "bindings": 10,
+      "latest_position_publish_us": 1792569425395005,
+      "pending": [],
+      "runtime_configs": 20,
+      "state_age_secs": 0.633,
+      "target_mismatches": []
+    },
+    "binance_exec_trade06": {
+      "active_bindings": 58,
+      "bindings": 59,
+      "latest_position_publish_us": 1792569400860910,
+      "pending": [],
+      "runtime_configs": 118,
+      "state_age_secs": 152196.205,
+      "target_mismatches": []
+    },
+    "binance_exec_trade07": {
+      "active_bindings": 5,
+      "bindings": 5,
+      "latest_position_publish_us": 1792569425081291,
+      "pending": [],
+      "runtime_configs": 10,
+      "state_age_secs": 0.985,
+      "target_mismatches": []
+    }
+  },
+  "grid_unchanged": true,
+  "processes_unchanged": true,
+  "time": "2026-10-21T07:57:15.949743+00:00"
+}

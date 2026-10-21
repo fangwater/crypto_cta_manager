@@ -1,0 +1,179 @@
+{
+  "start_ts_us": 1789970112413000,
+  "first_day_end_ts_us": 1790035200000000,
+  "baseline_price_difference": 1037.1932879999995,
+  "first_day_original_replay_error": 9.094947017729282e-12,
+  "fee_identity_max_error": 1.1155520951433573e-12,
+  "first_day_terminal": {
+    "ts_us": 1790035200000000,
+    "old_before": 2536.3077402,
+    "old_after": 2533.5990745906793,
+    "new_before": 1443.5978365999945,
+    "new_after": 1440.8891709906745
+  },
+  "largest_jumps": [
+    {
+      "ts_us": 1789976700000000,
+      "old": 906.7889411999992,
+      "corrected": -88.09833379999947
+    },
+    {
+      "ts_us": 1789985700000000,
+      "old": 459.3975409999989,
+      "corrected": -5.149529500001336
+    },
+    {
+      "ts_us": 1789982100000000,
+      "old": 412.8458565000012,
+      "corrected": 13.508535799994661
+    },
+    {
+      "ts_us": 1789996500000000,
+      "old": 210.1879825000019,
+      "corrected": -19.598117900001853
+    },
+    {
+      "ts_us": 1789978500000000,
+      "old": 126.0832400000005,
+      "corrected": 96.1197709000021
+    }
+  ],
+  "baseline_symbols": [
+    {
+      "symbol": "1000PEPEUSDT",
+      "quantity": 155584.0,
+      "latest_fill_mark": 0.0039728,
+      "minute_close_mark": 0.0040123,
+      "last_fill_ts_us": 1789909342559000,
+      "baseline_difference": 6.145567999999939
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "quantity": -0.19999999999999987,
+      "latest_fill_mark": 126.06,
+      "minute_close_mark": 137.94,
+      "last_fill_ts_us": 1788397343142000,
+      "baseline_difference": -2.3759999999999977
+    },
+    {
+      "symbol": "ADAUSDT",
+      "quantity": 1903.0,
+      "latest_fill_mark": 0.223,
+      "minute_close_mark": 0.2321,
+      "last_fill_ts_us": 1789913077144000,
+      "baseline_difference": 17.317299999999996
+    },
+    {
+      "symbol": "BNBUSDT",
+      "quantity": 1.4800000000000006,
+      "latest_fill_mark": 749.22,
+      "minute_close_mark": 773.52,
+      "last_fill_ts_us": 1789902088317000,
+      "baseline_difference": 35.96399999999995
+    },
+    {
+      "symbol": "BTCUSDT",
+      "quantity": 0.1140000000000001,
+      "latest_fill_mark": 80515.1,
+      "minute_close_mark": 81527.9,
+      "last_fill_ts_us": 1789909480838000,
+      "baseline_difference": 115.45919999999877
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "quantity": 6812.0,
+      "latest_fill_mark": 0.08529999999999999,
+      "minute_close_mark": 0.08846,
+      "last_fill_ts_us": 1789913043266000,
+      "baseline_difference": 21.525920000000067
+    },
+    {
+      "symbol": "ETHUSDT",
+      "quantity": 4.54999999999999,
+      "latest_fill_mark": 2575.56,
+      "minute_close_mark": 2666.21,
+      "last_fill_ts_us": 1789905740176000,
+      "baseline_difference": 412.4574999999995
+    },
+    {
+      "symbol": "NEARUSDT",
+      "quantity": 229.0,
+      "latest_fill_mark": 3.716,
+      "minute_close_mark": 4.32,
+      "last_fill_ts_us": 1789912905944000,
+      "baseline_difference": 138.31600000000003
+    },
+    {
+      "symbol": "SOLUSDT",
+      "quantity": 52.01,
+      "latest_fill_mark": 108.56999999999998,
+      "minute_close_mark": 111.81,
+      "last_fill_ts_us": 1789913036075000,
+      "baseline_difference": 168.5124000000012
+    },
+    {
+      "symbol": "SUIUSDT",
+      "quantity": 467.5,
+      "latest_fill_mark": 0.907,
+      "minute_close_mark": 0.9402,
+      "last_fill_ts_us": 1789922692960000,
+      "baseline_difference": 15.521000000000003
+    },
+    {
+      "symbol": "UNIUSDT",
+      "quantity": 84.0,
+      "latest_fill_mark": 8.617,
+      "minute_close_mark": 8.65,
+      "last_fill_ts_us": 1789912998969000,
+      "baseline_difference": 2.771999999999956
+    },
+    {
+      "symbol": "WLDUSDT",
+      "quantity": 1383.0,
+      "latest_fill_mark": 0.41940000000000005,
+      "minute_close_mark": 0.4442,
+      "last_fill_ts_us": 1789902105920000,
+      "baseline_difference": 34.29839999999991
+    },
+    {
+      "symbol": "XRPUSDT",
+      "quantity": 1484.9999999999998,
+      "latest_fill_mark": 1.3826,
+      "minute_close_mark": 1.4306,
+      "last_fill_ts_us": 1789913023179000,
+      "baseline_difference": 71.28000000000006
+    }
+  ],
+  "thirty_day_actual": {
+    "fill_count": 17138,
+    "volume_quote": 520408.2861090651,
+    "maker_fill_count": 11658,
+    "maker_volume_quote": 496476.8507004997,
+    "taker_fill_count": 108,
+    "taker_volume_quote": 4277.034121299998,
+    "unknown_liquidity_fill_count": 5372,
+    "unknown_liquidity_volume_quote": 19654.40128726542,
+    "realized_pnl_before_fee_quote": 2747.525572275866,
+    "estimated_trading_fee_quote": 50.93079530643996,
+    "realized_pnl_after_fee_quote": 2696.5947769694267,
+    "floating_pnl_quote": 128.48932766156923,
+    "nav_change_before_fee_quote": 2876.014899937436,
+    "nav_change_after_fee_quote": 2825.0841046309956
+  },
+  "thirty_day_theoretical": {
+    "ts_us": 1792560960000000,
+    "nav_change_before_fee_quote": 1792.257596821416,
+    "nav_change_after_fee_quote": 1675.382674020421,
+    "estimated_trading_fee_quote": 116.87492280099487
+  },
+  "subsequent_window": {
+    "start_ts_us": 1790035200000000,
+    "end_ts_us": 1792561140000000,
+    "volume_quote": 493665.29481586535,
+    "before_fee_gap_quote": 17.405859496161668,
+    "after_fee_gap_quote": -45.912150704634854,
+    "before_fee_bps": 0.35258422414834656,
+    "after_fee_bps": -0.9300258937942935,
+    "unavailable_reason": null
+  }
+}

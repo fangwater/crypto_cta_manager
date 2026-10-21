@@ -701,6 +701,7 @@ rocksdb_path = "/unused"
                 nav_generated_at_us: now * 1000,
                 funding_mode: "estimated".into(),
                 strategy_allocation: true,
+                valuation: "quantity_fifo_window_delta".into(),
                 computed_at_ms: now,
                 drawdown_15d_percent: None,
             },

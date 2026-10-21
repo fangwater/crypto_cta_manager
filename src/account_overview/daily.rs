@@ -18,6 +18,9 @@ pub struct EquityAnchor {
     /// False also describes records created before allocation provenance was saved.
     #[serde(default)]
     pub strategy_allocation: bool,
+    /// Valuation used for this reconstruction; absent on older immutable audit anchors.
+    #[serde(default)]
+    pub valuation: String,
     pub computed_at_ms: i64,
     pub drawdown_15d_percent: Option<f64>,
 }
@@ -193,6 +196,7 @@ mod tests {
             nav_generated_at_us: ts * 1000,
             funding_mode: "estimated".into(),
             strategy_allocation: true,
+            valuation: "quantity_fifo_window_delta".into(),
             computed_at_ms: ts,
             drawdown_15d_percent: None,
         }

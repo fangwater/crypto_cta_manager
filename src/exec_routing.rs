@@ -75,6 +75,16 @@ pub(crate) fn symbol_market(configured_venue: &str, symbol: &str) -> Result<&'st
     }
 }
 
+/// Proxy inputs may include unsupported markets; the account projection filters
+/// them before runtime routing. Ordinary accounts retain strict venue checks.
+pub(crate) fn validate_target_symbol(source: &SourceConfig, symbol: &str) -> Result<()> {
+    if source.target_proxy.is_some() {
+        crate::order_config::validate_exec_symbol(symbol).map_err(anyhow::Error::msg)
+    } else {
+        symbol_market(&source.venue, symbol).map(|_| ())
+    }
+}
+
 pub(crate) fn for_symbol(source: &SourceConfig, symbol: &str) -> Result<SourceConfig> {
     let market = symbol_market(&source.venue, symbol)?;
     anyhow::ensure!(

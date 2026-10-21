@@ -97,6 +97,7 @@ pub struct ExecOrderRateLimits {
 pub struct RedisRuntime {
     inner: Arc<Mutex<RedisRuntimeInner>>,
     bnb_reserve_sources: Arc<std::sync::RwLock<std::collections::BTreeSet<String>>>,
+    market_rules: Arc<std::sync::RwLock<BTreeMap<String, Arc<MarketRulesSnapshot>>>>,
 }
 
 struct RedisRuntimeInner {
@@ -112,6 +113,7 @@ impl RedisRuntime {
             .with_context(|| format!("invalid redis.url {}", settings.url))?;
         Ok(Self {
             bnb_reserve_sources: Arc::new(std::sync::RwLock::new(Default::default())),
+            market_rules: Arc::new(std::sync::RwLock::new(Default::default())),
             inner: Arc::new(Mutex::new(RedisRuntimeInner {
                 settings,
                 client,
@@ -854,7 +856,14 @@ impl RedisRuntime {
         };
 
         match stored {
-            Ok(Ok(Some(stored))) if stored == encoded => Ok(()),
+            Ok(Ok(Some(stored))) if stored == encoded => {
+                // Proxy and Exec consume the same fully confirmed snapshot.
+                self.market_rules
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key, Arc::new(snapshot.clone()));
+                Ok(())
+            }
             Ok(Ok(Some(_))) => bail!("Redis market-rules confirmation mismatched: {key}"),
             Ok(Ok(None)) => bail!("Redis market-rules key missing after write: {key}"),
             Ok(Err(error)) => {
@@ -871,6 +880,28 @@ impl RedisRuntime {
                 )
             }
         }
+    }
+
+    pub(crate) fn project_targets(
+        &self,
+        source: &SourceConfig,
+        targets: &BTreeMap<String, TargetPosition>,
+        shares: f64,
+    ) -> Result<Option<crate::target_proxy::TargetProjection>> {
+        let Some(config) = &source.target_proxy else {
+            return Ok(None);
+        };
+        config.validate(&source.venue)?;
+        let key = format!("{}:{}:market_rules", source.id, source.venue);
+        let snapshot = self
+            .market_rules
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+            .context("Bybit target_proxy market-rules cache is loading; retry after refresh")?;
+        crate::target_proxy::project(config, &snapshot, targets, shares, next_updated_at_us(None))
+            .map(Some)
     }
 
     async fn request_timeout_secs(&self) -> u64 {
@@ -1021,7 +1052,7 @@ fn parse_exec_order_rate_limit(raw: Option<&str>, field: &str) -> Result<i32> {
         .with_context(|| format!("Redis {field} must be in 0..={}", i32::MAX))
 }
 
-fn filter_runtime_target_signals(
+pub(crate) fn filter_runtime_target_signals(
     order_parameters: &OrderParameters,
     symbol_order_parameters: &BTreeMap<String, OrderParameters>,
     targets: &BTreeMap<String, TargetPosition>,
@@ -1289,6 +1320,132 @@ mod tests {
                 assert_eq!(connection.get::<_, String>(&key).await.unwrap(), raw);
             }
         }
+        // The proxy only uses fully published rules for its own account.
+        let mut proxy_source = source.clone();
+        proxy_source.id = "fixture_proxy".into();
+        proxy_source.venue = "bybit-futures".into();
+        proxy_source.target_proxy = Some(
+            toml::from_str(
+                r#"
+            [symbol_mappings.PEPEUSDT]
+            symbol = "1000PEPEUSDT"
+            source_contract_multiplier = 1
+            target_contract_multiplier = 1000
+        "#,
+            )
+            .unwrap(),
+        );
+        let incoming: BTreeMap<String, TargetPosition> =
+            serde_json::from_value(serde_json::json!({
+                "PEPEUSDT":{"qty":2000,"signal":-1}, "BTCUSDT":1,
+                "ETHUSDT":"clear", "UNKNOWNUSDT":7, "BTC":2
+            }))
+            .unwrap();
+        assert!(
+            runtime
+                .project_targets(&proxy_source, &incoming, 3.0)
+                .is_err()
+        );
+        let rules = MarketRulesSnapshot {
+            venue: "bybit-futures".into(),
+            execution_backend: "native".into(),
+            portfolio_id: None,
+            fetched_at_us: next_updated_at_us(None),
+            symbols: ["BTCUSDT", "ETHUSDT", "1000PEPEUSDT"]
+                .into_iter()
+                .map(|symbol| {
+                    (
+                        symbol.into(),
+                        crate::market_rules::MarketRule {
+                            status: "Trading".into(),
+                            base_asset: symbol.strip_suffix("USDT").unwrap().into(),
+                            quote_asset: "USDT".into(),
+                            price_tick: "0.001".into(),
+                            qty_step: "0.001".into(),
+                            min_qty: "0.001".into(),
+                            min_notional: None,
+                            contract_multiplier: None,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        runtime
+            .publish_market_rules(&proxy_source, &rules)
+            .await
+            .unwrap();
+        let projection = runtime
+            .clone()
+            .project_targets(&proxy_source, &incoming, 3.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection.filtered.len(), 2);
+        let mut selected = parameters.clone();
+        selected.signal_execution_enabled = true;
+        selected.single_order_usdt = 123.0;
+        let proxy_overrides = projection.remap(&BTreeMap::from([("PEPEUSDT".into(), selected)]));
+        runtime
+            .publish_strategy(
+                &proxy_source,
+                "proxy",
+                &parameters,
+                &proxy_overrides,
+                &projection.targets,
+            )
+            .await
+            .unwrap();
+        let key = "fixture_proxy:bybit-futures:batch_exec:proxy";
+        let raw: String = connection.get(key).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["targets"].as_object().unwrap().len(), 3);
+        assert_eq!(value["targets"]["1000PEPEUSDT"]["qty"], 6.0);
+        assert_eq!(value["targets"]["1000PEPEUSDT"]["signal"], -1);
+        assert_eq!(value["targets"]["ETHUSDT"]["qty"], "clear");
+        assert_eq!(
+            value["symbol_overrides"]["1000PEPEUSDT"]["single_order_usdt"],
+            123.0
+        );
+        let mut other = proxy_source.clone();
+        other.id = "other_proxy".into();
+        assert!(runtime.project_targets(&other, &incoming, 3.0).is_err());
+        let mut invalid = rules.clone();
+        invalid.symbols.clear();
+        assert!(
+            runtime
+                .publish_market_rules(&proxy_source, &invalid)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            runtime
+                .project_targets(&proxy_source, &incoming, 3.0)
+                .unwrap()
+                .unwrap(),
+            projection
+        );
+        let unsupported = BTreeMap::from([("UNKNOWNUSDT".into(), incoming["UNKNOWNUSDT"])]);
+        let empty = runtime
+            .project_targets(&proxy_source, &unsupported, 3.0)
+            .unwrap()
+            .unwrap();
+        runtime
+            .publish_strategy(
+                &proxy_source,
+                "proxy",
+                &parameters,
+                &BTreeMap::new(),
+                &empty.targets,
+            )
+            .await
+            .unwrap();
+        let raw: String = connection.get(key).await.unwrap();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap()["targets"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+
         let bybit_keys: Vec<String> = connection
             .keys("fixture_bybit:bitget-futures:*")
             .await
@@ -1583,6 +1740,7 @@ mod tests {
             account_ipc_service: None,
             legacy_share_unit_usdt: None,
             env_path: None,
+            target_proxy: None,
         };
         assert_eq!(
             exec_risk_params_key(&source),

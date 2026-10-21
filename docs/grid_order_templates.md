@@ -1,6 +1,93 @@
 # Grid order templates
 
 Manager supports Grid templates for RapidX and supported native unified accounts.
+
+## Japan template split, 2026-10-21
+
+At the operator's request, the former `lgq_grid` was split into two templates,
+both retaining `lgq` ownership. RX01 (`virtual03` / `binance_exec_trade06`)
+uses `lgq_grid_spread`; RX02 and RX03 (`virtual02` / `virtual04`, sources
+`binance_exec_trade05` / `binance_exec_trade07`) use `lgq_grid_prep`. The
+operator's exact spelling `prep` is retained. RX02/RX03's active targets are
+perpetuals only; no market-routing or position-target changes were introduced.
+
+| Template | Spot | Futures |
+| --- | --- | --- |
+| `lgq_grid_spread` | 5 levels, 120 seconds, one Maker round | 5 levels, 30 seconds, unlimited Maker rounds |
+| `lgq_grid_prep` | Same unchanged spot parameters | Copied from spot: 5 levels, 120 seconds, one Maker round |
+
+Both retain single-order size 100 USDT, volatility multipliers 1 and the existing
+signal execution switch. After a finite Maker round the remaining quantity uses
+the existing Taker fallback. All 74 bindings retain their shares and follow
+multipliers; 64 remain active and 10 stopped. Manager published and verified all
+148 market-scoped runtime configurations with no pending deliveries. The old
+template was removed only after every real/Virtual reference was replaced.
+Recoverable catalog evidence is in the host-local
+`/home/ubuntu/crypto_cta_manager/backups/grid_split_20261021/` directory.
+
+RX01's stalled position display was repaired at 08:14–08:15 UTC by replacing
+its executor and Viz together. The single existing state channel now permits
+1 MiB complete snapshots, retains two history samples and allows an eight-sample
+subscriber queue. The compact payload and HTTP/WebSocket format are unchanged.
+The binaries were built locally from synchronized Exec `arbmm` base `115213a6`
+plus the recorded state-channel patch; the host evidence includes exact hashes.
+
+Three samples ten seconds apart returned fresh, ready snapshots with 1,506–1,509
+rows across 59 strategies, including the system residual strategy, at 330–513 ms
+age. Both cash and perpetual rows are present and all displayed algorithms are
+Grid. The previous oversize-message errors stopped. Four cash strategy rows
+still report `borrow_unavailable` (RLC, IOST and two KNC rows); this is a separate
+execution constraint. Live KSM/QTUM orders also showed temporary differences
+between account quantities and summed strategy allocations during observation,
+so monitoring recovery does not certify every target as reached.
+
+Validation passed 1,342 Exec library tests (3 ignored), 2 codec tests, 6 Viz tests,
+format/check and release builds. The regression fixture preserves all fields in
+a 6,600-row mixed-market snapshot. Only RX01 executor/Viz PIDs changed, to
+502412/502880, both still on CPUs 0–5; 134 other observed process identities and
+118 configuration hashes were preserved. Gateway and WebSocket checks passed.
+
+## Japan activation, 2026-10-21
+
+At 07:51 UTC the operator activated the existing `lgq_grid` template for all
+bindings in RX01, RX02 and RX03. Manager's Nginx API updated their followed
+Virtual accounts; no process or binary was replaced.
+
+| Account | Source | Virtual | Bindings | Active |
+| --- | --- | --- | --- | --- |
+| RX01 | `binance_exec_trade06` | `virtual03` | 59 | 58 |
+| RX02 | `binance_exec_trade05` | `virtual02` | 10 | 1 |
+| RX03 | `binance_exec_trade07` | `virtual04` | 5 | 5 |
+
+All 74 bindings now select `lgq_grid`. Shares, follow multipliers and stopped
+bindings are preserved. The operator's template is unchanged: single-order size
+100 USDT, five levels in each market, volatility multiplier 1; spot uses one
+120-second Maker round, futures use unlimited 30-second Maker rounds. Existing
+signal-driven Taker behavior remains enabled.
+
+Verification at 07:55 UTC found no pending configuration deliveries, all 148
+market-scoped runtime configurations using the template, no target mismatches,
+and unchanged observed process identities. All three Exec logs confirmed their
+strategy configuration reloads. Read-only recent RocksDB inspection confirmed
+post-switch exchange fills for RX01/RX02 without rejected orders. RX03 initially
+had no executable delta; a new DASHUSDT target at 07:56 UTC subsequently produced
+Grid limit orders and two fill events by 07:57 UTC, also without rejections.
+Signal status files were fresh and reported no publication errors.
+
+RX01 has a pre-existing monitoring fault: its strategy-state payload is about
+140 KB, exceeding the 64 KiB IPC limit. Its Viz strategy snapshot is approximately
+42 hours old and still displays CTaker. Runtime Redis, configuration reload logs
+and fresh order records independently confirm Grid execution; the old snapshot
+cannot verify current full-position convergence. This activation does not repair
+that fault or restart trading services.
+
+Recoverable configuration and verification evidence remain host-local under
+`/home/ubuntu/crypto_cta_manager/backups/grid_activation_20261021/`.
+Temporary authentication sessions and the read-only diagnostic executable are
+removed after verification.
+
+## Template parameters
+
 The form has one shared single-order size and the same controls for each market:
 
 | Field | Spot default | Futures default |

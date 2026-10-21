@@ -1,0 +1,542 @@
+{
+  "passed": true,
+  "results": [
+    {
+      "width": 1440,
+      "height": 1000,
+      "ready": {
+        "url": "http://172.16.30.42:10041/manager/?source=binance_exec_trade01",
+        "range": [
+          "30D"
+        ],
+        "inputs": [
+          {
+            "value": "2026-09-21T15:23",
+            "ms": 1789975380000
+          },
+          {
+            "value": "2026-10-21T15:14:59.675",
+            "ms": 1792566899675
+          }
+        ],
+        "notices": [
+          "30D 已按当前可查询范围对齐，实际与理论净值均从 09/21 15:23:00 计算。",
+          "（理论净值 − 实际净值）÷ 同期实际成交额 × 10,000；正值表示实际表现更差，funding 不计入滑点。比较截至 10/21 15:12:00。",
+          "净值差包含仓位与估值差异；同成交量的价格与费用滑点见“成本分析”。",
+          "按各策略结算整点前持仓及公开历史资金费率、结算标记价格估算，无需开启账户资金费采集。每 30 分钟刷新。费率已查询至 10/21 14:55:53。",
+          "RapidX 的结算仓位截点和标记价格取样可能与公开历史记录不同，估算金额可能与实际账单有差异。",
+          "实际持仓按已完成的 1 分钟收盘价估值；成交价格、数量和交易费按真实成交计算。",
+          "最新五分钟窗口尚未结束，理论曲线截至 10/21 15:12:00。",
+          "策略净值默认包含估算 Funding；资金费单列，并可在「策略 Funding」视图查看独立曲线。未归属仓位单独核算。"
+        ],
+        "loading": false,
+        "errors": [],
+        "overflow": false,
+        "strokes": {
+          "#edf0f4": 88,
+          "#d7dbe2": 15,
+          "#2563a7": 15,
+          "#176b5b": 15,
+          "#7357a3": 9,
+          "#a33f55": 9,
+          "#4b6478": 9,
+          "#d97706": 9,
+          "#15803d": 9,
+          "#1f7a68": 39,
+          "#dfe3e8": 15,
+          "#b7791f": 6,
+          "#8292cc": 6
+        },
+        "records": [
+          {
+            "url": "/manager/api/timeline?startMs=1792480499675&endMs=1792566899675&sourceIds=binance_exec_trade01&maxPoints=3500&includeTheoretical=false",
+            "status": 200,
+            "elapsedMs": 5076.300001144409,
+            "start": 1792480499675000,
+            "end": 1792566899675000,
+            "valuation": "quantity_fifo_closed_1m_window_delta",
+            "actualPoints": 98,
+            "theoreticalPoints": 0,
+            "loading": true,
+            "reason": "理论曲线正在计算",
+            "missing": 0,
+            "actualFirst": {
+              "ts_us": 1792480499675000,
+              "gross_position_value_quote": 21524.986391783437,
+              "net_position_value_quote": 21465.15439178344,
+              "fill_count": 0,
+              "volume_quote": 0,
+              "maker_fill_count": 0,
+              "maker_volume_quote": 0,
+              "taker_fill_count": 0,
+              "taker_volume_quote": 0,
+              "unknown_liquidity_fill_count": 0,
+              "unknown_liquidity_volume_quote": 0,
+              "realized_pnl_before_fee_quote": 0,
+              "estimated_trading_fee_quote": 0,
+              "realized_pnl_after_fee_quote": 0,
+              "floating_pnl_quote": 0,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0
+            },
+            "generationDurationMs": 4711
+          },
+          {
+            "url": "/manager/api/timeline?startMs=1792480499675&endMs=1792566899675&sourceIds=binance_exec_trade01&maxPoints=3500&includeTheoretical=true",
+            "status": 200,
+            "elapsedMs": 411.5,
+            "start": 1792480499675000,
+            "end": 1792566899675000,
+            "valuation": "quantity_fifo_closed_1m_window_delta",
+            "actualPoints": 98,
+            "theoreticalPoints": 229,
+            "loading": false,
+            "reason": null,
+            "missing": 0,
+            "actualFirst": {
+              "ts_us": 1792480499675000,
+              "gross_position_value_quote": 21524.986391783437,
+              "net_position_value_quote": 21465.15439178344,
+              "fill_count": 0,
+              "volume_quote": 0,
+              "maker_fill_count": 0,
+              "maker_volume_quote": 0,
+              "taker_fill_count": 0,
+              "taker_volume_quote": 0,
+              "unknown_liquidity_fill_count": 0,
+              "unknown_liquidity_volume_quote": 0,
+              "realized_pnl_before_fee_quote": 0,
+              "estimated_trading_fee_quote": 0,
+              "realized_pnl_after_fee_quote": 0,
+              "floating_pnl_quote": 0,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0
+            },
+            "theoreticalFirst": {
+              "ts_us": 1792480499675000,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0,
+              "estimated_trading_fee_quote": 0
+            },
+            "theoreticalLast": {
+              "ts_us": 1792566720000000,
+              "nav_change_before_fee_quote": 471.2115656152924,
+              "nav_change_after_fee_quote": 468.4696345481643,
+              "estimated_trading_fee_quote": 2.7419310671280663
+            },
+            "generationDurationMs": 76
+          },
+          {
+            "url": "/manager/api/timeline?startMs=1789975380000&endMs=1792566899675&sourceIds=binance_exec_trade01&maxPoints=3500&includeTheoretical=false",
+            "status": 200,
+            "elapsedMs": 4573.89999961853,
+            "start": 1789975380000000,
+            "end": 1792566899675000,
+            "valuation": "quantity_fifo_closed_1m_window_delta",
+            "actualPoints": 2881,
+            "theoreticalPoints": 0,
+            "loading": true,
+            "reason": "理论曲线正在计算",
+            "missing": 0,
+            "actualFirst": {
+              "ts_us": 1789975380000000,
+              "gross_position_value_quote": 34974.94046519998,
+              "net_position_value_quote": 34919.52046519998,
+              "fill_count": 0,
+              "volume_quote": 0,
+              "maker_fill_count": 0,
+              "maker_volume_quote": 0,
+              "taker_fill_count": 0,
+              "taker_volume_quote": 0,
+              "unknown_liquidity_fill_count": 0,
+              "unknown_liquidity_volume_quote": 0,
+              "realized_pnl_before_fee_quote": 0,
+              "estimated_trading_fee_quote": 0,
+              "realized_pnl_after_fee_quote": 0,
+              "floating_pnl_quote": 0,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0
+            },
+            "generationDurationMs": 902
+          },
+          {
+            "url": "/manager/api/timeline?startMs=1789975380000&endMs=1792566899675&sourceIds=binance_exec_trade01&maxPoints=3500&includeTheoretical=true",
+            "status": 200,
+            "elapsedMs": 6725.89999961853,
+            "start": 1789975380000000,
+            "end": 1792566899675000,
+            "valuation": "quantity_fifo_closed_1m_window_delta",
+            "actualPoints": 2881,
+            "theoreticalPoints": 1573,
+            "loading": false,
+            "reason": null,
+            "missing": 0,
+            "actualFirst": {
+              "ts_us": 1789975380000000,
+              "gross_position_value_quote": 34974.94046519998,
+              "net_position_value_quote": 34919.52046519998,
+              "fill_count": 0,
+              "volume_quote": 0,
+              "maker_fill_count": 0,
+              "maker_volume_quote": 0,
+              "taker_fill_count": 0,
+              "taker_volume_quote": 0,
+              "unknown_liquidity_fill_count": 0,
+              "unknown_liquidity_volume_quote": 0,
+              "realized_pnl_before_fee_quote": 0,
+              "estimated_trading_fee_quote": 0,
+              "realized_pnl_after_fee_quote": 0,
+              "floating_pnl_quote": 0,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0
+            },
+            "theoreticalFirst": {
+              "ts_us": 1789975380000000,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0,
+              "estimated_trading_fee_quote": 0
+            },
+            "theoreticalLast": {
+              "ts_us": 1792566720000000,
+              "nav_change_before_fee_quote": 1801.4097235087388,
+              "nav_change_after_fee_quote": 1684.7212127536422,
+              "estimated_trading_fee_quote": 116.6885107550966
+            },
+            "generationDurationMs": 1130
+          }
+        ],
+        "scriptAssets": [
+          "http://172.16.30.42:10041/manager/assets/index-BZkMHDR7.js"
+        ],
+        "checkboxes": [
+          {
+            "text": "费前净值",
+            "checked": true
+          },
+          {
+            "text": "费后净值",
+            "checked": true
+          },
+          {
+            "text": "理论费前（TWAP，分钟 VWAP）",
+            "checked": true
+          },
+          {
+            "text": "理论费后（TWAP，分钟 VWAP）",
+            "checked": true
+          },
+          {
+            "text": "已实现盈亏",
+            "checked": false
+          },
+          {
+            "text": "浮动盈亏",
+            "checked": true
+          },
+          {
+            "text": "估算手续费",
+            "checked": false
+          },
+          {
+            "text": "估算 Funding（累计资金费）",
+            "checked": true
+          },
+          {
+            "text": "费前总体净值（含 估算 funding）",
+            "checked": false
+          },
+          {
+            "text": "费后总体净值（含 估算 funding）",
+            "checked": true
+          }
+        ]
+      },
+      "repeat": {
+        "elapsedMs": 3744.199998855591,
+        "requestDelta": 0,
+        "factualIdentical": true,
+        "theoreticalIdentical": true,
+        "points": 1573,
+        "missing": 0,
+        "commonTheoryError": 0,
+        "priorTheoryEnd": 1792566720000000,
+        "nextTheoryEnd": 1792566720000000,
+        "feeIdentity": true
+      },
+      "pendingRecovery": {
+        "injected": 1,
+        "elapsedMs": 11206.60000038147,
+        "errors": [],
+        "points": 98
+      },
+      "jsErrors": [],
+      "liveApi": true
+    },
+    {
+      "width": 390,
+      "height": 1100,
+      "ready": {
+        "url": "http://172.16.30.42:10041/manager/?source=binance_exec_trade01",
+        "range": [
+          "30D"
+        ],
+        "inputs": [
+          {
+            "value": "2026-09-21T15:25",
+            "ms": 1789975500000
+          },
+          {
+            "value": "2026-10-21T15:16:36.558",
+            "ms": 1792566996558
+          }
+        ],
+        "notices": [
+          "30D 已按当前可查询范围对齐，实际与理论净值均从 09/21 15:25:00 计算。",
+          "（理论净值 − 实际净值）÷ 同期实际成交额 × 10,000；正值表示实际表现更差，funding 不计入滑点。比较截至 10/21 15:14:00。",
+          "净值差包含仓位与估值差异；同成交量的价格与费用滑点见“成本分析”。",
+          "按各策略结算整点前持仓及公开历史资金费率、结算标记价格估算，无需开启账户资金费采集。每 30 分钟刷新。费率已查询至 10/21 14:55:53。",
+          "RapidX 的结算仓位截点和标记价格取样可能与公开历史记录不同，估算金额可能与实际账单有差异。",
+          "实际持仓按已完成的 1 分钟收盘价估值；成交价格、数量和交易费按真实成交计算。",
+          "最新五分钟窗口尚未结束，理论曲线截至 10/21 15:14:00。",
+          "策略净值默认包含估算 Funding；资金费单列，并可在「策略 Funding」视图查看独立曲线。未归属仓位单独核算。"
+        ],
+        "loading": false,
+        "errors": [],
+        "overflow": false,
+        "strokes": {
+          "#edf0f4": 64,
+          "#d7dbe2": 11,
+          "#2563a7": 11,
+          "#176b5b": 11,
+          "#7357a3": 6,
+          "#a33f55": 6,
+          "#4b6478": 6,
+          "#d97706": 6,
+          "#15803d": 6,
+          "#1f7a68": 28,
+          "#dfe3e8": 11,
+          "#b7791f": 5,
+          "#8292cc": 5
+        },
+        "records": [
+          {
+            "url": "/manager/api/timeline?startMs=1792480596558&endMs=1792566996558&sourceIds=binance_exec_trade01&maxPoints=3500&includeTheoretical=false",
+            "status": 200,
+            "elapsedMs": 9758,
+            "start": 1792480596558000,
+            "end": 1792566996558000,
+            "valuation": "quantity_fifo_closed_1m_window_delta",
+            "actualPoints": 98,
+            "theoreticalPoints": 0,
+            "loading": true,
+            "reason": "理论曲线正在计算",
+            "missing": 0,
+            "actualFirst": {
+              "ts_us": 1792480596558000,
+              "gross_position_value_quote": 21501.38446617604,
+              "net_position_value_quote": 21441.644466176043,
+              "fill_count": 0,
+              "volume_quote": 0,
+              "maker_fill_count": 0,
+              "maker_volume_quote": 0,
+              "taker_fill_count": 0,
+              "taker_volume_quote": 0,
+              "unknown_liquidity_fill_count": 0,
+              "unknown_liquidity_volume_quote": 0,
+              "realized_pnl_before_fee_quote": 0,
+              "estimated_trading_fee_quote": 0,
+              "realized_pnl_after_fee_quote": 0,
+              "floating_pnl_quote": 0,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0
+            },
+            "generationDurationMs": 9412
+          },
+          {
+            "url": "/manager/api/timeline?startMs=1792480596558&endMs=1792566996558&sourceIds=binance_exec_trade01&maxPoints=3500&includeTheoretical=true",
+            "status": 200,
+            "elapsedMs": 1663.5,
+            "start": 1792480596558000,
+            "end": 1792566996558000,
+            "valuation": "quantity_fifo_closed_1m_window_delta",
+            "actualPoints": 98,
+            "theoreticalPoints": 228,
+            "loading": false,
+            "reason": null,
+            "missing": 0,
+            "actualFirst": {
+              "ts_us": 1792480596558000,
+              "gross_position_value_quote": 21501.38446617604,
+              "net_position_value_quote": 21441.644466176043,
+              "fill_count": 0,
+              "volume_quote": 0,
+              "maker_fill_count": 0,
+              "maker_volume_quote": 0,
+              "taker_fill_count": 0,
+              "taker_volume_quote": 0,
+              "unknown_liquidity_fill_count": 0,
+              "unknown_liquidity_volume_quote": 0,
+              "realized_pnl_before_fee_quote": 0,
+              "estimated_trading_fee_quote": 0,
+              "realized_pnl_after_fee_quote": 0,
+              "floating_pnl_quote": 0,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0
+            },
+            "theoreticalFirst": {
+              "ts_us": 1792480596558000,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0,
+              "estimated_trading_fee_quote": 0
+            },
+            "theoreticalLast": {
+              "ts_us": 1792566840000000,
+              "nav_change_before_fee_quote": 490.9262929528938,
+              "nav_change_after_fee_quote": 488.1843618857657,
+              "estimated_trading_fee_quote": 2.7419310671280663
+            },
+            "generationDurationMs": 90
+          },
+          {
+            "url": "/manager/api/timeline?startMs=1789975500000&endMs=1792566996558&sourceIds=binance_exec_trade01&maxPoints=3500&includeTheoretical=false",
+            "status": 200,
+            "elapsedMs": 4264.5,
+            "start": 1789975500000000,
+            "end": 1792566996558000,
+            "valuation": "quantity_fifo_closed_1m_window_delta",
+            "actualPoints": 2882,
+            "theoreticalPoints": 0,
+            "loading": true,
+            "reason": "理论曲线正在计算",
+            "missing": 0,
+            "actualFirst": {
+              "ts_us": 1789975500000000,
+              "gross_position_value_quote": 34959.34921799998,
+              "net_position_value_quote": 34903.97721799998,
+              "fill_count": 0,
+              "volume_quote": 0,
+              "maker_fill_count": 0,
+              "maker_volume_quote": 0,
+              "taker_fill_count": 0,
+              "taker_volume_quote": 0,
+              "unknown_liquidity_fill_count": 0,
+              "unknown_liquidity_volume_quote": 0,
+              "realized_pnl_before_fee_quote": 0,
+              "estimated_trading_fee_quote": 0,
+              "realized_pnl_after_fee_quote": 0,
+              "floating_pnl_quote": 0,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0
+            },
+            "generationDurationMs": 891
+          },
+          {
+            "url": "/manager/api/timeline?startMs=1789975500000&endMs=1792566996558&sourceIds=binance_exec_trade01&maxPoints=3500&includeTheoretical=true",
+            "status": 200,
+            "elapsedMs": 5521.300001144409,
+            "start": 1789975500000000,
+            "end": 1792566996558000,
+            "valuation": "quantity_fifo_closed_1m_window_delta",
+            "actualPoints": 2882,
+            "theoreticalPoints": 1573,
+            "loading": false,
+            "reason": null,
+            "missing": 0,
+            "actualFirst": {
+              "ts_us": 1789975500000000,
+              "gross_position_value_quote": 34959.34921799998,
+              "net_position_value_quote": 34903.97721799998,
+              "fill_count": 0,
+              "volume_quote": 0,
+              "maker_fill_count": 0,
+              "maker_volume_quote": 0,
+              "taker_fill_count": 0,
+              "taker_volume_quote": 0,
+              "unknown_liquidity_fill_count": 0,
+              "unknown_liquidity_volume_quote": 0,
+              "realized_pnl_before_fee_quote": 0,
+              "estimated_trading_fee_quote": 0,
+              "realized_pnl_after_fee_quote": 0,
+              "floating_pnl_quote": 0,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0
+            },
+            "theoreticalFirst": {
+              "ts_us": 1789975500000000,
+              "nav_change_before_fee_quote": 0,
+              "nav_change_after_fee_quote": 0,
+              "estimated_trading_fee_quote": 0
+            },
+            "theoreticalLast": {
+              "ts_us": 1792566840000000,
+              "nav_change_before_fee_quote": 1812.3297422070098,
+              "nav_change_after_fee_quote": 1695.6412314519132,
+              "estimated_trading_fee_quote": 116.6885107550966
+            },
+            "generationDurationMs": 1216
+          }
+        ],
+        "scriptAssets": [
+          "http://172.16.30.42:10041/manager/assets/index-BZkMHDR7.js"
+        ],
+        "checkboxes": [
+          {
+            "text": "费前净值",
+            "checked": true
+          },
+          {
+            "text": "费后净值",
+            "checked": true
+          },
+          {
+            "text": "理论费前（TWAP，分钟 VWAP）",
+            "checked": true
+          },
+          {
+            "text": "理论费后（TWAP，分钟 VWAP）",
+            "checked": true
+          },
+          {
+            "text": "已实现盈亏",
+            "checked": false
+          },
+          {
+            "text": "浮动盈亏",
+            "checked": true
+          },
+          {
+            "text": "估算手续费",
+            "checked": false
+          },
+          {
+            "text": "估算 Funding（累计资金费）",
+            "checked": true
+          },
+          {
+            "text": "费前总体净值（含 估算 funding）",
+            "checked": false
+          },
+          {
+            "text": "费后总体净值（含 估算 funding）",
+            "checked": true
+          }
+        ]
+      },
+      "repeat": {
+        "elapsedMs": 6046.199998855591,
+        "requestDelta": 0,
+        "factualIdentical": true,
+        "theoreticalIdentical": true,
+        "points": 1573,
+        "missing": 0,
+        "commonTheoryError": 0,
+        "priorTheoryEnd": 1792566840000000,
+        "nextTheoryEnd": 1792566840000000,
+        "feeIdentity": true
+      },
+      "pendingRecovery": null,
+      "jsErrors": [],
+      "liveApi": true
+    }
+  ]
+}

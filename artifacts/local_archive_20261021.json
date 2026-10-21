@@ -1,0 +1,79 @@
+{
+  "created_at": "2026-10-21T08:30:19.306755+00:00",
+  "archive_root": "/home/fanghaizhou/crypto_cta_manager-archives/20261021-precommit",
+  "reason": "Keep large raw diagnostic responses and compiled release package outside Git; preserve original relative paths and checksums.",
+  "files": [
+    {
+      "path": "artifacts/nav_drift_20261021/after.jsonl",
+      "bytes": 21652936,
+      "sha256": "d6f68846bad2ee59f3614d5118bc7b905508775ec5e2d96cac2a55bdb0a03d86",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/before.jsonl",
+      "bytes": 80054437,
+      "sha256": "f385c5dc58aac8a9ff0610ff45df78a6db74c4cacd1d78472abcf258c58fe5a5",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/boundary.jsonl",
+      "bytes": 8032457,
+      "sha256": "8039245c54362fc7793e0cb44105e3e1e3d5252faf91a1dea39ddf9f048058a7",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/cached_repeat.jsonl",
+      "bytes": 7106744,
+      "sha256": "73b6eab5b9885f9d23a15f1c0fc14ce2513be92c09d8faa1fe2def0af8e2f1ce",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/extra.jsonl",
+      "bytes": 14495186,
+      "sha256": "e688d586b1c0035f5f6274c5041ce2124ce6bdbc154ba67142e2a0500a652e99",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/final.jsonl",
+      "bytes": 80935046,
+      "sha256": "557fbec6e9ecc9144757b03737851bca8226f35935f149c665fe0089b0283f90",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/final_normalized.jsonl",
+      "bytes": 80935046,
+      "sha256": "c57e76e61a37d09d55df8ec7cf1fc2fe0dcb81a7b6e0072050cc403fcf2c92c2",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/funding_recheck.jsonl",
+      "bytes": 37527942,
+      "sha256": "e6b9424bf6176d837835ef7c8153da3f061484448b7446cb1b83f5162282b047",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/probe.jsonl",
+      "bytes": 23099324,
+      "sha256": "024c538c4c07740bf6dbea07b30d4b28cae87fdf0dd843651a065ad0dabd432a",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/release.tar.gz",
+      "bytes": 14477259,
+      "sha256": "2cc86642aac405c571f04d7033db12ae774975bc8b824d1d43bd12ebe2426a8e",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/stores.txt",
+      "bytes": 3509676,
+      "sha256": "0132abcecc7532064fb9ac9401e624ee2f253f79dadf42a145e185b2df471d2d",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/nav_drift_20261021/strategies.jsonl",
+      "bytes": 4136634,
+      "sha256": "e164c9ad52ca02d2886afd7928aae40df6bcee690eb39887027529a69acbef02",
+      "status": "retained"
+    }
+  ]
+}

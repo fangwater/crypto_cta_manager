@@ -121,6 +121,7 @@ pub struct DashboardAccount {
     pub enabled: bool,
     pub gateway_prefix: Option<String>,
     pub configurable: bool,
+    pub target_proxy_enabled: bool,
     /// Current session's grant on this account: "view" or "configure".
     /// Annotated per request after the shared snapshot is filtered.
     pub access_level: Option<&'static str>,
@@ -257,6 +258,7 @@ struct StrategyPnlQuery {
 
 #[derive(Clone, Debug, Serialize)]
 struct StrategyPnlSummary {
+    valuation: &'static str,
     generated_at_us: i64,
     generation_duration_ms: u64,
     source_id: String,
@@ -384,6 +386,17 @@ where
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let Some(pricing) = self
+            .0
+            .downcast_ref::<nav::minute_marks::PricingUnavailable>()
+        {
+            let status = if pricing.loading {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            return (status, NO_STORE, Json(pricing)).into_response();
+        }
         error!(error = ?self.0, "CTA web API request failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -703,6 +716,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route(
             "/api/catalog/accounts/{source_id}/bindings/{binding_name}/publish",
             post(publish_account_binding),
+        )
+        .route(
+            "/api/catalog/accounts/{source_id}/bindings/{binding_name}/target-preview",
+            get(preview_account_binding_targets),
         )
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
@@ -1612,11 +1629,9 @@ async fn rebuild_timeline_snapshot(
     let aligned_request = request.clone();
     let aligned_timelines = nav_timelines.clone();
     let funding_timelines = nav_timelines.clone();
-    let report = tokio::task::spawn_blocking(move || {
-        nav_timelines.rebuild(request, use_strategy_allocation)
-    })
-    .await
-    .context("CTA timeline rebuild task failed")?;
+    let report = nav_timelines
+        .rebuild_priced(request, use_strategy_allocation, state.klines.clone())
+        .await;
     let report = match report {
         Ok(report) => report,
         Err(error) if is_timeline_request_error(&error) => {
@@ -1659,11 +1674,9 @@ async fn rebuild_timeline_snapshot(
             end_ts_us: point.ts_us,
             ..aligned_request
         };
-        let actual = tokio::task::spawn_blocking(move || {
-            aligned_timelines.rebuild(aligned, use_strategy_allocation)
-        })
-        .await
-        .context("aligned slippage timeline task failed")??;
+        let actual = aligned_timelines
+            .rebuild_priced(aligned, use_strategy_allocation, state.klines.clone())
+            .await?;
         crate::execution_slippage::ExecutionSlippage::calculate(
             report.start_ts_us,
             actual.summary,
@@ -1830,6 +1843,7 @@ fn strategy_pnl_summary_from_report(
 ) -> StrategyPnlSummary {
     let totals = report.rows.last().map(|row| row.totals).unwrap_or_default();
     StrategyPnlSummary {
+        valuation: report.valuation,
         generated_at_us,
         generation_duration_ms,
         source_id: report.source_id,
@@ -1877,31 +1891,16 @@ async fn rebuild_strategy_pnl_report(
     state: &WebState,
     request: nav::StrategyPnlRequest,
 ) -> Result<(nav::StrategyPnlReport, i64)> {
-    let (histories, snapshots, strategy_snapshots, data_generated_at_us) = {
+    let (timelines, data_generated_at_us) = {
         let cache = state.cache.read().await;
         (
-            Arc::clone(&cache.nav_histories),
-            Arc::clone(&cache.position_snapshots),
-            Arc::clone(&cache.strategy_position_snapshots),
+            Arc::clone(&cache.nav_timelines),
             cache.dashboard.generated_at_us,
         )
     };
-    let requested_source_ids = vec![request.source_id.clone()];
-    let snapshots = selected_snapshot_map(&snapshots, &requested_source_ids);
-    let strategy_snapshots = selected_snapshot_map(&strategy_snapshots, &requested_source_ids);
-    let config = Arc::clone(&state.config).as_ref().clone();
-    let report = tokio::task::spawn_blocking(move || {
-        nav::rebuild_strategy_pnl_from_histories_with_strategy_snapshots(
-            &config,
-            request,
-            &snapshots,
-            &strategy_snapshots,
-            &histories,
-        )
-    })
-    .await
-    .context("CTA strategy PnL rebuild task failed")?;
-    let report = report?;
+    let report = timelines
+        .rebuild_strategy_pnl_priced(request, state.klines.clone())
+        .await?;
     Ok((report, data_generated_at_us))
 }
 
@@ -2425,12 +2424,27 @@ async fn save_position_strategy(
             .find(|source| source.id == source_id)
         {
             for symbol in request.targets.keys() {
-                if let Err(error) = crate::exec_routing::symbol_market(&source.venue, symbol) {
+                if let Err(error) = crate::exec_routing::validate_target_symbol(source, symbol) {
                     return Ok(bad_request(format!("source {source_id}: {error}")));
                 }
             }
         }
     }
+    // Freeze the same account projection for both archive and runtime publish.
+    // A cold/stale proxy cache rejects the request before changing the catalog.
+    let published_accounts =
+        match load_published_accounts(&state, &request.strategy_name, &request.targets).await {
+            Ok(accounts) => accounts,
+            Err(error) => {
+                return Ok((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: error.to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+        };
     match strategy_catalog::upsert_position_strategy(
         &state.pool,
         &request,
@@ -2441,12 +2455,11 @@ async fn save_position_strategy(
     {
         Ok(saved) => {
             let factual_positions = load_factual_positions(&state, &saved.strategy_name).await;
-            let published_accounts = load_published_accounts(&state, &saved.strategy_name).await?;
             if let Err(error) = state.position_archive.append(
                 saved.updated_at_us,
                 &saved,
                 factual_positions,
-                published_accounts,
+                published_accounts.clone(),
             ) {
                 error!(
                     strategy_name = %saved.strategy_name,
@@ -2456,7 +2469,8 @@ async fn save_position_strategy(
                 );
                 return Err(error.into());
             }
-            let publishes = publish_bound_accounts(&state, &saved.strategy_name).await;
+            let publishes =
+                publish_bound_accounts(&state, &saved.strategy_name, &published_accounts).await;
             if let Some(failed) = publishes.iter().find(|item| item.error.is_some()) {
                 let source_id = failed.source_id.as_str();
                 let binding_name = failed.binding_name.as_str();
@@ -3677,7 +3691,7 @@ async fn save_account_binding(
             .keys()
             .chain(position.symbol_order_strategy_overrides.keys())
         {
-            if let Err(error) = crate::exec_routing::symbol_market(&source.venue, symbol) {
+            if let Err(error) = crate::exec_routing::validate_target_symbol(source, symbol) {
                 return Ok(bad_request(error.to_string()));
             }
         }
@@ -3730,7 +3744,7 @@ async fn save_account_binding_shares(
             .keys()
             .chain(position.symbol_order_strategy_overrides.keys())
         {
-            if let Err(error) = crate::exec_routing::symbol_market(&source.venue, symbol) {
+            if let Err(error) = crate::exec_routing::validate_target_symbol(source, symbol) {
                 return Ok(bad_request(error.to_string()));
             }
         }
@@ -3810,15 +3824,101 @@ async fn publish_account_binding(
             Err(error) => Ok(publish_failure_response(error)),
         };
     }
-    match publish_binding(&state, &source_id, &binding_name).await {
+    let source = match resolve_publish_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(error) => return Ok(publish_failure_response(error)),
+    };
+    let projection = if source.target_proxy.is_some() && shares.is_some() {
+        match archive_configuration_binding(&state, &source_id, &binding_name).await {
+            Ok(projection) => projection,
+            Err(error) => {
+                return Ok((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: error.to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+        }
+    } else {
+        None
+    };
+    match publish_binding_with_projection(&state, &source_id, &binding_name, projection.as_ref())
+        .await
+    {
         Ok(published) => Ok((NO_STORE, Json(published)).into_response()),
         Err(error) => Ok(publish_failure_response(error)),
     }
 }
 
+async fn preview_account_binding_targets(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Path((source_id, binding_name)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let _guard = state.configuration_lock.lock().await;
+    let source = match resolve_publish_source(&state.config, &source_id) {
+        Ok(source) => source,
+        Err(error) => return Ok(publish_failure_response(error)),
+    };
+    let Some((position, order, overrides, shares)) =
+        strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name).await?
+    else {
+        return Ok(not_found("binding was not found"));
+    };
+    if !user.is_admin()
+        && !strategy_catalog::load_position_access(&state.pool, &position.strategy_name)
+            .await?
+            .is_some_and(|access| access.user_can_view(user.user_id))
+    {
+        return Ok(forbidden(
+            "strategy view permission required to preview targets",
+        ));
+    }
+    let projection = match state
+        .redis_runtime
+        .project_targets(source, &position.targets, shares)
+    {
+        Ok(projection) => projection,
+        Err(error) => {
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+                .into_response());
+        }
+    };
+    let targets = projection.as_ref().map_or_else(
+        || strategy_catalog::scale_targets(&position.targets, shares),
+        |p| p.targets.clone(),
+    );
+    if let Err(message) = strategy_catalog::validate_targets(&targets) {
+        return Ok(bad_request(message));
+    }
+    let overrides = projection
+        .as_ref()
+        .map_or_else(|| overrides.clone(), |p| p.remap(&overrides));
+    let runtime_targets = crate::redis_runtime::filter_runtime_target_signals(
+        &order.order_parameters,
+        &overrides,
+        &targets,
+    );
+    Ok((NO_STORE, Json(serde_json::json!({
+        "source_id": source_id, "binding_name": binding_name, "shares": shares,
+        "proxy_enabled": source.target_proxy.is_some(), "projection": projection,
+        "targets": runtime_targets,
+        "symbol_order_strategy_overrides": projection.as_ref().map_or_else(
+            || position.symbol_order_strategy_overrides.clone(), |p| p.remap(&position.symbol_order_strategy_overrides)),
+    }))).into_response())
+}
+
 async fn publish_bound_accounts(
     state: &WebState,
     strategy_name: &str,
+    archived: &[crate::position_archive::ArchivedPublishedAccount],
 ) -> Vec<BindingPublishResult> {
     let bindings =
         match strategy_catalog::list_active_bindings_for_position(&state.pool, strategy_name).await
@@ -3841,7 +3941,18 @@ async fn publish_bound_accounts(
         };
     let mut publishes = Vec::with_capacity(bindings.len());
     for binding in bindings {
-        match publish_binding(state, &binding.source_id, &binding.binding_name).await {
+        let projection = archived
+            .iter()
+            .find(|a| a.source_id == binding.source_id && a.binding_name == binding.binding_name)
+            .and_then(|a| a.target_projection.as_ref());
+        match publish_binding_with_projection(
+            state,
+            &binding.source_id,
+            &binding.binding_name,
+            projection,
+        )
+        .await
+        {
             Ok(published) => {
                 info!(
                     strategy_name,
@@ -3921,6 +4032,15 @@ async fn stop_binding(
     let position = loaded.0;
     let mut archived_account =
         crate::position_archive::published_account(source_id, binding_name, 0.0);
+    let source = resolve_publish_source(&state.config, source_id)?;
+    archived_account.target_projection = state
+        .redis_runtime
+        .project_targets(source, &position.targets, 0.0)
+        .map_err(|error| PublishFailure {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: error.to_string(),
+        })?;
+    let projection = archived_account.target_projection.clone();
     let archived_fees = postgres::load_theoretical_twap_fee_rate(&state.pool, source_id)
         .await
         .map_err(|error| PublishFailure {
@@ -3952,7 +4072,7 @@ async fn stop_binding(
                 message: "shares were saved as zero, but the stop event archive failed; the zero target was not published, retry the stop or manual publish".to_string(),
             }
         })?;
-    let published = publish_binding(state, source_id, binding_name)
+    let published = publish_binding_with_projection(state, source_id, binding_name, projection.as_ref())
         .await
         .map_err(|mut failure| {
             failure.message = format!(
@@ -3968,10 +4088,11 @@ async fn stop_binding(
     Ok(published)
 }
 
-async fn publish_binding(
+async fn publish_binding_with_projection(
     state: &WebState,
     source_id: &str,
     binding_name: &str,
+    frozen: Option<&crate::target_proxy::TargetProjection>,
 ) -> std::result::Result<OrderStrategyView, PublishFailure> {
     let source = match resolve_publish_source(&state.config, source_id) {
         Ok(source) => source,
@@ -3994,14 +4115,42 @@ async fn publish_binding(
         .keys()
         .chain(symbol_order_parameters.keys())
     {
-        crate::exec_routing::symbol_market(&source.venue, symbol).map_err(|error| {
+        crate::exec_routing::validate_target_symbol(source, symbol).map_err(|error| {
             PublishFailure {
                 status: StatusCode::BAD_REQUEST,
                 message: error.to_string(),
             }
         })?;
     }
-    let targets = strategy_catalog::scale_targets(&position.targets, shares);
+    let fresh = if frozen.is_none() {
+        state
+            .redis_runtime
+            .project_targets(source, &position.targets, shares)
+            .map_err(|error| PublishFailure {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: error.to_string(),
+            })?
+    } else {
+        None
+    };
+    let projection = frozen.or(fresh.as_ref());
+    let targets = projection.map_or_else(
+        || strategy_catalog::scale_targets(&position.targets, shares),
+        |p| p.targets.clone(),
+    );
+    let symbol_order_parameters = projection.map_or_else(
+        || symbol_order_parameters.clone(),
+        |p| p.remap(&symbol_order_parameters),
+    );
+    strategy_catalog::validate_targets(&targets).map_err(|message| PublishFailure {
+        status: StatusCode::BAD_REQUEST,
+        message,
+    })?;
+    if let Some(projection) = projection {
+        if !projection.filtered.is_empty() {
+            warn!(source_id, binding_name, filtered = ?projection.filtered, "target_proxy filtered unsupported Bybit targets");
+        }
+    }
     state
         .redis_runtime
         .validate_cta_targets(source_id, &targets)
@@ -4031,6 +4180,14 @@ async fn publish_binding(
                 });
             }
         }
+    }
+    if let Some(projection) = projection {
+        projection
+            .ensure_fresh(unix_now_us())
+            .map_err(|error| PublishFailure {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: error.to_string(),
+            })?;
     }
     let published = state
         .redis_runtime
@@ -4115,6 +4272,7 @@ fn publish_failure_response(error: PublishFailure) -> Response {
 async fn load_published_accounts(
     state: &WebState,
     strategy_name: &str,
+    targets: &BTreeMap<String, crate::order_config::TargetPosition>,
 ) -> Result<Vec<crate::position_archive::ArchivedPublishedAccount>> {
     let snapshots =
         strategy_catalog::list_publish_snapshots_for_position(&state.pool, strategy_name).await?;
@@ -4131,6 +4289,17 @@ async fn load_published_accounts(
                 snapshot.binding_name,
                 snapshot.shares,
             );
+            if let Some(source) = state
+                .config
+                .sources
+                .iter()
+                .find(|s| s.id == account.source_id)
+            {
+                account.target_projection =
+                    state
+                        .redis_runtime
+                        .project_targets(source, targets, account.shares)?;
+            }
             account.set_theoretical_fees(Some(fee));
             Ok(account)
         })
@@ -4325,20 +4494,6 @@ fn parse_csv(value: Option<&str>, uppercase: bool) -> Vec<String> {
                 value.to_string()
             }
         })
-        .collect()
-}
-
-fn selected_snapshot_map<T: Clone>(
-    snapshots: &BTreeMap<String, T>,
-    selected_source_ids: &[String],
-) -> BTreeMap<String, T> {
-    if selected_source_ids.is_empty() {
-        return snapshots.clone();
-    }
-    snapshots
-        .iter()
-        .filter(|(source_id, _)| selected_source_ids.iter().any(|id| id == *source_id))
-        .map(|(source_id, snapshot)| (source_id.clone(), snapshot.clone()))
         .collect()
 }
 
@@ -4766,10 +4921,7 @@ fn encode_strategy_pnl_arrow(
         ("source_id".to_string(), report.source_id.clone()),
         ("start_ts_us".to_string(), report.start_ts_us.to_string()),
         ("strategy_name".to_string(), report.strategy_name.clone()),
-        (
-            "valuation".to_string(),
-            "quantity_fifo_window_delta".to_string(),
-        ),
+        ("valuation".to_string(), report.valuation.to_string()),
     ]);
     let schema = Arc::new(Schema::new_with_metadata(
         vec![
@@ -5015,6 +5167,7 @@ async fn build_dashboard(
                 enabled: source.enabled,
                 gateway_prefix: source.gateway_prefix.clone(),
                 configurable: source.exec_config_url.is_some(),
+                target_proxy_enabled: source.target_proxy.is_some(),
                 access_level: None,
                 account_pnl_start_ts_us,
                 strategy_pnl_start_ts_us,
@@ -5443,6 +5596,7 @@ mod tests {
         let mut totals = nav::NavTotals::default();
         totals.nav_change_after_fee_quote = 12.345_678_901;
         let report = nav::StrategyPnlReport {
+            valuation: "quantity_fifo_window_delta",
             source_id: "trade01".to_string(),
             account: "account-01".to_string(),
             strategy_name: "cta_alpha".to_string(),
@@ -5504,6 +5658,7 @@ mod tests {
         terminal.fill_count = 3;
         terminal.nav_change_after_fee_quote = 12.5;
         let report = nav::StrategyPnlReport {
+            valuation: "quantity_fifo_window_delta",
             source_id: "trade01".to_string(),
             account: "account-01".to_string(),
             strategy_name: "cta_alpha".to_string(),
@@ -5569,6 +5724,7 @@ mod tests {
                 account_ipc_service: None,
                 legacy_share_unit_usdt: None,
                 env_path: None,
+                target_proxy: None,
             }],
         };
         assert!(resolve_publish_source(&config, "binance_exec_trade01").is_ok());
@@ -5624,6 +5780,7 @@ mod tests {
             account_ipc_service: None,
             legacy_share_unit_usdt: None,
             env_path: None,
+            target_proxy: None,
         };
         let config = crate::config::AppConfig {
             database: crate::config::DatabaseConfig {
@@ -6052,7 +6209,7 @@ async fn validate_virtual_activation(
     multiplier: f64,
 ) -> Result<(), String> {
     let source = resolve_publish_source(&state.config, source_id).map_err(|e| e.message)?;
-    virtual_accounts::validate_source_bindings(&state.pool, &source.venue, bindings)
+    virtual_accounts::validate_source_bindings(&state.pool, source, bindings)
         .await
         .map_err(|e| e.to_string())?;
     let effective =
@@ -6065,7 +6222,14 @@ async fn validate_virtual_activation(
             .iter()
             .find(|p| p.strategy_name == b.position_strategy_name)
         {
-            let targets = strategy_catalog::scale_targets(&position.targets, b.shares);
+            let projection = state
+                .redis_runtime
+                .project_targets(source, &position.targets, b.shares)
+                .map_err(|e| e.to_string())?;
+            let targets = projection.map_or_else(
+                || strategy_catalog::scale_targets(&position.targets, b.shares),
+                |p| p.targets,
+            );
             strategy_catalog::validate_targets(&targets)?;
             state
                 .redis_runtime
@@ -6358,11 +6522,21 @@ async fn publish_pending_configurations(state: &WebState) -> Result<()> {
         let revision: i64 = row.try_get("revision")?;
         let mut archived: bool = row.try_get("archived")?;
         let result = async {
-            if !archived {
-                archive_configuration_binding(state, &source, &binding).await?;
+            let has_proxy = state
+                .config
+                .sources
+                .iter()
+                .any(|s| s.id == source && s.target_proxy.is_some());
+            // A proxy retry may observe a new tradable-symbol snapshot. Archive
+            // each such attempt and publish exactly that frozen projection.
+            let projection = if !archived || has_proxy {
+                let projection = archive_configuration_binding(state, &source, &binding).await?;
                 archived = true;
-            }
-            publish_binding(state, &source, &binding)
+                projection
+            } else {
+                None
+            };
+            publish_binding_with_projection(state, &source, &binding, projection.as_ref())
                 .await
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             Ok::<(), anyhow::Error>(())
@@ -6388,13 +6562,20 @@ async fn archive_configuration_binding(
     state: &WebState,
     source: &str,
     binding: &str,
-) -> Result<()> {
+) -> Result<Option<crate::target_proxy::TargetProjection>> {
     // Both positive changes and stops need a frozen account-specific archive event.
     let (position, _, _, shares) =
         strategy_catalog::load_binding_parts(&state.pool, source, binding)
             .await?
             .context("pending binding disappeared")?;
     let mut account = crate::position_archive::published_account(source, binding, shares);
+    let source_config =
+        resolve_publish_source(&state.config, source).map_err(|e| anyhow::anyhow!(e.message))?;
+    account.target_projection =
+        state
+            .redis_runtime
+            .project_targets(source_config, &position.targets, shares)?;
+    let projection = account.target_projection.clone();
     account
         .set_theoretical_fees(postgres::load_theoretical_twap_fee_rate(&state.pool, source).await?);
     let factual = load_factual_position(state, source, binding)
@@ -6404,5 +6585,5 @@ async fn archive_configuration_binding(
     state
         .position_archive
         .append(unix_now_us(), &position, factual, vec![account])?;
-    Ok(())
+    Ok(projection)
 }

@@ -271,6 +271,9 @@ pub struct SourceConfig {
     /// Optional Exec env.sh used only to read exchange API credentials.
     #[serde(default)]
     pub env_path: Option<PathBuf>,
+    /// Optional account-scoped Binance USDT -> Bybit target filter/unit conversion.
+    #[serde(default)]
+    pub target_proxy: Option<crate::target_proxy::TargetProxyConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -703,6 +706,9 @@ impl AppConfig {
         let mut enabled = 0usize;
         for source in &self.sources {
             validate_quote_fee_rates(&source.quote_fee_rates)?;
+            if let Some(proxy) = &source.target_proxy {
+                proxy.validate(&source.venue)?;
+            }
             validate_source_id(&source.id)?;
             if source.account.trim().is_empty() {
                 bail!("source {} has an empty account", source.id);
@@ -1084,6 +1090,7 @@ mod tests {
             account_ipc_service: None,
             legacy_share_unit_usdt: None,
             env_path: None,
+            target_proxy: None,
         }
     }
 
@@ -1094,6 +1101,42 @@ mod tests {
             source("binance_exec_trade02", "/srv/trade02/persist_manager"),
         ]);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn target_proxy_is_opt_in_and_validates_venue_and_contract_units() {
+        let mut settings: toml::Value =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        let sources = settings["sources"].as_array_mut().unwrap();
+        let bybit = sources
+            .iter_mut()
+            .find(|s| s["venue"].as_str() == Some("bybit-futures"))
+            .unwrap();
+        bybit.as_table_mut().unwrap().insert(
+            "target_proxy".into(),
+            toml::from_str::<toml::Value>(
+                r#"
+            [symbol_mappings.PEPEUSDT]
+            symbol = "1000PEPEUSDT"
+            source_contract_multiplier = 1
+            target_contract_multiplier = 1000
+        "#,
+            )
+            .unwrap(),
+        );
+        let config: AppConfig = settings.clone().try_into().unwrap();
+        config.validate().unwrap();
+        assert!(config.sources[0].target_proxy.is_none());
+        let bybit = settings["sources"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|s| s["venue"].as_str() == Some("bybit-futures"))
+            .unwrap();
+        bybit["target_proxy"]["symbol_mappings"]["PEPEUSDT"]["target_contract_multiplier"] =
+            0.into();
+        let config: AppConfig = settings.try_into().unwrap();
+        assert!(config.validate().is_err());
     }
 
     #[test]

@@ -655,6 +655,7 @@ async fn daily_equity_is_atomic_source_scoped_and_runs_once_per_shanghai_day() -
                 nav_generated_at_us: end * 1000,
                 funding_mode: "estimated".into(),
                 strategy_allocation: true,
+                valuation: "quantity_fifo_closed_1m_window_delta".into(),
                 computed_at_ms: end,
                 drawdown_15d_percent: None,
             },

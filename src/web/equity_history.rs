@@ -158,6 +158,7 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
             nav_generated_at_us: snapshot.generated_at_us,
             funding_mode: funding_mode.into(),
             strategy_allocation,
+            valuation: snapshot.report.valuation.into(),
             computed_at_ms: unix_now_ms(),
             drawdown_15d_percent: None,
         },

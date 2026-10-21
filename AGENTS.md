@@ -174,9 +174,22 @@ evaluated. Store timestamped initial-position snapshots in PostgreSQL, never in
 TOML. Insert those signed quantities as zero-volume, zero-fee FIFO lots. An
 omitted reference price uses the first positive RocksDB fill for the same symbol
 and venue. There is still no baseline equity: report NAV change from zero at the
-snapshot rather than absolute NAV. Until an external mark feed is connected,
-value each open venue position at its latest fill price and identify that mark
-source in output. Order-only reconstruction does not include funding, deposits,
+snapshot rather than absolute NAV. By operator confirmation on 2026-10-21,
+Binance linear/cash factual NAV APIs use the same completed one-minute candle
+close marks as theoretical NAV at the window baseline, every sample and the end.
+Real execution prices, quantities, FIFO realization and fees remain factual.
+Use the existing dedicated-egress Manager Kline cache; never mix missing minute
+marks with stale fill prices or expose a partial priced curve. Missing coverage
+returns an explicit loading/unavailable response; the browser retries pending
+coverage and aligns only the 30D shortcut to the moving retention boundary.
+Keep source/symbol/venue isolation and account/strategy/residual additivity,
+including offsetting strategy holdings in a flat account. Strategy exports,
+funding-inclusive NAV and daily equity reconstruction use the same valuation.
+Record the valuation in daily audit anchors without changing the daily write
+schedule or rewriting snapshots. Older-than-retention ranges cannot use minute
+valuation. Other venues and explicitly order-only offline diagnostics retain
+their identified latest-fill valuation until their mark feed is connected.
+Order-only reconstruction does not include funding, deposits,
 withdrawals, liquidation charges, or other account-ledger movements; keep those
 limitations explicit.
 

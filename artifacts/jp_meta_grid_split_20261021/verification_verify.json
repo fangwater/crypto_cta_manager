@@ -1,0 +1,20 @@
+{
+  "binance_exec_trade05": {
+    "pending": [],
+    "templates": {
+      "lgq_grid_prep": 10
+    }
+  },
+  "binance_exec_trade06": {
+    "pending": [],
+    "templates": {
+      "lgq_grid_spread": 59
+    }
+  },
+  "binance_exec_trade07": {
+    "pending": [],
+    "templates": {
+      "lgq_grid_prep": 5
+    }
+  }
+}

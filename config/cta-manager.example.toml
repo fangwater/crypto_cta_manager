@@ -209,6 +209,15 @@ env_path = "/home/ubuntu/bybit_exec_trade01/env.sh"
 enabled = false
 ipc_namespace = "bybit_exec_trade01"
 # account_ipc_service defaults to "account_pubs/bybit_pm".
+# Optional Binance USDT target proxy for this account (disabled when absent).
+# Exact active Bybit symbols pass with unit factor 1; missing/inactive symbols
+# and other markets are filtered. Explicit aliases convert contract units.
+# [sources.target_proxy]
+# [sources.target_proxy.symbol_mappings.PEPEUSDT]
+# symbol = "1000PEPEUSDT"
+# source_contract_multiplier = 1.0
+# target_contract_multiplier = 1000.0
+# Example: incoming 2000 PEPE -> 2 units of 1000PEPE, then multiply by shares.
 
 [[sources]]
 id = "bitget_exec_trade01"

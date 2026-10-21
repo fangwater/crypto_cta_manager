@@ -1,8 +1,0 @@
-{"kind": "history_completed", "status": "ok", "start_ts_us": 1790240116645637, "start_utc": "2026-09-24T08:55:16.645637+00:00", "synced_through_us": 1792015774188000, "symbols": 15, "records": 662, "income_quote": -385.3977161199999, "original_records_preserved": true, "only_enabled_source": ["binance_exec_trade09"], "verified_fixed_ip": "154.197.32.9"}
-{"kind": "account_timeline", "http": 200, "record_count": 662, "funding_income_quote": -385.3977161199999, "points": 154, "overall_before_additive": true, "overall_after_additive": true}
-{"kind": "protected_runtime", "processes_checked": 82, "changed_pids": [], "trade_configs_checked": 13, "trade_configs_unchanged": true}
-{"kind": "frontend_served", "http": 200, "assets": 2, "configuration_controls_present": true}
-{"kind": "exec_endpoint", "name": "viz", "http": 200}
-{"kind": "exec_endpoint", "name": "config", "http": 200}
-{"kind": "release", "frontend_release": "/home/el01/crypto_cta_manager/web-releases/20261014T220725Z", "binary_sha256": "3e3a015b716736f8416d2ff0ceed756531d0e148525551bf405877c084676b73", "config_sha256": "9a8ec9975d216f3664ecd0aa4e43bc1b911c37d535b3023bb5825bff4909196a", "verified_at_utc": "2026-10-14T22:16:01.601303+00:00"}
-{"kind": "temporary_session_removed", "removed": true}

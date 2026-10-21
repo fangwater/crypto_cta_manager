@@ -1,0 +1,209 @@
+diff --git a/crates/ipc_common/src/iceoryx_publisher.rs b/crates/ipc_common/src/iceoryx_publisher.rs
+index fd730340..e96281ba 100644
+--- a/crates/ipc_common/src/iceoryx_publisher.rs
++++ b/crates/ipc_common/src/iceoryx_publisher.rs
+@@ -13,7 +13,11 @@ use signal_common::trade_signal::{SignalType, TradeSignal, TRADE_SIGNAL_HEADER_L
+ pub const SIGNAL_PAYLOAD: usize = 4_096;
+ pub const TRADE_SIGNAL_PAYLOAD: usize = 1_024;
+ pub const RESAMPLE_PAYLOAD: usize = 32 * 1024;
+-pub const EXEC_STATE_RESAMPLE_PAYLOAD: usize = 64 * 1024;
++// Full multi-strategy cash/perpetual snapshots can exceed 64 KiB. This channel
++// carries replaceable state, so retain only a small queue of complete snapshots.
++pub const EXEC_STATE_RESAMPLE_PAYLOAD: usize = 1024 * 1024;
++pub const EXEC_STATE_RESAMPLE_HISTORY: usize = 2;
++pub const EXEC_STATE_RESAMPLE_BUFFER: usize = 8;
+ pub const BINANCE_MARGIN_UPDATE_PAYLOAD: usize = SIGNAL_PAYLOAD;
+ pub const BINANCE_UM_UPDATE_PAYLOAD: usize = SIGNAL_PAYLOAD;
+ pub const QUERY_REQ_PAYLOAD: usize = 256;
+@@ -178,6 +182,31 @@ impl<const PAYLOAD: usize> GenericPublisher<PAYLOAD> {
+         prefix: &str,
+         channel_name: &str,
+         service_mode: PublisherServiceMode,
++    ) -> Result<Self> {
++        Self::new_with_prefix_mode_and_queue(prefix, channel_name, service_mode, 128, 256)
++    }
++
++    pub fn new_with_prefix_and_queue_limits(
++        prefix: &str,
++        channel_name: &str,
++        history_size: usize,
++        subscriber_max_buffer_size: usize,
++    ) -> Result<Self> {
++        Self::new_with_prefix_mode_and_queue(
++            prefix,
++            channel_name,
++            PublisherServiceMode::OpenOrCreate,
++            history_size,
++            subscriber_max_buffer_size,
++        )
++    }
++
++    fn new_with_prefix_mode_and_queue(
++        prefix: &str,
++        channel_name: &str,
++        service_mode: PublisherServiceMode,
++        history_size: usize,
++        subscriber_max_buffer_size: usize,
+     ) -> Result<Self> {
+         let full_service = build_service_name(&format!("{}/{}", prefix, channel_name));
+         let suppress_trade_signal_publish =
+@@ -207,8 +236,8 @@ impl<const PAYLOAD: usize> GenericPublisher<PAYLOAD> {
+                 .publish_subscribe::<[u8; PAYLOAD]>()
+                 .max_publishers(1)
+                 .max_subscribers(32)
+-                .history_size(128)
+-                .subscriber_max_buffer_size(256)
++                .history_size(history_size)
++                .subscriber_max_buffer_size(subscriber_max_buffer_size)
+         };
+ 
+         let service = match service_mode {
+diff --git a/crates/viz_server/src/subscribers.rs b/crates/viz_server/src/subscribers.rs
+index 829530d6..eb6d78af 100644
+--- a/crates/viz_server/src/subscribers.rs
++++ b/crates/viz_server/src/subscribers.rs
+@@ -12,7 +12,8 @@ use tokio::time::Instant;
+ use crate::config::{PreTradeSrcCfg, VizServerCfg};
+ use crate::server::WsHub;
+ use ipc_common::iceoryx_publisher::{
+-    EXEC_STATE_RESAMPLE_PAYLOAD, RESAMPLE_PAYLOAD as ICEORYX_RESAMPLE_PAYLOAD,
++    EXEC_STATE_RESAMPLE_BUFFER, EXEC_STATE_RESAMPLE_HISTORY, EXEC_STATE_RESAMPLE_PAYLOAD,
++    RESAMPLE_PAYLOAD as ICEORYX_RESAMPLE_PAYLOAD,
+ };
+ use runtime_common::time_util::get_timestamp_us;
+ use viz_common::resample::{
+@@ -152,6 +153,7 @@ fn spawn_exec_state_listener(
+     >(
+         &format!("viz_exec_state_{}", sanitize_node_component(&namespace)),
+         &service_name,
++        (EXEC_STATE_RESAMPLE_HISTORY, EXEC_STATE_RESAMPLE_BUFFER),
+         move |entry: ExecStrategyStateResampleEntry, hub: WsHub| {
+             let rows = match entry.expanded_rows() {
+                 Ok(rows) => rows,
+@@ -352,6 +354,7 @@ where
+     spawn_resample_channel_with_payload::<T, F, RESAMPLE_PAYLOAD>(
+         node_suffix,
+         service_name,
++        (128, 256),
+         on_entry,
+         hub,
+     )
+@@ -360,6 +363,7 @@ where
+ fn spawn_resample_channel_with_payload<T, F, const PAYLOAD: usize>(
+     node_suffix: &str,
+     service_name: &str,
++    queue_limits: (usize, usize),
+     on_entry: F,
+     hub: WsHub,
+ ) -> Result<()>
+@@ -394,8 +398,8 @@ where
+                 .publish_subscribe::<[u8; PAYLOAD]>()
+                 .max_publishers(1)
+                 .max_subscribers(32)
+-                .history_size(128)
+-                .subscriber_max_buffer_size(256)
++                .history_size(queue_limits.0)
++                .subscriber_max_buffer_size(queue_limits.1)
+                 .open_or_create()?;
+             let subscriber: Subscriber<ipc::Service, [u8; PAYLOAD], ()> =
+                 service.subscriber_builder().create()?;
+diff --git a/src/pre_trade/exec_resample_channel.rs b/src/pre_trade/exec_resample_channel.rs
+index 3621511f..9699ac36 100644
+--- a/src/pre_trade/exec_resample_channel.rs
++++ b/src/pre_trade/exec_resample_channel.rs
+@@ -5,7 +5,8 @@ use crate::strategy::batch_exec_strategy::BatchExecSnapshot;
+ use crate::strategy::chase_exec::ChaseExecSnapshot;
+ use anyhow::Result;
+ use ipc_common::iceoryx_publisher::{
+-    ExecStateResamplePublisher, GenericPublisher, ResamplePublisher,
++    ExecStateResamplePublisher, GenericPublisher, ResamplePublisher, EXEC_STATE_RESAMPLE_BUFFER,
++    EXEC_STATE_RESAMPLE_HISTORY,
+ };
+ use log::{info, warn};
+ use runtime_common::time_util::get_timestamp_us;
+@@ -65,11 +66,16 @@ impl ExecResampleChannel {
+ 
+     fn new() -> Self {
+         Self {
+-            state_pub: ExecStateResamplePublisher::new_with_prefix("viz_pubs", EXEC_STATE_CHANNEL)
+-                .map_err(|err| {
+-                    warn!("ExecResampleChannel init failed channel={EXEC_STATE_CHANNEL}: {err:#}")
+-                })
+-                .ok(),
++            state_pub: ExecStateResamplePublisher::new_with_prefix_and_queue_limits(
++                "viz_pubs",
++                EXEC_STATE_CHANNEL,
++                EXEC_STATE_RESAMPLE_HISTORY,
++                EXEC_STATE_RESAMPLE_BUFFER,
++            )
++            .map_err(|err| {
++                warn!("ExecResampleChannel init failed channel={EXEC_STATE_CHANNEL}: {err:#}")
++            })
++            .ok(),
+             risk_pub: ResamplePublisher::new_with_prefix("viz_pubs", EXEC_RISK_CHANNEL)
+                 .map_err(|err| {
+                     warn!("ExecResampleChannel init failed channel={EXEC_RISK_CHANNEL}: {err:#}")
+@@ -402,4 +408,63 @@ mod tests {
+         chase.has_execution_in_flight = true;
+         assert!(!is_idle_chase_exec(&chase));
+     }
++
++    #[test]
++    fn large_cash_and_perpetual_state_survives_ipc_round_trip() {
++        use ipc_common::iceoryx_publisher::EXEC_STATE_RESAMPLE_PAYLOAD;
++        use viz_common::resample::{ExecStrategyStateResampleEntry, ExecStrategyStateRow};
++
++        // RX01 runs dozens of strategies in both markets. Exercise their full
++        // symbol universe, including live orders and fractional residuals.
++        let mut rows = Vec::new();
++        for strategy in 0..60 {
++            for symbol in 0..55 {
++                for suffix in ["", "USDT"] {
++                    rows.push(ExecStrategyStateRow {
++                        algorithm: "grid".into(),
++                        pov: None,
++                        strategy_name: format!("binance_cta_spread_rx01_factor_{strategy:03}"),
++                        source_updated_at_ms: 1_792_569_435_000,
++                        symbol: format!("TOKEN{symbol:03}{suffix}"),
++                        position_allocated: true,
++                        account_position_qty: 2.0,
++                        target_qty: 1.0,
++                        current_qty: 0.25,
++                        effective_position_qty: 0.25,
++                        delta_qty: 0.75,
++                        live_order_qty: 0.125,
++                        pending_qty: 0.625,
++                        account_position_usdt: 200.0,
++                        target_usdt: 100.0,
++                        current_usdt: 25.0,
++                        delta_usdt: 75.0,
++                        live_order_usdt: 12.5,
++                        pending_usdt: 62.5,
++                        active_batches: 1,
++                        remaining_batches: 3,
++                        estimated_completion_ts_ms: 1_792_569_555_000,
++                        execution_complete: false,
++                        completion_reason: String::new(),
++                        mid_price: 100.0,
++                    });
++                }
++            }
++        }
++        let expected = serde_json::to_value(&rows).unwrap();
++        let entry = ExecStrategyStateResampleEntry::from_rows(123, true, rows).unwrap();
++        let encoded = entry.to_bytes().unwrap();
++        assert!(encoded.len() + 4 > 64 * 1024);
++        assert!(
++            encoded.len() + 4 <= EXEC_STATE_RESAMPLE_PAYLOAD,
++            "full snapshot has {} bytes",
++            encoded.len() + 4,
++        );
++        let decoded = ExecStrategyStateResampleEntry::from_bytes(&encoded).unwrap();
++        assert!(decoded.position_ready);
++        assert_eq!(decoded.ts_ms, 123);
++        assert_eq!(
++            serde_json::to_value(decoded.expanded_rows().unwrap()).unwrap(),
++            expected,
++        );
++    }
+ }

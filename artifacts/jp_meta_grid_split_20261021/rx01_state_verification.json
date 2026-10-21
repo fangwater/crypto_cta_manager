@@ -1,0 +1,113 @@
+[
+  {
+    "account_allocation_differences": [
+      {
+        "account_qty": -13.906546751613453,
+        "allocated_qty": -18.573373365562954,
+        "difference": -4.666826613949501,
+        "symbol": "KSM"
+      },
+      {
+        "account_qty": -193.26116949173567,
+        "allocated_qty": -215.46116949173563,
+        "difference": -22.19999999999996,
+        "symbol": "QTUM"
+      }
+    ],
+    "algorithms": {
+      "grid": 1509
+    },
+    "at": "2026-10-21T08:15:24.996363+00:00",
+    "cash_rows": 799,
+    "completion": {
+      "": 37,
+      "borrow_unavailable": 4,
+      "exchange_minimum": 4,
+      "target_reached": 1224,
+      "target_tolerance": 240
+    },
+    "incomplete_rows": 37,
+    "perpetual_rows": 710,
+    "position_ready": true,
+    "relay_age_ms": 280.135009765625,
+    "rows": 1509,
+    "sample": 0,
+    "state_age_ms": 330.135009765625,
+    "state_ts_ms": 1792570524665,
+    "strategies": 59
+  },
+  {
+    "account_allocation_differences": [
+      {
+        "account_qty": -13.907760453966947,
+        "allocated_qty": -18.573373365562954,
+        "difference": -4.665612911596007,
+        "symbol": "KSM"
+      },
+      {
+        "account_qty": -193.26469168823567,
+        "allocated_qty": -215.46116949173563,
+        "difference": -22.19647780349996,
+        "symbol": "QTUM"
+      }
+    ],
+    "algorithms": {
+      "grid": 1509
+    },
+    "at": "2026-10-21T08:15:35.087122+00:00",
+    "cash_rows": 799,
+    "completion": {
+      "": 19,
+      "borrow_unavailable": 4,
+      "exchange_minimum": 4,
+      "target_reached": 1224,
+      "target_tolerance": 258
+    },
+    "incomplete_rows": 19,
+    "perpetual_rows": 710,
+    "position_ready": true,
+    "relay_age_ms": 326.834228515625,
+    "rows": 1509,
+    "sample": 1,
+    "state_age_ms": 419.834228515625,
+    "state_ts_ms": 1792570534665,
+    "strategies": 59
+  },
+  {
+    "account_allocation_differences": [
+      {
+        "account_qty": -13.908627384219454,
+        "allocated_qty": -18.573373365562954,
+        "difference": -4.664745981343501,
+        "symbol": "KSM"
+      },
+      {
+        "account_qty": -193.26821388473567,
+        "allocated_qty": -215.46116949173563,
+        "difference": -22.19295560699996,
+        "symbol": "QTUM"
+      }
+    ],
+    "algorithms": {
+      "grid": 1506
+    },
+    "at": "2026-10-21T08:15:45.180540+00:00",
+    "cash_rows": 798,
+    "completion": {
+      "": 16,
+      "borrow_unavailable": 4,
+      "exchange_minimum": 4,
+      "target_reached": 1229,
+      "target_tolerance": 253
+    },
+    "incomplete_rows": 16,
+    "perpetual_rows": 708,
+    "position_ready": true,
+    "relay_age_ms": 431.86865234375,
+    "rows": 1506,
+    "sample": 2,
+    "state_age_ms": 512.86865234375,
+    "state_ts_ms": 1792570544664,
+    "strategies": 59
+  }
+]

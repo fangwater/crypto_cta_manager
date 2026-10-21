@@ -1,0 +1,18 @@
+
+> crypto-cta-manager-frontend@0.1.0 build
+> tsc -b && vite build
+
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 2441 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                     0.53 kB │ gzip:   0.33 kB
+dist/assets/index-CD8gA5wl.css     92.48 kB │ gzip:  17.22 kB
+dist/assets/index-BZkMHDR7.js   1,106.59 kB │ gzip: 351.45 kB
+
+✓ built in 20.21s
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.

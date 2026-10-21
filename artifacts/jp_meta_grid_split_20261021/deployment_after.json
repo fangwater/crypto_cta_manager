@@ -1,0 +1,1767 @@
+{
+  "at": "2026-10-21T08:14:59.566141+00:00",
+  "binaries": {
+    "exec-pre-trade": "531893b4c51de4550e40098c5a1c1e1445aa18ea30a23a5247776a7e2f17aa75",
+    "viz_server": "ded2bc35ed04a63c4d5752dbb1125a9486735f0cac0f21881b7b660cf7dcc93b"
+  },
+  "configs": {
+    "/home/ubuntu/binance-cta-perp-rx02/config/cta_perp_factor_model_1m_pub.toml": "cc17aa88e6f20d05e5c5ba7c456efde18a10248c4bbdee6050b35a5310ecc79f",
+    "/home/ubuntu/binance-cta-perp-rx02/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance-cta-perp-rx02/env.sh": "26540c8b9e7ed7c9b5f98588209ec6e04288cdc518b2ae418f02e9c2250e7aab",
+    "/home/ubuntu/binance-cta-perp-rx03/config/cta_perp_factor_model_1m_pub.toml": "57f7968c46b2bc454b9df273ad9e657b212991684c88ead8bcae3f335d86073d",
+    "/home/ubuntu/binance-cta-perp-rx03/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance-cta-perp-rx03/env.sh": "5c2d2a64704571cce56cc09ca1908e98ebfc2ccaadc79a3c55fc30122770d1cd",
+    "/home/ubuntu/binance-cta-rx01/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance-cta-rx01/config/persist_sync_distribution.toml": "b69cc99767bc62d3a6be9ece16ba63c41f963a5cda3601f0f7acf7ae170b4bd6",
+    "/home/ubuntu/binance-cta-rx01/config/viz.toml": "97389b34c07e7c0446a9c470870a7f80b40cec44a2ac1cc00cfd4717976ae253",
+    "/home/ubuntu/binance-cta-rx01/env.sh": "5ef52555e07eb863dfa36aa70918d6c3198c4eae80576460ff2b1d2a4c797ce2",
+    "/home/ubuntu/binance-cta-rx01/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance-cta-special-rx02/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance-cta-special-rx02/env.sh": "f0c615e0a4b9b3ab1c42d447670988d03b22acb224dad973523061c80265793c",
+    "/home/ubuntu/binance-cta-special-rx02/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance-cta-special-rx03/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance-cta-special-rx03/env.sh": "9a81e977c99f5e06f88134276018f594b6beb984378117274966102b552b93b0",
+    "/home/ubuntu/binance-cta-special-rx03/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance-cta-spread-rx01/config/cta_spread_factor_model_1m_pub.toml": "1eb15b86660729ac4b29602610ad58777a77606b3b8eff6436d9b8c83beb21cc",
+    "/home/ubuntu/binance-cta-spread-rx01/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance-cta-spread-rx01/env.sh": "ee68ae42800edc32682268afd361833258c76d49465220c25e4991d83282ef06",
+    "/home/ubuntu/binance-intra-arb01/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance-intra-arb01/config/persist_sync_distribution.toml": "bd2c85bb202903b973d440f5950be46b4a9028ccf634c7746b66fef1c89530e3",
+    "/home/ubuntu/binance-intra-arb01/config/viz.toml": "a8cf6f8dd03457af8d1bf38d7b07f8ce0a811f3835e3c089146efd7056c67e23",
+    "/home/ubuntu/binance-intra-arb01/env.sh": "e69705f6be7c000f9301d44dedd3b0bf6f55d0f140f1f59acc18f66978525793",
+    "/home/ubuntu/binance-intra-arb01/trade_engine.toml": "c560f27c70e9b535de0a65e7f9948910f8d6bd9cd63e65fa1186048b14809f6d",
+    "/home/ubuntu/binance_exec_trade01/config/exec_viz.toml": "c985173300c1379a50b3c19bfbf062e91adc4390a63b6c65a08562b7bdc4fcef",
+    "/home/ubuntu/binance_exec_trade01/config/iceoryx2.toml": "ea1936175fcf835bb69b157a2ec1c36bcc2fbdd27611314ed87c0f7350462cc3",
+    "/home/ubuntu/binance_exec_trade01/env.sh": "02ba2337f571c0b5dfdb2f7c7bd3d4f425601b1c1e080bc3d6e94363485ef316",
+    "/home/ubuntu/binance_exec_trade01/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/ubuntu/binance_exec_trade02/config/exec_viz.toml": "677af8adf0a4cc6bb13ff9221ec252561e0b683f291297459072cc6f8b55acae",
+    "/home/ubuntu/binance_exec_trade02/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance_exec_trade02/config/persist_sync_distribution.toml": "4c7d251ec558476123fa0146774c1195ab7d8ddcc2e6f27333e9644bef10d11b",
+    "/home/ubuntu/binance_exec_trade02/env.sh": "7599b2b792debbe09ac3adaa86b0fb6c122c63a32a3231117782ac384167ba06",
+    "/home/ubuntu/binance_exec_trade02/trade_engine.toml": "87b34c72bafe10728a2157bcd524f2e46b31a9be691b445ee046ee7443906dec",
+    "/home/ubuntu/binance_exec_trade03/config/exec_viz.toml": "44bf933194b4f38c6ca4d19952fff07f6ff0ce49a2532b7e4ae17b7cd1f34e8a",
+    "/home/ubuntu/binance_exec_trade03/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance_exec_trade03/config/persist_sync_distribution.toml": "4c7d251ec558476123fa0146774c1195ab7d8ddcc2e6f27333e9644bef10d11b",
+    "/home/ubuntu/binance_exec_trade03/env.sh": "0f2b9b3add61f4bbfb4bff90b12f65f24e39e577e2838a0ad8a8b202cb848991",
+    "/home/ubuntu/binance_exec_trade03/trade_engine.toml": "87b34c72bafe10728a2157bcd524f2e46b31a9be691b445ee046ee7443906dec",
+    "/home/ubuntu/binance_exec_trade04/config/exec_viz.toml": "dd4a8d93a390249dfad2f1fd45bfa51d1d9980714b22356d7b5d4fec5dbd2318",
+    "/home/ubuntu/binance_exec_trade04/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance_exec_trade04/config/persist_sync_distribution.toml": "4c7d251ec558476123fa0146774c1195ab7d8ddcc2e6f27333e9644bef10d11b",
+    "/home/ubuntu/binance_exec_trade04/env.sh": "b990f701fd8183fd1f9a13df2fee33401d37dbcbd9b05afa3703c2f045601152",
+    "/home/ubuntu/binance_exec_trade04/trade_engine.toml": "87b34c72bafe10728a2157bcd524f2e46b31a9be691b445ee046ee7443906dec",
+    "/home/ubuntu/binance_exec_trade05/config/exec_viz.toml": "11879e8e43353df9c54bb91de7fb576456392968f07e2dccd3496523374e85e7",
+    "/home/ubuntu/binance_exec_trade05/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance_exec_trade05/config/persist_sync_distribution.toml": "db84ae83cdb51382cc0e4f8fab6a85c7bc587548b881d0b3228604f4848c4e0c",
+    "/home/ubuntu/binance_exec_trade05/env.sh": "2d8048cacc519d31725230ea1fc7a9b28690ba8c952cecc587eb54129a890b3b",
+    "/home/ubuntu/binance_exec_trade05/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance_exec_trade06/config/exec_viz.toml": "ea4b530729dfb1e392b95873fe4feb3ebcd6b2da3fac91baddb8f15addca8f20",
+    "/home/ubuntu/binance_exec_trade06/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance_exec_trade06/config/persist_sync_distribution.toml": "db84ae83cdb51382cc0e4f8fab6a85c7bc587548b881d0b3228604f4848c4e0c",
+    "/home/ubuntu/binance_exec_trade06/env.sh": "bad8f799c34acec3dc89fde1c1e7d14127a9ad432acf0ae238d1d0f366dfab86",
+    "/home/ubuntu/binance_exec_trade06/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance_exec_trade07/config/exec_viz.toml": "74918638ab09dbdd89fa3fe2c04baca692aebea1b63921abe51d25d793d34fb5",
+    "/home/ubuntu/binance_exec_trade07/config/iceoryx2.toml": "d665a71ddd1e97db6e231c6b38bbd9194b57decbd6e6cba7968f1009642b46f9",
+    "/home/ubuntu/binance_exec_trade07/config/persist_sync_distribution.toml": "db84ae83cdb51382cc0e4f8fab6a85c7bc587548b881d0b3228604f4848c4e0c",
+    "/home/ubuntu/binance_exec_trade07/env.sh": "c23827000780e99bca0fd96c1b48986e074a28bb2d9d36aa553d25d3aebe060b",
+    "/home/ubuntu/binance_exec_trade07/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance_fix_demo/env.sh": "c31bda6217c60e7e700a8216ffec9f81c0d7362e23510bf5a2a7bc218e1a301f",
+    "/home/ubuntu/binance_fr_arb01/config/persist_sync_distribution.toml": "6a569f861e76021fa7b8005d843dc3085b0393e8fc722cc9ba9476fad463d1e2",
+    "/home/ubuntu/binance_fr_arb01/config/viz.toml": "f0714947c46821318f696241213e30a85f704bf2bf90a30c276ba850148497be",
+    "/home/ubuntu/binance_fr_arb01/env.sh": "942438f4dd4de027fe6ddf07e95a912623353b4ea9f7e894c3cb447e6f3c2ace",
+    "/home/ubuntu/binance_fr_arb01/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/binance_fr_arb02/config/persist_sync_distribution.toml": "6a569f861e76021fa7b8005d843dc3085b0393e8fc722cc9ba9476fad463d1e2",
+    "/home/ubuntu/binance_fr_arb02/config/viz.toml": "1681fc60295855d23a4af17b96efb17555a6eb8e6a4a5ecae4a7e9e3bbfa7a80",
+    "/home/ubuntu/binance_fr_arb02/env.sh": "6e8ea8e19b03e37179eb752bb0ab0ba5325dc0cb0726d2951fe43b668f3fd49e",
+    "/home/ubuntu/binance_fr_arb02/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/binance_fr_arb03/config/persist_sync_distribution.toml": "6a569f861e76021fa7b8005d843dc3085b0393e8fc722cc9ba9476fad463d1e2",
+    "/home/ubuntu/binance_fr_arb03/config/viz.toml": "fb68784b22a9b3ea3eaf67a63f18d258225b908ea5666c6d4fa841ceac49cef8",
+    "/home/ubuntu/binance_fr_arb03/env.sh": "b9aabdba64ab40370c539e43a7cb77f6703db74aa1bc8c42f28bbeb3337cc727",
+    "/home/ubuntu/binance_fr_arb03/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/binance_fr_arb04/config/persist_sync_distribution.toml": "6a569f861e76021fa7b8005d843dc3085b0393e8fc722cc9ba9476fad463d1e2",
+    "/home/ubuntu/binance_fr_arb04/config/viz.toml": "d85d0fe2f231769d0b3e77f4bb9ab1a61f61ec24b1a2fd092d51abfceed87b45",
+    "/home/ubuntu/binance_fr_arb04/env.sh": "3945c16579d06a8cfe27cd1bdf8ebd8decaed25d1543c607d4a0fcb6b505ff72",
+    "/home/ubuntu/binance_fr_arb04/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/binance_mm_alpha/config/persist_sync_distribution.toml": "a44e82b05b7c0e5c2ef0fef34ec57e8e4f7687656efd6f53907cb8b6a70e43f8",
+    "/home/ubuntu/binance_mm_alpha/config/viz.toml": "f75d7ef8956fe14a1c8d34c01326d265d92302d2a71d5f1ee6a9eeb22c2a9761",
+    "/home/ubuntu/binance_mm_alpha/env.sh": "69563afb57cca3422bfdeb290e9913fa49e0832fe0186afa369eeac9d7a7cd0e",
+    "/home/ubuntu/binance_mm_alpha/trade_engine.toml": "fb6bee9dd17af4baf8dda52157d0b03bcf67efdbffb2029a65a9328bc4c4ad8c",
+    "/home/ubuntu/bitget-gate-cross-arb01/config/persist_sync_distribution.toml": "b5b6d4fca427f7ed62c40507a4db6b33dc0efd9d29bf6cce793e6ca8a4581028",
+    "/home/ubuntu/bitget-gate-cross-arb01/config/viz.toml": "20d7fe1f36025ea4e4519e358a55f88446f56bf6d7bc689054731a16ae462141",
+    "/home/ubuntu/bitget-gate-cross-arb01/env.sh": "ceb9686a2bc11bde2242b1fb42c48154ed172cec52e90394b7df530d9f0ff903",
+    "/home/ubuntu/bitget-gate-cross-arb01/trade_engine.toml": "c8064dc3da0b30d004ea2e93d8a8960fb98f8dc351ad205bb09e34233efd3bfb",
+    "/home/ubuntu/bitget_fr_arb01/config/persist_sync_distribution.toml": "99b45bcfe9e94a0b4168e3688b53d95308e0d852d36bad2c1660b10eeafb34c9",
+    "/home/ubuntu/bitget_fr_arb01/config/viz.toml": "1da75839dba250091c15fa639269fe8a90cdd8f655b91cb762ede668bee9afab",
+    "/home/ubuntu/bitget_fr_arb01/env.sh": "b0193c3708e00984495461a41d57fa13a97e8b2d1874a3e1eda89bdf7249dd0c",
+    "/home/ubuntu/bitget_fr_arb01/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/bitget_fr_arb02/config/persist_sync_distribution.toml": "6a569f861e76021fa7b8005d843dc3085b0393e8fc722cc9ba9476fad463d1e2",
+    "/home/ubuntu/bitget_fr_arb02/config/viz.toml": "aab5a9c9921fe0f0a07c3e48c84b6da265c677d008398a2f835f9e68120d317e",
+    "/home/ubuntu/bitget_fr_arb02/env.sh": "c69211e89cf16b9206d2f500392bbbe5be1e8bf2b74e423143d4860ac1942bd0",
+    "/home/ubuntu/bitget_fr_arb02/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/bitget_fr_arb03/config/persist_sync_distribution.toml": "28a9e47db5f87cb88e3fbd79347ba29c8c694b88a0a1528241793249f0cd398e",
+    "/home/ubuntu/bitget_fr_arb03/config/viz.toml": "0d9c60d839635cc04ebef59615517a98b53d00c836e1887df03761000dff7a0e",
+    "/home/ubuntu/bitget_fr_arb03/env.sh": "7b55c1fe0dcd1dfb46abb4b31aba8258323eee18ba924083469a611eb10f7779",
+    "/home/ubuntu/bitget_fr_arb03/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/crypto_cta_manager/config/cta-manager.toml": "58fdf5c21a5d8e8e1de85aaf65aaeb21af77696cf3671987ae024023e4d8c794",
+    "/home/ubuntu/ed25519_demo/env.sh": "49cb26b9edd3b1740ff73b0b0d3a9b5b3b4240ca4412e12c4b7da34bb8c65516",
+    "/home/ubuntu/gate_fr_arb01/config/persist_sync_distribution.toml": "6a569f861e76021fa7b8005d843dc3085b0393e8fc722cc9ba9476fad463d1e2",
+    "/home/ubuntu/gate_fr_arb01/config/viz.toml": "4e0bf79338c3c8045ac23c217f844e9ff47bacdb4a852fe8a5c949933008f84e",
+    "/home/ubuntu/gate_fr_arb01/env.sh": "a024199474fa3dee8d3259392e074ffceb9d2f035e83621da833f81f5d67b064",
+    "/home/ubuntu/gate_fr_arb01/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/gate_fr_arb02/config/persist_sync_distribution.toml": "6a569f861e76021fa7b8005d843dc3085b0393e8fc722cc9ba9476fad463d1e2",
+    "/home/ubuntu/gate_fr_arb02/config/viz.toml": "46c9a6d6cfd858c25aa1bce2722896f7286a21d2dea5cdf5a1ae31745c492907",
+    "/home/ubuntu/gate_fr_arb02/env.sh": "7407de3774a488ffc794710f845e19b5d23f1a9e99651e04d9e5e69e9a4e3d69",
+    "/home/ubuntu/gate_fr_arb02/trade_engine.toml": "bdfa689c4a9bc82ea9fbdcaf4c743f4c819ddbbb5900479074ff913e7e905ed5",
+    "/home/ubuntu/gate_fr_arb03/config/persist_sync_distribution.toml": "4c7d251ec558476123fa0146774c1195ab7d8ddcc2e6f27333e9644bef10d11b",
+    "/home/ubuntu/gate_fr_arb03/config/viz.toml": "1979c5cfd332eb378a59691a0374dc32872b1220641e3906b4c08dae44624c26",
+    "/home/ubuntu/gate_fr_arb03/env.sh": "4764213a35ed5181dd2bce8ee8c316d6a5bca866e126031c3342a124ecadcacf",
+    "/home/ubuntu/gate_fr_arb03/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/local_binance_ed25519_test/env.sh": "9196c78ac78e252c6a01dbb6fb3ae29be30462dba027c811c7ecc341ba36a06d",
+    "/home/ubuntu/okex-intra-arb01/config/persist_sync_distribution.toml": "2fd81a7c11517c51a021cb451f50b37ff63732c45bad8a4bda6bf116cab38175",
+    "/home/ubuntu/okex-intra-arb01/config/viz.toml": "3c5dac4cc9b4dcb6712341c91957f7b8098c07ec25d954dcd8e03a8104315934",
+    "/home/ubuntu/okex-intra-arb01/env.sh": "cceabf1f322156237abea0424bdae6bf81542d7bf4cb8b9e3274e0ad17a61d09",
+    "/home/ubuntu/okex-intra-arb01/trade_engine.toml": "3fb4d3557835f91bdb6ff4872297c208eed45047ce6d74002932525bd3173acd",
+    "/home/ubuntu/okex_mm_alpha/config/viz.toml": "952848378ca0841b80adab70d820c062d52711ea3af2acb0f0aa38fd9fc38231",
+    "/home/ubuntu/okex_mm_alpha/env.sh": "abbaaccb7225bba4c4fb45d522dbd67e491ae2f9b18981cd9711b19e090fcc29",
+    "/home/ubuntu/okex_mm_alpha/trade_engine.toml": "fb6bee9dd17af4baf8dda52157d0b03bcf67efdbffb2029a65a9328bc4c4ad8c"
+  },
+  "processes": {
+    "100190": {
+      "affinity": [
+        18
+      ],
+      "cwd": "/home/ubuntu/binance-cta-perp-rx02",
+      "exe": "cta_perp_factor_model_1m_pub",
+      "start": "226141"
+    },
+    "100626": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance-cta-perp-rx03",
+      "exe": "cta_perp_signal",
+      "start": "226601"
+    },
+    "101151": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/okex_mm_alpha",
+      "exe": "viz_server",
+      "start": "228554"
+    },
+    "101408": {
+      "affinity": [
+        15
+      ],
+      "cwd": "/home/ubuntu/okex_mm_alpha",
+      "exe": "persist_manager",
+      "start": "228968"
+    },
+    "101876": {
+      "affinity": [
+        23
+      ],
+      "cwd": "/home/ubuntu/okex_mm_alpha",
+      "exe": "trade_engine",
+      "start": "229388"
+    },
+    "102229": {
+      "affinity": [
+        22
+      ],
+      "cwd": "/home/ubuntu/okex_mm_alpha",
+      "exe": "pre_trade",
+      "start": "229816"
+    },
+    "102472": {
+      "affinity": [
+        20
+      ],
+      "cwd": "/home/ubuntu/okex_mm_alpha",
+      "exe": "account_monitor",
+      "start": "230278"
+    },
+    "105323": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade07",
+      "exe": "persist_manager",
+      "start": "233435"
+    },
+    "105844": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade07",
+      "exe": "trade_engine",
+      "start": "233835"
+    },
+    "106116": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade07",
+      "exe": "rapidx_account_monitor",
+      "start": "234315"
+    },
+    "106434": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade07",
+      "exe": "viz_server",
+      "start": "235085"
+    },
+    "106578": {
+      "affinity": [
+        19
+      ],
+      "cwd": "/home/ubuntu/binance-cta-perp-rx03",
+      "exe": "cta_perp_factor_model_1m_pub",
+      "start": "235264"
+    },
+    "116154": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb02",
+      "exe": "pre_trade",
+      "start": "259314"
+    },
+    "120760": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/trade_flow_feature/okex-futures",
+      "exe": "trade_flow_feature_pub",
+      "start": "269947"
+    },
+    "120900": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb03",
+      "exe": "pre_trade",
+      "start": "271130"
+    },
+    "121148": {
+      "affinity": [
+        21
+      ],
+      "cwd": "/home/ubuntu/okex_mm_alpha",
+      "exe": "trade_signal",
+      "start": "272769"
+    },
+    "123262": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb01",
+      "exe": "pre_trade",
+      "start": "275868"
+    },
+    "129512": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb03",
+      "exe": "pre_trade",
+      "start": "293239"
+    },
+    "1403": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/crypto_nav_manager",
+      "exe": "ops_monitor",
+      "start": "1270"
+    },
+    "142609": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb01",
+      "exe": "pre_trade",
+      "start": "328583"
+    },
+    "142765": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb02",
+      "exe": "pre_trade",
+      "start": "330008"
+    },
+    "144946": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb04",
+      "exe": "pre_trade",
+      "start": "337482"
+    },
+    "147066": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb03",
+      "exe": "pre_trade",
+      "start": "342776"
+    },
+    "149220": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb02",
+      "exe": "trade_signal",
+      "start": "346996"
+    },
+    "149309": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb03",
+      "exe": "trade_signal",
+      "start": "347336"
+    },
+    "149403": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb04",
+      "exe": "trade_signal",
+      "start": "347669"
+    },
+    "149496": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb01",
+      "exe": "trade_signal",
+      "start": "348011"
+    },
+    "149584": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb02",
+      "exe": "trade_signal",
+      "start": "348347"
+    },
+    "149679": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb03",
+      "exe": "trade_signal",
+      "start": "348691"
+    },
+    "149767": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb01",
+      "exe": "trade_signal",
+      "start": "349037"
+    },
+    "149857": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb02",
+      "exe": "trade_signal",
+      "start": "349371"
+    },
+    "149949": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb03",
+      "exe": "trade_signal",
+      "start": "349719"
+    },
+    "1550427": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/delist_risk_server",
+      "exe": "delist_risk_server",
+      "start": "16752795"
+    },
+    "166260": {
+      "affinity": [
+        24
+      ],
+      "cwd": "/home/ubuntu/crypto_cta_manager",
+      "exe": "cta_web",
+      "start": "24988270"
+    },
+    "2879622": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance-cta-spread-rx01",
+      "exe": "cta_spread_signal",
+      "start": "8388408"
+    },
+    "29832": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/.pm2/modules/pm2-logrotate/node_modules/pm2-logrotate",
+      "exe": "node",
+      "start": "0"
+    },
+    "30584": {
+      "affinity": [
+        11
+      ],
+      "cwd": "/home/ubuntu/spread_pbs/bitget-both",
+      "exe": "spread_pbs",
+      "start": "93927"
+    },
+    "30676": {
+      "affinity": [
+        10
+      ],
+      "cwd": "/home/ubuntu/spread_pbs/gate-both",
+      "exe": "spread_pbs",
+      "start": "93955"
+    },
+    "30763": {
+      "affinity": [
+        8
+      ],
+      "cwd": "/home/ubuntu/spread_pbs/binance-margin",
+      "exe": "spread_pbs",
+      "start": "93983"
+    },
+    "30865": {
+      "affinity": [
+        14
+      ],
+      "cwd": "/home/ubuntu/spread_pbs/binance-futures",
+      "exe": "spread_pbs",
+      "start": "94015"
+    },
+    "30974": {
+      "affinity": [
+        9
+      ],
+      "cwd": "/home/ubuntu/spread_pbs/binance-futures",
+      "exe": "spread_pbs",
+      "start": "94047"
+    },
+    "31052": {
+      "affinity": [
+        16
+      ],
+      "cwd": "/home/ubuntu/spread_pbs/gate-bitget-futures-bbo",
+      "exe": "spread_pbs",
+      "start": "94075"
+    },
+    "31341": {
+      "affinity": [
+        5
+      ],
+      "cwd": "/home/ubuntu/spread_bbo_zmq_pub/binance-futures",
+      "exe": "spread_bbo_zmq_pub",
+      "start": "94148"
+    },
+    "3199097": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade06",
+      "exe": "persist_manager",
+      "start": "9324950"
+    },
+    "3199439": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade06",
+      "exe": "rapidx_account_monitor",
+      "start": "9325179"
+    },
+    "3207923": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade06",
+      "exe": "trade_engine",
+      "start": "9349113"
+    },
+    "32664": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/rolling_metrics/bitget-margin-bitget-futures",
+      "exe": "rolling_metrics",
+      "start": "96989"
+    },
+    "32774": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/rolling_metrics/gate-margin-gate-futures",
+      "exe": "rolling_metrics",
+      "start": "97022"
+    },
+    "32996": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/rolling_metrics/bitget-futures-gate-futures",
+      "exe": "rolling_metrics",
+      "start": "97092"
+    },
+    "330224": {
+      "affinity": [
+        17
+      ],
+      "cwd": "/home/ubuntu/binance-cta-spread-rx01",
+      "exe": "cta_spread_factor_model_1m_pub",
+      "start": "25476645"
+    },
+    "3639659": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance-cta-perp-rx02",
+      "exe": "cta_perp_signal",
+      "start": "10610905"
+    },
+    "37086": {
+      "affinity": [
+        12
+      ],
+      "cwd": "/home/ubuntu/spread_pbs/okex-both",
+      "exe": "spread_pbs",
+      "start": "101449"
+    },
+    "37225": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/trade_flow_feature/bitget-margin",
+      "exe": "trade_flow_feature_pub",
+      "start": "101532"
+    },
+    "37298": {
+      "affinity": [
+        13
+      ],
+      "cwd": "/home/ubuntu/depth_pub/general",
+      "exe": "depth_pub_general",
+      "start": "101553"
+    },
+    "37325": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/trade_flow_feature/bitget-futures",
+      "exe": "trade_flow_feature_pub",
+      "start": "101577"
+    },
+    "37415": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/trade_flow_feature/gate-margin",
+      "exe": "trade_flow_feature_pub",
+      "start": "101620"
+    },
+    "37507": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/trade_flow_feature/gate-futures",
+      "exe": "trade_flow_feature_pub",
+      "start": "101665"
+    },
+    "37598": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/trade_flow_feature/binance-margin",
+      "exe": "trade_flow_feature_pub",
+      "start": "101707"
+    },
+    "37684": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/trade_flow_feature/binance-futures",
+      "exe": "trade_flow_feature_pub",
+      "start": "101746"
+    },
+    "384442": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade05",
+      "exe": "exec-pre-trade",
+      "start": "25632013"
+    },
+    "384621": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade07",
+      "exe": "exec-pre-trade",
+      "start": "25632810"
+    },
+    "4064693": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade01",
+      "exe": "trade_engine",
+      "start": "24133156"
+    },
+    "4066760": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade01",
+      "exe": "exec-pre-trade",
+      "start": "24135215"
+    },
+    "43876": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb02",
+      "exe": "account_monitor",
+      "start": "120794"
+    },
+    "43996": {
+      "affinity": [
+        15
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb02",
+      "exe": "persist_manager",
+      "start": "120838"
+    },
+    "44293": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb02",
+      "exe": "viz_server",
+      "start": "120880"
+    },
+    "44461": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb03",
+      "exe": "account_monitor",
+      "start": "121075"
+    },
+    "44581": {
+      "affinity": [
+        15
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb03",
+      "exe": "persist_manager",
+      "start": "121121"
+    },
+    "44889": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb03",
+      "exe": "viz_server",
+      "start": "121163"
+    },
+    "45056": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb04",
+      "exe": "account_monitor",
+      "start": "121291"
+    },
+    "45178": {
+      "affinity": [
+        15
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb04",
+      "exe": "persist_manager",
+      "start": "121335"
+    },
+    "45486": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb04",
+      "exe": "viz_server",
+      "start": "121378"
+    },
+    "47756": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb02",
+      "exe": "trade_engine",
+      "start": "127645"
+    },
+    "47920": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb03",
+      "exe": "trade_engine",
+      "start": "127772"
+    },
+    "48089": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb04",
+      "exe": "trade_engine",
+      "start": "127907"
+    },
+    "502412": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade06",
+      "exe": "exec-pre-trade",
+      "start": "25957038"
+    },
+    "502880": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade06",
+      "exe": "viz_server",
+      "start": "25957302"
+    },
+    "58430": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_futures_ipc_proxy",
+      "exe": "binance_futures_ipc_proxy",
+      "start": "151094"
+    },
+    "58459": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/crypto_nav_manager",
+      "exe": "crypto_nav_manager",
+      "start": "152543"
+    },
+    "60648": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb01",
+      "exe": "account_monitor",
+      "start": "154400"
+    },
+    "60809": {
+      "affinity": [
+        15
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb01",
+      "exe": "persist_manager",
+      "start": "154458"
+    },
+    "60856": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb02",
+      "exe": "fr_signal_dashboard",
+      "start": "154461"
+    },
+    "61143": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb01",
+      "exe": "trade_engine",
+      "start": "154502"
+    },
+    "61245": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb03",
+      "exe": "fr_signal_dashboard",
+      "start": "154569"
+    },
+    "61465": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb01",
+      "exe": "viz_server",
+      "start": "154651"
+    },
+    "61528": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb04",
+      "exe": "fr_signal_dashboard",
+      "start": "154691"
+    },
+    "61710": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb01",
+      "exe": "fr_signal_dashboard",
+      "start": "154784"
+    },
+    "61805": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb02",
+      "exe": "account_monitor",
+      "start": "154841"
+    },
+    "61932": {
+      "affinity": [
+        15
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb02",
+      "exe": "persist_manager",
+      "start": "154892"
+    },
+    "62192": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb02",
+      "exe": "trade_engine",
+      "start": "154940"
+    },
+    "62350": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb02",
+      "exe": "viz_server",
+      "start": "155082"
+    },
+    "62454": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb02",
+      "exe": "fr_signal_dashboard",
+      "start": "155210"
+    },
+    "62577": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb03",
+      "exe": "account_monitor",
+      "start": "155286"
+    },
+    "62705": {
+      "affinity": [
+        15
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb03",
+      "exe": "persist_manager",
+      "start": "155341"
+    },
+    "62997": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb03",
+      "exe": "trade_engine",
+      "start": "155389"
+    },
+    "63195": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb03",
+      "exe": "viz_server",
+      "start": "155547"
+    },
+    "63312": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/gate_fr_arb03",
+      "exe": "fr_signal_dashboard",
+      "start": "155675"
+    },
+    "63432": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb01",
+      "exe": "account_monitor",
+      "start": "155752"
+    },
+    "63556": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb01",
+      "exe": "persist_manager",
+      "start": "155807"
+    },
+    "63801": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb01",
+      "exe": "trade_engine",
+      "start": "155855"
+    },
+    "63990": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb01",
+      "exe": "viz_server",
+      "start": "156020"
+    },
+    "64097": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb01",
+      "exe": "fr_signal_dashboard",
+      "start": "156151"
+    },
+    "64192": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb02",
+      "exe": "account_monitor",
+      "start": "156213"
+    },
+    "64315": {
+      "affinity": [
+        15
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb02",
+      "exe": "persist_manager",
+      "start": "156269"
+    },
+    "64572": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb02",
+      "exe": "trade_engine",
+      "start": "156319"
+    },
+    "64734": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb02",
+      "exe": "viz_server",
+      "start": "156468"
+    },
+    "64843": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb02",
+      "exe": "fr_signal_dashboard",
+      "start": "156594"
+    },
+    "64965": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb03",
+      "exe": "account_monitor",
+      "start": "156678"
+    },
+    "65088": {
+      "affinity": [
+        15
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb03",
+      "exe": "persist_manager",
+      "start": "156734"
+    },
+    "65382": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb03",
+      "exe": "trade_engine",
+      "start": "156789"
+    },
+    "65577": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb03",
+      "exe": "viz_server",
+      "start": "156955"
+    },
+    "65688": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/bitget_fr_arb03",
+      "exe": "fr_signal_dashboard",
+      "start": "157087"
+    },
+    "697198": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/rolling_metrics/binance-margin-binance-futures",
+      "exe": "rolling_metrics",
+      "start": "1966147"
+    },
+    "84400": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade01",
+      "exe": "persist_manager",
+      "start": "210038"
+    },
+    "85012": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade01",
+      "exe": "account_monitor",
+      "start": "210855"
+    },
+    "85308": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade01",
+      "exe": "viz_server",
+      "start": "211587"
+    },
+    "85925": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade02",
+      "exe": "persist_manager",
+      "start": "212630"
+    },
+    "86311": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade02",
+      "exe": "trade_engine",
+      "start": "212990"
+    },
+    "86546": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade02",
+      "exe": "account_monitor",
+      "start": "213437"
+    },
+    "87496": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade02",
+      "exe": "exec-pre-trade",
+      "start": "213798"
+    },
+    "88791": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade02",
+      "exe": "viz_server",
+      "start": "214165"
+    },
+    "89461": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade03",
+      "exe": "persist_manager",
+      "start": "215210"
+    },
+    "89855": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade03",
+      "exe": "trade_engine",
+      "start": "215575"
+    },
+    "90108": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade03",
+      "exe": "account_monitor",
+      "start": "216023"
+    },
+    "90287": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade03",
+      "exe": "exec-pre-trade",
+      "start": "216388"
+    },
+    "90416": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade03",
+      "exe": "viz_server",
+      "start": "216755"
+    },
+    "91219": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade04",
+      "exe": "persist_manager",
+      "start": "217835"
+    },
+    "91622": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade04",
+      "exe": "trade_engine",
+      "start": "218209"
+    },
+    "91888": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade04",
+      "exe": "account_monitor",
+      "start": "218673"
+    },
+    "92076": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade04",
+      "exe": "exec-pre-trade",
+      "start": "219049"
+    },
+    "92209": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade04",
+      "exe": "viz_server",
+      "start": "219424"
+    },
+    "94898": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade05",
+      "exe": "persist_manager",
+      "start": "220496"
+    },
+    "95314": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade05",
+      "exe": "trade_engine",
+      "start": "220865"
+    },
+    "95549": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade05",
+      "exe": "rapidx_account_monitor",
+      "start": "221317"
+    },
+    "95871": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_exec_trade05",
+      "exe": "viz_server",
+      "start": "222078"
+    },
+    "99911": {
+      "affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "cwd": "/home/ubuntu/binance_fr_arb02",
+      "exe": "pre_trade",
+      "start": "225809"
+    }
+  }
+}

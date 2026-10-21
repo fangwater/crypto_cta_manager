@@ -1,0 +1,7 @@
+    Checking ipc_common v0.1.0 (/home/fanghaizhou/mkt_signal/crates/ipc_common)
+    Checking period_pbs v0.1.0 (/home/fanghaizhou/mkt_signal/crates/period_pbs)
+    Checking trade_engine v0.1.0 (/home/fanghaizhou/mkt_signal/crates/trade_engine)
+    Checking trade_signal v0.1.0 (/home/fanghaizhou/mkt_signal/crates/trade_signal)
+    Checking viz_server v0.1.0 (/home/fanghaizhou/mkt_signal/crates/viz_server)
+    Checking mkt_signal v0.1.0 (/home/fanghaizhou/mkt_signal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.08s

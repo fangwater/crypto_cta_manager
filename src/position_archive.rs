@@ -34,6 +34,9 @@ pub struct ArchivedPublishedAccount {
     pub source_id: String,
     pub binding_name: String,
     pub shares: f64,
+    /// Account-specific filtered/mapped targets, including frozen shares and unit ratios.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_projection: Option<crate::target_proxy::TargetProjection>,
     /// Frozen at publication; absence in old messages is reported as a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theoretical_fee_rate: Option<f64>,
@@ -105,6 +108,7 @@ pub fn published_account(
         source_id: source_id.into(),
         binding_name: binding_name.into(),
         shares,
+        target_projection: None,
         theoretical_fee_rate: None,
         theoretical_fee_rates_by_quote: BTreeMap::new(),
         legacy_leverage: None,

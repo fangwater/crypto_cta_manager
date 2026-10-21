@@ -1,0 +1,204 @@
+{
+  "processes": {
+    "unchanged": true,
+    "count": 88
+  },
+  "config_hashes": {
+    "unchanged": true,
+    "count": 16
+  },
+  "snapshots": {
+    "unchanged": true,
+    "count": 4
+  },
+  "cpus": {
+    "unchanged": true,
+    "count": 1
+  },
+  "accounts": [
+    {
+      "source_id": "binance_exec_trade01",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 2.5579538487363607e-13,
+      "before": 380.61191499842835,
+      "after": 443.5342891804167
+    },
+    {
+      "source_id": "binance_exec_trade04",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 7.105427357601002e-12,
+      "before": 12215.440050250265,
+      "after": 13009.707791550216
+    },
+    {
+      "source_id": "binance_exec_trade02",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 6.110667527536862e-13,
+      "before": 1149.8812524669463,
+      "after": 1208.8443277817614
+    },
+    {
+      "source_id": "binance_exec_trade03",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 6.252776074688882e-13,
+      "before": 104.15724593491935,
+      "after": 135.26366847492037
+    },
+    {
+      "source_id": "binance_exec_trade08",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 8.44124770082999e-12,
+      "before": 12288.05442645617,
+      "after": 14920.909597156213
+    },
+    {
+      "source_id": "binance_exec_trade10",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 6.0254023992456496e-12,
+      "before": 9606.513120288426,
+      "after": 11397.440818388342
+    },
+    {
+      "source_id": "binance_exec_trade11",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 9.336531547887716e-12,
+      "before": 14633.703213801316,
+      "after": 17294.80857561366
+    },
+    {
+      "source_id": "binance_exec_trade09",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 3.611333454500709e-12,
+      "before": 4671.140287052571,
+      "after": 5795.211483351682
+    },
+    {
+      "source_id": "binance_exec_trade12",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 8.554934538551606e-12,
+      "before": 10620.183739712364,
+      "after": 12565.118756042391
+    },
+    {
+      "source_id": "binance_exec_xy_lxy21_05",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 5.4853899200679734e-12,
+      "before": 10446.56355929825,
+      "after": 12585.521588545551
+    },
+    {
+      "source_id": "binance_exec_trade13",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 4.884981308350689e-13,
+      "before": 992.456651936579,
+      "after": 1237.9495414365774
+    },
+    {
+      "source_id": "binance_exec_trade14",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 1.8405277302235845e-12,
+      "before": 8211.892432426368,
+      "after": 8688.477955476375
+    },
+    {
+      "source_id": "binance_exec_trade07",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 4.231992534187157e-11,
+      "before": 29241.91223459282,
+      "after": 32758.68545393965
+    },
+    {
+      "source_id": "binance_exec_trade06",
+      "immutable_totals_unchanged": true,
+      "fee_identity_max_error": 6.203038083185675e-12,
+      "before": 11871.318875806031,
+      "after": 14145.48483473014
+    }
+  ],
+  "trade01_30d": {
+    "before": {
+      "fill_count": 17162,
+      "volume_quote": 520592.90928072046,
+      "maker_fill_count": 11663,
+      "maker_volume_quote": 496559.41503049975,
+      "taker_fill_count": 108,
+      "taker_volume_quote": 4277.034121299998,
+      "unknown_liquidity_fill_count": 5391,
+      "unknown_liquidity_volume_quote": 19756.460128920753,
+      "realized_pnl_before_fee_quote": 2748.9687487381225,
+      "estimated_trading_fee_quote": 50.93905173943996,
+      "realized_pnl_after_fee_quote": 2698.029696998682,
+      "floating_pnl_quote": 66.75074617142467,
+      "nav_change_before_fee_quote": 2815.7194949095465,
+      "nav_change_after_fee_quote": 2764.780443170107
+    },
+    "after": {
+      "fill_count": 17162,
+      "volume_quote": 520592.90928072046,
+      "maker_fill_count": 11663,
+      "maker_volume_quote": 496559.41503049975,
+      "taker_fill_count": 108,
+      "taker_volume_quote": 4277.034121299998,
+      "unknown_liquidity_fill_count": 5391,
+      "unknown_liquidity_volume_quote": 19756.460128920753,
+      "realized_pnl_before_fee_quote": 2748.9687487381225,
+      "estimated_trading_fee_quote": 50.93905173943996,
+      "realized_pnl_after_fee_quote": 2698.029696998682,
+      "floating_pnl_quote": -837.643218852932,
+      "nav_change_before_fee_quote": 1911.3255298851905,
+      "nav_change_after_fee_quote": 1860.3864781457505
+    }
+  },
+  "kline_status": {
+    "active_backfills": 0,
+    "cache_hits": 2131,
+    "disk_batch_reads": 5286,
+    "disk_range_reads": 2105,
+    "enabled": true,
+    "fetched_candles": 304328,
+    "last_error": null,
+    "memory_candle_hits": 4745723,
+    "pricing_cache_hits": 32156,
+    "requests": 709,
+    "retained_days": 30,
+    "target_history": {
+      "last_error": null,
+      "loading": false,
+      "processed_messages": 4282917,
+      "ready": true
+    }
+  },
+  "health": {
+    "status": "ok",
+    "source_count": 14,
+    "generated_at_us": 1792566366277401,
+    "last_attempt_at_us": 1792566353573526,
+    "refresh_interval_secs": 60,
+    "last_refresh_error": null
+  },
+  "sessions_removed": true,
+  "browser_verified": [
+    {
+      "width": 1440,
+      "height": 1000,
+      "errors": 0,
+      "overflow": false,
+      "pending_recovery": {
+        "injected": 1,
+        "elapsedMs": 11206.60000038147,
+        "errors": [],
+        "points": 98
+      }
+    },
+    {
+      "width": 390,
+      "height": 1100,
+      "errors": 0,
+      "overflow": false,
+      "pending_recovery": null
+    }
+  ],
+  "cached_repeat_request_delta": 0,
+  "all_account_funding_unchanged": true,
+  "static_root_corrected": true
+}

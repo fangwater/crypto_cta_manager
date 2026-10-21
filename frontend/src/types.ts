@@ -96,6 +96,7 @@ export interface DashboardAccount {
   enabled: boolean
   gateway_prefix: string | null
   configurable: boolean
+  target_proxy_enabled: boolean
   /** Current session's grant on this account. Undefined only in stale payloads. */
   access_level?: 'view' | 'configure' | null
   account_pnl_start_ts_us?: number | null
@@ -231,6 +232,24 @@ export interface AccountBinding {
   order_strategy_name: string
   shares: number
   updated_at_us: number
+}
+
+export interface BindingTargetPreview {
+  source_id: string
+  binding_name: string
+  shares: number
+  proxy_enabled: boolean
+  targets: Record<string, TargetPosition>
+  projection: {
+    rules_fetched_at_us: number
+    matched: Record<string, {
+      symbol: string
+      source_contract_multiplier: number
+      target_contract_multiplier: number
+      quantity_multiplier: number
+    }>
+    filtered: Record<string, string>
+  } | null
 }
 
 export interface AccountStudio {

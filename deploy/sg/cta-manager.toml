@@ -19,18 +19,20 @@ enabled = false
 host_tag = "sg"
 
 [[sources]]
-id = "bybit_exec_trade02"
-account = "trade02"
-alias = "bybit-02"
+id = "bybit_exec_trade01"
+account = "trade01"
+alias = "bybit-01"
 venue = "bybit-futures"
-rocksdb_path = "/home/ubuntu/bybit_exec_trade02/data/persist_manager"
+rocksdb_path = "/home/ubuntu/bybit_exec_trade01/data/persist_manager"
 enabled = true
 monitor_enabled = true
-ipc_namespace = "bybit_exec_trade02"
+ipc_namespace = "bybit_exec_trade01"
 account_ipc_service = "account_pubs/bybit_pm"
-gateway_prefix = "/exec_trade02"
-exec_config_url = "http://127.0.0.1:18162"
-exec_viz_url = "http://127.0.0.1:10042"
+gateway_prefix = "/exec_trade01"
+exec_config_url = "http://127.0.0.1:18161"
+exec_viz_url = "http://127.0.0.1:10041"
+
+[sources.target_proxy]
 
 [[sources]]
 id = "bitget_exec_trade01"

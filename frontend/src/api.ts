@@ -3,6 +3,7 @@ import { normalizeTargetMap } from './lib/targetPositions'
 import { serverClock } from './lib/serverClock'
 import type {
   AccountStudio,
+  BindingTargetPreview,
   FundingSettings,
   AccountConfiguration,
   VirtualAccount,
@@ -27,6 +28,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly navPricing?: { loading: boolean; availableFromUs: number },
   ) {
     super(message)
   }
@@ -72,9 +74,12 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
   serverClock.observe(response.headers.get('Date'))
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as
-      | { error?: string }
+      | { error?: string; code?: string; loading?: boolean; available_from_us?: number }
       | null
-    throw new ApiError(payload?.error ?? `HTTP ${response.status}`, response.status)
+    throw new ApiError(payload?.error ?? `HTTP ${response.status}`, response.status,
+      payload?.code === 'nav_pricing_unavailable' && typeof payload.available_from_us === 'number'
+        ? { loading: payload.loading === true, availableFromUs: payload.available_from_us }
+        : undefined)
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
@@ -608,6 +613,13 @@ export function publishAccountBinding(sourceId: string, bindingName: string) {
   return requestJson<OrderStrategyView>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings/${encodeURIComponent(bindingName)}/publish`,
     { method: 'POST' },
+  )
+}
+
+export function previewAccountBindingTargets(sourceId: string, bindingName: string, signal?: AbortSignal) {
+  return requestJson<BindingTargetPreview>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/bindings/${encodeURIComponent(bindingName)}/target-preview`,
+    { signal },
   )
 }
 

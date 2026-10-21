@@ -6,6 +6,10 @@ account, IPC namespace, Redis prefix and persistence store. Bare assets, inverse
 contracts, delivery contracts and USDC contracts are rejected. A unified wallet
 does not expand the configured Exec market.
 
+An opt-in account target proxy can filter Binance USDT inputs against the
+same Bybit rule cache and convert explicitly mapped contract units. See
+[Bybit target proxy](bybit_target_proxy.md) for configuration and preview.
+
 This is Manager support. Registering a source does not deploy an Exec, migrate
 existing intra positions, repay borrowing or start trading. The Exec runtime
 must support the same venue and Manager rule cache before enabling publication.

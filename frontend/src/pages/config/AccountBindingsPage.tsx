@@ -19,6 +19,7 @@ import {
 } from '../../components/ContractLeveragePanel'
 import { FundingSettingsPanel } from '../../components/FundingSettingsPanel'
 import { AccountFollowPanel } from '../../components/AccountFollowPanel'
+import { BindingTargetPreview } from '../../components/BindingTargetPreview'
 import { ConfigShell } from '../../components/ConfigShell'
 import { Alert } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
@@ -83,7 +84,7 @@ export function AccountBindingsPage() {
     () =>
       positions.filter(
         (item) => !boundNames.has(item.strategy_name) && bindableStrategies.has(item.strategy_name)
-          && !!selectedAccount && Object.keys(item.targets).every((symbol) => symbolMatchesExecMarket(selectedAccount.venue, symbol)),
+          && !!selectedAccount && (selectedAccount.target_proxy_enabled || Object.keys(item.targets).every((symbol) => symbolMatchesExecMarket(selectedAccount.venue, symbol))),
       ),
     [boundNames, positions, bindableStrategies, selectedAccount],
   )
@@ -209,8 +210,10 @@ export function AccountBindingsPage() {
       <Alert tone="warning" className="mb-2">
         <strong className="font-medium">逻辑说明：</strong>
         先在「仓位策略」里定义目标仓位 → 在「下单策略」里维护执行算法模板（如 default_order）→
-        在这里为每条策略配置份数。发布数量 = 原始 qty × 份数。
-        {selectedAccount && ` 当前账户只管理${executionMarketLabel(selectedAccount.venue)}合约，新增绑定只列出对应市场的仓位策略。`}
+        在这里为每条策略配置份数。
+        {selectedAccount?.target_proxy_enabled
+          ? ' 当前账户启用了 Bybit 过滤与单位换算：发布数量 = 原始 qty × 合约单位系数 × 份数；不支持的 symbol 会被过滤。'
+          : ` 发布数量 = 原始 qty × 份数。${selectedAccount ? ` 当前账户只管理${executionMarketLabel(selectedAccount.venue)}合约，新增绑定只列出对应市场的仓位策略。` : ''}`}
       </Alert>
 
       {loading || catalogLoading ? (
@@ -586,6 +589,7 @@ export function AccountBindingsPage() {
                         )}
                       </div>
                     </div>
+                    <BindingTargetPreview key={`${sourceId}:${binding.binding_name}:${binding.updated_at_us}:${positions.find((p) => p.strategy_name === binding.position_strategy_name)?.updated_at_us}`} sourceId={sourceId} bindingName={binding.binding_name} />
                   </CardContent>
                 </Card>
               })

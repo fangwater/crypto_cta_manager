@@ -1,0 +1,35 @@
+{
+  "health": {
+    "status": "ok",
+    "source_count": 14,
+    "generated_at_us": 1792568226772115,
+    "last_attempt_at_us": 1792568213573890,
+    "refresh_interval_secs": 60,
+    "last_refresh_error": null
+  },
+  "order_templates_http": 200,
+  "order_template_count": 6,
+  "strategy": {
+    "name": "USDC_C40V6D3PosV5_filter",
+    "source_id": "binance_exec_trade14",
+    "catalog_updated_at": "2026-10-21T07:35:14.385369+00:00",
+    "runtime_updated_at": "2026-10-21T07:35:14.433266+00:00",
+    "target_count": 25,
+    "shares": 25,
+    "all_target_quantities_and_signals_match": true,
+    "config_http_status": 200
+  },
+  "temporary_auth_session_removed": true,
+  "missing_grid_errors_after_repair": 0,
+  "strategy_publish_success_logs": [
+    "2026-10-21T07:35:14.434347Z  INFO crypto_cta_manager::web: published bound account after position update strategy_name=\"USDC_C40V6D3PosV5_filter\" source_id=binance_exec_trade14 binding_name=USDC_C40V6D3PosV5_filter shares=25.0",
+    "2026-10-21T07:35:14.434364Z  INFO crypto_cta_manager::reload_notify: reload notify published after confirmed Redis write source_id=binance_exec_trade14 service_name=binance_exec_trade14/batch_exec_pubs/reload_notify strategy_name=USDC_C40V6D3PosV5_filter updated_at_us=1792568114433266"
+  ],
+  "strategy_publish_failure_logs": [],
+  "position_post_statuses_after_repair": {
+    "200": 8,
+    "502": 112,
+    "499": 3
+  },
+  "checked_at": "2026-10-21T07:37:35.843038+00:00"
+}

@@ -38,6 +38,7 @@ function fallbackAccounts(dashboard: DashboardSnapshot): DashboardAccount[] {
     enabled: true,
     gateway_prefix: null,
     configurable: false,
+    target_proxy_enabled: false,
   }))
 }
 
