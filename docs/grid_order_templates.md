@@ -20,10 +20,12 @@ The existing signal execution switch still allows explicit taker instructions.
 
 Multipliers must be finite and positive. Each side's offsets run from zero to
 `vol * vol_multiplier`, evenly spaced across its market's split count; one
-level has zero offset. Raw volatility and freshness rules are unchanged. The
+level has zero offset. The raw volatility formula and freshness rules are unchanged. The
 execution parameters depend only on the target's market: spot/perpetual pairs
 and standalone perpetual strategies both use Grid without spread membership
-checks. Each market still requires its own ready volatility feed.
+checks. Each market still requires its own ready volatility feed. Vol discovers all
+symbols in the two Binance Kafka market feeds, independently of Spread membership;
+new symbols become ready after their own complete history window.
 
 New order templates belong to the logged-in creator. The catalog returns
 `owner` and session-specific `can_configure`; only the owner or an administrator
@@ -46,6 +48,13 @@ Grid parameters are emitted to Exec only when the selected algorithm is Grid.
 A Grid symbol override includes its complete Grid settings when its base uses a
 different algorithm. Saving an unbound template only updates the Manager catalog;
 activating it requires a compatible Exec and its volatility producer.
+
+The Grid editor sizes its columns to the parameter panel rather than the whole
+viewport. Spot and futures use matching field order, aligned controls and a
+persistent round-count field (disabled for unlimited mode). Descriptions sit
+outside field rows so switching modes does not move the next market section.
+Desktop and mobile checks at 1440, 1024, 768, 390 and 320 px verified no horizontal
+overflow and stable section positions.
 
 ## Japan deployment, 2026-10-21
 

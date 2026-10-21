@@ -71,7 +71,7 @@ export function OrderStrategyPage() {
             }}
           />
 
-          <Card>
+          <Card className="min-w-0">
             <CardHeader>
               <CardTitle>编辑模板</CardTitle>
               <CardDescription>归属：{owner}。{canEdit ? '可配置执行参数。' : '仅归属用户和管理员可修改。'}</CardDescription>
@@ -104,7 +104,7 @@ export function OrderStrategyPage() {
                   />
                   <FieldHint>例如 {DEFAULT_ORDER_STRATEGY_NAME}，不要复用 CTA 仓位策略名。</FieldHint>
                 </Label>
-                <fieldset disabled={!canEdit || saving} className="grid gap-4">
+                <fieldset disabled={!canEdit || saving} className="grid min-w-0 gap-4">
                   <OrderParametersForm
                     value={selectedOrder.order_parameters}
                     onChange={(order_parameters) => setSelectedOrder({ ...selectedOrder, order_parameters })}
