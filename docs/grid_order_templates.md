@@ -56,6 +56,51 @@ outside field rows so switching modes does not move the next market section.
 Desktop and mobile checks at 1440, 1024, 768, 390 and 320 px verified no horizontal
 overflow and stable section positions.
 
+## Japan full-symbol Vol and layout deployment, 2026-10-21
+
+Release `20261021T064822ZGridAllSymbols` uses Exec `d3b724af` and Manager
+frontend `82f58cb`. It publishes every symbol carried by the Binance futures and
+spot Kafka feeds, independently of the 48-symbol Spread universe. New symbols
+join automatically and become usable after their Vol window is ready. Each Vol
+stream now retains 4096 messages and each executor subscribes with that capacity.
+
+The replacement publisher replayed in the background from 06:54 UTC while the
+existing publisher continued serving Spread/Vol and owning the history files.
+The warmed replacement took over at 07:20 UTC. Only one publisher remains:
+`cta_spread_factor_binance_futures`, PID 330224, all threads on CPU 17 at normal
+priority. Exec05/06/07 were replaced through their environment scripts; PIDs
+384442/384533/384621 retain CPUs 0–5. The handoff sequence took 51 seconds,
+including the first executor's supervisor shutdown wait; the publisher ownership
+check completed four seconds after the old publisher stop returned. A two-second
+continuity sample spanning the handoff saw no status read errors, maximum status
+age 1920 ms and maximum observed Vol counter progress gap 8002 ms.
+
+Both live streams passed complete-market coverage checks: 524/524 futures and
+362/362 spot symbols had ready Vol younger than 15 seconds. The probe also retained
+one stale historical spot symbol, EPICUSDT; it is not counted as current coverage.
+Every active strategy target passed independently: RX02 has 51 futures symbols,
+RX01 has 54 futures and 55 spot symbols, and RX03 has 14 futures symbols. All three
+executors subscribed to both streams. Decode, evaluation and publication errors
+remained zero. Current algorithms remain CTaker; this deployment does not activate
+Grid or alter targets, bindings or the saved Grid template.
+
+The layout uses the actual editor width for responsive field columns. Finite and
+unlimited Maker controls keep the same row geometry. Production-build Chromium
+checks passed at widths 1440, 1024, 768, 390 and 320 without horizontal overflow.
+The deployed HTML and assets were SHA-256 checked through Nginx. Only frontend
+files changed in Manager; backend PID 166260 on CPU 24 and all Config/Viz/trading
+engine processes were preserved. All 156 protected process identities, 53
+unchanged configuration hashes, 12 templates, 87 real-account bindings, 77 virtual
+bindings and four snapshot tables passed verification. The remaining config file
+changed only by adding the factor-specific process name to its `env.sh`.
+
+Validation: 1341 Exec library tests passed (3 ignored), 3 probe tests, 4 handoff
+script tests, release builds, frontend build and browser layout checks. Ten
+Manager/Exec gateway checks passed and temporary auth sessions were removed.
+The release retains `RELEASE-MANIFEST.json`, `DEPLOYMENT-VERIFICATION.json` and
+`UI-VERIFICATION.json`; deployment staging, backups, probes, screenshots and the
+browser profile were removed after verification.
+
 ## Japan deployment, 2026-10-21
 
 Release `20261021T053158ZGridControls` uses Manager commit `d5c3cc1` and Exec
@@ -91,8 +136,8 @@ output for about 20 minutes; this replay was caused by including the raw-Vol
 producer update, not by the parameter controls themselves. Both spot and futures
 Vol probes reported 48/48 symbols ready while receiving fresh messages, and all
 three executors subscribed to both streams. Decode, evaluation and publication
-error counters remained zero. Vol coverage remains the producer's configured 48
-symbols; Grid on other symbols requires its corresponding ready Vol feed.
+error counters remained zero. At this earlier release, Vol coverage was limited to the configured 48
+symbols; the later full-symbol deployment above removes that limit.
 Final process, configuration, binding and snapshot checks passed. The release
 contains `RELEASE-MANIFEST.json` and `DEPLOYMENT-VERIFICATION.json`; temporary
 staging, probes and deployment backups were removed after verification.
