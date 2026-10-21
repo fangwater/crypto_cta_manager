@@ -47,11 +47,48 @@ A Grid symbol override includes its complete Grid settings when its base uses a
 different algorithm. Saving an unbound template only updates the Manager catalog;
 activating it requires a compatible Exec and its volatility producer.
 
-## Local change, 2026-10-21
+## Japan deployment, 2026-10-21
 
-Manager, Exec and Exec Config now share the fields above. Deploy the matching
-artifacts together; the older Exec rejects the new fields. This framework change
-does not publish targets, change RX01 bindings or activate live Grid trading.
+Release `20261021T053158ZGridControls` uses Manager commit `d5c3cc1` and Exec
+`arbmm` commit `bf9d0ad8`. Manager API/frontend, RapidX Exec05/06/07 executors
+and Config services, and RX01's shared factor publisher were replaced. Manager
+was rebuilt from the committed sources in the existing checkout; unrelated local
+work was saved and restored byte-for-byte. No trading engine, account monitor,
+persist_manager, signal, Viz, Nginx or standard-account Exec was restarted.
+
+The explicit Grid JSON maintenance preserved all 12 templates' existing settings,
+including `lgq_grid`'s operator-set one spot Maker round. It added multipliers of
+1.0 and unlimited futures rounds. New templates default to three spot rounds.
+All 87 real-account bindings, 77 virtual-account bindings and four snapshot tables
+are unchanged; `lgq_grid` remains unbound. This deployment enables configuration
+and execution support, without switching current live strategies to Grid.
+
+All 152 other long-running process identities and 54 configuration hashes were
+preserved. Manager remains on CPU 24, the shared factor publisher on CPU 17, and
+Exec05/06/07 on CPUs 0–5. The separate NAV collector's finite `sync_history` jobs
+finished normally during verification and were excluded from the process check.
+
+The gateway returned HTTP 200 for all seven Exec Viz, snapshot and Config paths.
+A temporary unbound template saved and reloaded spot/futures multipliers 0.5/2.0,
+unlimited spot with one futures round, then three spot rounds with unlimited
+futures. The temporary template and verification sessions were removed.
+Manager briefly returned 502 during its initial report load and recovered before
+API verification. Committed-source validation passed 366 Manager library tests
+(5 ignored), 9 binary tests, release build and frontend build.
+
+The shared factor publisher resumed output at 05:53 UTC after replaying its
+configured three-day Kafka lookback. The restart interrupted its existing Spread
+output for about 20 minutes; this replay was caused by including the raw-Vol
+producer update, not by the parameter controls themselves. Both spot and futures
+Vol probes reported 48/48 symbols ready while receiving fresh messages, and all
+three executors subscribed to both streams. Decode, evaluation and publication
+error counters remained zero. Vol coverage remains the producer's configured 48
+symbols; Grid on other symbols requires its corresponding ready Vol feed.
+Final process, configuration, binding and snapshot checks passed. The release
+contains `RELEASE-MANIFEST.json` and `DEPLOYMENT-VERIFICATION.json`; temporary
+staging, probes and deployment backups were removed after verification.
+Manager, Exec and Exec Config must be deployed together for this single contract;
+older Exec versions reject the new fields.
 
 Validation: Manager full crate tests (377 library and 9 binary), 15 isolated
 PostgreSQL tests, frontend production build, Exec library tests (1,338 passed,
