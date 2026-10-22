@@ -1,7 +1,7 @@
 //! Inspect existing Manager minute marks without fetching or modifying anything.
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use rocksdb::{DB, Options};
+use rocksdb::{DB, Direction, IteratorMode, Options};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -9,10 +9,14 @@ use std::path::PathBuf;
 struct Args {
     #[arg(long)]
     manager_db: PathBuf,
-    #[arg(long, required = true)]
+    #[arg(long, required_unless_present = "archive_status")]
     ts_us: Vec<i64>,
-    #[arg(long = "symbol", required = true)]
+    #[arg(long = "symbol", required_unless_present_any = ["archive_status", "target_source"])]
     symbols: Vec<String>,
+    #[arg(long)]
+    archive_status: bool,
+    #[arg(long)]
+    target_source: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -21,9 +25,88 @@ fn main() -> Result<()> {
     options.set_max_open_files(256);
     let families = DB::list_cf(&options, &args.manager_db)?;
     let db = DB::open_cf_for_read_only(&options, &args.manager_db, families, false)?;
+    if args.archive_status {
+        let cf = db
+            .cf_handle("position_updates")
+            .context("no target archive")?;
+        let boundary = |mode| -> Result<Option<i64>> {
+            db.iterator_cf(cf, mode)
+                .next()
+                .transpose()?
+                .map(|(key, _)| {
+                    ensure!(key.len() >= 8, "invalid target archive key");
+                    Ok(i64::from_be_bytes(key[..8].try_into()?))
+                })
+                .transpose()
+        };
+        println!(
+            "{}",
+            json!({
+                "estimated_messages": db.property_int_value_cf(cf, "rocksdb.estimate-num-keys")?,
+                "first_received_at_us": boundary(IteratorMode::Start)?,
+                "last_received_at_us": boundary(IteratorMode::End)?,
+            })
+        );
+        return Ok(());
+    }
     let cf = db
         .cf_handle("klines_1m")
         .context("no minute candle cache")?;
+    if let Some(source) = &args.target_source {
+        ensure!(
+            args.ts_us.len() == 2,
+            "target scan requires start and end --ts-us"
+        );
+        let targets = db
+            .cf_handle("position_updates")
+            .context("no target archive")?;
+        let start_key = args.ts_us[0].to_be_bytes();
+        let mut missing = std::collections::BTreeSet::new();
+        let mut count = 0;
+        for entry in db.iterator_cf(targets, IteratorMode::From(&start_key, Direction::Forward)) {
+            let (key, value) = entry?;
+            let received = i64::from_be_bytes(key[..8].try_into()?);
+            if received > args.ts_us[1] {
+                break;
+            }
+            let message: serde_json::Value = serde_json::from_slice(&value)?;
+            for account in message["published_accounts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if account["source_id"].as_str() != Some(source) {
+                    continue;
+                }
+                count += 1;
+                let target_map = account["target_projection"]["targets"]
+                    .as_object()
+                    .or_else(|| message["strategy"]["targets"].as_object());
+                for symbol in target_map.into_iter().flat_map(|map| map.keys()) {
+                    let open = received.div_euclid(60_000_000) * 60_000_000;
+                    let next = ((received + 60_000_000 - 1) / 60_000_000) * 60_000_000;
+                    for minute in [open, next, next + 60_000_000, next + 120_000_000] {
+                        let mut candle_key = vec![symbol.len() as u8];
+                        candle_key.extend_from_slice(symbol.as_bytes());
+                        candle_key.extend_from_slice(&minute.to_be_bytes());
+                        if db.get_cf(cf, candle_key)?.is_none()
+                            && missing.insert((symbol.clone(), minute))
+                        {
+                            println!(
+                                "{}",
+                                json!({"symbol":symbol,"missing_open_ts_us":minute,"received_at_us":received})
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "{}",
+            json!({"target_messages":count,"missing_candles":missing.len()})
+        );
+        return Ok(());
+    }
     for symbol in &args.symbols {
         ensure!(symbol.len() < 256, "symbol too long");
         for &ts_us in &args.ts_us {
