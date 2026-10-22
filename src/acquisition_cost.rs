@@ -556,12 +556,12 @@ pub async fn report_acquisition_cost(
         };
         let sample_prices = priced.prices.clone();
         if delta.received_at_us >= start_received_at_us {
-            zero_volume_fallback_sample_count +=
-                usize::from(priced.all_zero_volume_fallback) * sample_prices.len();
+            zero_volume_fallback_sample_count += priced.zero_volume_fallback_sample_count;
             zero_volume_skipped_sample_count += priced.zero_volume_skipped_sample_count;
             zero_volume_skipped_delta_count +=
                 usize::from(priced.zero_volume_skipped_sample_count > 0);
-            zero_volume_fallback_delta_count += usize::from(priced.all_zero_volume_fallback);
+            zero_volume_fallback_delta_count +=
+                usize::from(priced.zero_volume_fallback_sample_count > 0);
         }
         if delta.legacy_fee {
             legacy_fee_delta_count += 1;
@@ -605,8 +605,7 @@ pub async fn report_acquisition_cost(
             first_price: priced
                 .first_price()
                 .context("virtual schedule has no arrival price")?,
-            zero_volume_fallback_sample_count: usize::from(priced.all_zero_volume_fallback)
-                * priced.prices.len(),
+            zero_volume_fallback_sample_count: priced.zero_volume_fallback_sample_count,
             zero_volume_skipped_sample_count: priced.zero_volume_skipped_sample_count,
             virtual_vwap,
             virtual_fee_usdt: delta.delta_qty.abs() * virtual_vwap * delta.fee_rate,

@@ -1,0 +1,163 @@
+{
+  "factual": {
+    "binance_exec_trade03_timeline": true,
+    "binance_exec_trade03_account-timeline": true,
+    "binance_exec_trade05_timeline": true,
+    "binance_exec_trade05_account-timeline": true,
+    "binance_exec_trade06_timeline": true,
+    "binance_exec_trade06_account-timeline": true,
+    "binance_exec_trade07_timeline": true,
+    "binance_exec_trade07_account-timeline": true
+  },
+  "native_theory": {
+    "binance_exec_trade03_timeline": true,
+    "binance_exec_trade03_account-timeline": true
+  },
+  "cost": {
+    "binance_exec_trade03_cost": [
+      {
+        "model": "twap5m",
+        "checked_prices": 0,
+        "missing": 0,
+        "matched_fills": 1185,
+        "price_shortfall_bps": -2.139220350375927
+      }
+    ],
+    "binance_exec_trade05_cost": [
+      {
+        "model": "vwap3m",
+        "checked_prices": 52,
+        "missing": 0,
+        "matched_fills": 68,
+        "price_shortfall_bps": -1.2934474642650007
+      },
+      {
+        "model": "twap3m",
+        "checked_prices": 52,
+        "missing": 0,
+        "matched_fills": 68,
+        "price_shortfall_bps": -0.8486302527049928
+      }
+    ],
+    "binance_exec_trade06_cost": [
+      {
+        "model": "vwap3m",
+        "checked_prices": 100,
+        "missing": 12,
+        "matched_fills": 415,
+        "price_shortfall_bps": 1.0710874976399125
+      },
+      {
+        "model": "twap3m",
+        "checked_prices": 100,
+        "missing": 82,
+        "matched_fills": 382,
+        "price_shortfall_bps": 0.7768859883258007
+      }
+    ],
+    "binance_exec_trade07_cost": [
+      {
+        "model": "vwap3m",
+        "checked_prices": 45,
+        "missing": 0,
+        "matched_fills": 119,
+        "price_shortfall_bps": -3.830344298182492
+      },
+      {
+        "model": "twap3m",
+        "checked_prices": 45,
+        "missing": 0,
+        "matched_fills": 119,
+        "price_shortfall_bps": -2.566509753034536
+      }
+    ]
+  },
+  "availability": {
+    "binance_exec_trade03_timeline": [
+      {
+        "model": "twap5m",
+        "points": 148,
+        "reason": null
+      }
+    ],
+    "binance_exec_trade03_account-timeline": [
+      {
+        "model": "twap5m",
+        "points": 148,
+        "reason": null
+      }
+    ],
+    "binance_exec_trade05_timeline": [
+      {
+        "model": "vwap3m",
+        "points": 212,
+        "reason": null
+      },
+      {
+        "model": "twap3m",
+        "points": 0,
+        "reason": "ZRXUSDT \u7684\u4e09\u5206\u949f\u7a97\u53e3\u5b58\u5728\u65e0\u6210\u4ea4\u5206\u949f\uff0c\u7406\u8bba3min_twap \u4e0d\u53ef\u7528"
+      }
+    ],
+    "binance_exec_trade05_account-timeline": [
+      {
+        "model": "vwap3m",
+        "points": 212,
+        "reason": null
+      },
+      {
+        "model": "twap3m",
+        "points": 0,
+        "reason": "ZRXUSDT \u7684\u4e09\u5206\u949f\u7a97\u53e3\u5b58\u5728\u65e0\u6210\u4ea4\u5206\u949f\uff0c\u7406\u8bba3min_twap \u4e0d\u53ef\u7528"
+      }
+    ],
+    "binance_exec_trade06_timeline": [
+      {
+        "model": "vwap3m",
+        "points": 0,
+        "reason": "SNX \u7684\u4e09\u5206\u949f\u7a97\u53e3\u603b\u6210\u4ea4\u91cf\u4e3a\u96f6\uff0c\u7406\u8bba3min_vwap \u4e0d\u53ef\u7528"
+      },
+      {
+        "model": "twap3m",
+        "points": 0,
+        "reason": "VET \u7684\u4e09\u5206\u949f\u7a97\u53e3\u5b58\u5728\u65e0\u6210\u4ea4\u5206\u949f\uff0c\u7406\u8bba3min_twap \u4e0d\u53ef\u7528"
+      }
+    ],
+    "binance_exec_trade06_account-timeline": [
+      {
+        "model": "vwap3m",
+        "points": 0,
+        "reason": "SNX \u7684\u4e09\u5206\u949f\u7a97\u53e3\u603b\u6210\u4ea4\u91cf\u4e3a\u96f6\uff0c\u7406\u8bba3min_vwap \u4e0d\u53ef\u7528"
+      },
+      {
+        "model": "twap3m",
+        "points": 0,
+        "reason": "VET \u7684\u4e09\u5206\u949f\u7a97\u53e3\u5b58\u5728\u65e0\u6210\u4ea4\u5206\u949f\uff0c\u7406\u8bba3min_twap \u4e0d\u53ef\u7528"
+      }
+    ],
+    "binance_exec_trade07_timeline": [
+      {
+        "model": "vwap3m",
+        "points": 149,
+        "reason": null
+      },
+      {
+        "model": "twap3m",
+        "points": 149,
+        "reason": null
+      }
+    ],
+    "binance_exec_trade07_account-timeline": [
+      {
+        "model": "vwap3m",
+        "points": 149,
+        "reason": null
+      },
+      {
+        "model": "twap3m",
+        "points": 149,
+        "reason": null
+      }
+    ]
+  }
+}

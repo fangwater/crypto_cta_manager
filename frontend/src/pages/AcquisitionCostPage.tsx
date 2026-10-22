@@ -203,7 +203,7 @@ export function AcquisitionCostPage() {
       {report?.warnings.map((warning) => <Alert key={warning} className="mb-4">{warning}</Alert>)}
       {Boolean(totals?.pending_virtual_delta_count) && <Alert className="mb-4">{totals?.pending_virtual_delta_count} 个 delta 的理论执行窗口尚未结束。</Alert>}
       {Boolean(totals?.zero_volume_skipped_sample_count) && <div className="mb-4 text-sm text-muted" role="status">跳过 {totals?.zero_volume_skipped_sample_count} 个无成交分钟样本，{report?.execution_model === 'vwap3m' ? '其余分钟按市场成交量占比分配理论数量。' : '其余分钟按账户理论执行规则分配数量。'}</div>}
-      {Boolean(totals?.zero_volume_fallback_sample_count) && <Alert className="mb-4">{totals?.zero_volume_fallback_delta_count} 个目标的五分钟全部无成交，使用收盘价定价。</Alert>}
+      {report?.execution_model === 'twap5m' && Boolean(totals?.zero_volume_fallback_sample_count) && <Alert className="mb-4">{totals?.zero_volume_fallback_delta_count} 个目标的五分钟全部无成交，使用收盘价定价。</Alert>}
       {totals && totals.missing_virtual_delta_count > 0 && (
         <Alert className="mb-4">
           {totals.missing_virtual_delta_count} 个 delta 缺少可定价的完整窗口行情，未进入可比成本。
@@ -349,7 +349,7 @@ export function AcquisitionCostPage() {
                     <td className="px-4 py-2">{side(row.delta_qty)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{quantity(Math.abs(row.delta_qty))}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right text-[11px] tabular-nums text-muted">{sampleText(row)}</td>
-                    <td className="px-4 py-2 text-right tabular-nums">{row.zero_volume_fallback_sample_count ? "收盘价" : (row.sample_prices.length - row.zero_volume_skipped_sample_count) + " / " + row.sample_prices.length}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{row.execution_model === "twap5m" && row.zero_volume_fallback_sample_count ? "收盘价" : (row.sample_prices.length - row.zero_volume_skipped_sample_count) + " / " + row.sample_prices.length}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{row.reference_prices.map((reference) => <div key={reference.execution_model}>{row.reference_prices.length > 1 && <span className="mr-2 text-xs text-muted">{theoreticalExecutionLabel(reference.execution_model)}</span>}{formatPrice(reference.price)}</div>)}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{formatPrice(row.actual_vwap)}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{difference != null && difference > 0 ? '+' : ''}{priceFormatter([difference])(difference)}</td>

@@ -35,5 +35,3 @@ def sql(query, readonly=True):
 
 def emit(name, body):
     print(json.dumps({'name': name, 'body': body}, ensure_ascii=False), flush=True)
-
-

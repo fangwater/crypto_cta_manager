@@ -139,7 +139,7 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
       data: row.sample_prices.map((price, i) => [offset(startUs + (i * 60 + 30) * 1e6), price == null ? null : plotPrice(price)]),
       tooltip: { formatter: (p: { dataIndex: number }) => {
         const i = p.dataIndex
-        return `第 ${i + 1} 个完整分钟\n发布后 ${offset(startUs + i * 60e6).toFixed(1)}–${offset(startUs + (i + 1) * 60e6).toFixed(1)} 秒\n${row.zero_volume_fallback_sample_count ? '收盘价' : '分钟 VWAP'} ${formatPrice(row.sample_prices[i])}\n理论数量权重 ${(row.sample_quantity_weights[i] * 100).toFixed(2)}%`
+        return `第 ${i + 1} 个完整分钟\n发布后 ${offset(startUs + i * 60e6).toFixed(1)}–${offset(startUs + (i + 1) * 60e6).toFixed(1)} 秒\n${row.execution_model === 'twap5m' && row.zero_volume_fallback_sample_count ? '收盘价' : '分钟均价'} ${formatPrice(row.sample_prices[i])}\n理论数量权重 ${(row.sample_quantity_weights[i] * 100).toFixed(2)}%`
       } },
       markArea: { silent: true, itemStyle: { color: 'rgba(37,99,167,0.05)' }, data: [[{ xAxis: offset(startUs) }, { xAxis: offset(row.virtual_execution_ts_us) }]] },
       markLine: { silent: true, symbol: 'none', label: { show: false }, lineStyle: { color: '#9ca3af', type: 'dotted' }, data: [{ xAxis: offset(row.virtual_execution_ts_us) }] },
@@ -192,7 +192,7 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
       </div>
       <div className="grid gap-3 lg:grid-cols-3">
         <Diagnostic title={!path.complete ? '反转：数据不足' : reversed ? `${windowMinutes} 分钟内存在反转线索` : '未见显著反转'} detected={reversed}>
-          {!path.complete ? `需要 ${windowMinutes} 个都有成交的分钟。跳过分钟或全空窗口的收盘价不能用于反转判断。` : reversal ? `第 ${reversal.minute} 分钟附近转向：先${reversal.outwardBps > 0 ? '涨' : '跌'} ${Math.abs(reversal.outwardBps).toFixed(2)} bps，再${reversal.returnBps > 0 ? '涨' : '跌'} ${Math.abs(reversal.returnBps).toFixed(2)} bps。两段都达到 ${moveThreshold} bps 才标记。` : `首分钟到内部转折点、再到末分钟，未发现两段方向相反且都达到 ${moveThreshold} bps 的形态。`}
+          {!path.complete ? row.execution_model === 'twap5m' ? `需要 ${windowMinutes} 个都有成交的分钟。跳过分钟或全空窗口的收盘价不能用于反转判断。` : '分钟成交数据不足，无法判断反转。' : reversal ? `第 ${reversal.minute} 分钟附近转向：先${reversal.outwardBps > 0 ? '涨' : '跌'} ${Math.abs(reversal.outwardBps).toFixed(2)} bps，再${reversal.returnBps > 0 ? '涨' : '跌'} ${Math.abs(reversal.returnBps).toFixed(2)} bps。两段都达到 ${moveThreshold} bps 才标记。` : `首分钟到内部转折点、再到末分钟，未发现两段方向相反且都达到 ${moveThreshold} bps 的形态。`}
         </Diagnostic>
         <Diagnostic title={path.jumpBps == null ? '跳变：数据不足' : jumped ? '存在分钟级跳变线索' : '未见显著分钟跳变'} detected={jumped}>
           {path.jumpBps == null ? '没有相邻且都有成交的分钟可供比较。' : `第 ${path.jumpMinute! - 1} → ${path.jumpMinute} 分钟均价变化最大，为 ${bps(path.jumpBps)}，判断阈值 ${moveThreshold} bps。分钟均价无法确认瞬时跳价，需要更细行情才能区分突跳与连续移动。`}

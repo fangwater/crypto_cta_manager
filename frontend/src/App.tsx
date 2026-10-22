@@ -906,7 +906,7 @@ function NavPage() {
             <div className="chart-notice" role="status">最新 {timeline.theoretical[0].execution_window_secs / 60} 分钟窗口尚未结束，理论曲线截至 {timestampUs(timeline.theoretical[0].latest_point_ts_us)}。</div>
           )}
           {Boolean(timeline?.theoretical[0]?.zero_volume_skipped_sample_count) && <div className="chart-notice" role="status">跳过 {timeline?.theoretical[0]?.zero_volume_skipped_sample_count} 个无成交分钟样本，{timeline?.theoretical[0]?.execution_model === 'vwap3m' ? '其余分钟按市场成交量占比分配理论数量。' : '其余分钟按账户理论执行规则分配数量。'}</div>}
-          {Boolean(timeline?.theoretical[0]?.zero_volume_fallback_sample_count) && (
+          {timeline?.theoretical[0]?.execution_model === 'twap5m' && Boolean(timeline?.theoretical[0]?.zero_volume_fallback_sample_count) && (
             <div className="chart-notice" role="status">{integer((timeline?.theoretical[0]?.zero_volume_fallback_sample_count ?? 0) / 5)} 个目标的五分钟全部无成交，使用收盘价定价。</div>
           )}
           <div className="chart-body has-picker">

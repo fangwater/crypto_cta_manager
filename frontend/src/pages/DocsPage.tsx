@@ -331,7 +331,7 @@ function buildChapters(gateway: string): Chapter[] {
           { field: 'sample_prices / sample_quantity_weights', detail: '分别为三个或五个分钟价格及理论数量权重。RapidX 的 VWAP 按分钟成交量占比分配数量，均价为三分钟总成交额 ÷ 总成交币数量；TWAP 每分钟分配三分之一数量，均价为三根分钟均价的算术平均；其他账户在有成交分钟均分数量，保留五分钟全部无成交时的收盘价回退' },
           { field: 'price_shortfall_usdt', detail: '实际有符号成交数量 × (实际成交价 − 该账户的理论均价)' },
         ]} />
-        <Note>分钟 K 线存入 Manager 自己的 RocksDB。已缓存的分钟不重复请求，其他币对按查询缺口向前补拉 24 小时。缺失数据明确显示覆盖不足；RapidX 的 VWAP 在三分钟总成交量为零时不可用；TWAP 在任一分钟无成交时不可用。均不以收盘价替代。</Note>
+        <Note>分钟 K 线存入 Manager 自己的 RocksDB。已缓存的分钟不重复请求，其他币对按查询缺口向前补拉 24 小时。缺失 K 线明确显示覆盖不足。</Note>
       </>
     ),
   },

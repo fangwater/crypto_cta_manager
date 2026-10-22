@@ -1,0 +1,15 @@
+{"name": "health", "body": {"status": "ok", "source_count": 7, "generated_at_us": 1792641970978262, "last_attempt_at_us": 1792641970978262, "refresh_interval_secs": 60, "last_refresh_error": null}}
+{"name": "query", "body": {"source": "binance_exec_trade03", "endpoint": "timeline", "elapsed_s": 414.86, "references": [{"model": "twap5m", "points": 148, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade03", "endpoint": "account-timeline", "elapsed_s": 0.47, "references": [{"model": "twap5m", "points": 148, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade03", "reports": [{"model": "twap5m", "rows": 100, "missing": 0}]}}
+{"name": "query", "body": {"source": "binance_exec_trade05", "endpoint": "timeline", "elapsed_s": 0.1, "references": [{"model": "vwap3m", "points": 212, "missing": 0, "reason": null}, {"model": "twap3m", "points": 0, "missing": 0, "reason": "ZRXUSDT 的三分钟窗口存在无成交分钟，理论3min_twap 不可用"}]}}
+{"name": "query", "body": {"source": "binance_exec_trade05", "endpoint": "account-timeline", "elapsed_s": 0.08, "references": [{"model": "vwap3m", "points": 212, "missing": 0, "reason": null}, {"model": "twap3m", "points": 0, "missing": 0, "reason": "ZRXUSDT 的三分钟窗口存在无成交分钟，理论3min_twap 不可用"}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade05", "reports": [{"model": "vwap3m", "rows": 52, "missing": 0}, {"model": "twap3m", "rows": 52, "missing": 0}]}}
+{"name": "query", "body": {"source": "binance_exec_trade06", "endpoint": "timeline", "elapsed_s": 0.33, "references": [{"model": "vwap3m", "points": 0, "missing": 0, "reason": "SNX 的三分钟窗口总成交量为零，理论3min_vwap 不可用"}, {"model": "twap3m", "points": 0, "missing": 0, "reason": "VET 的三分钟窗口存在无成交分钟，理论3min_twap 不可用"}]}}
+{"name": "query", "body": {"source": "binance_exec_trade06", "endpoint": "account-timeline", "elapsed_s": 0.33, "references": [{"model": "vwap3m", "points": 0, "missing": 0, "reason": "SNX 的三分钟窗口总成交量为零，理论3min_vwap 不可用"}, {"model": "twap3m", "points": 0, "missing": 0, "reason": "VET 的三分钟窗口存在无成交分钟，理论3min_twap 不可用"}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade06", "reports": [{"model": "vwap3m", "rows": 100, "missing": 12}, {"model": "twap3m", "rows": 100, "missing": 82}]}}
+{"name": "query", "body": {"source": "binance_exec_trade07", "endpoint": "timeline", "elapsed_s": 0.03, "references": [{"model": "vwap3m", "points": 149, "missing": 0, "reason": null}, {"model": "twap3m", "points": 149, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade07", "endpoint": "account-timeline", "elapsed_s": 0.02, "references": [{"model": "vwap3m", "points": 149, "missing": 0, "reason": null}, {"model": "twap3m", "points": 149, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade07", "reports": [{"model": "vwap3m", "rows": 45, "missing": 0}, {"model": "twap3m", "rows": 45, "missing": 0}]}}
+{"name": "saved", "body": {"phase": "after", "window": {"startMs": 1792619160000, "endMs": 1792640760000}}}
+{"name": "diagnostic_session_removed", "body": true}

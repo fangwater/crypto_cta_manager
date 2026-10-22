@@ -719,8 +719,7 @@ fn rebuild_timeline(
             return Ok(());
         }
         output.zero_volume_skipped_sample_count += priced.zero_volume_skipped_sample_count;
-        output.zero_volume_fallback_sample_count +=
-            usize::from(priced.all_zero_volume_fallback) * priced.prices.len();
+        output.zero_volume_fallback_sample_count += priced.zero_volume_fallback_sample_count;
         schedules.insert(index, priced);
     }
     let pricing_duration_ms = started.elapsed().as_millis();
@@ -1845,7 +1844,14 @@ mod tests {
         store
             .save_page("BTCUSDT", start - MINUTE_US, start + 5 * MINUTE_US, &bars)
             .unwrap();
-        assert_eq!(d.prices(&store).unwrap().unwrap().average(), None);
+        let priced = d.prices(&store).unwrap().unwrap();
+        assert_eq!(
+            priced.average(),
+            Some((100.0 + original.close + 102.0) / 3.0)
+        );
+        assert_eq!(priced.zero_volume_fallback_sample_count, 1);
+        assert_eq!(priced.quantity_weights, vec![1.0 / 3.0; 3]);
+        assert_eq!(priced.zero_volume_skipped_sample_count, 0);
         assert!(
             store
                 .window_prices("BTCUSDT", start, ExecutionModel::Vwap3m)
@@ -1867,7 +1873,7 @@ mod tests {
     }
 
     #[test]
-    fn rapidx_empty_and_missing_minutes_never_fall_back_or_pollute_twap_cache() {
+    fn rapidx_empty_minutes_use_closes_but_missing_candles_remain_missing() {
         let (_dir, store, start, mut bars) = cached_market();
         let mut d = delta(start);
         d.execution_model = ExecutionModel::Vwap3m;
@@ -1894,8 +1900,11 @@ mod tests {
             .save_page("BTCUSDT", start - MINUTE_US, start + 5 * MINUTE_US, &bars)
             .unwrap();
         let empty = d.prices(&store).unwrap().unwrap();
-        assert_eq!(empty.average(), None);
-        assert!(!empty.all_zero_volume_fallback);
+        let close_mean = bars[1..4].iter().map(|bar| bar.close).sum::<f64>() / 3.0;
+        assert_eq!(empty.average(), Some(close_mean));
+        assert_eq!(empty.zero_volume_fallback_sample_count, 3);
+        assert_eq!(empty.quantity_weights, vec![1.0 / 3.0; 3]);
+        assert_eq!(empty.zero_volume_skipped_sample_count, 0);
         assert_eq!(
             delta(start).prices(&store).unwrap().unwrap().average(),
             Some(103.5)
@@ -1915,9 +1924,19 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        assert!(output.points.is_empty());
+        assert!(!output.points.is_empty());
         assert!(!output.loading);
-        assert!(output.unavailable_reason.unwrap().contains("总成交量为零"));
+        assert!(output.unavailable_reason.is_none());
+        assert_eq!(output.zero_volume_fallback_sample_count, 3);
+        let last = output.points.last().unwrap();
+        assert!(
+            (last.nav_change_before_fee_quote - d.delta_qty * (bars[3].close - close_mean)).abs()
+                < 1e-10
+        );
+        assert!(
+            (last.estimated_trading_fee_quote - d.delta_qty.abs() * close_mean * d.fee_rate).abs()
+                < 1e-10
+        );
         bars[2].base_volume = 2.0;
         bars[2].quote_volume = 204.0;
         store
@@ -2121,6 +2140,70 @@ mod tests {
             crate::theoretical_execution::references(&config, &["rapidx".into()]).unwrap(),
             vec![false, true]
         );
+        // Zero-volume windows use the same close prices, quantities and fees in
+        // both report paths. Restoring a candle must invalidate both caches.
+        let original_bars = bars.clone();
+        for bar in &mut bars[1..4] {
+            bar.base_volume = 0.0;
+            bar.quote_volume = 0.0;
+        }
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, end, &bars)
+            .unwrap();
+        let mean_close = bars[1..4].iter().map(|bar| bar.close).sum::<f64>() / 3.0;
+        for twap in [false, true] {
+            let scope = vec!["rapidx".to_owned()];
+            let curve = load_timeline(
+                fees.clone(),
+                &targets,
+                &store,
+                start,
+                end,
+                &scope,
+                100,
+                twap,
+            )
+            .await
+            .unwrap();
+            let cost = crate::acquisition_cost::report_acquisition_cost(
+                fees.clone(),
+                &config,
+                &targets,
+                &store,
+                &BTreeMap::new(),
+                start,
+                end,
+                end,
+                &scope,
+                None,
+                1,
+                100,
+                None,
+                None,
+                Default::default(),
+                twap,
+            )
+            .await
+            .unwrap();
+            let row = &cost.rows[0];
+            assert_eq!(row.virtual_vwap, mean_close);
+            assert_eq!(row.zero_volume_fallback_sample_count, 3);
+            assert_eq!(cost.totals.missing_virtual_delta_count, 0);
+            assert_eq!(curve.zero_volume_fallback_sample_count, 3);
+            assert!(curve.unavailable_reason.is_none());
+            let last = curve.points.last().unwrap();
+            assert!((last.nav_change_before_fee_quote - 5.0 * (105.0 - mean_close)).abs() < 1e-10);
+            assert!((last.estimated_trading_fee_quote - row.virtual_fee_usdt).abs() < 1e-10);
+            assert_eq!(row.reference_prices.len(), 2);
+            assert!(
+                row.reference_prices
+                    .iter()
+                    .all(|reference| reference.price == Some(mean_close))
+            );
+        }
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, end, &original_bars)
+            .unwrap();
         // Exercise current-clock tail limits, rather than only old cached ranges.
         let current_end = now_us().div_euclid(MINUTE_US) * MINUTE_US;
         let recent = (0..11)
@@ -2224,7 +2307,7 @@ mod tests {
         assert_eq!(priced.average(), Some(102.0));
         assert_eq!(priced.priced_sample_count(), 4);
         assert_eq!(priced.zero_volume_skipped_sample_count, 1);
-        assert!(!priced.all_zero_volume_fallback);
+        assert_eq!(priced.zero_volume_fallback_sample_count, 0);
         let fills = (0..5)
             .map(|slice| (start + (slice as i64 + 1) * MINUTE_US, 0, slice))
             .collect();
@@ -2265,7 +2348,7 @@ mod tests {
         assert_eq!(priced.first_price(), Some(105.0));
         assert_eq!(priced.priced_sample_count(), 5);
         assert_eq!(priced.zero_volume_skipped_sample_count, 0);
-        assert!(priced.all_zero_volume_fallback);
+        assert_eq!(priced.zero_volume_fallback_sample_count, 5);
         let fills = (0..5)
             .map(|slice| (start + (slice as i64 + 1) * MINUTE_US, 0, slice))
             .collect();

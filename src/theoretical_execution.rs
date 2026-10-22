@@ -47,8 +47,8 @@ impl ExecutionModel {
             Self::Twap5m => {
                 "equal_qty_over_traded_minutes_in_complete_5m_window_or_all_empty_close"
             }
-            Self::Vwap3m => "total_quote_over_total_base_in_complete_3m_window",
-            Self::Twap3m => "arithmetic_mean_of_3_complete_minute_vwaps",
+            Self::Vwap3m => "total_quote_over_total_base_in_complete_3m_window_or_all_empty_close",
+            Self::Twap3m => "arithmetic_mean_of_3_complete_minute_vwaps_or_empty_minute_close",
         }
     }
 
@@ -58,9 +58,11 @@ impl ExecutionModel {
                 "equal_qty_over_traded_minutes_in_complete_5m_window_or_all_empty_close+closed_1m_close_mark"
             }
             Self::Vwap3m => {
-                "total_quote_over_total_base_in_complete_3m_window+closed_1m_close_mark"
+                "total_quote_over_total_base_in_complete_3m_window_or_all_empty_close+closed_1m_close_mark"
             }
-            Self::Twap3m => "arithmetic_mean_of_3_complete_minute_vwaps+closed_1m_close_mark",
+            Self::Twap3m => {
+                "arithmetic_mean_of_3_complete_minute_vwaps_or_empty_minute_close+closed_1m_close_mark"
+            }
         }
     }
 }

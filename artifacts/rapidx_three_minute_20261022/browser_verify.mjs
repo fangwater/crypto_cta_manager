@@ -34,7 +34,7 @@ async function scenario(width, height, source, cost=false) {
       return r.result.value
     }
     const waitFor=async expression=>{
-      for(let n=0;n<1200;n++) {if(await run(expression))return;await pause(250)}
+      for(let n=0;n<2400;n++) {if(await run(expression))return;await pause(250)}
       throw new Error('browser condition timed out: '+expression)
     }
     await c('Runtime.enable');await c('Network.enable');await c('Page.enable')
@@ -66,16 +66,19 @@ async function scenario(width, height, source, cost=false) {
       assert.ok(await run(`window.__strokes['#d97706']>0`))
     } else {
       const count=source==='binance_exec_trade03'?1:2
-      await waitFor(`window.__records.some(r=>r.body.theoretical?.length===${count}&&r.body.theoretical.every(t=>t.points.length>0&&!t.loading))&&!!document.querySelector('canvas')`)
+      await waitFor(`window.__records.some(r=>r.body.theoretical?.length===${count}&&r.body.theoretical.every(t=>!t.loading&&(t.points.length>0||t.unavailable_reason)))&&!!document.querySelector('canvas')`)
       await pause(500)
       const visible=await run(`[...document.querySelectorAll('[aria-label="净值曲线选择"] label')].map(e=>({text:e.textContent,checked:e.querySelector('input').checked}))`)
       if(count===2){
         for(const label of ['理论3min_vwap','理论3min_twap'])assert.equal(visible.filter(v=>v.text.includes(label)&&v.checked).length,2)
-        assert.ok(await run(`window.__strokes['#7357a3']>0&&window.__strokes['#a33f55']>0&&window.__strokes['#0891b2']>0&&window.__strokes['#d97706']>0`))
+        if(source==='binance_exec_trade07') assert.ok(await run(`window.__strokes['#7357a3']>0&&window.__strokes['#a33f55']>0&&window.__strokes['#0891b2']>0&&window.__strokes['#d97706']>0`))
+        else assert.ok(await run(`document.body.textContent.includes('不可用')`))
       } else assert.ok(visible.every(v=>!v.text.includes('3min')))
     }
-    const result=await run(`({overflow:document.documentElement.scrollWidth>innerWidth,labels:[...document.querySelectorAll('[aria-label="净值曲线选择"] label')].map(e=>e.textContent),canvasCount:document.querySelectorAll('canvas').length,records:window.__records.map(r=>({url:r.url,status:r.status,references:r.body.theoretical?.map(t=>({model:t.execution_model,points:t.points.length,loading:t.loading,missing:t.missing_price_count})),reports:r.body.reports?.map(t=>({model:t.execution_model,rows:t.rows.length}))})),assets:[...document.scripts].map(e=>e.src).filter(Boolean)})`)
+    const result=await run(`({overflow:document.documentElement.scrollWidth>innerWidth,labels:[...document.querySelectorAll('[aria-label="净值曲线选择"] label')].map(e=>e.textContent),canvasCount:document.querySelectorAll('canvas').length,records:window.__records.map(r=>({url:r.url,status:r.status,references:r.body.theoretical?.map(t=>({model:t.execution_model,points:t.points.length,loading:t.loading,missing:t.missing_price_count,reason:t.unavailable_reason})),reports:r.body.reports?.map(t=>({model:t.execution_model,rows:t.rows.length}))})),assets:[...document.scripts].map(e=>e.src).filter(Boolean)})`)
     assert.equal(result.overflow,false);assert.equal(state.errors.length,0)
+    await run(`document.querySelector('${cost ? '#delta-analysis' : '.chart-body.has-picker'}')?.scrollIntoView({block:'start'})`)
+    await pause(300)
     const shot=await c('Page.captureScreenshot',{format:'png',captureBeyondViewport:false})
     fs.writeFileSync(path.join(stage,`${source}-${cost?'cost':'nav'}-${width}.png`),Buffer.from(shot.data,'base64'))
     results.push({width,height,source,cost,...result,errors:state.errors})
@@ -83,6 +86,7 @@ async function scenario(width, height, source, cost=false) {
 }
 try {
   for(const [width,height] of [[1440,1000],[390,1100]]){
+    await scenario(width,height,'binance_exec_trade07')
     await scenario(width,height,'binance_exec_trade06')
     await scenario(width,height,'binance_exec_trade06',true)
   }

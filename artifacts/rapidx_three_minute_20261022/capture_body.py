@@ -13,8 +13,14 @@ session_id = sql("INSERT INTO cta_auth_sessions (user_id,token_hash,expires_at) 
 assert session_id.isdigit()
 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def get(path):
-    with opener.open(urllib.request.Request('http://13.115.227.29:4191'+path,headers={'Cookie':'cta_session='+token}),timeout=55) as response:
-        return json.load(response)
+    began=time.monotonic()
+    while True:
+        try:
+            with opener.open(urllib.request.Request('http://13.115.227.29:4191'+path,headers={'Cookie':'cta_session='+token}),timeout=55) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code not in [502,503,504] or time.monotonic()-began>300:raise
+            time.sleep(5)
 try:
     emit('health',get('/manager/api/health'))
     data={'window':window,'queries':{}}

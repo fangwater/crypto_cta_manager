@@ -29,7 +29,7 @@ pub struct MinutePrices {
     pub execution_model: ExecutionModel,
     average_price: Option<f64>,
     pub zero_volume_skipped_sample_count: usize,
-    pub all_zero_volume_fallback: bool,
+    pub zero_volume_fallback_sample_count: usize,
 }
 impl MinutePrices {
     pub fn priced_sample_count(&self) -> usize {
@@ -499,9 +499,19 @@ impl KlineStore {
                 quote_volume += candle.quote_volume;
             }
         }
-        let all_empty_fallback = skipped == count && model == ExecutionModel::Twap5m;
+        let all_empty_fallback = skipped == count;
+        let mut fallback_count = 0;
         if all_empty_fallback {
-            prices = closes.into_iter().map(Some).collect();
+            prices = closes.iter().copied().map(Some).collect();
+            fallback_count = count;
+            skipped = 0;
+        } else if model == ExecutionModel::Twap3m {
+            for (price, close) in prices.iter_mut().zip(&closes) {
+                if price.is_none() {
+                    *price = Some(*close);
+                    fallback_count += 1;
+                }
+            }
             skipped = 0;
         }
         let priced_count = prices.iter().flatten().count();
@@ -525,14 +535,18 @@ impl KlineStore {
                     .collect(),
             ),
             ExecutionModel::Vwap3m => (
-                (total_volume > 0.0).then(|| quote_volume / total_volume),
+                Some(if total_volume > 0.0 {
+                    quote_volume / total_volume
+                } else {
+                    closes.iter().sum::<f64>() / count as f64
+                }),
                 volumes
                     .iter()
                     .map(|volume| {
                         if total_volume > 0.0 {
                             volume / total_volume
                         } else {
-                            0.0
+                            1.0 / count as f64
                         }
                     })
                     .collect(),
@@ -548,9 +562,9 @@ impl KlineStore {
             execution_model: model,
             average_price,
             zero_volume_skipped_sample_count: skipped,
-            all_zero_volume_fallback: all_empty_fallback,
+            zero_volume_fallback_sample_count: fallback_count,
         };
-        // An all-empty VWAP window is explicitly unpriceable; do not negative-cache it.
+        // Only complete, positive schedules enter the derived cache.
         if priced.average().is_some() {
             cache.prices.insert((open, model), priced.clone());
         }
