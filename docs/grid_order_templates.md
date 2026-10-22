@@ -1,6 +1,29 @@
 # Grid order templates
 
-Manager supports Grid templates for RapidX and supported native unified accounts.
+Manager supports Grid templates for RapidX, native Binance STANDARD USD-M,
+and supported native unified accounts. Updated 2026-10-22 UTC.
+
+STANDARD USD-M uses the existing native order/cancel/account paths. Manager,
+Exec Config and Exec Redis reload validate the same account/market scope.
+STANDARD COIN-M and native cash Grid remain unsupported; a missing or invalid
+Binance account mode is rejected. The USD-M source keeps its independent
+namespace, rules and ledger, with no cash or COIN-M targets.
+
+Japan RX02 now follows `virtual02` through `binance_exec_trade08` / `lgq_ltp_81857`
+at multiplier 1, using the unchanged live `lgq_grid_prep` template (3 futures
+levels, 10-second Maker rounds, unlimited requotes, 100 USDT per hand). The
+existing Multi-Assets Mode publish/startup requirement remains enforced. At the
+operator's explicit request, one Binance API POST enabled that mode at 14:55:55
+UTC on October 22; one-way positions remain enabled. Exec started at 15:00 UTC.
+The 15:06 audit found 8 Maker fills, 5 target positions within their original
+tolerance, no live orders or pending publishes, and healthy JP/SG signal delivery.
+The old `binance_exec_trade05` remains retired. Only Japan Manager's `cta_web`
+binary was replaced (SHA-256 `7e20dcf6fd29b3fd90d8b4c7dae174e2d2d1a93d8e823075228b7f5cc2c63511`),
+with PID315038 still pinned to CPU24; frontend, host configuration and gateway
+remain in place. Manager's 398 library tests passed (5 ignored).
+Audit receipts are in Exec08's `run/grid_20261022/` on Japan and the mkt_signal
+`artifacts/rx02_exec08_grid_20261022/` directory. Earlier sections below describe
+historical template settings and deployment states.
 
 ## Japan template split, 2026-10-21
 

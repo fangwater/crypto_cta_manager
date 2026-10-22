@@ -18,7 +18,11 @@ pub(crate) fn validate_grid_account(
     let backend = crate::market_rules::execution_backend(&source.venue, &values)?;
     let allowed = match (backend, source.venue.as_str()) {
         ("ltp", "binance-futures" | "okex-futures") => true,
-        ("native", "binance-futures" | "binance-coin-futures") => values
+        ("native", "binance-futures") => values.get("BINANCE_ACCOUNT_MODE").is_some_and(|mode| {
+            mode.trim().eq_ignore_ascii_case("STANDARD")
+                || mode.trim().eq_ignore_ascii_case("UNIFIED")
+        }),
+        ("native", "binance-coin-futures") => values
             .get("BINANCE_ACCOUNT_MODE")
             .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("UNIFIED")),
         // Native Exec startup verifies these supported unified account modes.
@@ -27,7 +31,7 @@ pub(crate) fn validate_grid_account(
     };
     anyhow::ensure!(
         allowed,
-        "Grid requires RapidX or a supported native unified account: {}",
+        "Grid requires RapidX, native Binance USD-M, or a supported native unified account: {}",
         source.id
     );
     Ok(())
@@ -145,7 +149,7 @@ mod tests {
         let overrides = BTreeMap::from([("BTCUSDT".into(), grid.clone())]);
         for body in [
             "TRADE_ENGINE_EXEC_BACKEND=native\n",
-            "BINANCE_ACCOUNT_MODE=STANDARD\n",
+            "BINANCE_ACCOUNT_MODE=invalid\n",
         ] {
             std::fs::write(&env, body).unwrap();
             assert!(validate_grid_account(&source, &base, &BTreeMap::new()).is_ok());
@@ -154,12 +158,24 @@ mod tests {
         }
         for body in [
             "BINANCE_ACCOUNT_MODE=UNIFIED\n",
+            "BINANCE_ACCOUNT_MODE=STANDARD\n",
+            "BINANCE_ACCOUNT_MODE=' standard '\n",
             "TRADE_ENGINE_EXEC_BACKEND_MAP='binance=rapidx'\n",
         ] {
             std::fs::write(&env, body).unwrap();
             assert!(validate_grid_account(&source, &grid, &BTreeMap::new()).is_ok());
             assert!(validate_grid_account(&source, &base, &overrides).is_ok());
         }
+        std::fs::write(&env, "BINANCE_ACCOUNT_MODE=STANDARD\n").unwrap();
+        assert_eq!(markets(&source).unwrap(), vec!["binance-futures"]);
+        assert!(for_symbol(&source, "BTCUSDT").is_ok());
+        assert!(for_symbol(&source, "BTC").is_err());
+        assert!(for_symbol(&source, "BTCUSD").is_err());
+        source.venue = "binance-coin-futures".into();
+        assert!(validate_grid_account(&source, &grid, &BTreeMap::new()).is_err());
+        assert!(validate_grid_account(&source, &base, &overrides).is_err());
+        std::fs::write(&env, "BINANCE_ACCOUNT_MODE=UNIFIED\n").unwrap();
+        assert!(validate_grid_account(&source, &grid, &BTreeMap::new()).is_ok());
         std::fs::write(&env, "TRADE_ENGINE_EXEC_BACKEND=native\n").unwrap();
         for venue in ["okex-futures", "bybit-futures", "bitget-futures"] {
             source.venue = venue.into();
