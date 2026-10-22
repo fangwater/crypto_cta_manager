@@ -1,0 +1,9 @@
+{
+  "release": "20261021T094524Z",
+  "base_commit": "c04598476f651947d235e42c3cdcf6e8bc84b436",
+  "patch_sha256": "cbe9670cbf71c07bfcdfe55628bb3b36d818d482e36da227d0f5185f7fe487b0",
+  "binary_sha256": "01f3ae08aac66bab926a924eb9660ef5674cf0db545438f323895dfe97d153d2",
+  "previous_manager_pid": 1368404,
+  "webroot": "/home/el01/crypto_cta_manager/web-releases/20261021T065251Z",
+  "scope": "Manager initial-position system-close attribution and negligible virtual exposure; cta_web only"
+}

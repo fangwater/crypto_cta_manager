@@ -1,0 +1,2 @@
+{"name": "kline", "elapsed_s": 0.005, "http_status": 200, "body": {"active_backfills": 0, "cache_hits": 0, "disk_batch_reads": 285, "disk_range_reads": 17, "enabled": true, "fetched_candles": 111, "last_error": null, "memory_candle_hits": 94969, "pricing_cache_hits": 0, "requests": 17, "retained_days": 30, "target_history": {"last_error": null, "loading": false, "processed_messages": 4289110, "ready": true}}}
+{"verification_session_removed": true}

@@ -1,0 +1,343 @@
+{
+  "observed_at_ms": 1792577848469,
+  "exec_position_ready": true,
+  "exec_rows": 37,
+  "exec_system_rows": 0,
+  "manager_symbols": 51,
+  "comparable_symbols": 19,
+  "absent_live_symbols_reconstructed_nonzero": [],
+  "maximum_comparable_quantity_difference": 5.115352585960409e-14,
+  "account_quantities": [
+    {
+      "symbol": "1INCHUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "manager_qty": -0.10000000000000062,
+      "exec_qty": -0.1,
+      "difference": -6.106226635438361e-16
+    },
+    {
+      "symbol": "ADAUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "ALGOUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "ATOMUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "AXSUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "BANDUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": 0.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "BELUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "BNBUSDT",
+      "manager_qty": -0.009999999999999993,
+      "exec_qty": -0.01,
+      "difference": 6.938893903907228e-18
+    },
+    {
+      "symbol": "BTCUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "COMPUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "CRVUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "DASHUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "DOTUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "EGLDUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": 0.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "ENJUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "ETCUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "ETHUSDT",
+      "manager_qty": -0.000999999999999994,
+      "exec_qty": -0.001,
+      "difference": 6.071532165918825e-18
+    },
+    {
+      "symbol": "FILUSDT",
+      "manager_qty": -0.10000000000001563,
+      "exec_qty": -0.1,
+      "difference": -1.5626389071599078e-14
+    },
+    {
+      "symbol": "GRTUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "IOSTUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "IOTAUSDT",
+      "manager_qty": -1.5916157281026244e-12,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "KAVAUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "KNCUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "KSMUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": 0.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "LINKUSDT",
+      "manager_qty": -0.009999999999998899,
+      "exec_qty": -0.01,
+      "difference": 1.1015494072452725e-15
+    },
+    {
+      "symbol": "LTCUSDT",
+      "manager_qty": -0.0009999999999998899,
+      "exec_qty": -0.001,
+      "difference": 1.1015494072452725e-16
+    },
+    {
+      "symbol": "NEARUSDT",
+      "manager_qty": -1.0,
+      "exec_qty": -1.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "NEOUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "ONTUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": 0.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "QTUMUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": 0.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "RLCUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "RSRUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "SKLUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "SNXUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "SOLUSDT",
+      "manager_qty": -0.010000000000001286,
+      "exec_qty": -0.01,
+      "difference": -1.285430095698814e-15
+    },
+    {
+      "symbol": "SUSHIUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "THETAUSDT",
+      "manager_qty": -49.0,
+      "exec_qty": -49.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "TRBUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "UNIUSDT",
+      "manager_qty": -1.0,
+      "exec_qty": -1.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "VETUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "XLMUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "XRPUSDT",
+      "manager_qty": -0.10000000000005116,
+      "exec_qty": -0.1,
+      "difference": -5.115352585960409e-14
+    },
+    {
+      "symbol": "XTZUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": 0.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "YFIUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "ZECUSDT",
+      "manager_qty": -0.0009999999999999263,
+      "exec_qty": -0.001,
+      "difference": 7.37257477290143e-17
+    },
+    {
+      "symbol": "ZENUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "ZILUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": null,
+      "difference": null
+    },
+    {
+      "symbol": "ZRXUSDT",
+      "manager_qty": 0.0,
+      "exec_qty": 0.0,
+      "difference": 0.0
+    }
+  ],
+  "system_strategy_1d": {
+    "strategy": "system_position_close",
+    "symbol_count": 19,
+    "gross_position_value_quote": 2702.13401844193,
+    "net_position_value_quote": -2702.13401844193,
+    "summary": {
+      "fill_count": 9,
+      "volume_quote": 106.84642148001568,
+      "maker_fill_count": 0,
+      "maker_volume_quote": 0.0,
+      "taker_fill_count": 0,
+      "taker_volume_quote": 0.0,
+      "unknown_liquidity_fill_count": 9,
+      "unknown_liquidity_volume_quote": 106.84642148001568,
+      "realized_pnl_before_fee_quote": -0.023099999999997456,
+      "estimated_trading_fee_quote": 0.0174676425,
+      "realized_pnl_after_fee_quote": -0.04056764249999746,
+      "floating_pnl_quote": -118.45520035439291,
+      "nav_change_before_fee_quote": -118.47830035439291,
+      "nav_change_after_fee_quote": -118.49576799689291
+    }
+  },
+  "account_snapshot_count": 0,
+  "strategy_snapshot_count": 0,
+  "diagnostic_session_removed": true
+}

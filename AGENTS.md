@@ -629,12 +629,36 @@ strategy, symbol, and venue, but mark every strategy bucket with the latest
 account-level fill for the same symbol and venue so strategy NAV remains
 additive to account NAV. Account-level PostgreSQL snapshots have no historical
 strategy allocation, so expose them as `__initial_position__` instead of
-assigning them to a CTA strategy. When a strategy-allocation snapshot is
-active, `system_position_close` fills update only the account ledger and
+assigning them to a CTA strategy. With an account-only snapshot, system-close
+fills for the same source, symbol and venue share that initial unassigned FIFO
+ledger, including fees and estimated funding, so closing carried inventory does
+not leave offsetting phantom positions. Other symbols and venues retain their
+original system-close attribution. Keep raw order attribution and snapshots
+unchanged. Omit inactive initial/system/residual series only when the selected
+window has no fills, PnL or nonzero quoted exposure; retain historical closes.
+When a strategy-allocation snapshot is active, `system_position_close` fills
+update only the account ledger and
 `__unallocated__` is derived as the account residual after the named strategy
 ledgers; never consume a named strategy lot for a system-close fill. The
 browser must provide portfolio, per-symbol, and per-strategy curves plus a
 strategy PnL table.
+
+Timestamped ownership corrections are separate from initial position snapshots.
+Use immutable `cta_strategy_allocation_snapshots` records only after replaying
+the complete same-source history (including recovered RapidX fills) and matching
+the observed account quantities. Transfers must net to zero per symbol/venue,
+share the completed minute reference price, and preserve account FIFO, fills,
+volume and fees. Apply them after fills at the same timestamp; preserve earlier
+history and use corrected ownership for subsequent strategy funding estimates.
+Reject changed pre-correction quantities rather than silently accepting late
+history that invalidates an audited correction. Existing databases require the
+explicit `scripts/apply_allocation_schema.sql` maintenance before deploying a
+binary that loads these records. `nav_allocation_reconcile` prepares and verifies
+a candidate read-only; insertion requires `--candidate`, `--apply` and `--note`.
+Its current repair mode requires no initial strategy snapshot and a settled Exec
+snapshot without active orders. Never alter account initial quantities to hide a
+strategy ownership mismatch. See `docs/jp_meta_trade05_system_close_20261021.md`
+for the October 21 trade05 correction and its deployment evidence.
 
 The NAV page must also show interval execution analysis for the selected
 account scope and selected symbols: Maker, Taker, and explicitly Unclassified

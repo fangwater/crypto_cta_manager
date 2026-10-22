@@ -59,7 +59,8 @@ async fn main() -> Result<()> {
         strategy_snapshots.insert(source.id.clone(), snapshot);
     }
 
-    let histories = nav::load_nav_source_histories(&config, &[source.id.clone()])?;
+    let mut histories = nav::load_nav_source_histories(&config, &[source.id.clone()])?;
+    nav::allocation::attach(&mut histories, &nav::allocation::load(&pool).await?);
 
     let end_ts_us = match args.end_ts_us {
         Some(end_ts_us) => end_ts_us,

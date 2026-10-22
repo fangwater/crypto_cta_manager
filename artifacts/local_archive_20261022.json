@@ -1,0 +1,109 @@
+{
+  "created_at": "2026-10-22T02:38:10.513376+00:00",
+  "archive_root": "/home/fanghaizhou/crypto_cta_manager-archives/20261022-precommit",
+  "reason": "Keep large raw diagnostic responses, fill exports and generated release bundles outside Git; preserve original relative paths and checksums.",
+  "files": [
+    {
+      "path": "artifacts/hxl_initial_close_20261021/before_cached.jsonl",
+      "bytes": 68084723,
+      "sha256": "5de48624cc780c7069835b3ec7cfa966d5919b8c5cd6b55c1e276733e38c7bc4",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/hxl_initial_close_20261021/after_first.jsonl",
+      "bytes": 67115813,
+      "sha256": "eceda844c26c57aabe725ba8d7ec1a228243d5825a1cd766bbf5530b69e09084",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/hxl_initial_close_20261021/after_cached.jsonl",
+      "bytes": 66977365,
+      "sha256": "fab3d60750859382fa782d99a710e23d96ec70de14b926a7c8ba11e0ef31b1a1",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/hxl_initial_close_20261021/funding_recheck.jsonl",
+      "bytes": 51188510,
+      "sha256": "8eb1360add952d5f33b10ce3e9e7ecce36589c9da3a9e098825c3495de923819",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/hxl_initial_close_20261021/latest_first.jsonl",
+      "bytes": 4380609,
+      "sha256": "11db437d9ee0bdefbafbcdcc94a6dd714a76026960ecc1cb30685bfe72a62757",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/hxl_initial_close_20261021/latest.jsonl",
+      "bytes": 4244739,
+      "sha256": "8d34f509a478cc1b76a03706f9bf7b9cc6835ee6f725484e8f680f5656520aa9",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/hxl_initial_close_20261021/before.jsonl",
+      "bytes": 3501865,
+      "sha256": "1be892cfcf78b65a5a3b0a7f45d4fd8c2c675d462bc1aaa150e7a9223cf5aec2",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/hxl_initial_close_20261021/before_hxl.jsonl",
+      "bytes": 2151778,
+      "sha256": "4ecff1879016c3f8243e171c9f378e976170f10efc705dcfc6c3ff8527b47edd",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/hxl_initial_close_20261021/fills.tsv",
+      "bytes": 2144112,
+      "sha256": "ef31009e50ebaee99c1c2d4aa71b5dec7133f0780015dd9c6929b3f3f2084130",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/jp_meta_trade05_system_close_20261021/after_alignment.jsonl.gz",
+      "bytes": 8435232,
+      "sha256": "f5d0355a6716a035fad3e4c490433898d86c58f8537702e8bdc6603817b1ebca",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/jp_meta_trade05_system_close_20261021/preapply_minute.jsonl.gz",
+      "bytes": 8415904,
+      "sha256": "3c18d70f456e690a2ab3be1ebebd8258ba2e8c17866103d43f995af8a121a888",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/jp_meta_trade05_system_close_20261021/before_alignment.jsonl.gz",
+      "bytes": 6216939,
+      "sha256": "da4c7ea0ec72f132c37b1fca5f9d6a815eb44e24764ed7922daa88727b12aab1",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/jp_meta_trade05_system_close_20261021/candidate_verification.json.gz",
+      "bytes": 1200771,
+      "sha256": "f12afb91ff2914f22e255c239cb7d5cdc61699daa3709e6228cba6d321120ed1",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/jp_meta_trade05_system_close_20261021/inspection.jsonl.gz",
+      "bytes": 500774,
+      "sha256": "69774bfef3b9d98b5cf47c32679b9102ea5a323c786af9d76b8263cc3e39f3f4",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/jp_meta_trade05_system_close_20261021/fills.tsv",
+      "bytes": 711953,
+      "sha256": "216c75019673255e821c7eaea206edfd38d35987f40ffe4c6da8da6fe55d4ce5",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/jp_meta_trade05_system_close_20261021/frontend.tar.gz",
+      "bytes": 364873,
+      "sha256": "a6cbbfd325ca7cad13f4cba4a380f3ee5a166e051a7d36b59e2af1b5d78e3ae9",
+      "status": "retained"
+    },
+    {
+      "path": "artifacts/jp_meta_trade05_system_close_20261021/source_delta.tar.gz",
+      "bytes": 153550,
+      "sha256": "2953cde35423283c193c37b92b7ffa36296c2d7c94e79e03287f88b978cbe1f1",
+      "status": "retained"
+    }
+  ]
+}

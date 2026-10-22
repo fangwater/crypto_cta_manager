@@ -1,0 +1,28 @@
+{
+  "timestamp_us": 1792585051450000,
+  "positions": 60,
+  "symbols": 20,
+  "account_exact": true,
+  "windows": [
+    {
+      "window": "history",
+      "account_unchanged": true,
+      "additivity_error": 1.1368683772161603e-13
+    },
+    {
+      "window": "7d",
+      "account_unchanged": true,
+      "additivity_error": 0.0
+    },
+    {
+      "window": "1d",
+      "account_unchanged": true,
+      "additivity_error": 5.684341886080802e-14
+    },
+    {
+      "window": "after",
+      "account_unchanged": true,
+      "additivity_error": 0.0
+    }
+  ]
+}

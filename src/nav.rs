@@ -17,6 +17,7 @@ use crate::model::{
 use crate::rocks_source;
 use crate::snapshot::{PositionSnapshot, StrategyPositionSnapshot};
 
+pub mod allocation;
 mod fill_recovery;
 mod funding_estimate;
 pub mod minute_marks;
@@ -78,6 +79,7 @@ impl From<UniformOrderEvent> for Arc<NavEvent> {
 
 #[derive(Clone, Debug, Default)]
 pub struct NavSourceHistory {
+    allocations: Arc<Vec<allocation::AllocationSnapshot>>,
     events: im::Vector<Arc<NavEvent>>,
     liquidity_by_order: LiquidityByOrder,
     revision: u64,
@@ -418,10 +420,35 @@ struct PreparedFill {
     side: Side,
     fill_ts_us: i64,
     liquidity: LiquidityRole,
+    initial_position_close: bool,
+}
+
+impl PreparedFill {
+    fn attribute_initial_position(
+        &mut self,
+        strategy_allocation_active: bool,
+        initial_states: &BTreeMap<(String, i16), VenueState>,
+    ) {
+        // An account-only snapshot and its system executions own one unassigned
+        // ledger. Keep that ownership stable after it reaches zero, including
+        // reversals, without ever consuming a named strategy's lots.
+        self.initial_position_close = !strategy_allocation_active
+            && initial_states.contains_key(&(self.event.symbol.clone(), self.event.venue_code))
+            && is_system_position_close(&strategy_from_from_key(&self.event.from_key_text));
+    }
+
+    fn strategy(&self) -> String {
+        if self.initial_position_close {
+            INITIAL_POSITION_STRATEGY.to_string()
+        } else {
+            strategy_from_from_key(&self.event.from_key_text)
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct PreparedSourceEvents {
+    allocations: Arc<Vec<allocation::AllocationSnapshot>>,
     snapshot_ts_us: Option<i64>,
     initial_states: BTreeMap<(String, i16), VenueState>,
     initial_strategy_states: BTreeMap<(String, String, i16), VenueState>,
@@ -499,6 +526,8 @@ impl TimelineEvent {
 
 #[derive(Clone, Debug)]
 struct TimelineSourceState {
+    allocations: Arc<Vec<allocation::AllocationSnapshot>>,
+    next_allocation: usize,
     source_id: String,
     fee_rates: FeeRates,
     snapshot_ts_us: Option<i64>,
@@ -534,6 +563,8 @@ fn initial_timeline_state(
     prepared: &PreparedSourceEvents,
 ) -> Result<TimelineSourceState> {
     Ok(TimelineSourceState {
+        allocations: prepared.allocations.clone(),
+        next_allocation: 0,
         source_id: source.id.clone(),
         fee_rates: source.nav_fee_rates()?,
         snapshot_ts_us: prepared.snapshot_ts_us,
@@ -580,6 +611,9 @@ impl CachedTimelineSource {
         history: &NavSourceHistory,
         initial_position_count: usize,
     ) -> Result<Option<Self>> {
+        if !self.prepared.allocations.is_empty() {
+            return Ok(None);
+        }
         let Some(change) = &history.change else {
             return Ok(None);
         };
@@ -593,12 +627,18 @@ impl CachedTimelineSource {
             {
                 prepared.ignored_at_or_before_snapshot_event_count += 1;
             } else if let Some(side) = validated_fill_side(source, event)? {
-                added.push(PreparedFill {
+                let mut fill = PreparedFill {
                     event: event.clone(),
                     side,
                     fill_ts_us: fifo_ts_us(event),
                     liquidity: liquidity_role_for_event(event, &history.liquidity_by_order),
-                });
+                    initial_position_close: false,
+                };
+                fill.attribute_initial_position(
+                    prepared.strategy_allocation_active,
+                    &prepared.initial_states,
+                );
+                added.push(fill);
             } else {
                 prepared.ignored_non_fill_event_count += 1;
             }
@@ -723,12 +763,20 @@ impl CachedTimelineSource {
         mut strategies: BTreeMap<String, i64>,
         mut next_checkpoint: Option<i64>,
     ) -> Result<Self> {
+        for a in prepared.allocations.iter() {
+            for p in &a.positions {
+                symbols.entry(p.symbol.clone()).or_insert(a.snapshot_ts_us);
+                strategies
+                    .entry(p.strategy.clone())
+                    .or_insert(a.snapshot_ts_us);
+            }
+        }
         let replayed_fills = prepared.fill_events.len() - first_fill;
         for (index, fill) in prepared.fill_events.iter().enumerate().skip(first_fill) {
             symbols
                 .entry(fill.event.symbol.clone())
                 .or_insert(fill.fill_ts_us);
-            let strategy = strategy_from_from_key(&fill.event.from_key_text);
+            let strategy = fill.strategy();
             strategies
                 .entry(
                     if prepared.strategy_allocation_active && is_system_position_close(&strategy) {
@@ -751,6 +799,7 @@ impl CachedTimelineSource {
             state.apply_fill(fill)?;
         }
         state.activate_snapshot_at(i64::MAX);
+        state.advance_allocations(i64::MAX, true)?;
         let mut symbol_builders = BTreeMap::<String, SymbolReportBuilder>::new();
         for ((symbol, _), venue) in &state.states {
             symbol_builders
@@ -809,6 +858,7 @@ fn fill_order(left: &PreparedFill, right: &PreparedFill) -> Ordering {
 
 #[derive(Clone, Debug, PartialEq)]
 struct TimelineSourceInputs {
+    allocations: Arc<Vec<allocation::AllocationSnapshot>>,
     snapshot: Option<PositionSnapshot>,
     strategy: Option<StrategyPositionSnapshot>,
     fees: FeeRates,
@@ -880,6 +930,7 @@ impl NavTimelineCache {
                         .flatten();
                     let key = (source.id.clone(), *allocation);
                     let inputs = TimelineSourceInputs {
+                        allocations: history.allocations.clone(),
                         snapshot: snapshots.get(&source.id).cloned(),
                         strategy: strategy.cloned(),
                         fees: source.nav_fee_rates()?,
@@ -920,6 +971,7 @@ impl NavTimelineCache {
                         snapshots.get(&source.id),
                         strategy,
                         &history.liquidity_by_order,
+                        &history.allocations,
                     )?;
                     Ok((
                         key,
@@ -1123,6 +1175,7 @@ impl TimelineSourceState {
     }
 
     fn apply_fill(&mut self, fill: &PreparedFill) -> Result<()> {
+        self.advance_allocations(fill.fill_ts_us, false)?;
         self.activate_snapshot_at(fill.fill_ts_us);
         let key = (fill.event.symbol.clone(), fill.event.venue_code);
         let state = self
@@ -1144,7 +1197,7 @@ impl TimelineSourceState {
                 )
             })?;
 
-        let strategy = strategy_from_from_key(&fill.event.from_key_text);
+        let strategy = fill.strategy();
         if !(self.strategy_allocation_active && is_system_position_close(&strategy)) {
             let strategy_key = (strategy, fill.event.symbol.clone(), fill.event.venue_code);
             let strategy_state = self
@@ -1605,6 +1658,7 @@ fn prepare_source_events<E: Into<Arc<NavEvent>>>(
     snapshot: Option<&PositionSnapshot>,
     strategy_snapshot: Option<&StrategyPositionSnapshot>,
     liquidity_by_order: &LiquidityByOrder,
+    allocations: &Arc<Vec<allocation::AllocationSnapshot>>,
 ) -> Result<PreparedSourceEvents> {
     if let Some(snapshot) = snapshot {
         snapshot.validate()?;
@@ -1679,6 +1733,7 @@ fn prepare_source_events<E: Into<Arc<NavEvent>>>(
             side,
             fill_ts_us,
             liquidity,
+            initial_position_close: false,
         });
     }
 
@@ -1787,7 +1842,31 @@ fn prepare_source_events<E: Into<Arc<NavEvent>>>(
             .collect(),
     };
 
+    for fill in &mut fill_events {
+        fill.attribute_initial_position(strategy_snapshot.is_some(), &initial_states);
+    }
+
+    let allocations = allocations
+        .iter()
+        .filter(|a| snapshot_ts_us.is_none_or(|ts| a.snapshot_ts_us > ts))
+        .cloned()
+        .collect::<Vec<_>>();
+    for a in &allocations {
+        a.validate()?;
+        anyhow::ensure!(a.source_id == source.id, "allocation source mismatch");
+    }
+    anyhow::ensure!(
+        allocations
+            .windows(2)
+            .all(|w| w[0].snapshot_ts_us < w[1].snapshot_ts_us),
+        "allocation timestamps must increase"
+    );
+    anyhow::ensure!(
+        allocations.is_empty() || strategy_snapshot.is_none(),
+        "allocation repair cannot override a strategy initial snapshot"
+    );
     Ok(PreparedSourceEvents {
+        allocations: Arc::new(allocations),
         snapshot_ts_us,
         initial_states,
         initial_strategy_states,
@@ -2266,7 +2345,14 @@ fn estimate_source_events_with_snapshot_and_liquidity<E: Into<Arc<NavEvent>>>(
         ignored_at_or_before_snapshot_event_count,
         ignored_non_fill_event_count,
         ..
-    } = prepare_source_events(source, events, snapshot, None, liquidity_by_order)?;
+    } = prepare_source_events(
+        source,
+        events,
+        snapshot,
+        None,
+        liquidity_by_order,
+        &Arc::default(),
+    )?;
 
     let mut first_fill_ts_us = None;
     let mut last_fill_ts_us = None;
@@ -2545,6 +2631,7 @@ fn rebuild_nav_timeline_with_cache(
                 snapshots.get(&source.id),
                 strategy_snapshots.get(&source.id),
                 &history.liquidity_by_order,
+                &history.allocations,
             )
             .with_context(|| format!("failed to prepare source {} timeline", source.id))?;
             &uncached_prepared
@@ -2589,6 +2676,16 @@ fn rebuild_nav_timeline_with_cache(
                 ts_us: snapshot_ts_us,
             });
         }
+        for a in prepared
+            .allocations
+            .iter()
+            .filter(|a| a.snapshot_ts_us <= request.end_ts_us)
+        {
+            for p in &a.positions {
+                available_symbols.insert(p.symbol.clone());
+                available_strategies.insert(p.strategy.clone());
+            }
+        }
         let strategy_allocation_active = prepared.strategy_allocation_active;
         if strategy_allocation_active {
             available_strategies.insert(UNALLOCATED_STRATEGY.to_string());
@@ -2631,7 +2728,7 @@ fn rebuild_nav_timeline_with_cache(
         {
             if fill.fill_ts_us <= request.end_ts_us {
                 available_symbols.insert(fill.event.symbol.clone());
-                let strategy = strategy_from_from_key(&fill.event.from_key_text);
+                let strategy = fill.strategy();
                 available_strategies.insert(
                     (strategy_allocation_active && is_system_position_close(&strategy))
                         .then_some(UNALLOCATED_STRATEGY.to_string())
@@ -2693,6 +2790,9 @@ fn rebuild_nav_timeline_with_cache(
         apply_timeline_event(&mut runtimes, event)?;
     }
 
+    for runtime in &mut runtimes {
+        runtime.advance_allocations(start_ts_us, false)?;
+    }
     minute_marks::apply(prices, &mut runtimes, &selected_symbol_set, start_ts_us)?;
     let baselines = timeline_totals_by_symbol(&runtimes);
     let strategy_baselines = timeline_totals_by_strategy_symbol(&runtimes);
@@ -2796,6 +2896,7 @@ fn rebuild_nav_timeline_with_cache(
     }
     for runtime in &mut runtimes {
         runtime.activate_snapshot_at(request.end_ts_us);
+        runtime.advance_allocations(request.end_ts_us, true)?;
     }
     push_timeline_sample(
         request.end_ts_us,
@@ -2869,15 +2970,23 @@ fn rebuild_nav_timeline_with_cache(
         })
         .collect::<Vec<_>>();
 
-    let has_empty_unallocated_series = strategy_points.iter().any(|timeline| {
-        timeline.strategy == UNALLOCATED_STRATEGY
-            && timeline.symbol_count == 0
-            && timeline.summary == NavTotals::default()
-    });
-    if has_empty_unallocated_series {
-        available_strategies.retain(|strategy| strategy != UNALLOCATED_STRATEGY);
-        strategy_points.retain(|timeline| timeline.strategy != UNALLOCATED_STRATEGY);
-    }
+    let empty_virtual_strategies = strategy_points
+        .iter()
+        .filter(|timeline| {
+            (matches!(
+                timeline.strategy.as_str(),
+                UNALLOCATED_STRATEGY | INITIAL_POSITION_STRATEGY
+            ) || is_system_position_close(&timeline.strategy))
+                && timeline.gross_position_value_quote == 0.0
+                && timeline.summary == NavTotals::default()
+                && timeline.points.iter().all(|point| {
+                    point.gross_position_value_quote == 0.0 && point.totals == NavTotals::default()
+                })
+        })
+        .map(|timeline| timeline.strategy.clone())
+        .collect::<BTreeSet<_>>();
+    available_strategies.retain(|strategy| !empty_virtual_strategies.contains(strategy));
+    strategy_points.retain(|timeline| !empty_virtual_strategies.contains(&timeline.strategy));
 
     Ok(NavTimelineReport {
         valuation: if prices.is_some() {
@@ -2974,6 +3083,7 @@ fn rebuild_strategy_pnl_with_prices(
         snapshots.get(&source.id),
         strategy_snapshots.get(&source.id),
         &history.liquidity_by_order,
+        &history.allocations,
     )
     .with_context(|| format!("failed to prepare source {} strategy PnL", source.id))?;
 
@@ -2990,6 +3100,8 @@ fn rebuild_strategy_pnl_with_prices(
         .chain(prepared.fill_events.iter().map(|f| f.event.symbol.clone()))
         .collect::<BTreeSet<_>>();
     let mut runtime = TimelineSourceState {
+        allocations: prepared.allocations.clone(),
+        next_allocation: 0,
         source_id: source.id.clone(),
         fee_rates: source.nav_fee_rates()?,
         snapshot_ts_us: prepared.snapshot_ts_us,
@@ -3019,6 +3131,7 @@ fn rebuild_strategy_pnl_with_prices(
         &symbols,
         request.start_ts_us,
     )?;
+    runtime.advance_allocations(request.start_ts_us, false)?;
     let baseline = strategy_totals(&runtime, &request.strategy_name);
     let mut rows = vec![StrategyPnlRow {
         row_kind: StrategyPnlRowKind::WindowStart,
@@ -3035,7 +3148,7 @@ fn rebuild_strategy_pnl_with_prices(
         .skip(window_start)
         .take(window_end - window_start)
     {
-        let fill_strategy = strategy_from_from_key(&fill.event.from_key_text);
+        let fill_strategy = fill.strategy();
         let is_strategy_fill = fill_strategy == request.strategy_name
             || (runtime.strategy_allocation_active
                 && request.strategy_name == UNALLOCATED_STRATEGY
@@ -3059,6 +3172,7 @@ fn rebuild_strategy_pnl_with_prices(
         }
     }
     runtime.activate_snapshot_at(request.end_ts_us);
+    runtime.advance_allocations(request.end_ts_us, true)?;
     minute_marks::apply(
         prices,
         std::slice::from_mut(&mut runtime),
@@ -3482,6 +3596,15 @@ fn timeline_strategy_position_values(
                 .get(&(symbol.clone(), *venue_code))
                 .copied();
             let report = state.report(mark);
+            // Repeated fractional closes can leave a few floating-point ulps.
+            // Below eight-decimal quote precision these virtual rows have no
+            // reportable exposure. Preserve the FIFO, PnL, fees and raw fills.
+            if (strategy == INITIAL_POSITION_STRATEGY || is_system_position_close(strategy))
+                && report.long_position_value_quote.abs() + report.short_position_value_quote.abs()
+                    < 1e-8
+            {
+                continue;
+            }
             if report.long_quantity.abs() > 1e-12 || report.short_quantity.abs() > 1e-12 {
                 symbols.insert(symbol.clone());
             }
@@ -3533,6 +3656,9 @@ fn push_timeline_sample(
     points_by_strategy: &mut BTreeMap<String, Vec<NavTimelinePoint>>,
     prices: Option<&MinuteMarks>,
 ) -> Result<()> {
+    for runtime in runtimes.iter_mut() {
+        runtime.advance_allocations(ts_us, !points.is_empty())?;
+    }
     minute_marks::apply(
         prices,
         runtimes,
@@ -5903,7 +6029,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_keeps_system_close_and_initial_position_attribution_separate() {
+    fn timeline_system_close_realizes_initial_position_without_offsetting_inventory() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("trade01");
         write_events(
@@ -5934,10 +6060,15 @@ mod tests {
 
         assert_eq!(
             report.available_strategies,
-            vec![
-                INITIAL_POSITION_STRATEGY.to_string(),
-                "system_position_close".to_string(),
-            ]
+            vec![INITIAL_POSITION_STRATEGY.to_string()]
+        );
+        assert_eq!(report.strategy_points[0].symbol_count, 0);
+        assert_close(report.strategy_points[0].gross_position_value_quote, 0.0);
+        assert_close(
+            report.strategy_points[0]
+                .summary
+                .realized_pnl_before_fee_quote,
+            10.0,
         );
         let attributed_nav = report
             .strategy_points
@@ -5961,6 +6092,346 @@ mod tests {
         );
         assert_eq!(strategy_from_from_key("other:alpha"), UNATTRIBUTED_STRATEGY);
         assert_eq!(strategy_from_from_key("batch_exec:"), UNATTRIBUTED_STRATEGY);
+    }
+
+    #[test]
+    fn initial_system_close_partial_fills_exports_and_funding_share_ownership() {
+        let m = crate::kline::MINUTE_US;
+        for initial_qty in [1.0, -1.0] {
+            let close_side = if initial_qty > 0.0 { 2 } else { 1 };
+            let mut config = app_config(vec![source("trade01", Some(0.001))]);
+            config.sources[0].venue = "binance-futures".into();
+            let snapshots = Arc::new(BTreeMap::from([(
+                "trade01".into(),
+                position_snapshot("trade01", 1, initial_qty, Some(100.0)),
+            )]));
+            let strategies = Arc::new(BTreeMap::new());
+            let histories = Arc::new(BTreeMap::from([(
+                "trade01".into(),
+                NavSourceHistory {
+                    events: vec![
+                        strategy_event_at(
+                            65 * m,
+                            65 * m,
+                            "BTCUSDT",
+                            1,
+                            close_side,
+                            110.0,
+                            0.4,
+                            "SYSTEM_POSITION_CLOSE",
+                        ),
+                        strategy_event_at(
+                            70 * m,
+                            70 * m,
+                            "BTCUSDT",
+                            1,
+                            close_side,
+                            115.0,
+                            0.6,
+                            "system_position_close",
+                        ),
+                        strategy_event_at(80 * m, 80 * m, "BTCUSDT", 1, 1, 130.0, 2.0, "alpha"),
+                    ]
+                    .into_iter()
+                    .map(Arc::<NavEvent>::from)
+                    .collect(),
+                    ..Default::default()
+                },
+            )]));
+            let cache = NavTimelineCache::build(
+                config.clone(),
+                snapshots.clone(),
+                strategies.clone(),
+                histories.clone(),
+            )
+            .unwrap();
+            let prices = minute_marks(
+                &[
+                    (60 * m, 105.0),
+                    (65 * m, 110.0),
+                    (70 * m, 115.0),
+                    (75 * m, 140.0),
+                    (80 * m, 130.0),
+                    (90 * m, 150.0),
+                ],
+                1,
+            );
+            let report = cache
+                .rebuild_with_prices(
+                    timeline_request(60 * m, 90 * m, vec![], vec![]),
+                    true,
+                    Some(&prices),
+                )
+                .unwrap();
+            let initial = report
+                .strategy_points
+                .iter()
+                .find(|s| s.strategy == INITIAL_POSITION_STRATEGY)
+                .unwrap();
+            assert_close(
+                initial.summary.nav_change_before_fee_quote,
+                initial_qty * 8.0,
+            );
+            assert_close(initial.summary.estimated_trading_fee_quote, 0.113);
+            assert_eq!(initial.summary.fill_count, 2);
+            assert_eq!(initial.symbol_count, 0);
+            assert_close(initial.gross_position_value_quote, 0.0);
+            assert!(
+                !report
+                    .available_strategies
+                    .iter()
+                    .any(|s| is_system_position_close(s))
+            );
+            assert_close(
+                report.summary.nav_change_before_fee_quote,
+                40.0 + initial_qty * 8.0,
+            );
+            assert_close(
+                report
+                    .strategy_points
+                    .iter()
+                    .map(|s| s.summary.nav_change_after_fee_quote)
+                    .sum(),
+                report.summary.nav_change_after_fee_quote,
+            );
+
+            let export = rebuild_strategy_pnl_with_prices(
+                &config,
+                StrategyPnlRequest {
+                    source_id: "trade01".into(),
+                    strategy_name: INITIAL_POSITION_STRATEGY.into(),
+                    start_ts_us: 60 * m,
+                    end_ts_us: 90 * m,
+                },
+                &snapshots,
+                &strategies,
+                &histories,
+                Some(&prices),
+            )
+            .unwrap();
+            assert_eq!(
+                export
+                    .rows
+                    .iter()
+                    .filter(|r| r.row_kind == StrategyPnlRowKind::Fill)
+                    .count(),
+                2
+            );
+            assert_eq!(export.rows.last().unwrap().totals, initial.summary);
+
+            // Once closed, a later price jump cannot create phantom exposure or PnL.
+            let later = cache
+                .rebuild_with_prices(
+                    timeline_request(75 * m, 90 * m, vec![], vec![]),
+                    true,
+                    Some(&prices),
+                )
+                .unwrap();
+            assert_eq!(later.available_strategies, vec!["alpha"]);
+            assert_close(later.summary.nav_change_before_fee_quote, 40.0);
+            let rates = BTreeMap::from([(
+                "BTCUSDT".into(),
+                Arc::new(vec![crate::funding_rates::FundingRate {
+                    symbol: "BTCUSDT".into(),
+                    ts_us: 120 * m,
+                    rate: 0.001,
+                    mark_price: 100.0,
+                    rate_type: "Regular".into(),
+                }]),
+            )]);
+            let funding_report = cache
+                .rebuild(timeline_request(90 * m, 120 * m, vec![], vec![]), true)
+                .unwrap();
+            let funding = cache
+                .estimate_funding_records(&funding_report, true, &rates)
+                .unwrap();
+            assert_close(funding[0].strategies[INITIAL_POSITION_STRATEGY], 0.0);
+            assert_close(funding[0].strategies["alpha"], -0.2);
+            assert_close(funding[0].income_quote, -0.2);
+            assert!(
+                !funding[0]
+                    .strategies
+                    .keys()
+                    .any(|s| is_system_position_close(s))
+            );
+        }
+    }
+
+    #[test]
+    fn initial_system_close_does_not_cross_source_symbol_venue_or_named_strategy() {
+        let config = app_config(vec![
+            source("trade01", Some(0.0)),
+            source("trade02", Some(0.0)),
+        ]);
+        let snapshots = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            position_snapshot("trade01", 1, 1.0, Some(100.0)),
+        )]));
+        let mut spot =
+            strategy_event_at(4, 4, "BTCUSDT", 0, 2, 100.0, 1.0, "system_position_close");
+        spot.from_key_text = "chase_exec:SYSTEM_POSITION_CLOSE".into();
+        let histories = Arc::new(BTreeMap::from([
+            (
+                "trade01".into(),
+                NavSourceHistory {
+                    events: vec![
+                        strategy_event_at(
+                            2,
+                            2,
+                            "BTCUSDT",
+                            1,
+                            2,
+                            100.0,
+                            2.0,
+                            "system_position_close",
+                        ),
+                        strategy_event_at(
+                            3,
+                            3,
+                            "BTCUSDC",
+                            1,
+                            2,
+                            100.0,
+                            1.0,
+                            "system_position_close",
+                        ),
+                        spot,
+                        strategy_event_at(5, 5, "BTCUSDT", 1, 1, 100.0, 1.0, "alpha"),
+                    ]
+                    .into_iter()
+                    .map(Arc::<NavEvent>::from)
+                    .collect(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "trade02".into(),
+                NavSourceHistory {
+                    events: vec![strategy_event_at(
+                        2,
+                        2,
+                        "BTCUSDT",
+                        1,
+                        2,
+                        100.0,
+                        1.0,
+                        "system_position_close",
+                    )]
+                    .into_iter()
+                    .map(Arc::<NavEvent>::from)
+                    .collect(),
+                    ..Default::default()
+                },
+            ),
+        ]));
+        let cache =
+            NavTimelineCache::build(config, snapshots, Arc::new(BTreeMap::new()), histories)
+                .unwrap();
+        let state = &cache.sources[&("trade01".into(), true)].end_state;
+        // Excess system quantity remains factual unassigned exposure; alpha's lot is intact.
+        assert_close(
+            state.strategy_states[&(INITIAL_POSITION_STRATEGY.into(), "BTCUSDT".into(), 1)]
+                .report(None)
+                .net_quantity,
+            -1.0,
+        );
+        assert_close(
+            state.strategy_states[&("alpha".into(), "BTCUSDT".into(), 1)]
+                .report(None)
+                .net_quantity,
+            1.0,
+        );
+        assert!(state.strategy_states.contains_key(&(
+            "system_position_close".into(),
+            "BTCUSDC".into(),
+            1
+        )));
+        assert!(state.strategy_states.contains_key(&(
+            "SYSTEM_POSITION_CLOSE".into(),
+            "BTC".into(),
+            0
+        )));
+        let other = &cache.sources[&("trade02".into(), true)].end_state;
+        assert!(other.strategy_states.contains_key(&(
+            "system_position_close".into(),
+            "BTCUSDT".into(),
+            1
+        )));
+        assert!(
+            !other
+                .strategy_states
+                .keys()
+                .any(|(s, _, _)| s == INITIAL_POSITION_STRATEGY)
+        );
+    }
+
+    #[test]
+    fn inactive_system_dust_is_hidden_but_its_historical_fill_is_retained() {
+        let mut dust = strategy_event_at(
+            10,
+            10,
+            "1000PEPEUSDC",
+            1,
+            1,
+            0.004,
+            1e-10,
+            "system_position_close",
+        );
+        dust.order_type_code = INTERNAL_CROSS_ORDER_TYPE_CODE;
+        let cache = minute_mark_fixture(vec![dust]);
+        let history = cache
+            .rebuild(timeline_request(10, 20, vec![], vec![]), true)
+            .unwrap();
+        assert_eq!(history.strategy_points.len(), 1);
+        let later = cache
+            .rebuild(timeline_request(11, 20, vec![], vec![]), true)
+            .unwrap();
+        assert!(later.strategy_points.is_empty());
+        assert!(later.available_strategies.is_empty());
+    }
+
+    #[test]
+    fn fractional_initial_closes_do_not_report_roundoff_as_open_exposure() {
+        let config = app_config(vec![source("trade01", Some(0.0001))]);
+        let snapshots = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            position_snapshot("trade01", 1, 1.157, Some(80_000.0)),
+        )]));
+        let histories = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            NavSourceHistory {
+                events: (0..43)
+                    .map(|i| {
+                        Arc::<NavEvent>::from(strategy_event_at(
+                            100 + i,
+                            100 + i,
+                            "BTCUSDT",
+                            1,
+                            2,
+                            81_000.0,
+                            1.157 / 43.0,
+                            "system_position_close",
+                        ))
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        )]));
+        let cache =
+            NavTimelineCache::build(config, snapshots, Arc::new(BTreeMap::new()), histories)
+                .unwrap();
+        let report = cache
+            .rebuild(timeline_request(1, 200, vec![], vec![]), true)
+            .unwrap();
+        let initial = &report.strategy_points[0];
+        assert_eq!(initial.summary.fill_count, 43);
+        assert_eq!(initial.symbol_count, 0);
+        assert_eq!(initial.gross_position_value_quote, 0.0);
+        assert_close(initial.summary.nav_change_before_fee_quote, 1_157.0);
+        let later = cache
+            .rebuild(timeline_request(200, 300, vec![], vec![]), true)
+            .unwrap();
+        assert!(later.available_strategies.is_empty());
     }
 
     #[test]

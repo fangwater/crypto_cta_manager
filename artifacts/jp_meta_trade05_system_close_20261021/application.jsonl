@@ -1,0 +1,2 @@
+{"name": "applied", "body": {"inserted": true, "position_count": 60, "snapshot_ts_us": 1792585051450000, "source_id": "binance_exec_trade05"}}
+{"name": "allocation_record", "body": {"source_id": "binance_exec_trade05", "snapshot_ts_us": 1792585051450000, "position_count": 60, "created_at": "2026-10-21T12:26:02.538654+00:00"}}

@@ -1,0 +1,143 @@
+{
+  "protected": {
+    "processes": true,
+    "config_hashes": true,
+    "tables": true,
+    "cpus": true,
+    "webroot": true
+  },
+  "accounts": [
+    {
+      "query": "binance_exec_trade01_1d",
+      "nav_after_fee": 443.5342891804167,
+      "strategy_count_before": 5,
+      "strategy_count_after": 5,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade02_1d",
+      "nav_after_fee": 1208.8443277817614,
+      "strategy_count_before": 9,
+      "strategy_count_after": 9,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade03_1d",
+      "nav_after_fee": 135.26366847492037,
+      "strategy_count_before": 3,
+      "strategy_count_after": 3,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade04_1d",
+      "nav_after_fee": 13009.707791550216,
+      "strategy_count_before": 9,
+      "strategy_count_after": 9,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade06_1d",
+      "nav_after_fee": 14145.48483473014,
+      "strategy_count_before": 8,
+      "strategy_count_after": 8,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade07_1d",
+      "nav_after_fee": 32758.68545393965,
+      "strategy_count_before": 8,
+      "strategy_count_after": 8,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade08_1d",
+      "nav_after_fee": 14920.909597156213,
+      "strategy_count_before": 5,
+      "strategy_count_after": 5,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade09_1d",
+      "nav_after_fee": 5795.211483351682,
+      "strategy_count_before": 6,
+      "strategy_count_after": 5,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade10_1d",
+      "nav_after_fee": 11397.440818388342,
+      "strategy_count_before": 5,
+      "strategy_count_after": 5,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade11_1d",
+      "nav_after_fee": 17294.80857561366,
+      "strategy_count_before": 5,
+      "strategy_count_after": 5,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade12_1d",
+      "nav_after_fee": 12565.118756042391,
+      "strategy_count_before": 5,
+      "strategy_count_after": 5,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_xy_lxy21_05_1d",
+      "nav_after_fee": 12585.521588545551,
+      "strategy_count_before": 3,
+      "strategy_count_after": 3,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade13_1d",
+      "nav_after_fee": 1237.9495414365774,
+      "strategy_count_before": 5,
+      "strategy_count_after": 5,
+      "funding_compared": true
+    },
+    {
+      "query": "binance_exec_trade14_1d",
+      "nav_after_fee": 8688.477955476375,
+      "strategy_count_before": 7,
+      "strategy_count_after": 5,
+      "funding_compared": true
+    },
+    {
+      "query": "hxl_history",
+      "nav_after_fee": 16797.732851609224,
+      "strategy_count_before": 7,
+      "strategy_count_after": 7,
+      "funding_compared": true
+    },
+    {
+      "query": "hxl_closed_usdt_1d",
+      "nav_after_fee": 0.0,
+      "strategy_count_before": 7,
+      "strategy_count_after": 5,
+      "funding_compared": true
+    }
+  ],
+  "hxl_initial_history": {
+    "fill_count": 193,
+    "volume_quote": 164144.97045000002,
+    "maker_fill_count": 193,
+    "maker_volume_quote": 164144.97045000002,
+    "taker_fill_count": 0,
+    "taker_volume_quote": 0.0,
+    "unknown_liquidity_fill_count": 0,
+    "unknown_liquidity_volume_quote": 0.0,
+    "realized_pnl_before_fee_quote": 283.63938134008134,
+    "estimated_trading_fee_quote": 16.414497045,
+    "realized_pnl_after_fee_quote": 267.2248842950813,
+    "floating_pnl_quote": -38.59934134008215,
+    "nav_change_before_fee_quote": 245.04003999999904,
+    "nav_change_after_fee_quote": 228.6255429549991
+  },
+  "hxl_initial_position_value": 0.0,
+  "protected_process_count": 90,
+  "config_hash_count": 16,
+  "errors": []
+}

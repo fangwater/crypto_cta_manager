@@ -145,18 +145,26 @@ impl NavTimelineCache {
                 })
                 .collect();
             let fills = &source.prepared.fill_events;
+            let mut allocation_index = state.next_allocation;
+            let allocations = &source.prepared.allocations;
             for &(settlement_ts_us, rate) in &settlements {
                 // The operator-selected estimate uses the scheduled hour.
                 // At/after-boundary fills never move the estimated cutoff.
                 while index < fills.len() && fills[index].fill_ts_us < settlement_ts_us {
                     let fill = &fills[index];
+                    apply_funding_allocations(
+                        allocations,
+                        &mut allocation_index,
+                        fill.fill_ts_us,
+                        &mut strategies,
+                    );
                     if fill.event.venue_code == 1 {
                         let signed = match fill.side {
                             Side::Buy => fill.event.amount_update,
                             Side::Sell => -fill.event.amount_update,
                         };
                         *quantities.entry(fill.event.symbol.clone()).or_default() += signed;
-                        let strategy = strategy_from_from_key(&fill.event.from_key_text);
+                        let strategy = fill.strategy();
                         if !(state.strategy_allocation_active
                             && is_system_position_close(&strategy))
                         {
@@ -167,6 +175,12 @@ impl NavTimelineCache {
                     }
                     index += 1;
                 }
+                apply_funding_allocations(
+                    allocations,
+                    &mut allocation_index,
+                    settlement_ts_us,
+                    &mut strategies,
+                );
                 if source
                     .prepared
                     .snapshot_ts_us
@@ -231,6 +245,25 @@ impl NavTimelineCache {
             ))
         });
         Ok(records)
+    }
+}
+
+fn apply_funding_allocations(
+    snapshots: &[allocation::AllocationSnapshot],
+    index: &mut usize,
+    before_us: i64,
+    strategies: &mut BTreeMap<(String, String), f64>,
+) {
+    while let Some(snapshot) = snapshots.get(*index) {
+        if snapshot.snapshot_ts_us >= before_us {
+            break;
+        }
+        for p in &snapshot.positions {
+            if p.venue_code == 1 {
+                strategies.insert((p.strategy.clone(), p.symbol.clone()), p.after_qty);
+            }
+        }
+        *index += 1;
     }
 }
 
@@ -428,7 +461,8 @@ mod tests {
         let records = cache
             .estimate_funding_records(&report, false, &rates)
             .unwrap();
-        assert!((records[0].strategies["__initial_position__"] + 0.2).abs() < 1e-12);
+        assert!((records[0].strategies["__initial_position__"] + 0.1).abs() < 1e-12);
+        assert!(!records[0].strategies.contains_key("SYSTEM_POSITION_CLOSE"));
         assert!((records[0].income_quote + 0.2).abs() < 1e-12);
         report.selected_source_ids = vec!["another-account".into()];
         assert!(

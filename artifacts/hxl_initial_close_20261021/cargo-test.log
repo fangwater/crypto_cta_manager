@@ -1,0 +1,498 @@
+   Compiling crypto_cta_manager v0.1.0 (/home/fanghaizhou/crypto_cta_manager)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.67s
+     Running unittests src/lib.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/crypto_cta_manager-93158adb8c5dd1d6)
+
+running 388 tests
+test account_ipc::tests::aggregates_usdt_and_bfusd_wallet_rows ... ok
+test account_ipc::tests::decodes_okx_unified_unimmr_and_keeps_the_newer_sample ... ok
+test account_ipc::tests::a_new_poll_replaces_previous_asset_rows ... ok
+test account_ipc::tests::decodes_standard_um_wallet_equity ... ok
+test account_ipc::tests::account_total_keeps_multi_asset_collateral_after_newer_wallet_rows ... ok
+test account_ipc::tests::ignores_non_stable_wallet_rows ... ok
+test account_ipc::tests::initial_margin_preserves_zero_and_missing_without_using_maintenance ... ok
+test account_ipc::tests::rapidx_total_equity_is_scoped_to_its_account_stream_and_keeps_newest_value ... ok
+test account_ipc::tests::rejects_invalid_account_equity_without_affecting_other_scopes ... ok
+test account_ipc::tests::unified_equity_and_risk_are_source_scoped_and_never_approximate_from_wallets ... ok
+test account_overview::daily::tests::drawdown_includes_intraday_nav_and_requires_full_coverage ... ok
+test account_overview::daily::tests::missing_boundary_invalid_nav_and_misaligned_anchor_are_rejected ... ok
+test account_overview::daily::tests::reverse_nav_preserves_signed_daily_changes_and_anchor ... ok
+test account_overview::margin::tests::factual_margin_preserves_zero_and_rejects_missing_invalid_values ... ok
+test account_overview::margin::tests::coin_and_rapidx_never_use_native_account_credentials_or_endpoint ... ok
+test account_overview::tests::daily_profit_and_risk_use_factual_equity_without_order_nav ... ok
+test account_overview::tests::daily_baseline_does_not_reset_at_utc_midnight ... ok
+test account_overview::tests::shanghai_date_boundaries_and_drawdown_order ... ok
+test acquisition_cost::tests::acquisition_breakdown_uses_the_same_quantity_for_both_prices ... ok
+test account_overview::tests::daily_baseline_requires_a_fresh_sample_at_the_shanghai_boundary ... ok
+test acquisition_cost::tests::acquisition_delay_buckets_have_stable_boundaries ... ok
+test acquisition_cost::tests::acquisition_pages_are_latest_first ... ok
+test account_overview::tests::missing_baselines_stale_equity_and_zero_margin_are_distinct ... ok
+test account_overview::tests::drawdown_requires_fifteen_days_and_follows_time_order ... ok
+test acquisition_cost::tests::acquisition_shortfall_is_side_aware ... ok
+test acquisition_cost::tests::detail_sort_keeps_unknown_after_negative_costs_and_handles_empty_pages ... ok
+test acquisition_cost::tests::empty_execution_is_unavailable_rather_than_zero_delay ... ok
+test acquisition_cost::tests::execution_diagnostics_weight_by_absolute_quantity_and_include_window_boundary ... ok
+test acquisition_cost::tests::strategy_drilldown_finds_small_behind_mid_pages_without_mixing_fills ... ok
+test acquisition_cost::tests::symbol_drilldown_finds_old_worst_delta_and_preserves_fill_identity ... ok
+test analysis::tests::incomplete_results_are_not_reused ... ok
+test auth::tests::session_cookie_parser_ignores_other_cookies ... ok
+test acquisition_cost::tests::execution_plot_sampling_preserves_extrema_without_sampling_statistics ... ok
+test bfusd_auto::tests::account_limits_reject_non_finite_values ... ok
+test bfusd_auto::tests::account_reserve_rejects_invalid_amounts_and_allows_large_reserves ... ok
+test bfusd_auto::tests::account_default_route_is_bound_explicitly_without_rewriting_trading_config ... ok
+test bfusd_auto::tests::negative_usdt_wallet_balance_is_a_valid_skip_condition ... ok
+test analysis::tests::concurrent_distinct_queries_shrink_back_to_capacity ... ok
+test bfusd_auto::tests::round_amount_retains_wallet_usdt_before_applying_other_limits ... ok
+test bfusd_auto::tests::round_amount_respects_withdrawable_quota_cap_and_margin ... ok
+test bfusd_auto::tests::spot_bfusd_sweep_uses_only_free_balance_with_exact_precision ... ok
+test bfusd_auto::tests::subscription_fee_detects_non_par_conversion ... ok
+test bnb_auto::tests::hedge_adjustment_uses_actual_exposure_and_preserves_legacy_zero ... ok
+test bnb_auto::tests::hedge_adjustment_waits_for_completed_target_without_live_orders ... ok
+test bfusd_auto::tests::exchange_rate_limit_is_shared_across_clients_before_another_request ... ok
+test bnb_auto::tests::hedge_cooldown_survives_clock_rollback_and_legacy_settings ... ok
+test bnb_auto::tests::hedge_ownership_ignores_only_completed_system_close_float_rounding ... ok
+test bnb_auto::tests::quotes_require_exact_quantity_freshness_and_cost_bound ... ok
+test bnb_auto::tests::system_hedge_name_cannot_be_published_or_deleted_through_catalog ... ok
+test bnb_auto::tests::thresholds_are_independently_configurable_and_hysteretic ... ok
+test bfusd_auto::tests::source_ips_follow_trade_engine_config ... ok
+test bfusd_auto::tests::treasury_rounds_share_rotation_without_changing_account_ips ... ok
+test config::tests::accepts_multiple_independent_sources ... ok
+test config::tests::display_name_prefers_alias ... ok
+test config::tests::enabled_monitor_requires_a_webhook_environment_name ... ok
+test config::tests::fee_rates_overlay_replaces_matching_sources_only ... ok
+test config::tests::kline_path_must_not_reuse_exec_persist_manager ... ok
+test bfusd_auto::tests::account_trigger_and_reserve_survive_reload_without_an_operation_token ... ok
+test config::tests::monitor_not_ready_threshold_defaults_and_validates ... ok
+test config::tests::quote_fee_validation_and_selection_preserve_zero_and_negative_rates ... ok
+test config::tests::nav_fee_rate_is_required_only_when_requested ... ok
+test config::tests::accepts_but_does_not_use_legacy_share_unit_config ... ok
+test config::tests::exec_loopback_origins_must_be_http_loopback ... ok
+test config::tests::redis_url_must_be_loopback ... ok
+test config::tests::rejects_duplicate_enabled_paths ... ok
+test config::tests::example_config_stays_valid ... ok
+test config::tests::rejects_duplicate_source_ids ... ok
+test config::tests::jp_meta_config_enables_six_trade_accounts ... ok
+test config::tests::rejects_invalid_estimated_fee_rate ... ok
+test config::tests::rejects_invalid_or_duplicate_gateway_prefixes ... ok
+test exchange_leverage::tests::formats_okx_swap_symbol ... ok
+test exchange_leverage::tests::okx_unified_account_requires_acct_lv_at_least_three ... ok
+test exchange_leverage::tests::parses_binance_fee_tier_and_commission_rates ... ok
+test exchange_leverage::tests::parses_binance_multi_assets_mode ... ok
+test exchange_leverage::tests::parses_binance_position_risk_leverage ... ok
+test exchange_leverage::tests::parses_okx_leverage_info ... ok
+test exchange_leverage::tests::parses_okx_usdt_swap_fee_group_into_manager_sign ... ok
+test exchange_leverage::tests::percent_encodes_unicode_binance_symbols_before_signing ... ok
+test exchange_leverage::tests::rejects_missing_binance_fee_fields ... ok
+test exchange_leverage::unified::tests::missing_or_unsafe_modes_and_ambiguous_leverage_fail_closed ... ok
+test exec_routing::tests::perpetual_quote_routes_linear_and_coin_symbols_without_delivery_aliases ... ok
+test execution_slippage::tests::fees_and_rebates_use_the_same_turnover_and_loss_sign ... ok
+test funding::rapidx::tests::request_scopes_only_funding_and_signature_uses_sorted_raw_parameters ... ok
+test funding::tests::enabling_requires_a_configured_matching_token ... ok
+test funding::tests::funding_ledger_retries_preserve_decimal_identity_and_atomic_cursor ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test funding::tests::funding_preserves_signed_decimal_and_rejects_unrelated_income ... ok
+test funding::tests::funding_boundaries_and_account_symbol_filters_preserve_order_nav ... ok
+test funding::tests::incremental_windows_advance_and_replay_only_recent_tail ... ok
+test funding_rates::reconciliation_tests::reconciliation_separates_observation_gaps_posting_delays_and_source_identity ... ok
+test funding_rates::tests::boundary_income_is_kept_after_zero_baseline_and_in_zero_duration_windows ... ok
+test funding_rates::tests::validates_public_settlements_and_preserves_negative_rates_and_usdc ... ok
+test kline::tests::measure_100_symbols_one_day_storage ... ignored, offline storage capacity measurement; 144000 synthetic candles
+test kline::tests::request_weight_allows_a_burst_but_never_exceeds_a_rolling_minute ... ok
+test kline::tests::signal_schedule_excludes_the_partial_arrival_minute ... ok
+test kline::tests::vwap_uses_quote_over_base_not_ohlc_average_and_zero_volume_has_no_price ... ok
+test kline::tests::weighted_requests_wait_until_enough_of_the_window_expires ... ok
+test manager_db::tests::sequence_keys_stay_ordered_within_the_same_microsecond ... ok
+test market_rules::rapidx::tests::accepts_numeric_binance_contract_size_one ... ok
+test market_rules::rapidx::tests::cash_rules_have_no_contract_size_and_do_not_replace_perp_rules ... ok
+test market_rules::rapidx::tests::cash_rules_skip_other_quote_markets_but_reject_hidden_target_rows ... ok
+test market_rules::rapidx::tests::parses_binance_and_preserves_decimal_strings ... ok
+test market_rules::rapidx::tests::parses_okx_contract_quantity_rules ... ok
+test market_rules::rapidx::tests::rejects_bad_business_code_target_key_and_target_row_mismatch ... ok
+test market_rules::rapidx::tests::rejects_duplicate_raw_symbol_keys ... ok
+test market_rules::tests::live_uta_public_rules ... ignored, read-only public exchange API smoke test
+test market_rules::rapidx::tests::rejects_target_malformed_records_and_unknown_states ... ok
+test market_rules::tests::parses_binance_coin_futures_contract_size ... ok
+test analysis::tests::coalesces_concurrent_queries_and_retries_errors ... ok
+test market_rules::tests::parses_binance_unicode_symbol_filters ... ok
+test exec_routing::tests::native_uta_sources_keep_usdt_market_and_account_namespaces ... ok
+test market_rules::tests::rejects_non_positive_rule_values ... ok
+test market_rules::tests::parses_okx_linear_usdt_swap ... ok
+test market_rules::unified::tests::bitget_uses_decimal_multipliers_and_retains_inactive_status ... ok
+test config::tests::target_proxy_is_opt_in_and_validates_venue_and_contract_units ... ok
+test market_rules::tests::explicit_missing_env_never_falls_back_to_native ... ok
+test market_rules::unified::tests::bybit_pages_preserve_status_and_reject_partial_or_duplicate_snapshots ... ok
+test exchange_leverage::tests::parses_export_assignments_without_printing_secrets ... ok
+test config::tests::funding_requires_complete_fixed_egress_configuration ... ok
+test market_rules::tests::source_backend_matches_exec_mapping_precedence_and_fails_closed ... ok
+test kline::tests::unbound_trading_ips_exclude_the_resolved_route_and_require_public_exclusions ... ok
+test model::tests::decodes_factual_fill_role_and_rejects_invalid_or_truncated_tail ... ok
+test config::tests::monitor_enabled_defaults_on_and_can_be_disabled_for_provisioned_source ... ok
+test market_rules::tests::wire_contract_has_one_unversioned_shape ... ok
+test model::tests::decodes_historical_record_without_optional_bbo_tail ... ok
+test model::tests::decodes_v2_uniform_order_with_bbo ... ok
+test model::tests::rejects_non_timestamp_key ... ok
+test monitor::tests::delayed_issue_alerts_after_grace_and_then_recovers ... ok
+test monitor::tests::delayed_issue_disappears_without_alert_or_recovery ... ok
+test monitor::tests::dingtalk_payload_is_text_with_at_fields ... ok
+test monitor::tests::heartbeat_fires_once_per_slot_and_consumes_quiet_slots ... ok
+test monitor::tests::heartbeat_message_reports_channel_status ... ok
+test monitor::tests::heartbeat_content_uses_heartbeat_prefix_and_host_tag ... ok
+test monitor::tests::market_notices_and_order_notices_use_separate_channels ... ok
+test monitor::tests::long_unicode_notice_is_truncated_on_a_character_boundary ... ok
+test monitor::tests::market_symbols_are_normalized ... ok
+test monitor::tests::missing_zero_target_uses_ready_snapshot_after_publish ... ok
+test monitor::tests::nonterminal_order_update_keeps_stale_order_alert ... ok
+test monitor::tests::not_ready_requires_continuous_fresh_snapshots_per_source ... ok
+test monitor::tests::position_check_alerts_only_when_configured_gap_is_stuck ... ok
+test monitor::tests::position_check_detects_unapplied_strategy_when_account_net_is_unchanged ... ok
+test monitor::tests::position_check_suppresses_dust_residuals ... ok
+test monitor::tests::quiet_window_covers_hours_and_wraps_overnight ... ok
+test monitor::tests::recovery_notice_reuses_alert_message ... ok
+test monitor::tests::repeat_alert_interval_has_thirty_second_floor ... ok
+test monitor::tests::shanghai_time_uses_fixed_utc8 ... ok
+test monitor::tests::signed_url_preserves_webhook_and_adds_signature_parameters ... ok
+test monitor::tests::signed_url_without_secret_is_unchanged ... ok
+test monitor::tests::source_issues_carry_the_account_alias ... ok
+test monitor::tests::stale_snapshot_only_reports_stale_position_issue ... ok
+test monitor::tests::terminal_order_update_clears_stale_uniform_new_order ... ok
+test monitor::tests::tracker_notifies_on_transition_repeats_and_recovery ... ok
+test monitor::tests::terminal_unmatched_trade_clears_stale_uniform_new_order ... ok
+test nav::fill_recovery::tests::execution_before_recorded_order_creation_is_not_reassigned ... ok
+test nav::fill_recovery::tests::missing_partial_is_recovered_and_late_lifecycle_does_not_duplicate_it ... ok
+test nav::fill_recovery::tests::replaces_previously_priced_partial_fills_without_adding_quantity ... ok
+test nav::fill_recovery::tests::uses_each_real_price_once_and_preserves_execution_time_and_attribution ... ok
+test nav::fill_recovery::tests::incomplete_or_conflicting_evidence_never_consumes_a_lifecycle_delta ... ok
+test nav::fill_recovery::tests::zero_fill_lifecycle_recovers_only_matching_deduplicated_executions ... ok
+test nav::tests::applies_maker_rebate_and_taker_cost_by_liquidity_role ... ok
+test nav::tests::configured_initial_reference_supports_a_snapshot_without_later_fills ... ok
+test nav::tests::estimates_fees_on_every_fill_and_reports_before_and_after_fee ... ok
+test nav::tests::explicit_mark_override_revalues_open_lots ... ok
+test nav::tests::fifo_uses_trade_update_time_instead_of_persistence_order ... ok
+test nav::tests::ignores_non_fill_events_but_rejects_invalid_fill_data ... ok
+test nav::tests::initial_position_defaults_reference_to_first_fill_price ... ok
+test nav::tests::initial_position_without_reference_requires_a_later_fill ... ok
+test nav::tests::initial_position_seeds_fifo_without_volume_or_fee ... ok
+test nav::tests::internal_cross_fill_counts_position_with_zero_fee ... ok
+test nav::tests::inverse_fifo_closes_equal_contract_face_at_different_prices ... ok
+test nav::tests::inverse_fifo_revalues_base_quantity_and_handles_short_reversal ... ok
+test nav::tests::latest_fill_price_marks_each_venue_by_default ... ok
+test nav::tests::nav_cache_refresh_benchmark ... ignored, opt-in memory and refresh benchmark
+test nav::tests::nav_requires_a_valid_configured_fee_rate ... ok
+test nav::tests::quantity_fifo_closes_oldest_lots_and_handles_reversal ... ok
+test nav::tests::same_timestamp_timeline_points_are_replaced ... ok
+test nav::tests::snapshot_excludes_earlier_rocksdb_events ... ok
+test nav::tests::source_fifos_never_match_during_aggregation ... ok
+test nav::tests::spot_and_perpetual_fifo_realize_independently_then_sum ... ok
+test nav::tests::strategy_from_key_accepts_stable_exec_family_names ... ok
+test nav::tests::symbols_never_match_each_other ... ok
+test nav::tests::uniform_fill_roles_preserve_mixed_liquidity_on_the_same_order ... ok
+test nav::tests::venue_fifos_never_match_each_other ... ok
+test order_config::tests::chase_runtime_contract_rejects_removed_fixed_usdt_fields ... ok
+test order_config::tests::coin_symbols_roundtrip_between_catalog_and_exchange_contracts ... ok
+test order_config::tests::explicit_clear_round_trips_without_turning_numeric_zero_into_a_command ... ok
+test order_config::tests::grid_controls_preserve_defaults_and_reject_invalid_market_values ... ok
+test order_config::tests::grid_catalog_overrides_and_runtime_roundtrip ... ok
+test order_config::tests::grid_parameters_only_travel_with_the_grid_algorithm ... ok
+test order_config::tests::legacy_order_parameters_default_max_batch ... ok
+test order_config::tests::only_pov_and_chase_are_experimental ... ok
+test order_config::tests::runtime_parameters_use_the_selected_family_contract ... ok
+test order_config::tests::save_payload_rejects_targets ... ok
+test order_config::tests::symbol_overrides_replace_only_their_defined_fields ... ok
+test order_config::tests::target_position_accepts_legacy_qty_and_signal_object ... ok
+test order_config::tests::validates_order_parameters ... ok
+test order_config::tests::validates_strategy_names ... ok
+test position_archive::tests::folds_legacy_leverage_into_effective_historical_shares ... ok
+test position_archive::tests::reads_legacy_messages_without_published_accounts ... ok
+test postgres::tests::symbol_index_keeps_earliest_event_and_fill_bounds ... ok
+test reconcile::tests::different_exchange_orders_are_not_merged_by_client_id ... ok
+test reconcile::tests::repeated_updates_use_maximum_cumulative_quantity ... ok
+test redis_runtime::tests::bnbusdc_reservation_is_shared_and_source_scoped_and_allows_clear ... ok
+test redis_runtime::tests::chase_payload_matches_exec_contract ... ok
+test redis_runtime::tests::clear_survives_scaling_runtime_filter_and_readback ... ok
+test redis_runtime::tests::independent_market_publish_switch_and_removal_never_cross_sources ... ignored, requires EXEC_REDIS_TEST_SERVER_BIN pointing to a local redis-server binary
+test redis_runtime::tests::decode_strategy_names_sorts_and_rejects_duplicates ... ok
+test redis_runtime::tests::exec_order_rate_limit_contract_uses_account_risk_hash ... ok
+test redis_runtime::tests::monitor_target_state_decodes_structured_and_legacy_targets ... ok
+test redis_runtime::tests::monitor_target_state_requires_a_publish_version ... ok
+test redis_runtime::tests::next_version_never_goes_backwards ... ok
+test redis_runtime::tests::redis_payload_omits_empty_overrides_and_preserves_symbol_overrides ... ok
+test redis_runtime::tests::runtime_target_signal_filter_uses_effective_symbol_order_strategy ... ok
+test reload_notify::tests::reload_notify_rejects_unconfirmed_version ... ok
+test reload_notify::tests::reload_notify_round_trips_strategy_and_version ... ok
+test snapshot::tests::strategy_snapshot_derives_an_account_anchor_without_losing_net_quantity ... ok
+test snapshot::tests::strategy_snapshot_rejects_mixed_marks_for_one_symbol_venue ... ok
+test snapshot::tests::validates_position_identity_and_values ... ok
+test strategy_catalog::tests::binding_shares_are_the_only_target_multiplier ... ok
+test strategy_catalog::tests::coin_targets_and_overrides_share_one_canonical_symbol_and_keep_base_units ... ok
+test strategy_catalog::tests::contract_leverage_must_be_a_supported_integer ... ok
+test strategy_catalog::tests::fee_rates_accept_any_finite_fraction ... ok
+test strategy_catalog::tests::official_unicode_symbols_are_valid_targets_and_overrides ... ok
+test strategy_catalog::tests::position_creator_permissions_agree_for_catalog_and_write_checks ... ok
+test strategy_catalog::tests::shares_must_be_nonnegative_and_finite ... ok
+test strategy_catalog::tests::symbol_order_strategy_overrides_require_a_target_and_valid_template_name ... ok
+test strategy_catalog::tests::theoretical_twap_fee_defaults_to_account_maker_taker_average ... ok
+test target_proxy::tests::converts_units_both_directions_and_preserves_clear_signals_and_overrides ... ok
+test target_proxy::tests::filters_missing_inactive_and_other_markets_without_guessing_names ... ok
+test target_proxy::tests::rejects_stale_provenance_collisions_and_invalid_arithmetic ... ok
+test theoretical_nav::tests::fifo_crosses_from_short_to_long ... ok
+test theoretical_nav::tests::fifo_quantity_check_scales_with_large_positions ... ok
+test theoretical_nav::tests::fifo_realizes_long_and_keeps_the_remainder ... ok
+test theoretical_nav::tests::open_position_keeps_accruing_pnl_between_signals ... ok
+test theoretical_nav::tests::persisted_float_tail_does_not_create_an_execution ... ok
+test theoretical_nav::tests::repeated_target_metadata_does_not_create_an_execution ... ok
+test theoretical_nav::tests::repeated_timestamp_replaces_the_sparse_portfolio_point ... ok
+test theoretical_nav::tests::target_delta_is_frozen_between_distinct_vectors ... ok
+test theoretical_nav::tests::theoretical_nav_has_before_and_after_fee_values ... ok
+test treasury_rate_limit::tests::heavy_discovery_has_a_shared_rolling_budget ... ok
+test treasury_rate_limit::tests::quotes_respect_long_windows_and_have_acceptance_headroom ... ok
+test treasury_rate_limit::tests::throttling_cools_every_pool_and_headers_account_for_external_usage ... ok
+test virtual_accounts::tests::follows_scale_shares_and_reject_invalid_or_overflowing_multipliers ... ok
+test virtual_accounts::tests::virtual_numbers_skip_existing_ids_and_leave_aliases_independent ... ok
+test virtual_accounts::tests::virtual_ownership_and_delegation_do_not_grant_further_delegation ... ok
+test viz_snapshot::tests::account_risk_rejects_foreign_venue_and_missing_or_negative_values ... ok
+test viz_snapshot::tests::extracts_complete_strategy_allocation_rows ... ok
+test viz_snapshot::tests::extracts_execution_fields_for_health_monitoring ... ok
+test viz_snapshot::tests::extracts_only_the_requested_strategy_current_qty ... ok
+test viz_snapshot::tests::missing_exec_state_returns_empty_positions ... ok
+test web::equity_history::tests::shanghai_first_boundary_respects_microsecond_history_start ... ok
+test web::tests::creating_position_strategies_requires_a_session_even_with_a_publish_token ... ok
+test web::tests::exec_order_rate_limit_validation_accepts_disabled_and_rejects_out_of_range ... ok
+test web::tests::existing_position_strategies_keep_owner_grants_and_token_authorization ... ok
+test web::tests::experimental_algorithm_token_is_exact_and_only_required_on_gated_changes ... ok
+test web::tests::experimental_binding_gate_covers_select_and_reenable_only ... ok
+test web::tests::manager_publish_client_download_is_the_checked_in_script ... ok
+test web::tests::only_new_experimental_symbol_overrides_require_the_token ... ok
+test web::tests::parses_csv_query_values_without_losing_source_identity ... ok
+test web::tests::account_timeline_arrow_is_a_versioned_table_with_separate_pnl_columns ... ok
+test web::tests::position_access_token_rules ... ok
+test web::tests::source_grants_allow_only_their_account_mutations ... ok
+test web::tests::strategy_pnl_summary_uses_the_terminal_window_totals ... ok
+test web::tests::trading_account_mode_gate_allows_zero_targets_only ... ok
+test web::tests::treasury_operations_require_the_selected_accounts_configure_permission ... ok
+test web::tests::unix_timestamp_is_positive_microseconds ... ok
+test web::tests::validates_millisecond_timestamp_conversion ... ok
+test web::tests::estimated_funding_arrow_is_nullable_and_matches_json_strategy_totals ... ok
+test web::tests::strategy_timeline_arrow_is_a_long_table ... ok
+test web::tests::strategy_pnl_arrow_stream_round_trips_without_losing_float_values ... ok
+test web::tests::symbols_merge_index_rows_with_snapshot_anchors ... ok
+test web::tests::resolve_publish_source_requires_enabled_exec_config ... ok
+test monitor::tests::market_check_alerts_only_when_no_watched_symbol_is_fresh ... ok
+test nav::tests::unallocated_strategy_pnl_lists_system_close_fills ... ok
+test monitor::tests::linear_exec_does_not_require_an_unconfigured_coin_feed ... ok
+test monitor::tests::independent_market_sources_require_their_own_fresh_quote ... ok
+test nav::tests::all_disabled_sources_rebuild_an_empty_nav_report ... ok
+test nav::tests::allocation_mode_unallocated_anchor_tracks_the_residual ... ok
+test nav::tests::strategy_pnl_returns_raw_strategy_fills_and_an_exact_terminal_mark ... ok
+test nav::tests::strategy_allocation_anchor_replaces_the_legacy_account_anchor ... ok
+test nav::tests::allocation_mode_reports_system_close_as_unallocated_residual ... ok
+test nav::tests::uninitialized_source_directory_is_an_empty_history ... ok
+test nav::tests::allocation_mode_system_close_does_not_consume_named_strategy_lots ... ok
+test kline::tests::rejects_trading_binding_and_public_ip_conflicts ... ok
+test funding::rapidx::tests::statements_preserve_signed_income_identity_and_require_exact_account_market_time ... ok
+test exec_routing::tests::deployment_market_is_fixed_for_every_backend ... ok
+test funding::rapidx::tests::incomplete_or_changed_pages_are_rejected_and_empty_history_is_valid ... ok
+test funding::tests::funding_requires_fixed_egress_separate_from_every_trading_ip ... ok
+test nav::tests::missing_rocksdb_directory_is_an_empty_source_not_an_error ... ok
+test market_rules::rapidx::tests::fetch_signs_empty_query_and_sets_required_headers ... ok
+test exec_routing::tests::grid_binding_gate_covers_base_and_symbol_algorithms ... ok
+test funding::tests::public_ip_test_requires_bound_egress_matching_response_and_http_success ... ok
+test nav::tests::inactive_system_dust_is_hidden_but_its_historical_fill_is_retained ... ok
+test nav::tests::cached_strategy_pnl_uses_catalog_fees_and_the_new_empty_account_anchor ... ok
+test nav::funding_estimate::tests::regular_funding_uses_the_hour_even_when_published_milliseconds_later ... ok
+test nav::tests::minute_valuation_keeps_sources_cash_perps_and_symbol_selection_isolated ... ok
+test nav::tests::initial_system_close_does_not_cross_source_symbol_venue_or_named_strategy ... ok
+test nav::tests::fifo_cache_new_generation_repairs_late_fills_and_fee_changes ... ok
+test nav::tests::minute_valuation_system_close_stays_in_account_residual ... ok
+test nav::tests::strategy_only_initial_position_preserves_nav_direction_and_history_start ... ok
+test nav::tests::minute_valuation_keeps_boundary_executions_and_rebates ... ok
+test nav::funding_estimate::tests::estimates_signed_strategy_inventory_residual_and_usdc_without_spot_contamination ... ok
+test nav::tests::minute_valuation_requires_all_open_strategy_marks_even_when_account_is_flat ... ok
+test nav::funding_estimate::tests::account_snapshot_keeps_initial_owner_and_sources_do_not_mix ... ok
+test nav::tests::fractional_initial_closes_do_not_report_roundoff_as_open_exposure ... ok
+test nav::tests::minute_valuation_removes_stale_start_and_marks_without_a_trade ... ok
+test market_rules::unified::tests::bybit_fetch_requires_all_pages_and_rejects_a_loop ... ok
+test exchange_leverage::tests::binance_account_apis_route_sign_and_restore_coin_symbols ... ok
+test bnb_auto::tests::dry_run_defaults_are_read_only ... ok
+test funding::tests::rapidx_trading_ip_exception_requires_source_opt_in_backend_and_current_binding ... ok
+test bnb_auto::tests::disabled_bnb_settings_leave_cta_contract_available_after_save_and_restart ... ok
+test exchange_leverage::tests::rapidx_publish_uses_portfolio_mode_without_native_credentials ... ok
+test bnb_auto::tests::fee_wallet_refill_moves_existing_bnb_without_buying ... ok
+test config::tests::dashboard_refresh_defaults_and_validates_host_configs ... ok
+test bnb_auto::tests::unsupported_direct_pair_never_redeems_or_uses_usdt ... ok
+test nav::tests::initial_system_close_partial_fills_exports_and_funding_share_ownership ... ok
+test bfusd_auto::tests::subscription_spends_only_the_excess_and_skips_the_reserve_boundary ... ok
+test account_overview::tests::daily_reconstruction_populates_history_without_inventing_risk_or_exposing_sources ... ok
+test bnb_auto::tests::receiving_balance_must_arrive_and_unknown_transfer_never_repeats ... ok
+test bnb_auto::tests::local_budget_exhaustion_never_creates_an_unknown_transaction ... ok
+test bnb_auto::tests::futures_direct_route_can_use_existing_spot_bfusd ... ok
+test exchange_leverage::unified::tests::native_uta_apis_sign_bind_verify_and_block_invalid_modes ... ok
+test bnb_auto::tests::direct_conversion_is_reconciled_after_lost_response_and_restart ... ok
+test bnb_auto::tests::spot_direct_conversion_uses_only_bfusd ... ok
+test bnb_auto::tests::bnb_runs_independently_of_bfusd_pause ... ok
+test funding_rates::reconciliation_tests::failed_refresh_retains_cache_and_applies_shared_retry_after_without_zero_estimates ... ok
+test account_overview::tests::observations_are_immutable_deduplicated_and_source_isolated ... ok
+test nav::tests::cached_fifo_checkpoints_match_full_replay_at_boundaries_and_with_strategy_residuals ... ok
+test account_overview::tests::historical_selection_preserves_dates_and_never_exposes_other_sources ... ok
+test nav::tests::quote_fees_separate_mixed_fills_and_refresh_cached_account_and_strategy_nav ... ok
+test kline::tests::dense_ranges_scan_once_and_later_queries_reuse_memory ... ok
+test kline::tests::sparse_minutes_use_one_deduplicated_batch_and_cache_repair_is_visible ... ok
+test position_archive::tests::appends_one_message_per_accepted_position_update ... ok
+test position_archive::tests::target_stream_preserves_execution_inputs_and_skips_snapshots_and_future_messages ... ok
+test theoretical_nav::tests::quote_fees_freeze_per_symbol_and_preserve_old_archived_rates ... ok
+test kline::tests::retention_only_deletes_kline_data_and_rejects_old_or_future_queries ... ok
+test theoretical_nav::tests::target_cache_coalesces_reads_keeps_fee_and_source_identity_and_resumes_same_timestamp ... ok
+test position_archive::tests::raw_json_page_keeps_stored_messages_unmodified_and_pages_by_sequence ... ok
+test kline::tests::cached_minutes_do_not_wait_for_a_different_range_backfill ... ok
+test theoretical_nav::tests::archived_proxy_targets_keep_account_units_signals_and_isolation ... ok
+test theoretical_nav::tests::empty_minute_is_skipped_and_remaining_minutes_share_the_entire_quantity ... ok
+test kline::tests::fresh_multi_symbol_queries_do_not_serialize_unused_request_budget ... ok
+test theoretical_nav::tests::minute_aligned_start_is_zero_without_dropping_its_execution_or_fee ... ok
+test theoretical_nav::tests::carried_inventory_uses_zero_fee_mark_anchor ... ok
+test theoretical_nav::tests::recent_late_target_rebuilds_the_tail_without_losing_its_next_delta ... ok
+test nav::minute_marks::tests::completed_marks_use_cache_separate_cash_and_perps_and_never_read_future_close ... ok
+test position_archive::tests::parallel_target_batches_preserve_order_and_resume_within_same_timestamp ... ok
+test theoretical_nav::tests::complete_empty_window_uses_closes_but_a_missing_candle_does_not ... ok
+test funding_rates::tests::caches_hourly_month_in_one_thousand_limit_request_and_coalesces_queries ... ok
+test theoretical_nav::tests::minutes_get_equal_quantity_despite_different_volume_and_later_targets_do_not_truncate ... ok
+test theoretical_nav::tests::traded_minute_weights_reconstruct_partial_window_inventory_without_seed_fees ... ok
+test nav::tests::timeline_uses_pre_window_fills_and_resets_the_window_to_zero ... ok
+test nav::tests::timeline_counts_a_fill_exactly_at_the_window_start ... ok
+test nav::minute_marks::tests::missing_cached_marks_stay_missing_until_repaired ... ok
+test nav::tests::uniform_only_history_keeps_canceled_fill_and_explicit_unknown ... ok
+test nav::tests::rebuilds_from_rocksdb_without_reading_the_database_url ... ok
+test theoretical_nav::tests::indexed_nav_inventory_matches_full_history_and_repairs_late_targets ... ok
+test rocks_source::tests::reads_newest_records_in_reverse_key_order ... ok
+test nav::tests::funding_discovers_decoded_usd_m_orders_and_earliest_creation_time ... ok
+test nav::tests::timeline_system_close_realizes_initial_position_without_offsetting_inventory ... ok
+test nav::tests::timeline_fee_after_nav_differs_by_the_estimated_window_fees ... ok
+test nav::tests::timeline_symbol_selection_changes_only_the_portfolio_curve ... ok
+test nav::tests::cached_history_rebuild_does_not_reopen_rocksdb ... ok
+test nav::tests::timeline_splits_one_source_nav_by_batch_exec_strategy ... ok
+test rocks_source::tests::reads_multiple_column_families_from_one_read_only_open ... ok
+test nav::tests::nav_history_store_keeps_other_sources_when_one_is_missing ... ok
+test nav::tests::nav_history_store_picks_up_a_database_created_later ... ok
+test nav::tests::timeline_returns_window_bounds_and_fifteen_minute_ticks ... ok
+test position_archive::tests::clear_remains_explicit_in_durable_archive_and_has_zero_theoretical_quantity ... ok
+test theoretical_nav::tests::missing_minute_suppresses_nav_and_cache_repair_reconstructs_without_ghost_holdings ... ok
+test kline::tests::empty_minutes_stay_missing_and_later_queries_only_retry_the_gap ... ok
+test nav::tests::persisted_mixed_strategy_fills_keep_two_fifos_and_one_strategy_total ... ok
+test position_archive::tests::continues_sequence_after_reopen ... ok
+test nav::tests::timeline_activates_each_source_snapshot_before_its_later_fills ... ok
+test nav::tests::nav_history_store_rescans_a_recreated_database ... ok
+test manager_db::tests::opens_existing_column_families_and_creates_position_updates ... ok
+test nav::tests::timeline_never_matches_positions_between_sources ... ok
+test theoretical_nav::tests::completed_curve_cache_skips_reads_and_invalidates_on_fees_targets_and_candles ... ok
+test kline::tests::cash_candle_cache_is_separate_from_same_pair_perpetuals ... ok
+test nav::tests::nav_history_store_merges_only_new_records ... ok
+test kline::tests::unicode_symbol_backfill_is_24h_and_concurrent_queries_or_restart_do_not_refetch ... ok
+test nav::tests::rebuild_recovers_real_execution_prices_without_mutating_exec_records ... ok
+test nav::tests::nav_history_store_keeps_checkpoints_after_a_failed_refresh ... ok
+test nav::tests::fifo_refresh_rebuilds_implicit_snapshot_reference_for_an_earlier_fill ... ok
+test nav::tests::history_retries_late_evidence_and_rebuilds_previously_priced_order_without_duplicates ... ok
+test nav::tests::incremental_rapidx_evidence_arrives_without_lifecycle_and_late_fills_do_not_duplicate ... ok
+test nav::tests::fifo_refresh_handles_role_corrections_skipped_generations_and_database_replacement ... ok
+test nav::tests::fifo_refresh_shares_fixed_history_and_replays_appends_and_late_fills ... ok
+test auth::tests::password_records_verify_and_reject_changes ... ok
+
+test result: ok. 383 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 5.63s
+
+     Running unittests src/bin/cta_monitor.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/cta_monitor-8c86bf5591aed82a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/cta_web.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/cta_web-41f935a098e06c51)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/fill_reconcile.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/fill_reconcile-3d8f378f5dc7334e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/nav_cached_marks.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/nav_cached_marks-7f410c40e20d380a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/nav_funding_check.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/nav_funding_check-a41975fd2408c771)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/nav_rebuild.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/nav_rebuild-b0855ffcb40f7f29)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/nav_snapshot.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/nav_snapshot-88374dd1eb089e78)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/nav_strategy_report.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/nav_strategy_report-87e281f1123805d6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/nav_strategy_snapshot.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/nav_strategy_snapshot-a696d8cfab30e2e4)
+
+running 9 tests
+test tests::chase_fills_use_the_stable_strategy_name ... ok
+test tests::exec_allocation_preserves_the_account_total_and_isolates_system_residual ... ok
+test tests::explicit_anchor_uses_only_later_fills_and_the_first_later_price ... ok
+test tests::ignores_quantity_remainders_below_execution_epsilon ... ok
+test tests::inference_preserves_small_initial_lots_and_account_quantity ... ok
+test tests::infers_initial_strategy_positions_and_account_residual_from_fills ... ok
+test tests::supplied_anchor_price_rejects_invalid_financial_values ... ok
+test tests::supplied_anchor_price_preserves_untouched_account_residual ... ok
+test tests::system_close_is_replayed_into_the_unallocated_anchor ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/nav_symbol_fills.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/nav_symbol_fills-aaf91eee1f43f151)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/unmatched_dump.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/unmatched_dump-b36c1c181c1b47ff)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/postgres_schema.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/postgres_schema-5846850a612b6472)
+
+running 15 tests
+test daily_equity_is_atomic_source_scoped_and_runs_once_per_shanghai_day ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test explicit_daily_equity_schema_preserves_existing_catalog_and_snapshots ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test grid_controls_maintenance_preserves_existing_market_settings_and_null_limits ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test grid_market_maintenance_preserves_execution_values_and_independent_edits ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test grid_schema_maintenance_and_catalog_preserve_existing_orders ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test initialization_failure_rolls_back_preceding_ddl ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test initializes_current_schema_without_ingestion_or_migration_tables ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test manager_operations_ignore_old_migration_history ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test order_template_ownership_preserves_shared_templates_and_creator ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test quote_fee_settings_roundtrip_preserve_defaults_and_explicit_clear ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test repeat_initialization_fails_and_preserves_business_data ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test shanghai_settlement_maintenance_invalidates_utc_derived_rows_only ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test virtual_follow_replaces_scales_stops_and_preserves_durable_delivery ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity ... ignored, requires an isolated local PostgreSQL 16 test cluster
+test virtual_owner_and_manager_grants_survive_edits_and_revoke_immediately ... ignored, requires an isolated local PostgreSQL 16 test cluster
+
+test result: ok. 0 passed; 0 failed; 15 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests crypto_cta_manager
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

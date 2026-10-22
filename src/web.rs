@@ -5133,6 +5133,7 @@ async fn build_dashboard(
     let nav_config = config.clone().with_fee_rates(&fee_rates);
     let mut snapshots = nav::SourcePositionSnapshots::new();
     let mut strategy_snapshots = nav::SourceStrategyPositionSnapshots::new();
+    let allocation_snapshots = nav::allocation::load(pool).await?;
     for source in config.sources.iter().filter(|source| source.enabled) {
         if let Some(snapshot) = postgres::load_latest_position_snapshot(pool, &source.id).await? {
             snapshots.insert(source.id.clone(), snapshot);
@@ -5193,12 +5194,13 @@ async fn build_dashboard(
     let nav_history_store = Arc::clone(nav_history_store);
     let (report, histories, snapshots, strategy_snapshots, nav_timelines) =
         tokio::task::spawn_blocking(move || {
-            let histories = {
+            let mut histories = {
                 let mut store = nav_history_store
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 store.refresh(&nav_config)?
             };
+            nav::allocation::attach(&mut histories, &allocation_snapshots);
             let histories = Arc::new(histories);
             let snapshots = Arc::new(snapshots);
             let strategy_snapshots = Arc::new(strategy_snapshots);

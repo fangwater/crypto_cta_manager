@@ -1,0 +1,311 @@
+{
+  "account_quantities": [
+    {
+      "symbol": "1INCHUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "fills": -0.10000000000000031,
+      "live": -0.1,
+      "difference": 3.0531133177191805e-16
+    },
+    {
+      "symbol": "ADAUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "ALGOUSDT",
+      "fills": -4.547473508864641e-13,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "ATOMUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "AXSUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "BANDUSDT",
+      "fills": 0.0,
+      "live": 0.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "BELUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "BNBUSDT",
+      "fills": 0.24,
+      "live": -0.01,
+      "difference": -0.25
+    },
+    {
+      "symbol": "BTCUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "COMPUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "CRVUSDT",
+      "fills": -1.1368683772161603e-13,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "DASHUSDT",
+      "fills": 3.9968028886505635e-15,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "DOTUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "EGLDUSDT",
+      "fills": 1.7763568394002505e-15,
+      "live": 0.0,
+      "difference": -1.7763568394002505e-15
+    },
+    {
+      "symbol": "ENJUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "ETCUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "ETHUSDT",
+      "fills": -0.000999999999999994,
+      "live": -0.001,
+      "difference": -6.071532165918825e-18
+    },
+    {
+      "symbol": "FILUSDT",
+      "fills": 177.30000000000004,
+      "live": -0.1,
+      "difference": -177.40000000000003
+    },
+    {
+      "symbol": "GRTUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "IOSTUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "IOTAUSDT",
+      "fills": -1.5916157281026244e-12,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "KAVAUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "KNCUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "KSMUSDT",
+      "fills": -5.329070518200751e-15,
+      "live": 0.0,
+      "difference": 5.329070518200751e-15
+    },
+    {
+      "symbol": "LINKUSDT",
+      "fills": -0.010000000000016662,
+      "live": -0.01,
+      "difference": 1.6662018986757232e-14
+    },
+    {
+      "symbol": "LTCUSDT",
+      "fills": -0.0009999999999996678,
+      "live": -0.001,
+      "difference": -3.3219954564955856e-16
+    },
+    {
+      "symbol": "NEARUSDT",
+      "fills": -0.9999999999999716,
+      "live": -1.0,
+      "difference": -2.842170943040401e-14
+    },
+    {
+      "symbol": "NEOUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "ONTUSDT",
+      "fills": 2.2737367544323206e-13,
+      "live": 0.0,
+      "difference": -2.2737367544323206e-13
+    },
+    {
+      "symbol": "QTUMUSDT",
+      "fills": -2.1316282072803006e-14,
+      "live": 0.0,
+      "difference": 2.1316282072803006e-14
+    },
+    {
+      "symbol": "RLCUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "RSRUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "SKLUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "SNXUSDT",
+      "fills": 2.2737367544323206e-13,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "SOLUSDT",
+      "fills": -0.009999999999998122,
+      "live": -0.01,
+      "difference": -1.878705524482882e-15
+    },
+    {
+      "symbol": "SUSHIUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "THETAUSDT",
+      "fills": -49.0,
+      "live": -49.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "TRBUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "UNIUSDT",
+      "fills": -1.0,
+      "live": -1.0,
+      "difference": 0.0
+    },
+    {
+      "symbol": "VETUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "XLMUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "XRPUSDT",
+      "fills": 146.69999999999993,
+      "live": -0.1,
+      "difference": -146.79999999999993
+    },
+    {
+      "symbol": "XTZUSDT",
+      "fills": -5.684341886080802e-14,
+      "live": 0.0,
+      "difference": 5.684341886080802e-14
+    },
+    {
+      "symbol": "YFIUSDT",
+      "fills": 1.3877787807814457e-17,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "ZECUSDT",
+      "fills": -0.0010000000000000373,
+      "live": -0.001,
+      "difference": 3.729655473350135e-17
+    },
+    {
+      "symbol": "ZENUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "ZILUSDT",
+      "fills": 0.0,
+      "live": null,
+      "difference": null
+    },
+    {
+      "symbol": "ZRXUSDT",
+      "fills": 5.684341886080802e-14,
+      "live": 0.0,
+      "difference": -5.684341886080802e-14
+    }
+  ],
+  "live_system_rows": []
+}

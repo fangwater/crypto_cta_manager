@@ -52,7 +52,8 @@ async fn main() -> Result<()> {
             allocations.insert(source.id.clone(), snapshot);
         }
     }
-    let histories = nav::load_nav_source_histories(&config, &args.sources)?;
+    let mut histories = nav::load_nav_source_histories(&config, &args.sources)?;
+    nav::allocation::attach(&mut histories, &nav::allocation::load(&pool).await?);
     let mut rate_config = config.funding_rates.clone();
     if args.local_ip.is_some() {
         rate_config.local_ip = args.local_ip;

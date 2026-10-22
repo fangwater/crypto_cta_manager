@@ -1,0 +1,486 @@
+{
+  "source_id": "binance_exec_trade05",
+  "snapshot_ts_us": 1792585051450000,
+  "positions": [
+    {
+      "strategy": "lgq_cta_TD_TI_002",
+      "symbol": "BNBUSDT",
+      "venue_code": 1,
+      "before_qty": 0.12071230479267636,
+      "after_qty": -0.009287695207323645,
+      "reference_price": 746.52
+    },
+    {
+      "strategy": "lgq_cta_TD_TI_002",
+      "symbol": "LINKUSDT",
+      "venue_code": 1,
+      "before_qty": 7.7212598668936705,
+      "after_qty": -0.008740133106329928,
+      "reference_price": 12.392
+    },
+    {
+      "strategy": "lgq_cta_TD_TI_002",
+      "symbol": "SOLUSDT",
+      "venue_code": 1,
+      "before_qty": 0.92,
+      "after_qty": -0.007127758205080603,
+      "reference_price": 106.98
+    },
+    {
+      "strategy": "lgq_cta_TD_TI_002",
+      "symbol": "XRPUSDT",
+      "venue_code": 1,
+      "before_qty": 72.61321939018083,
+      "after_qty": -0.029523599794472943,
+      "reference_price": 1.3575
+    },
+    {
+      "strategy": "lgq_cta_baseline_004",
+      "symbol": "DOGEUSDT",
+      "venue_code": 1,
+      "before_qty": 1175.5025273304336,
+      "after_qty": 0.0,
+      "reference_price": 0.08205
+    },
+    {
+      "strategy": "lgq_cta_baseline_004",
+      "symbol": "ETHUSDT",
+      "venue_code": 1,
+      "before_qty": 0.039,
+      "after_qty": 0.0,
+      "reference_price": 2468.06
+    },
+    {
+      "strategy": "lgq_cta_factor_036",
+      "symbol": "AAVEUSDT",
+      "venue_code": 1,
+      "before_qty": 0.5637058013933978,
+      "after_qty": -0.036294222448460256,
+      "reference_price": 155.6
+    },
+    {
+      "strategy": "lgq_cta_factor_036",
+      "symbol": "AVAXUSDT",
+      "venue_code": 1,
+      "before_qty": 9.0,
+      "after_qty": 0.0,
+      "reference_price": 9.721
+    },
+    {
+      "strategy": "lgq_cta_factor_036",
+      "symbol": "DASHUSDT",
+      "venue_code": 1,
+      "before_qty": 2.006,
+      "after_qty": 0.0,
+      "reference_price": 51.19
+    },
+    {
+      "strategy": "lgq_cta_factor_036",
+      "symbol": "FILUSDT",
+      "venue_code": 1,
+      "before_qty": 89.28062255231802,
+      "after_qty": -0.04093128551134839,
+      "reference_price": 1.0387
+    },
+    {
+      "strategy": "lgq_cta_factor_036",
+      "symbol": "LINKUSDT",
+      "venue_code": 1,
+      "before_qty": 7.769999999999996,
+      "after_qty": 0.0,
+      "reference_price": 12.392
+    },
+    {
+      "strategy": "lgq_cta_factor_036",
+      "symbol": "LTCUSDT",
+      "venue_code": 1,
+      "before_qty": 1.6216768332251785,
+      "after_qty": -0.0003231667748215816,
+      "reference_price": 61.69
+    },
+    {
+      "strategy": "lgq_cta_factor_036",
+      "symbol": "NEARUSDT",
+      "venue_code": 1,
+      "before_qty": 18.717315850366372,
+      "after_qty": -0.28268414963362787,
+      "reference_price": 5.214
+    },
+    {
+      "strategy": "lgq_cta_factor_036",
+      "symbol": "UNIUSDT",
+      "venue_code": 1,
+      "before_qty": 14.0,
+      "after_qty": 0.0,
+      "reference_price": 7.493
+    },
+    {
+      "strategy": "lgq_cta_factor_036",
+      "symbol": "ZECUSDT",
+      "venue_code": 1,
+      "before_qty": 0.0823944521396022,
+      "after_qty": -0.00013898113916912137,
+      "reference_price": 1288.56
+    },
+    {
+      "strategy": "lgq_cta_factor_051",
+      "symbol": "AAVEUSDT",
+      "venue_code": 1,
+      "before_qty": 0.5644741023196694,
+      "after_qty": -0.03552589768033054,
+      "reference_price": 155.6
+    },
+    {
+      "strategy": "lgq_cta_factor_051",
+      "symbol": "BNBUSDT",
+      "venue_code": 1,
+      "before_qty": 0.12854725990177612,
+      "after_qty": -0.0007123047926763659,
+      "reference_price": 746.52
+    },
+    {
+      "strategy": "lgq_cta_factor_051",
+      "symbol": "FILUSDT",
+      "venue_code": 1,
+      "before_qty": 88.08406778839533,
+      "after_qty": -0.05906871448864592,
+      "reference_price": 1.0387
+    },
+    {
+      "strategy": "lgq_cta_factor_051",
+      "symbol": "LINKUSDT",
+      "venue_code": 1,
+      "before_qty": 7.81,
+      "after_qty": 0.0,
+      "reference_price": 12.392
+    },
+    {
+      "strategy": "lgq_cta_factor_051",
+      "symbol": "LTCUSDT",
+      "venue_code": 1,
+      "before_qty": 1.6257193039518627,
+      "after_qty": -0.0002806960481380738,
+      "reference_price": 61.69
+    },
+    {
+      "strategy": "lgq_cta_factor_051",
+      "symbol": "NEARUSDT",
+      "venue_code": 1,
+      "before_qty": 18.717315850366372,
+      "after_qty": -0.28268414963362787,
+      "reference_price": 5.214
+    },
+    {
+      "strategy": "lgq_cta_factor_051",
+      "symbol": "SOLUSDT",
+      "venue_code": 1,
+      "before_qty": 0.9310752932170335,
+      "after_qty": -0.001796948577886481,
+      "reference_price": 106.98
+    },
+    {
+      "strategy": "lgq_cta_factor_051",
+      "symbol": "ZECUSDT",
+      "venue_code": 1,
+      "before_qty": -0.0004297142070526505,
+      "after_qty": 0.0,
+      "reference_price": 1288.56
+    },
+    {
+      "strategy": "lgq_cta_factor_170",
+      "symbol": "DOGEUSDT",
+      "venue_code": 1,
+      "before_qty": 1206.4974726695664,
+      "after_qty": 0.0,
+      "reference_price": 0.08205
+    },
+    {
+      "strategy": "lgq_cta_factor_170",
+      "symbol": "DOTUSDT",
+      "venue_code": 1,
+      "before_qty": 86.70000000000003,
+      "after_qty": 0.0,
+      "reference_price": 1.173
+    },
+    {
+      "strategy": "lgq_cta_factor_170",
+      "symbol": "LINKUSDT",
+      "venue_code": 1,
+      "before_qty": 7.8887401331063325,
+      "after_qty": -0.0012598668936671942,
+      "reference_price": 12.392
+    },
+    {
+      "strategy": "lgq_cta_factor_170",
+      "symbol": "LTCUSDT",
+      "venue_code": 1,
+      "before_qty": 1.6318798759588704,
+      "after_qty": -0.00012012404112948794,
+      "reference_price": 61.69
+    },
+    {
+      "strategy": "lgq_cta_factor_170",
+      "symbol": "NEARUSDT",
+      "venue_code": 1,
+      "before_qty": 18.57875315595261,
+      "after_qty": -0.4212468440473885,
+      "reference_price": 5.214
+    },
+    {
+      "strategy": "lgq_cta_factor_170",
+      "symbol": "UNIUSDT",
+      "venue_code": 1,
+      "before_qty": 14.0,
+      "after_qty": 0.0,
+      "reference_price": 7.493
+    },
+    {
+      "strategy": "lgq_cta_factor_170",
+      "symbol": "XRPUSDT",
+      "venue_code": 1,
+      "before_qty": 74.11350596443765,
+      "after_qty": -0.0704764002055498,
+      "reference_price": 1.3575
+    },
+    {
+      "strategy": "lgq_cta_factor_170",
+      "symbol": "ZECUSDT",
+      "venue_code": 1,
+      "before_qty": 0.0830352620674505,
+      "after_qty": -0.0008610188608308743,
+      "reference_price": 1288.56
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "AVAXUSDT",
+      "venue_code": 1,
+      "before_qty": -5.0,
+      "after_qty": 0.0,
+      "reference_price": 9.721
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "AXSUSDT",
+      "venue_code": 1,
+      "before_qty": 47.71587405400355,
+      "after_qty": 47.0,
+      "reference_price": 1.0559
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "COMPUSDT",
+      "venue_code": 1,
+      "before_qty": 0.00019101123595754999,
+      "after_qty": 0.0,
+      "reference_price": 25.59
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "DOGEUSDT",
+      "venue_code": 1,
+      "before_qty": -1235.0,
+      "after_qty": -610.0,
+      "reference_price": 0.08205
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "IOTAUSDT",
+      "venue_code": 1,
+      "before_qty": -1.5916157281026244e-12,
+      "after_qty": 0.0,
+      "reference_price": 0.0471
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "LTCUSDT",
+      "venue_code": 1,
+      "before_qty": -0.8432760131359113,
+      "after_qty": -0.0002760131359113016,
+      "reference_price": 61.69
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "SKLUSDT",
+      "venue_code": 1,
+      "before_qty": 0.2616339193391468,
+      "after_qty": 0.0,
+      "reference_price": 0.004327
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "SOLUSDT",
+      "venue_code": 1,
+      "before_qty": -0.4771865622910537,
+      "after_qty": -0.0010752932170335905,
+      "reference_price": 106.98
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "UNIUSDT",
+      "venue_code": 1,
+      "before_qty": -13.0,
+      "after_qty": -6.0,
+      "reference_price": 7.493
+    },
+    {
+      "strategy": "lgq_cta_symbol_mean",
+      "symbol": "XLMUSDT",
+      "venue_code": 1,
+      "before_qty": 271.978401727862,
+      "after_qty": 271.0,
+      "reference_price": 0.18456
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "AAVEUSDT",
+      "venue_code": 1,
+      "before_qty": -1.2000000238418578,
+      "after_qty": 0.0,
+      "reference_price": 155.6
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "AVAXUSDT",
+      "venue_code": 1,
+      "before_qty": -4.0,
+      "after_qty": 0.0,
+      "reference_price": 9.721
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "AXSUSDT",
+      "venue_code": 1,
+      "before_qty": -0.7158740540035495,
+      "after_qty": 0.0,
+      "reference_price": 1.0559
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "BNBUSDT",
+      "venue_code": 1,
+      "before_qty": -0.2592595646944525,
+      "after_qty": 0.0,
+      "reference_price": 746.52
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "COMPUSDT",
+      "venue_code": 1,
+      "before_qty": -0.00019101123595532954,
+      "after_qty": 0.0,
+      "reference_price": 25.59
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "DASHUSDT",
+      "venue_code": 1,
+      "before_qty": -2.006,
+      "after_qty": 0.0,
+      "reference_price": 51.19
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "DOGEUSDT",
+      "venue_code": 1,
+      "before_qty": -1757.0,
+      "after_qty": 0.0,
+      "reference_price": 0.08205
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "DOTUSDT",
+      "venue_code": 1,
+      "before_qty": -86.7,
+      "after_qty": 0.0,
+      "reference_price": 1.173
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "ETHUSDT",
+      "venue_code": 1,
+      "before_qty": -0.039,
+      "after_qty": 0.0,
+      "reference_price": 2468.06
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "FILUSDT",
+      "venue_code": 1,
+      "before_qty": -177.46469034071336,
+      "after_qty": 0.0,
+      "reference_price": 1.0387
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "LINKUSDT",
+      "venue_code": 1,
+      "before_qty": -31.2,
+      "after_qty": 0.0,
+      "reference_price": 12.392
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "LTCUSDT",
+      "venue_code": 1,
+      "before_qty": -4.037,
+      "after_qty": 0.0,
+      "reference_price": 61.69
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "NEARUSDT",
+      "venue_code": 1,
+      "before_qty": -57.0,
+      "after_qty": 0.0,
+      "reference_price": 5.214
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "SKLUSDT",
+      "venue_code": 1,
+      "before_qty": -0.2616339193391468,
+      "after_qty": 0.0,
+      "reference_price": 0.004327
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "SOLUSDT",
+      "venue_code": 1,
+      "before_qty": -1.3838887309259797,
+      "after_qty": 0.0,
+      "reference_price": 106.98
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "UNIUSDT",
+      "venue_code": 1,
+      "before_qty": -21.0,
+      "after_qty": 0.0,
+      "reference_price": 7.493
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "XLMUSDT",
+      "venue_code": 1,
+      "before_qty": -0.9784017278619785,
+      "after_qty": 0.0,
+      "reference_price": 0.18456
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "XRPUSDT",
+      "venue_code": 1,
+      "before_qty": -146.8267253546185,
+      "after_qty": 0.0,
+      "reference_price": 1.3575
+    },
+    {
+      "strategy": "system_position_close",
+      "symbol": "ZECUSDT",
+      "venue_code": 1,
+      "before_qty": -0.166,
+      "after_qty": 0.0,
+      "reference_price": 1288.56
+    }
+  ]
+}

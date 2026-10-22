@@ -1,0 +1,26 @@
+{
+  "base_commit": "c04598476f651947d235e42c3cdcf6e8bc84b436",
+  "source_sha256": {
+    "AGENTS.md": "361bc4e3b537be630e433fd20fcd74ef6102196ae390ae935abaa7eaecdec0af",
+    "docs/funding_and_slippage.md": "1bad7df406f85f1cfce729f2933593c94ad3aec0b64a181d947db283ac085f32",
+    "docs/jp_meta_trade05_system_close_20261021.md": "eebfcd6d91331050a3f86b9e507e6de063c426211eda7dd3e83488646138a8e7",
+    "migrations/schema.sql": "c7547c3c409f70ef35238e2a241be771d9d21ee2ce77ce5c1a568d5d5f045c3f",
+    "scripts/apply_allocation_schema.sql": "1974e2c5ed1088930be9d27c28da8cc2947075d0856c637bb0a2713caef2a75d",
+    "src/bin/nav_allocation_reconcile.rs": "bf82388b3e4a7d429ec5a80ed9bf51e346d50bf38a72bf37de651319d3deaa04",
+    "src/bin/nav_funding_check.rs": "0615d39f1d086e5f427dab300accecc5d30826ab9172be3a5bca287e2023d21e",
+    "src/bin/nav_strategy_report.rs": "c017cd3da9ba56bbfb63937af70976b521cb7a0dc011c8614a4edcd9f63da533",
+    "src/nav.rs": "3c95daf51c76abc8b6287a1d9ea5e32335c846c752fd652403d828ee32aa5e35",
+    "src/nav/allocation.rs": "e7db320fb0c24356c35023c1ffaa2cb2701cca123b9ba5c58f12c87536e8bf8e",
+    "src/nav/funding_estimate.rs": "19afd785b92c9ad28ba79d390ff10f6d2cd247397a9e1fb9e84ef2b7e995787a",
+    "src/web.rs": "b4b90ba1b606962d83a92bc957346b492e672c81d50ab3ca8d7dce82b3345d67"
+  },
+  "manager_binary_sha256": "d3c7fb7324669288eac224e78bd6acaf8fc6d2d5d4fb93e44ddc999ca6480926",
+  "frontend_release": "20261021T122000ZAllocation",
+  "preexisting_changes_preserved": [
+    "AGENTS.md",
+    "docs/funding_and_slippage.md",
+    "src/nav.rs",
+    "src/nav/funding_estimate.rs"
+  ],
+  "calibration_timestamp_us": 1792585051450000
+}

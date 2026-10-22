@@ -1,0 +1,57 @@
+{
+  "SOLUSDT": {
+    "fills": 48,
+    "signed_quantity": -199.53,
+    "gross_quantity": 199.53,
+    "volume": 20474.9418,
+    "first_shanghai": "2026-10-15T15:48:53.634000+08:00",
+    "last_shanghai": "2026-10-15T15:51:19.520000+08:00",
+    "by_day": {
+      "2026-10-15": 48
+    }
+  },
+  "BTCUSDT": {
+    "fills": 43,
+    "signed_quantity": -1.157,
+    "gross_quantity": 1.157,
+    "volume": 94032.3447,
+    "first_shanghai": "2026-10-15T15:48:59.828000+08:00",
+    "last_shanghai": "2026-10-15T15:52:29.929000+08:00",
+    "by_day": {
+      "2026-10-15": 43
+    }
+  },
+  "ETHUSDT": {
+    "fills": 51,
+    "signed_quantity": 15.46,
+    "gross_quantity": 15.46,
+    "volume": 36682.462830000004,
+    "first_shanghai": "2026-10-15T15:49:02.347000+08:00",
+    "last_shanghai": "2026-10-15T15:50:53.285000+08:00",
+    "by_day": {
+      "2026-10-15": 51
+    }
+  },
+  "XRPUSDT": {
+    "fills": 51,
+    "signed_quantity": 9914.9,
+    "gross_quantity": 9914.9,
+    "volume": 12955.22112,
+    "first_shanghai": "2026-10-15T15:50:05.493000+08:00",
+    "last_shanghai": "2026-10-15T15:53:46.060000+08:00",
+    "by_day": {
+      "2026-10-15": 51
+    }
+  },
+  "1000PEPEUSDC": {
+    "fills": 1,
+    "signed_quantity": 1.1641532182693481e-10,
+    "gross_quantity": 1.1641532182693481e-10,
+    "volume": 4.79456502944231e-13,
+    "first_shanghai": "2026-10-16T19:35:14.567116+08:00",
+    "last_shanghai": "2026-10-16T19:35:14.567116+08:00",
+    "by_day": {
+      "2026-10-16": 1
+    }
+  }
+}
