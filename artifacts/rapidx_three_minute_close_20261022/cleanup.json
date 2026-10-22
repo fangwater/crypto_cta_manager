@@ -1,0 +1,9 @@
+{
+  "diagnostic_sessions_removed": true,
+  "verification_browsers_closed": true,
+  "temporary_directories_removed": [
+    "/home/fanghaizhou/snap/chromium/common/rapidx-three-minute-20261022",
+    "/home/fanghaizhou/snap/chromium/common/rapidx-three-minute-close-20261022"
+  ],
+  "final_screenshots_archived": 8
+}

@@ -1,0 +1,11 @@
+{
+  "release": "20261022T042311ZRapidxReferences",
+  "source_commit": "a4d19ee5b8f203903bc131d664cc6d2e3b668b55",
+  "binary_sha256": "f07399edda74eee9ce3540073032e4ed57acd60acd2d650ea93c4d84e801159f",
+  "frontend": {
+    "assets/index-3c7PCPVT.css": "49faf4aeec6695e9944b8e9fd0193f06633f7dfa9735a149b3488391ca55ed2a",
+    "assets/index-DjLZEfKw.js": "d24227271fd02d9c922076cc6c9d43f95ab6b1e2e3a015d88549cc4ffbe2368e",
+    "favicon.svg": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+    "index.html": "4896c97bd9b3303bc678a41cada256dc6f97094e4595ac5c95959d4a8afe1c1d"
+  }
+}

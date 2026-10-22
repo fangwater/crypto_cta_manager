@@ -1,0 +1,85 @@
+{
+  "archive_root": "/home/fanghaizhou/crypto_cta_manager-archives/20261022-rapidx-three-minute",
+  "files": {
+    "after.json": {
+      "size": 18187913,
+      "sha256": "c118f321bc51b144c5df4ddba9be8f02e2359477e0d35984cbd12996e2632eb4"
+    },
+    "after_close.json": {
+      "size": 18391822,
+      "sha256": "7508c623477682c8eaa0a41af4a9d1ad139471e4f55c3f4fb9e63e2c265d6af8"
+    },
+    "before.json": {
+      "size": 17288177,
+      "sha256": "9e9ec1ce863dec8c154e00505dd6eead425beb1127eb89664fe92c26027e7b19"
+    },
+    "binance_exec_trade03-nav-1440.png": {
+      "size": 182409,
+      "sha256": "91822c09b7cf665b7420e23735d83963fca9076844859107b555d4d75631f79b"
+    },
+    "binance_exec_trade06-cost-1440.png": {
+      "size": 181858,
+      "sha256": "d37164bfd5b1d61a4d73ea29f6f6011b820ff711c411ef8fc76be2ce272da774"
+    },
+    "binance_exec_trade06-cost-390.png": {
+      "size": 89578,
+      "sha256": "0964dcdd42f6536b40a69a55897ac4fa14c4912fab6c43a94247d4f98011e6a3"
+    },
+    "binance_exec_trade06-nav-1440.png": {
+      "size": 178108,
+      "sha256": "16a8143f25e015ce680c38385df0a617a0a3c236744f341f9823ecd59361acbf"
+    },
+    "binance_exec_trade06-nav-390.png": {
+      "size": 84672,
+      "sha256": "249fba208293383730e20c74a0e94d8b9258925ac4278c23b193b12f79cfb932"
+    },
+    "binance_exec_trade07-nav-1440.png": {
+      "size": 247932,
+      "sha256": "536d6ae0155c47c6f8841348a47913f7d3ab1061a32aca1dc136c1c1c8b94939"
+    },
+    "binance_exec_trade07-nav-390.png": {
+      "size": 103809,
+      "sha256": "8274d8770944bc023ab440d8f00dc9d0409bb5b0c27ffbf44b78b2bfa27ec4f8"
+    },
+    "frontend.tar.gz": {
+      "size": 366146,
+      "sha256": "dbfd9182b6fa4ca4e3b75d959cb98d4861435a132b2d108f0cd755522e65787a"
+    },
+    "frontend_close.tar.gz": {
+      "size": 366113,
+      "sha256": "63c2f2970713478cf05359a46e276af2fe97dac2f358225caea5756dc4961e44"
+    },
+    "screenshots_close/binance_exec_trade03-nav-1440.png": {
+      "size": 184006,
+      "sha256": "7ff92566a1a70ca81626a9dac8a98f401a0ba61aa79acfceaf6001ecf99ed1b5"
+    },
+    "screenshots_close/binance_exec_trade05-nav-1440.png": {
+      "size": 175281,
+      "sha256": "0c02cb7ce8f947eac4ca71e85bda805aa27325c2e76900ac8f350e56b574e7cf"
+    },
+    "screenshots_close/binance_exec_trade06-cost-1440.png": {
+      "size": 181462,
+      "sha256": "de5b9e2e70c231264e3de9e6ea421eab0c06ef39d4480daea2a0e110921a35cc"
+    },
+    "screenshots_close/binance_exec_trade06-cost-390.png": {
+      "size": 90123,
+      "sha256": "db976c457ffb7278fa113b5fc5ca6f476bfafecddb101a4d0e24ec9d3065d18c"
+    },
+    "screenshots_close/binance_exec_trade06-nav-1440.png": {
+      "size": 215512,
+      "sha256": "d7ba345c7f010b984569a12c0974c600195b0c80d19924f17ed7e31ab477c714"
+    },
+    "screenshots_close/binance_exec_trade06-nav-390.png": {
+      "size": 93531,
+      "sha256": "cd5a409bba8802f0bdef01ea242f318d5e366033c126b1f17d067f6f349dd72f"
+    },
+    "screenshots_close/binance_exec_trade07-nav-1440.png": {
+      "size": 252067,
+      "sha256": "118a042ea07e3f9737eacdda678019841a0600d763e9d9d99111da3e26f124f5"
+    },
+    "screenshots_close/binance_exec_trade07-nav-390.png": {
+      "size": 103564,
+      "sha256": "089aa02d2b3dcb9a22d5fe68bc3918ad18f9d10abee1f8ab02038428fcc3b688"
+    }
+  }
+}
