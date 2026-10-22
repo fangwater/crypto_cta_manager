@@ -31,16 +31,19 @@ fn main() -> Result<()> {
             let mut key = vec![symbol.len() as u8];
             key.extend_from_slice(symbol.as_bytes());
             key.extend_from_slice(&open_us.to_be_bytes());
-            let close = match db.get_cf(cf, key)? {
+            let (open, close) = match db.get_cf(cf, key)? {
                 Some(value) => {
                     ensure!(value.len() == 56, "invalid cached candle size");
-                    Some(f64::from_le_bytes(value[24..32].try_into()?))
+                    (
+                        Some(f64::from_le_bytes(value[0..8].try_into()?)),
+                        Some(f64::from_le_bytes(value[24..32].try_into()?)),
+                    )
                 }
-                None => None,
+                None => (None, None),
             };
             println!(
                 "{}",
-                json!({"symbol":symbol,"ts_us":ts_us,"open_ts_us":open_us,"close":close})
+                json!({"symbol":symbol,"ts_us":ts_us,"open_ts_us":open_us,"open":open,"close":close})
             );
         }
     }

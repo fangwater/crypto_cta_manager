@@ -1643,10 +1643,10 @@ async fn rebuild_timeline_snapshot(
     let theoretical = if theoretical_symbols.is_empty() && query.include_theoretical.unwrap_or(true)
     {
         let mut references = Vec::new();
-        for twap_reference in
+        for reference_model in
             crate::theoretical_execution::references(&state.config, &report.selected_source_ids)
                 // Model errors belong to the theoretical overlay, never the factual report.
-                .unwrap_or_else(|_| vec![false])
+                .unwrap_or_else(|_| vec![crate::theoretical_execution::ExecutionModel::Twap5m])
         {
             references.push(
                 crate::theoretical_nav::load_timeline(
@@ -1657,7 +1657,7 @@ async fn rebuild_timeline_snapshot(
                     report.end_ts_us,
                     &report.selected_source_ids,
                     max_points,
-                    twap_reference,
+                    reference_model,
                 )
                 .await
                 .unwrap_or_else(|error| {
@@ -2034,7 +2034,8 @@ async fn acquisition_cost(
         .clone()
         .with_fee_rates(&fee_rates);
     let mut reports = Vec::new();
-    for twap_reference in crate::theoretical_execution::references(&config, &selected_source_ids)? {
+    for reference_model in crate::theoretical_execution::references(&config, &selected_source_ids)?
+    {
         reports.push(
             crate::acquisition_cost::report_acquisition_cost(
                 theoretical_fees.as_ref().clone(),
@@ -2052,7 +2053,7 @@ async fn acquisition_cost(
                 row_symbol.as_deref(),
                 row_strategy,
                 query.row_sort,
-                twap_reference,
+                reference_model,
             )
             .await?,
         );

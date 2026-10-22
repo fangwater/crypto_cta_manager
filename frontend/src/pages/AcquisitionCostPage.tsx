@@ -247,8 +247,8 @@ export function AcquisitionCostPage() {
       </Card>
 
       {(snapshot?.reports.length ?? 0) > 1 && <Card className="mb-6">
-        <CardHeader><CardTitle>两个三分钟参考</CardTitle><CardDescription>同一查询范围、实际成交和费用，分别计算参考价格与滑点。选择参考可查看对应的图表和逐 delta 明细。</CardDescription></CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-2">{snapshot?.reports.map((reference, index) => <div key={reference.execution_model} className="rounded-lg border border-border-soft p-4">
+        <CardHeader><CardTitle>三个执行参考</CardTitle><CardDescription>同一查询范围、实际成交和费用，分别计算参考价格与滑点。选择参考可查看对应的图表和逐 delta 明细。</CardDescription></CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-3">{snapshot?.reports.map((reference, index) => <div key={reference.execution_model} className="rounded-lg border border-border-soft p-4">
           <Button variant={referenceIndex === index ? 'primary' : 'secondary'} onClick={() => setReferenceIndex(index)}>{theoreticalExecutionLabel(reference.execution_model)}</Button>
           <div className="mt-3 text-sm">费前滑点 {reference.totals.matched_fill_count ? bps(reference.totals.price_shortfall_bps) : '--'} · 费后滑点 {reference.totals.matched_fill_count ? bps(reference.totals.after_fee_shortfall_bps) : '--'}</div>
           <div className="mt-2 text-xs text-muted">可比成交 {reference.totals.matched_fill_count} 笔 · 缺价 {reference.totals.missing_virtual_delta_count} 个 delta</div>

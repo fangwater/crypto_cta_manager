@@ -319,15 +319,15 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'acquisition-cost',
     group: '策略目录',
     title: '持仓成本',
-    lead: '按需比较实际成交与理论执行基准：RapidX 提供理论3min_vwap 与理论3min_twap 两个参考，其他账户保留五分钟 TWAP，仅支持最近 30 天。',
+    lead: '按需比较实际成交与理论执行基准：RapidX 提供理论3min_vwap、理论3min_twap 与理论瞬时taker 三个参考，其他账户保留五分钟 TWAP，仅支持最近 30 天。',
     content: (
       <>
         <Endpoint method="GET" path={`${CATALOG_PATH}/acquisition-cost`} summary="归档目标与 Binance 1m K 线生成虚拟价格，再与实际成交比较" />
         <FieldRows rows={[
           { field: 'startMs / endMs', detail: '最近 30 天内的查询区间；更早的数据不支持理论分析' },
           { field: 'sourceIds / strategyName', detail: '账户或策略筛选；省略策略则比较全部策略' },
-          { field: 'reports / theoretical', detail: '成本 API 的 reports 和净值 API 的 theoretical 按参考返回数组；RapidX 两个参考、其他账户一个。净值差滑点 execution_slippage 按同一顺序返回。逐 delta 的 reference_prices 同时列出各参考价格' },
-          { field: 'execution_model / execution_window_secs', detail: '按 Exec 后端识别：RapidX 返回 vwap3m 和 twap3m 两个参考，窗口均为 180 秒；其他账户为 twap5m / 300；窗口从目标发布时刻向上对齐的完整分钟开始' },
+          { field: 'reports / theoretical', detail: '成本 API 的 reports 和净值 API 的 theoretical 按参考返回数组；RapidX 三个参考、其他账户一个。净值差滑点 execution_slippage 按同一顺序返回。逐 delta 的 reference_prices 同时列出各参考价格' },
+          { field: 'execution_model / execution_window_secs', detail: '按 Exec 后端识别：RapidX 返回 vwap3m / 180、twap3m / 180 和 instant_taker / 0；其他账户为 twap5m / 300。多分钟窗口向上对齐完整分钟；instant_taker 取接收时间向下对齐整分钟的 open，在接收时刻计入理论成交' },
           { field: 'sample_prices / sample_quantity_weights', detail: '分别为三个或五个分钟价格及理论数量权重。RapidX 的 VWAP 按分钟成交量占比分配数量，均价为三分钟总成交额 ÷ 总成交币数量；TWAP 每分钟分配三分之一数量，均价为三根分钟均价的算术平均；其他账户在有成交分钟均分数量，保留五分钟全部无成交时的收盘价回退' },
           { field: 'price_shortfall_usdt', detail: '实际有符号成交数量 × (实际成交价 − 该账户的理论均价)' },
         ]} />

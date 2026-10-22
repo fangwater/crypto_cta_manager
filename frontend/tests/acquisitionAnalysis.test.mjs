@@ -82,3 +82,14 @@ test('three-minute RapidX paths use the third minute as the endpoint', () => {
   assert.equal(analyzePricePath(row([100, null, 102])).complete, false)
   assert.equal(analyzePricePath(row([])).complete, false)
 })
+
+test('instant taker uses one open price without inventing a market path', () => {
+  for (const delta_qty of [2, -2]) {
+    const result = analyzePricePath(row([100], { execution_model: 'instant_taker', delta_qty }))
+    assert.equal(result.complete, false)
+    assert.equal(result.jumpBps, null)
+    assert.equal(result.reversal, null)
+    assert.ok(result.pathBps === 0)
+    assert.equal(result.versusFirstBps, Math.sign(delta_qty) * 100)
+  }
+})

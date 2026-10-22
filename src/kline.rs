@@ -43,7 +43,7 @@ impl MinutePrices {
             return 0.0;
         }
         match self.execution_model {
-            ExecutionModel::Twap5m | ExecutionModel::Twap3m => {
+            ExecutionModel::Twap5m | ExecutionModel::Twap3m | ExecutionModel::InstantTaker => {
                 delta / self.priced_sample_count() as f64
             }
             ExecutionModel::Vwap3m => delta * self.quantity_weights[index],
@@ -72,6 +72,7 @@ impl MinuteCache {
                     ExecutionModel::Twap5m,
                     ExecutionModel::Vwap3m,
                     ExecutionModel::Twap3m,
+                    ExecutionModel::InstantTaker,
                 ] {
                     self.prices
                         .remove(&(candle.open_ts_us - index * MINUTE_US, model));
@@ -478,6 +479,21 @@ impl KlineStore {
             .collect();
         self.read_minutes(symbol, &opens)?;
         let mut cache = cache.lock().unwrap();
+        if model == ExecutionModel::InstantTaker {
+            let Some(candle) = cache.candles.get(&open) else {
+                return Ok(None);
+            };
+            let priced = MinutePrices {
+                prices: vec![Some(candle.open)],
+                quantity_weights: vec![1.0],
+                execution_model: model,
+                average_price: Some(candle.open),
+                zero_volume_skipped_sample_count: 0,
+                zero_volume_fallback_sample_count: 0,
+            };
+            cache.prices.insert((open, model), priced.clone());
+            return Ok(Some(priced));
+        }
         let mut prices = vec![None; count];
         let mut closes = vec![0.0; count];
         let mut volumes = vec![0.0; count];
@@ -517,6 +533,7 @@ impl KlineStore {
         let priced_count = prices.iter().flatten().count();
         let total_volume: f64 = volumes.iter().sum();
         let (average_price, quantity_weights) = match model {
+            ExecutionModel::InstantTaker => unreachable!("minute-open pricing handled above"),
             ExecutionModel::Twap3m => (
                 (priced_count == 3).then(|| prices.iter().flatten().sum::<f64>() / 3.0),
                 vec![1.0 / 3.0; 3],

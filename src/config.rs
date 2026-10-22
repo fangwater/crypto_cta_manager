@@ -46,6 +46,8 @@ impl FeeRates {
 pub struct TheoreticalFeeRates {
     pub default: f64,
     pub by_quote: BTreeMap<String, f64>,
+    pub taker_default: f64,
+    pub taker_by_quote: BTreeMap<String, f64>,
 }
 
 impl From<f64> for TheoreticalFeeRates {
@@ -53,11 +55,20 @@ impl From<f64> for TheoreticalFeeRates {
         Self {
             default,
             by_quote: BTreeMap::new(),
+            taker_default: default,
+            taker_by_quote: BTreeMap::new(),
         }
     }
 }
 
 impl TheoreticalFeeRates {
+    pub fn taker_for_symbol(&self, symbol: &str) -> f64 {
+        self.taker_by_quote
+            .get(symbol_quote(symbol))
+            .copied()
+            .unwrap_or(self.taker_default)
+    }
+
     pub fn for_symbol(&self, symbol: &str) -> f64 {
         self.by_quote
             .get(symbol_quote(symbol))

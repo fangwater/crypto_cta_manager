@@ -83,6 +83,8 @@ export const navSeriesMeta: Record<
   },
   theoretical_twap3m_before_fee_quote: { label: '理论3min_twap（费前）', color: '#0891b2', lineType: 'dotted' },
   theoretical_twap3m_after_fee_quote: { label: '理论3min_twap（费后）', color: '#d97706', lineType: 'dashed' },
+  theoretical_instant_taker_before_fee_quote: { label: '理论瞬时taker（费前）', color: '#65a30d', lineType: 'dotted' },
+  theoretical_instant_taker_after_fee_quote: { label: '理论瞬时taker（费后）', color: '#e11d48', lineType: 'dashed' },
   realized_pnl_before_fee_quote: { label: '已实现盈亏', color: '#b7791f' },
   floating_pnl_quote: {
     label: '浮动盈亏',
@@ -99,6 +101,7 @@ export const navSeriesMeta: Record<
 export function navSeriesLabel(key: NavSeriesKey, model?: TheoreticalExecutionModel | null) {
   if (key.startsWith('theoretical_')) {
     const fee = key.endsWith('before_fee_quote') ? '费前' : '费后'
+    if (key.startsWith('theoretical_instant_taker_')) return `理论瞬时taker（${fee}）`
     if (key.startsWith('theoretical_twap3m_')) return `理论3min_twap（${fee}）`
     if (model === 'vwap3m') return `理论3min_vwap（${fee}）`
     if (model === 'twap5m') return `理论${fee}（5 分钟 TWAP）`
@@ -153,7 +156,7 @@ export function NavTimelineChart({
         ? visibleSeries.map((key) => {
             const meta = { ...navSeriesMeta[key], label: navSeriesLabel(key, theoretical[0]?.execution_model) }
             const isTheoretical = isTheoreticalSeries(key)
-            const reference = key.startsWith('theoretical_twap3m_') ? theoretical[1] : theoretical[0]
+            const reference = key.startsWith('theoretical_instant_taker_') ? theoretical.find((r) => r.execution_model === 'instant_taker') : key.startsWith('theoretical_twap3m_') ? theoretical.find((r) => r.execution_model === 'twap3m') : theoretical[0]
             const data = isTheoretical
               ? (reference?.points ?? []).map((point) => [
                   point.ts_us / 1_000,

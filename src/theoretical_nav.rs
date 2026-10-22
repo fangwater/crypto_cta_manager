@@ -74,6 +74,7 @@ pub struct VirtualDelta {
     pub seq: u32,
     pub delta_qty: f64,
     pub fee_rate: f64,
+    pub archived_taker_fee_rate: Option<f64>,
     pub legacy_fee: bool,
     pub target_signal: i32,
 }
@@ -81,13 +82,27 @@ pub use crate::kline::MinutePrices as VirtualPrices;
 
 impl VirtualDelta {
     pub fn open_ts_us(&self, index: usize) -> i64 {
-        first_complete_open(self.received_at_us) + index as i64 * MINUTE_US
+        self.execution_model.open_ts_us(self.received_at_us) + index as i64 * MINUTE_US
     }
     pub fn execution_ts_us(&self) -> i64 {
         self.execution_ts_us_for(self.execution_model)
     }
     fn execution_ts_us_for(&self, model: ExecutionModel) -> i64 {
-        self.open_ts_us(model.sample_count() - 1) + MINUTE_US
+        if model == ExecutionModel::InstantTaker {
+            self.received_at_us
+        } else {
+            model.open_ts_us(self.received_at_us) + model.sample_count() as i64 * MINUTE_US
+        }
+    }
+    pub fn slice_ts_us(&self, index: usize) -> i64 {
+        if self.execution_model == ExecutionModel::InstantTaker {
+            self.received_at_us
+        } else {
+            self.open_ts_us(index) + MINUTE_US
+        }
+    }
+    pub fn pricing_end_ts_us(&self) -> i64 {
+        self.open_ts_us(0) + self.execution_model.sample_count() as i64 * MINUTE_US
     }
     pub fn prices(&self, store: &KlineStore) -> Result<Option<VirtualPrices>> {
         if !matches!(self.venue.as_str(), "binance-futures" | "binance-margin") {
@@ -113,7 +128,7 @@ struct CurveQueryKey {
     end: i64,
     max_points: usize,
     sources: Vec<String>,
-    fees: Vec<(String, u64, Vec<(String, u64)>)>,
+    fees: Vec<(String, u64, Vec<(String, u64)>, u64, Vec<(String, u64)>)>,
     target_revision: u64,
     candle_revision: u64,
 }
@@ -346,7 +361,15 @@ impl TheoreticalTargetCache {
                 }
                 let mut delta = delta.clone();
                 delta.execution_model = models[&delta.source_id];
-                if delta.legacy_fee {
+                if delta.execution_model == ExecutionModel::InstantTaker {
+                    delta.legacy_fee = delta.archived_taker_fee_rate.is_none();
+                    delta.fee_rate = delta.archived_taker_fee_rate.unwrap_or_else(|| {
+                        fee_rates
+                            .get(&delta.source_id)
+                            .map_or(f64::NAN, |fees| fees.taker_for_symbol(&delta.symbol))
+                    });
+                }
+                if delta.legacy_fee && delta.execution_model != ExecutionModel::InstantTaker {
                     delta.fee_rate = fee_rates
                         .get(&delta.source_id)
                         .with_context(|| {
@@ -419,6 +442,7 @@ fn ingest_target(
                     binding_name: account.binding_name.clone(),
                     strategy_name: next.position_strategy_name.clone(),
                     venue,
+                    archived_taker_fee_rate: account.taker_fee_for_symbol(&symbol),
                     symbol,
                     received_at_us: next.received_at_us,
                     seq: next.update_seq,
@@ -456,13 +480,13 @@ pub async fn prepare_acquisition(
     end: i64,
     source_ids: &[String],
     strategy: Option<&str>,
-    twap_reference: bool,
+    reference_model: crate::theoretical_execution::ExecutionModel,
 ) -> Result<(Vec<VirtualDelta>, Vec<String>, ExecutionModels)> {
     store.validate_range(start, end, now_us())?;
     ensure!(store.enabled(), "分钟 K 线理论分析未启用");
     // Older target metadata establishes deltas only; no older market data is read.
     let mut models = resolve_models(&targets.config, source_ids)?;
-    crate::theoretical_execution::select_reference(&mut models, twap_reference);
+    crate::theoretical_execution::select_reference(&mut models, reference_model);
     let Some((mut deltas, _, _)) = targets
         .query_inputs(fees, end, source_ids, strategy, None, models.clone())
         .await?
@@ -482,8 +506,16 @@ pub async fn prepare_acquisition(
             add_range(
                 &mut ranges,
                 &delta.symbol,
-                delta.open_ts_us(0),
-                delta.execution_ts_us(),
+                if delta.execution_model == ExecutionModel::Twap5m {
+                    delta.open_ts_us(0)
+                } else {
+                    ExecutionModel::InstantTaker.open_ts_us(delta.received_at_us)
+                },
+                if delta.execution_model == ExecutionModel::Twap5m {
+                    delta.pricing_end_ts_us()
+                } else {
+                    ExecutionModel::Vwap3m.open_ts_us(delta.received_at_us) + 3 * MINUTE_US
+                },
             );
         }
     }
@@ -499,10 +531,10 @@ pub async fn load_timeline(
     end: i64,
     source_ids: &[String],
     max_points: usize,
-    twap_reference: bool,
+    reference_model: crate::theoretical_execution::ExecutionModel,
 ) -> Result<TheoreticalNavTimeline> {
     let mut models = resolve_models(&targets.config, source_ids)?;
-    crate::theoretical_execution::select_reference(&mut models, twap_reference);
+    crate::theoretical_execution::select_reference(&mut models, reference_model);
     let model = scope_model(&models);
     let mut output = TheoreticalNavTimeline {
         execution_model: model,
@@ -511,6 +543,11 @@ pub async fn load_timeline(
             "source_specific_execution+closed_1m_close_mark",
             ExecutionModel::nav_price_basis,
         ),
+        fee_basis: if model == Some(ExecutionModel::InstantTaker) {
+            "archived_taker_rate_or_current_taker_rate_for_legacy_targets"
+        } else {
+            "archived_theoretical_rate_or_current_rate_for_legacy_targets"
+        },
         available_from_us: Some(first_complete_open(store.cutoff_us(now_us())) + MINUTE_US),
         ..Default::default()
     };
@@ -538,19 +575,34 @@ pub async fn load_timeline(
                     .iter()
                     .map(|(quote, fee)| (quote.clone(), fee.to_bits()))
                     .collect(),
+                rate.taker_default.to_bits(),
+                rate.taker_by_quote
+                    .iter()
+                    .map(|(quote, fee)| (quote.clone(), fee.to_bits()))
+                    .collect(),
             )
         })
         .collect();
     let effective_end = end.min(
         now_us().div_euclid(MINUTE_US) * MINUTE_US
-            - (output.execution_window_secs as i64 / 60 - 1) * MINUTE_US,
+            - (models
+                .values()
+                .map(|model| model.sample_count())
+                .max()
+                .unwrap_or(5) as i64
+                - 1)
+                * MINUTE_US,
     );
     if effective_end < start {
         output.loading = true;
-        output.unavailable_reason = Some(format!(
-            "{}分钟理论执行窗口尚未完整收盘，请稍后查询",
-            output.execution_window_secs / 60
-        ));
+        output.unavailable_reason = Some(if model == Some(ExecutionModel::InstantTaker) {
+            "信号所在分钟尚未收盘，等待分钟行情缓存完成".into()
+        } else {
+            format!(
+                "{}分钟理论执行窗口尚未完整收盘，请稍后查询",
+                output.execution_window_secs / 60
+            )
+        });
         return Ok(output);
     }
     let mut sources = source_ids.to_vec();
@@ -596,7 +648,7 @@ pub async fn load_timeline(
     let mut ranges = BTreeMap::new();
     for (index, delta) in deltas.iter().enumerate() {
         for slice in 0..delta.execution_model.sample_count() {
-            let ts = delta.open_ts_us(slice) + MINUTE_US;
+            let ts = delta.slice_ts_us(slice);
             if ts <= end {
                 fills.push((ts, index, slice));
                 if matches!(delta.venue.as_str(), "binance-futures" | "binance-margin") {
@@ -604,7 +656,7 @@ pub async fn load_timeline(
                         &mut ranges,
                         &delta.symbol,
                         baseline_open.min(delta.open_ts_us(0)),
-                        end.max(delta.execution_ts_us()),
+                        end.max(delta.pricing_end_ts_us()),
                     );
                 }
             }
@@ -1293,6 +1345,8 @@ mod tests {
             .unwrap();
         account.set_theoretical_fees(Some(TheoreticalFeeRates {
             default: 0.0004,
+            taker_default: 0.0005,
+            taker_by_quote: BTreeMap::from([("USDC".into(), 0.0002)]),
             by_quote: BTreeMap::from([("USDC".into(), 0.0000825)]),
         }));
         for target in strategy.targets.values_mut() {
@@ -1319,11 +1373,13 @@ mod tests {
             source.clone(),
             TheoreticalFeeRates {
                 default: 0.0007,
+                taker_default: 0.0009,
+                taker_by_quote: BTreeMap::from([("USDC".into(), 0.0003)]),
                 by_quote: BTreeMap::from([("USDC".into(), -0.0001)]),
             },
         )]);
         let deltas = cache
-            .query(fees, 300, &[source], None)
+            .query(fees.clone(), 300, std::slice::from_ref(&source), None)
             .await
             .unwrap()
             .unwrap();
@@ -1338,6 +1394,30 @@ mod tests {
             };
             assert_eq!(delta.fee_rate, expected);
             assert_eq!(delta.legacy_fee, delta.received_at_us == 300);
+        }
+        let (taker, _, _) = cache
+            .query_inputs(
+                fees,
+                300,
+                std::slice::from_ref(&source),
+                None,
+                None,
+                BTreeMap::from([(source.clone(), ExecutionModel::InstantTaker)]),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(taker.len(), 6);
+        for delta in taker {
+            let expected = match (delta.received_at_us, delta.symbol.as_str()) {
+                (200, "BTCUSDT") => 0.0005,
+                (200, "BTCUSDC") => 0.0002,
+                (_, "BTCUSDT") => 0.0009,
+                (_, "BTCUSDC") => 0.0003,
+                _ => unreachable!(),
+            };
+            assert_eq!(delta.fee_rate, expected);
+            assert_eq!(delta.legacy_fee, delta.received_at_us != 200);
         }
     }
 
@@ -1641,7 +1721,7 @@ mod tests {
             start + 5 * MINUTE_US,
             &sources,
             100,
-            false,
+            crate::theoretical_execution::ExecutionModel::Vwap3m,
         )
         .await
         .unwrap();
@@ -1655,7 +1735,7 @@ mod tests {
             start + 5 * MINUTE_US,
             &sources,
             100,
-            false,
+            crate::theoretical_execution::ExecutionModel::Vwap3m,
         )
         .await
         .unwrap();
@@ -1670,7 +1750,7 @@ mod tests {
             start + 5 * MINUTE_US,
             &sources,
             100,
-            false,
+            crate::theoretical_execution::ExecutionModel::Vwap3m,
         )
         .await
         .unwrap();
@@ -1694,7 +1774,7 @@ mod tests {
             start + 5 * MINUTE_US,
             &sources,
             100,
-            false,
+            crate::theoretical_execution::ExecutionModel::Vwap3m,
         )
         .await
         .unwrap();
@@ -1712,7 +1792,7 @@ mod tests {
             start + 5 * MINUTE_US,
             &sources,
             100,
-            false,
+            crate::theoretical_execution::ExecutionModel::Vwap3m,
         )
         .await
         .unwrap();
@@ -1732,10 +1812,96 @@ mod tests {
             seq: 0,
             delta_qty: 5.0,
             fee_rate: 0.0002,
+            archived_taker_fee_rate: None,
             legacy_fee: false,
             target_signal: 0,
         }
     }
+    #[test]
+    fn instant_taker_uses_arrival_minute_open_without_backdating_inventory() {
+        let (_dir, store, start, mut bars) = cached_market();
+        bars[1].open = 99.25;
+        bars[1].base_volume = 0.0;
+        bars[1].quote_volume = 0.0;
+        bars[1].trades = 0;
+        store
+            .save_page("BTCUSDT", start - MINUTE_US, start + 5 * MINUTE_US, &bars)
+            .unwrap();
+        for offset in [0, 3_000_000, MINUTE_US - 1] {
+            for quantity in [5.0, -5.0] {
+                let mut d = delta(start + offset);
+                d.execution_model = ExecutionModel::InstantTaker;
+                d.delta_qty = quantity;
+                d.fee_rate = 0.0007;
+                assert_eq!(d.open_ts_us(0), start);
+                assert_eq!(d.execution_ts_us(), start + offset);
+                assert_eq!(d.slice_ts_us(0), start + offset);
+                assert_eq!(d.pricing_end_ts_us(), start + MINUTE_US);
+                let price = d.prices(&store).unwrap().unwrap();
+                assert_eq!(price.prices, vec![Some(99.25)]);
+                assert_eq!(price.quantity(quantity, 0), quantity);
+                assert_eq!(price.quantity_weights, vec![1.0]);
+                assert_eq!(price.zero_volume_fallback_sample_count, 0);
+                let mut output = TheoreticalNavTimeline::default();
+                rebuild_timeline(
+                    &[d.clone()],
+                    BTreeMap::new(),
+                    vec![(d.slice_ts_us(0), 0, 0)],
+                    &store,
+                    start,
+                    start + 2 * MINUTE_US,
+                    100,
+                    &mut output,
+                )
+                .unwrap();
+                assert_eq!(output.points[0].nav_change_before_fee_quote, 0.0);
+                let last = output.points.last().unwrap();
+                assert!(
+                    (last.nav_change_before_fee_quote - quantity * (105.0 - 99.25)).abs() < 1e-10
+                );
+                assert!(
+                    (last.estimated_trading_fee_quote - quantity.abs() * 99.25 * 0.0007).abs()
+                        < 1e-10
+                );
+            }
+        }
+        let mut d = delta(start + 3_000_000);
+        d.execution_model = ExecutionModel::InstantTaker;
+        let mut carried = TheoreticalNavTimeline::default();
+        rebuild_timeline(
+            &[d.clone()],
+            BTreeMap::new(),
+            vec![(d.slice_ts_us(0), 0, 0)],
+            &store,
+            start + 4_000_000,
+            start + 2 * MINUTE_US,
+            100,
+            &mut carried,
+        )
+        .unwrap();
+        assert_eq!(
+            carried.points.last().unwrap().estimated_trading_fee_quote,
+            0.0
+        );
+        assert_eq!(
+            carried.points.last().unwrap().nav_change_before_fee_quote,
+            25.0
+        );
+        bars[1].open = 98.5;
+        store
+            .save_page("BTCUSDT", start, start + MINUTE_US, &[bars[1]])
+            .unwrap();
+        assert_eq!(d.prices(&store).unwrap().unwrap().average(), Some(98.5));
+        d.received_at_us = start + MINUTE_US;
+        assert_eq!(d.open_ts_us(0), start + MINUTE_US);
+        assert_eq!(
+            d.prices(&store).unwrap().unwrap().average(),
+            Some(bars[2].open)
+        );
+        d.received_at_us = start + 6 * MINUTE_US;
+        assert!(d.prices(&store).unwrap().is_none());
+    }
+
     #[test]
     fn rapidx_vwap_weights_quantity_and_fees_with_exact_window_boundaries() {
         let (_dir, store, start, mut bars) = cached_market();
@@ -2034,16 +2200,18 @@ mod tests {
             )
             .unwrap();
         let targets = TheoreticalTargetCache::new(Arc::new(config.clone()), archive);
-        let fees = BTreeMap::from([
+        let mut fees: BTreeMap<String, TheoreticalFeeRates> = BTreeMap::from([
             ("native".into(), 0.0002.into()),
             ("rapidx".into(), 0.0002.into()),
         ]);
+        fees.get_mut("rapidx").unwrap().taker_default = 0.0007;
         let end = start + 5 * MINUTE_US;
         let mut curves = Vec::new();
         for (source, model, expected) in [
             ("native", ExecutionModel::Twap5m, 102.0),
             ("rapidx", ExecutionModel::Vwap3m, 112200.0 / 1101.0),
             ("rapidx", ExecutionModel::Twap3m, 101.0),
+            ("rapidx", ExecutionModel::InstantTaker, bars[1].open),
         ] {
             let scope = vec![source.to_string()];
             let curve = load_timeline(
@@ -2054,7 +2222,7 @@ mod tests {
                 end,
                 &scope,
                 100,
-                model == ExecutionModel::Twap3m,
+                model,
             )
             .await
             .unwrap();
@@ -2074,7 +2242,7 @@ mod tests {
                 None,
                 None,
                 Default::default(),
-                model == ExecutionModel::Twap3m,
+                model,
             )
             .await
             .unwrap();
@@ -2090,6 +2258,9 @@ mod tests {
                 start + model.window_secs() as i64 * 1_000_000
             );
             assert_eq!(row.virtual_vwap, expected);
+            if model == ExecutionModel::InstantTaker {
+                assert!((row.virtual_fee_usdt - 5.0 * expected * 0.0007).abs() < 1e-12);
+            }
             let last = curve.points.last().unwrap();
             assert!((last.nav_change_before_fee_quote - 5.0 * (105.0 - expected)).abs() < 1e-10);
             assert!((last.estimated_trading_fee_quote - row.virtual_fee_usdt).abs() < 1e-10);
@@ -2103,7 +2274,7 @@ mod tests {
                     end,
                     &scope,
                     100,
-                    model == ExecutionModel::Twap3m
+                    model
                 )
                 .await
                 .unwrap(),
@@ -2112,9 +2283,18 @@ mod tests {
             assert_eq!(reads, store.status().disk_batch_reads);
             curves.push(curve);
         }
-        let mixed = load_timeline(fees.clone(), &targets, &store, start, end, &[], 100, false)
-            .await
-            .unwrap();
+        let mixed = load_timeline(
+            fees.clone(),
+            &targets,
+            &store,
+            start,
+            end,
+            &[],
+            100,
+            crate::theoretical_execution::ExecutionModel::Vwap3m,
+        )
+        .await
+        .unwrap();
         assert_eq!(mixed.execution_model, None);
         let expected_sum: f64 = curves[..2]
             .iter()
@@ -2123,9 +2303,18 @@ mod tests {
         assert!(
             (mixed.points.last().unwrap().nav_change_after_fee_quote - expected_sum).abs() < 1e-10
         );
-        let mixed_twap = load_timeline(fees.clone(), &targets, &store, start, end, &[], 100, true)
-            .await
-            .unwrap();
+        let mixed_twap = load_timeline(
+            fees.clone(),
+            &targets,
+            &store,
+            start,
+            end,
+            &[],
+            100,
+            crate::theoretical_execution::ExecutionModel::Twap3m,
+        )
+        .await
+        .unwrap();
         assert_eq!(mixed_twap.execution_model, None);
         let expected = curves[0].points.last().unwrap().nav_change_after_fee_quote
             + curves[2].points.last().unwrap().nav_change_after_fee_quote;
@@ -2134,11 +2323,15 @@ mod tests {
         );
         assert_eq!(
             crate::theoretical_execution::references(&config, &["native".into()]).unwrap(),
-            vec![false]
+            vec![ExecutionModel::Twap5m]
         );
         assert_eq!(
             crate::theoretical_execution::references(&config, &["rapidx".into()]).unwrap(),
-            vec![false, true]
+            vec![
+                ExecutionModel::Vwap3m,
+                ExecutionModel::Twap3m,
+                ExecutionModel::InstantTaker
+            ]
         );
         // Zero-volume windows use the same close prices, quantities and fees in
         // both report paths. Restoring a candle must invalidate both caches.
@@ -2151,7 +2344,7 @@ mod tests {
             .save_page("BTCUSDT", start - MINUTE_US, end, &bars)
             .unwrap();
         let mean_close = bars[1..4].iter().map(|bar| bar.close).sum::<f64>() / 3.0;
-        for twap in [false, true] {
+        for twap in [ExecutionModel::Vwap3m, ExecutionModel::Twap3m] {
             let scope = vec!["rapidx".to_owned()];
             let curve = load_timeline(
                 fees.clone(),
@@ -2194,10 +2387,11 @@ mod tests {
             let last = curve.points.last().unwrap();
             assert!((last.nav_change_before_fee_quote - 5.0 * (105.0 - mean_close)).abs() < 1e-10);
             assert!((last.estimated_trading_fee_quote - row.virtual_fee_usdt).abs() < 1e-10);
-            assert_eq!(row.reference_prices.len(), 2);
+            assert_eq!(row.reference_prices.len(), 3);
             assert!(
                 row.reference_prices
                     .iter()
+                    .filter(|reference| reference.execution_model != ExecutionModel::InstantTaker)
                     .all(|reference| reference.price == Some(mean_close))
             );
         }
@@ -2221,9 +2415,10 @@ mod tests {
             )
             .unwrap();
         for (source, delay, twap) in [
-            ("native", 4, false),
-            ("rapidx", 2, false),
-            ("rapidx", 2, true),
+            ("native", 4, ExecutionModel::Twap5m),
+            ("rapidx", 2, ExecutionModel::Vwap3m),
+            ("rapidx", 2, ExecutionModel::Twap3m),
+            ("rapidx", 0, ExecutionModel::InstantTaker),
         ] {
             let before_clock = now_us().div_euclid(MINUTE_US) * MINUTE_US;
             let latest = load_timeline(
@@ -2265,9 +2460,18 @@ mod tests {
             .unwrap();
         assert_eq!(carry.values().copied().sum::<f64>(), 5.0);
         std::fs::write(&rapidx_env, "TRADE_ENGINE_EXEC_BACKEND='native'").unwrap();
-        let changed = load_timeline(fees, &targets, &store, start, end, &scope, 100, false)
-            .await
-            .unwrap();
+        let changed = load_timeline(
+            fees,
+            &targets,
+            &store,
+            start,
+            end,
+            &scope,
+            100,
+            crate::theoretical_execution::ExecutionModel::Vwap3m,
+        )
+        .await
+        .unwrap();
         assert_eq!(changed.execution_model, Some(ExecutionModel::Twap5m));
         assert_eq!(changed.points, curves[0].points);
         assert_eq!(store.status().requests, 0);

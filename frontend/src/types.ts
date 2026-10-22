@@ -397,7 +397,7 @@ export interface TheoreticalNavPoint {
   estimated_trading_fee_quote: number
 }
 
-export type TheoreticalExecutionModel = 'twap5m' | 'vwap3m' | 'twap3m'
+export type TheoreticalExecutionModel = 'twap5m' | 'vwap3m' | 'twap3m' | 'instant_taker'
 
 export interface TheoreticalNavTimeline {
   execution_model: TheoreticalExecutionModel | null
@@ -618,6 +618,8 @@ export type TheoreticalNavSeriesKey =
   | 'theoretical_nav_after_fee_quote'
   | 'theoretical_twap3m_before_fee_quote'
   | 'theoretical_twap3m_after_fee_quote'
+  | 'theoretical_instant_taker_before_fee_quote'
+  | 'theoretical_instant_taker_after_fee_quote'
 export type FundingNavSeriesKey = 'funding_income_quote' | 'total_nav_before_fee_quote' | 'total_nav_after_fee_quote'
 export type NavSeriesKey = ActualNavSeriesKey | TheoreticalNavSeriesKey | FundingNavSeriesKey
 export type SymbolRow = AggregateSymbolNavReport & {

@@ -11,6 +11,7 @@ pub enum ExecutionModel {
     Twap5m,
     Vwap3m,
     Twap3m,
+    InstantTaker,
 }
 
 impl ExecutionModel {
@@ -28,11 +29,24 @@ impl ExecutionModel {
         match self {
             Self::Twap5m => 5,
             Self::Vwap3m | Self::Twap3m => 3,
+            Self::InstantTaker => 1,
         }
     }
 
     pub fn window_secs(self) -> u64 {
-        self.sample_count() as u64 * 60
+        if self == Self::InstantTaker {
+            0
+        } else {
+            self.sample_count() as u64 * 60
+        }
+    }
+
+    pub fn open_ts_us(self, received_at_us: i64) -> i64 {
+        if self == Self::InstantTaker {
+            received_at_us.div_euclid(crate::kline::MINUTE_US) * crate::kline::MINUTE_US
+        } else {
+            crate::kline::first_complete_open(received_at_us)
+        }
     }
 
     pub fn missing_volume_reason(self, symbol: &str) -> String {
@@ -49,6 +63,7 @@ impl ExecutionModel {
             }
             Self::Vwap3m => "total_quote_over_total_base_in_complete_3m_window_or_all_empty_close",
             Self::Twap3m => "arithmetic_mean_of_3_complete_minute_vwaps_or_empty_minute_close",
+            Self::InstantTaker => "arrival_minute_open_as_instant_taker_estimate",
         }
     }
 
@@ -63,33 +78,38 @@ impl ExecutionModel {
             Self::Twap3m => {
                 "arithmetic_mean_of_3_complete_minute_vwaps_or_empty_minute_close+closed_1m_close_mark"
             }
+            Self::InstantTaker => {
+                "arrival_minute_open_as_instant_taker_estimate+closed_1m_close_mark"
+            }
         }
     }
 }
 
 pub type ExecutionModels = BTreeMap<String, ExecutionModel>;
 
-/// Native sources keep their existing model in both portfolio comparisons.
-pub fn select_reference(models: &mut ExecutionModels, twap: bool) {
-    if twap {
-        for model in models.values_mut() {
-            if *model == ExecutionModel::Vwap3m {
-                *model = ExecutionModel::Twap3m;
-            }
+/// Native sources keep their existing model in every portfolio comparison.
+pub fn select_reference(models: &mut ExecutionModels, reference: ExecutionModel) {
+    for model in models.values_mut() {
+        if *model == ExecutionModel::Vwap3m {
+            *model = reference;
         }
     }
 }
 
-pub fn references(config: &AppConfig, sources: &[String]) -> Result<Vec<bool>> {
+pub fn references(config: &AppConfig, sources: &[String]) -> Result<Vec<ExecutionModel>> {
     let models = resolve_models(config, sources)?;
     Ok(
         if models
             .values()
             .any(|model| *model == ExecutionModel::Vwap3m)
         {
-            vec![false, true]
+            vec![
+                ExecutionModel::Vwap3m,
+                ExecutionModel::Twap3m,
+                ExecutionModel::InstantTaker,
+            ]
         } else {
-            vec![false]
+            vec![ExecutionModel::Twap5m]
         },
     )
 }

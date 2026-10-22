@@ -498,7 +498,7 @@ pub async fn report_acquisition_cost(
     row_symbol: Option<&str>,
     row_strategy: Option<&str>,
     row_sort: AcquisitionRowSort,
-    twap_reference: bool,
+    reference_model: crate::theoretical_execution::ExecutionModel,
 ) -> Result<AcquisitionCostReport> {
     if start_received_at_us < 0 || end_received_at_us < start_received_at_us {
         bail!("invalid acquisition-cost timestamp range");
@@ -514,7 +514,7 @@ pub async fn report_acquisition_cost(
         end_received_at_us,
         source_ids,
         strategy_name,
-        twap_reference,
+        reference_model,
     )
     .await?;
     let analysis_now_us = crate::kline::now_us();
@@ -529,6 +529,7 @@ pub async fn report_acquisition_cost(
     let mut zero_volume_skipped_delta_count = 0;
     for delta in deltas {
         let execution_ts_us = delta.execution_ts_us();
+        let pricing_end_ts_us = delta.pricing_end_ts_us();
         let samples = delta.prices(klines)?;
         if samples
             .as_ref()
@@ -546,7 +547,7 @@ pub async fn report_acquisition_cost(
                 .or_default()
                 .push(delta.received_at_us);
             if delta.received_at_us >= start_received_at_us {
-                if execution_ts_us > analysis_now_us {
+                if pricing_end_ts_us > analysis_now_us {
                     pending_virtual_delta_count += 1;
                 } else {
                     missing_virtual_delta_count += 1;
@@ -576,6 +577,7 @@ pub async fn report_acquisition_cost(
                 vec![
                     crate::theoretical_execution::ExecutionModel::Vwap3m,
                     crate::theoretical_execution::ExecutionModel::Twap3m,
+                    crate::theoretical_execution::ExecutionModel::InstantTaker,
                 ]
             };
         let reference_prices = reference_models
@@ -584,7 +586,11 @@ pub async fn report_acquisition_cost(
                 Ok(ExecutionReferencePrice {
                     execution_model: model,
                     price: klines
-                        .window_prices(&delta.symbol, delta.open_ts_us(0), model)?
+                        .window_prices(
+                            &delta.symbol,
+                            model.open_ts_us(delta.received_at_us),
+                            model,
+                        )?
                         .and_then(|prices| prices.average()),
                 })
             })
@@ -982,7 +988,13 @@ pub async fn report_acquisition_cost(
             "source_specific_execution",
             crate::theoretical_execution::ExecutionModel::price_basis,
         ),
-        fee_basis: "actual_maker_taker_vs_archived_theoretical_rate_or_current_legacy_fallback",
+        fee_basis: if crate::theoretical_execution::scope_model(&execution_models)
+            == Some(crate::theoretical_execution::ExecutionModel::InstantTaker)
+        {
+            "actual_maker_taker_vs_archived_taker_rate_or_current_taker_legacy_fallback"
+        } else {
+            "actual_maker_taker_vs_archived_theoretical_rate_or_current_legacy_fallback"
+        },
         start_received_at_us,
         end_received_at_us,
         source_ids: source_ids.to_vec(),

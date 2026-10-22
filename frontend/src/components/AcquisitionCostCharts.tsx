@@ -122,29 +122,32 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
   const sign = Math.sign(row.delta_qty)
   const offset = (ts: number) => (ts - row.received_at_us) / 1e6
   const plotPrice = (price: number) => priceMode === 'price' ? price : sign * (price / row.virtual_vwap - 1) * 10_000
+  const instant = row.execution_model === 'instant_taker'
   const windowMinutes = row.execution_window_secs / 60
-  const startUs = row.virtual_execution_ts_us - row.execution_window_secs * 1e6
-  const xEnd = Math.max(offset(row.virtual_execution_ts_us), offset(execution.last_fill_ts_us ?? row.received_at_us))
+  const startUs = instant ? Math.floor(row.received_at_us / 60e6) * 60e6 : row.virtual_execution_ts_us - row.execution_window_secs * 1e6
+  const xStart = Math.min(0, offset(startUs))
+  const xEnd = Math.max(1, offset(row.virtual_execution_ts_us), offset(execution.last_fill_ts_us ?? row.received_at_us))
   const reversal = path.reversal
   const reversed = reversal != null && Math.min(Math.abs(reversal.outwardBps), Math.abs(reversal.returnBps)) >= moveThreshold
   const jumped = path.jumpBps != null && Math.abs(path.jumpBps) >= moveThreshold
   const slow = execution.qty_weighted_target_delay_us != null && execution.qty_weighted_target_delay_us >= slowThreshold * 1e6
-  const late = execution.after_window_qty_ratio != null && execution.after_window_qty_ratio > 0
+  const late = !instant && execution.after_window_qty_ratio != null && execution.after_window_qty_ratio > 0
   const maxQty = Math.max(...execution.fills.map((fill) => Math.abs(fill.actual_qty)), 1e-30)
   const priceDifference = row.actual_vwap == null ? null : row.actual_vwap - row.virtual_vwap
   const differenceFormat = priceFormatter([priceDifference])
   const series: echarts.EChartsCoreOption['series'] = [
     {
-      type: 'line', name: '分钟均价', connectNulls: false, symbolSize: 8, itemStyle: { color: blue },
-      data: row.sample_prices.map((price, i) => [offset(startUs + (i * 60 + 30) * 1e6), price == null ? null : plotPrice(price)]),
+      type: 'line', name: instant ? '整分钟 open' : '分钟均价', connectNulls: false, symbolSize: 8, itemStyle: { color: blue },
+      data: row.sample_prices.map((price, i) => [offset(startUs + (i * 60 + (instant ? 0 : 30)) * 1e6), price == null ? null : plotPrice(price)]),
       tooltip: { formatter: (p: { dataIndex: number }) => {
         const i = p.dataIndex
+        if (instant) return `信号所在整分钟 open\n相对接收时间 ${offset(startUs).toFixed(1)} 秒\n价格 ${formatPrice(row.sample_prices[i])}\n理论数量权重 100%`
         return `第 ${i + 1} 个完整分钟\n发布后 ${offset(startUs + i * 60e6).toFixed(1)}–${offset(startUs + (i + 1) * 60e6).toFixed(1)} 秒\n${row.execution_model === 'twap5m' && row.zero_volume_fallback_sample_count ? '收盘价' : '分钟均价'} ${formatPrice(row.sample_prices[i])}\n理论数量权重 ${(row.sample_quantity_weights[i] * 100).toFixed(2)}%`
       } },
-      markArea: { silent: true, itemStyle: { color: 'rgba(37,99,167,0.05)' }, data: [[{ xAxis: offset(startUs) }, { xAxis: offset(row.virtual_execution_ts_us) }]] },
+      markArea: instant ? undefined : { silent: true, itemStyle: { color: 'rgba(37,99,167,0.05)' }, data: [[{ xAxis: offset(startUs) }, { xAxis: offset(row.virtual_execution_ts_us) }]] },
       markLine: { silent: true, symbol: 'none', label: { show: false }, lineStyle: { color: '#9ca3af', type: 'dotted' }, data: [{ xAxis: offset(row.virtual_execution_ts_us) }] },
     },
-    ...row.reference_prices.filter((reference) => reference.price != null).map((reference) => ({ type: 'line' as const, name: theoreticalExecutionLabel(reference.execution_model), symbol: 'none', lineStyle: { color: reference.execution_model === 'twap3m' ? '#d97706' : better, type: 'dashed' as const }, data: [[0, plotPrice(reference.price!)], [xEnd, plotPrice(reference.price!)]] })),
+    ...row.reference_prices.filter((reference) => reference.price != null).map((reference) => ({ type: 'line' as const, name: theoreticalExecutionLabel(reference.execution_model), symbol: 'none', lineStyle: { color: reference.execution_model === 'instant_taker' ? '#e11d48' : reference.execution_model === 'twap3m' ? '#d97706' : better, type: 'dashed' as const }, data: [[xStart, plotPrice(reference.price!)], [xEnd, plotPrice(reference.price!)]] })),
     ...(row.actual_vwap == null ? [] : [{ type: 'line', name: '实际 VWAP', symbol: 'none', lineStyle: { color: '#b7791f', type: 'dashed' }, data: [[0, plotPrice(row.actual_vwap)], [xEnd, plotPrice(row.actual_vwap)]] }]),
     ...(['maker', 'taker', 'unclassified', 'internal_cross'] as const).map((role, index) => ({
       type: 'scatter', name: ['Maker 成交', 'Taker 成交', '未分类成交', '内部对敲'][index], itemStyle: { color: [better, worse, '#7357a3', '#64748b'][index], opacity: 0.85 },
@@ -173,14 +176,14 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
         <div><div className="text-xs text-muted">实际 − 理论（原始价格差）</div><div className="mt-1 break-all font-medium tabular-nums">{priceDifference != null && priceDifference > 0 ? '+' : ''}{differenceFormat(priceDifference)}</div></div>
         <div><div className="text-xs text-muted">方向调整价格差（正值更差）</div><div className={`mt-1 font-medium tabular-nums ${(row.price_shortfall_bps ?? 0) > 0 ? 'number-negative' : 'number-positive'}`}>{bps(row.price_shortfall_bps)}</div></div>
       </div>
-      <CostChart height={360} label={`${row.symbol} ${windowMinutes} 分钟均价与实际成交时点`} option={{
+      <CostChart height={360} label={`${row.symbol} ${instant ? '整分钟 open' : `${windowMinutes} 分钟均价`}与实际成交时点`} option={{
         grid: { ...grid, top: 64, bottom: 80, right: 20 }, tooltip: { ...tooltip, trigger: 'item', formatter: (p: { seriesName: string; value: [number, number] }) => `${p.seriesName}\n${priceMode === 'price' ? formatPrice(p.value[1]) : bps(p.value[1])}` },
         legend: { type: 'scroll', top: 0, textStyle: { fontSize: 11 } },
-        xAxis: { ...valueAxis, min: 0, max: Math.ceil(xEnd), name: '目标发布后 / 秒', nameLocation: 'middle', nameGap: 30 },
+        xAxis: { ...valueAxis, min: Math.floor(xStart), max: Math.ceil(xEnd), name: '相对目标接收时间 / 秒', nameLocation: 'middle', nameGap: 30 },
         yAxis: { ...valueAxis, scale: true, name: priceMode === 'price' ? '价格' : '方向调整 bps', axisLabel: { formatter: (value: number) => priceMode === 'price' ? formatPrice(value) : value.toFixed(1), fontSize: 10 } },
         dataZoom: [{ type: 'inside', filterMode: 'none' }, { type: 'slider', bottom: 0, height: 20, filterMode: 'none' }], series,
       }} />
-      <p className="text-xs leading-6 text-muted">阴影为目标后的 {windowMinutes} 个完整分钟，右边界为窗口结束。均价画在分钟中点，连线只帮助观察走势，不代表逐笔路径；空白分钟不连线。成交点大小表示数量。{execution.fills_sampled ? `图中抽样 ${execution.fills.length} / ${row.matched_fill_count} 笔，保留首尾及价格极值；下方统计使用全部配对成交。` : `共 ${row.matched_fill_count} 笔配对成交。`}成交统计仅覆盖本次查询范围，不代表目标的全部生命周期。价格仅调整显示精度，不代表交易所 tick 精度。</p>
+      <p className="text-xs leading-6 text-muted">{instant ? '参考点为信号接收时间所在整分钟的 K 线 open，负秒数表示取价早于接收；理论数量在接收时一次计入，费用按 taker 计算，未计入价差和冲击。' : `阴影为目标后的 ${windowMinutes} 个完整分钟，右边界为窗口结束。均价画在分钟中点，连线只帮助观察走势，不代表逐笔路径；空白分钟不连线。`}成交点大小表示数量。{execution.fills_sampled ? `图中抽样 ${execution.fills.length} / ${row.matched_fill_count} 笔，保留首尾及价格极值；下方统计使用全部配对成交。` : `共 ${row.matched_fill_count} 笔配对成交。`}成交统计仅覆盖本次查询范围，不代表目标的全部生命周期。价格仅调整显示精度，不代表交易所 tick 精度。</p>
       <div className="grid gap-3 text-sm sm:grid-cols-3">
         <div><div className="text-xs text-muted">目标 → 成交 · 数量加权平均</div><div className="mt-1 tabular-nums">{seconds(execution.qty_weighted_target_delay_us)}</div></div>
         <div><div className="text-xs text-muted">订单 → 成交 · 数量加权平均</div><div className="mt-1 tabular-nums">{seconds(execution.qty_weighted_order_delay_us)}</div></div>
@@ -198,7 +201,7 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
           {path.jumpBps == null ? '没有相邻且都有成交的分钟可供比较。' : `第 ${path.jumpMinute! - 1} → ${path.jumpMinute} 分钟均价变化最大，为 ${bps(path.jumpBps)}，判断阈值 ${moveThreshold} bps。分钟均价无法确认瞬时跳价，需要更细行情才能区分突跳与连续移动。`}
         </Diagnostic>
         <Diagnostic title={execution.qty_weighted_target_delay_us == null ? '速度：暂无配对成交' : slow || late ? '存在成交延迟线索' : '平均成交延迟在阈值内'} detected={slow || late}>
-          {execution.qty_weighted_target_delay_us == null ? '未配对不代表未成交；检查参考覆盖率和缺失行情。' : `数量加权平均 ${seconds(execution.qty_weighted_target_delay_us)}，阈值 ${slowThreshold} 秒；窗口结束后成交占 ${(100 * (execution.after_window_qty_ratio ?? 0)).toFixed(1)}%。这只是速度筛查，需结合订单算法的预期节奏和同图价格判断是否造成不利成交。`}
+          {execution.qty_weighted_target_delay_us == null ? '未配对不代表未成交；检查参考覆盖率和缺失行情。' : `数量加权平均 ${seconds(execution.qty_weighted_target_delay_us)}，阈值 ${slowThreshold} 秒${instant ? '' : `；窗口结束后成交占 ${(100 * (execution.after_window_qty_ratio ?? 0)).toFixed(1)}%`}。这只是速度筛查，需结合订单算法的预期节奏和同图价格判断是否造成不利成交。`}
         </Diagnostic>
       </div>
       <div className="rounded-lg bg-canvas p-3 text-xs leading-6 text-muted">

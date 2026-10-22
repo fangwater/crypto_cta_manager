@@ -115,6 +115,12 @@ fn decode_fee_rates(row: &sqlx::postgres::PgRow) -> Result<(FeeRates, Theoretica
     validate_theoretical_twap_fee_rate(default)?;
     let theory = TheoreticalFeeRates {
         default,
+        taker_default: rates.taker,
+        taker_by_quote: rates
+            .by_quote
+            .iter()
+            .map(|(quote, fee)| (quote.clone(), fee.taker_fee_rate))
+            .collect(),
         by_quote: rates
             .by_quote
             .iter()

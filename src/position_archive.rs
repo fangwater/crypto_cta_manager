@@ -42,6 +42,10 @@ pub struct ArchivedPublishedAccount {
     pub theoretical_fee_rate: Option<f64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub theoretical_fee_rates_by_quote: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taker_fee_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub taker_fee_rates_by_quote: BTreeMap<String, f64>,
     #[serde(default, rename = "leverage", skip_serializing_if = "Option::is_none")]
     legacy_leverage: Option<f64>,
 }
@@ -51,6 +55,8 @@ impl ArchivedPublishedAccount {
         if let Some(fees) = fees {
             self.theoretical_fee_rate = Some(fees.default);
             self.theoretical_fee_rates_by_quote = fees.by_quote;
+            self.taker_fee_rate = Some(fees.taker_default);
+            self.taker_fee_rates_by_quote = fees.taker_by_quote;
         }
     }
 
@@ -63,6 +69,13 @@ impl ArchivedPublishedAccount {
 
     pub fn effective_shares(&self) -> f64 {
         self.shares * self.legacy_leverage.unwrap_or(1.0)
+    }
+
+    pub fn taker_fee_for_symbol(&self, symbol: &str) -> Option<f64> {
+        self.taker_fee_rates_by_quote
+            .get(crate::config::symbol_quote(symbol))
+            .copied()
+            .or(self.taker_fee_rate)
     }
 }
 
@@ -111,6 +124,8 @@ pub fn published_account(
         target_projection: None,
         theoretical_fee_rate: None,
         theoretical_fee_rates_by_quote: BTreeMap::new(),
+        taker_fee_rate: None,
+        taker_fee_rates_by_quote: BTreeMap::new(),
         legacy_leverage: None,
     }
 }

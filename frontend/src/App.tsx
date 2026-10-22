@@ -88,6 +88,8 @@ const seriesOptions: NavSeriesKey[] = [
   'theoretical_nav_after_fee_quote',
   'theoretical_twap3m_before_fee_quote',
   'theoretical_twap3m_after_fee_quote',
+  'theoretical_instant_taker_before_fee_quote',
+  'theoretical_instant_taker_after_fee_quote',
   'realized_pnl_before_fee_quote',
   'floating_pnl_quote',
   'estimated_trading_fee_quote',
@@ -226,6 +228,8 @@ function NavPage() {
     'theoretical_nav_after_fee_quote',
     'theoretical_twap3m_before_fee_quote',
     'theoretical_twap3m_after_fee_quote',
+    'theoretical_instant_taker_before_fee_quote',
+    'theoretical_instant_taker_after_fee_quote',
     'floating_pnl_quote',
     'funding_income_quote',
     'total_nav_after_fee_quote',
@@ -467,7 +471,7 @@ function NavPage() {
   const hasFunding = displayed.kind !== 'unavailable'
   const strategyChart = chartMode === 'strategies' || chartMode === 'strategyFunding'
   const fundingLabel = (key: NavSeriesKey) => usesEstimatedFunding ? navSeriesLabel(key, timeline?.theoretical[0]?.execution_model).replace('Funding', '估算 Funding').replace('funding', '估算 funding') : navSeriesLabel(key, timeline?.theoretical[0]?.execution_model)
-  const fundingSeriesVisible = (key: NavSeriesKey) => (!key.startsWith('theoretical_twap3m_') || (timeline?.theoretical.length ?? 0) > 1) && (hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_')))
+  const fundingSeriesVisible = (key: NavSeriesKey) => (!key.startsWith('theoretical_twap3m_') || timeline?.theoretical.some((r) => r.execution_model === 'twap3m')) && (!key.startsWith('theoretical_instant_taker_') || timeline?.theoretical.some((r) => r.execution_model === 'instant_taker')) && (hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_')))
   const portfolioSeriesOptions = (
     selectedSymbols === null
       ? seriesOptions
@@ -903,7 +907,7 @@ function NavPage() {
           )}
           {timeline?.theoretical.map((reference, index) => reference.unavailable_reason && <div key={index} className="chart-notice" role="status">{theoreticalExecutionLabel(reference.execution_model)}：{reference.unavailable_reason}</div>)}
           {timeline?.theoretical[0]?.latest_point_ts_us != null && timeline.theoretical[0].latest_point_ts_us < timeline.report.end_ts_us && (
-            <div className="chart-notice" role="status">最新 {timeline.theoretical[0].execution_window_secs / 60} 分钟窗口尚未结束，理论曲线截至 {timestampUs(timeline.theoretical[0].latest_point_ts_us)}。</div>
+            <div className="chart-notice" role="status">{theoreticalExecutionLabel(timeline.theoretical[0].execution_model)} 的最新 {timeline.theoretical[0].execution_window_secs / 60} 分钟窗口尚未结束，该参考曲线截至 {timestampUs(timeline.theoretical[0].latest_point_ts_us)}。</div>
           )}
           {Boolean(timeline?.theoretical[0]?.zero_volume_skipped_sample_count) && <div className="chart-notice" role="status">跳过 {timeline?.theoretical[0]?.zero_volume_skipped_sample_count} 个无成交分钟样本，{timeline?.theoretical[0]?.execution_model === 'vwap3m' ? '其余分钟按市场成交量占比分配理论数量。' : '其余分钟按账户理论执行规则分配数量。'}</div>}
           {timeline?.theoretical[0]?.execution_model === 'twap5m' && Boolean(timeline?.theoretical[0]?.zero_volume_fallback_sample_count) && (

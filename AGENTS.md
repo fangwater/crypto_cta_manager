@@ -521,8 +521,16 @@ checked here contain USDT quotes; the generic "报价币" UI label was introduce
 by coin-margined support and does not change their currency.
 
 The theoretical target model freezes `delta = target - previous distinct target`.
-By operator instruction on 2026-10-22, RapidX sources expose two three-minute references
-for theoretical NAV and acquisition cost: `理论3min_vwap` and `理论3min_twap`. Identify the backend from each
+By operator instruction on 2026-10-22, RapidX sources expose three references
+for theoretical NAV and acquisition cost: `理论3min_vwap`, `理论3min_twap`, and
+`理论瞬时taker`. The instant taker estimate uses the open of the target receipt's
+wall-clock minute (floor the receipt timestamp), with the entire delta applied at
+receipt, never backdated. Use the account's quote-specific taker fee, archived for
+new targets and resolved from current settings for legacy targets without it.
+Keep the existing theoretical fee archive unchanged for the other references.
+This minute-open proxy does not model bid/ask spread or market impact. Retain
+closed-candle caching, missing-coverage handling, and completed-minute close marks;
+the instant curve has no additional multi-minute execution delay. Identify the backend from each
 source's Exec environment, honoring the exchange-specific backend map; never
 infer it from RX01/RX02/RX03 labels. Starting at the first complete minute at or
 after publication, price `[t,t+180s)` as total quote volume / total base volume.
@@ -536,8 +544,8 @@ Keep diagnostic counts internally. A missing candle still remains unavailable.
 Preserve source/symbol/venue isolation,
 archived fees and shares, actual FIFO and funding, and the existing five-minute
 order-signal reference matching bound. Include the execution model in derived
-cache keys and expose both three-minute references in the browser. The latest RapidX
-curve ends two minutes before the latest closed-minute boundary. Existing
+cache keys and expose all three references in the browser. The two three-minute
+curves end two minutes before the latest closed-minute boundary. Existing
 unsupported venue feeds remain explicitly unavailable. See
 `docs/rapidx_theoretical_vwap.md`.
 
