@@ -1,0 +1,595 @@
+{
+  "manager_pid": "1462641",
+  "binary_sha256": "01f3ae08aac66bab926a924eb9660ef5674cf0db545438f323895dfe97d153d2",
+  "webroot": "/home/el01/crypto_cta_manager/web-releases/20261021T065251Z",
+  "processes": {
+    "107046": {
+      "exe": "/home/el01/.local/opt/redis/usr/bin/redis-check-rdb",
+      "start_ticks": "50718857",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "248620": {
+      "exe": "/home/el01/binance_exec_trade06/persist_manager",
+      "start_ticks": "664623144",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "286082": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "664647614",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "333385": {
+      "exe": "/home/el01/binance_exec_trade02/viz_server",
+      "start_ticks": "734021629",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "467854": {
+      "exe": "/home/el01/binance_exec_trade06/viz_server",
+      "start_ticks": "664762852",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "709851": {
+      "exe": "/home/el01/binance_exec_trade07/viz_server",
+      "start_ticks": "586855500",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "826962": {
+      "exe": "/home/el01/binance_exec_trade14/persist_manager",
+      "start_ticks": "724621089",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1080468": {
+      "exe": "/home/el01/spread_pbs/binance-futures/spread_pbs",
+      "start_ticks": "751083696",
+      "affinity": "Cpus_allowed_list:\t2"
+    },
+    "1080489": {
+      "exe": "/home/el01/spread_pbs/binance-futures/spread_pbs",
+      "start_ticks": "751083714",
+      "affinity": "Cpus_allowed_list:\t1"
+    },
+    "1128850": {
+      "exe": "/home/el01/binance_exec_trade02/trade_engine",
+      "start_ticks": "751179922",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1128990": {
+      "exe": "/home/el01/binance_exec_trade02/account_monitor",
+      "start_ticks": "751180045",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1129075": {
+      "exe": "/home/el01/binance_exec_trade02/exec-pre-trade",
+      "start_ticks": "751180089",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1132523": {
+      "exe": "/home/el01/binance_exec_trade06/trade_engine",
+      "start_ticks": "751188814",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1132655": {
+      "exe": "/home/el01/binance_exec_trade06/account_monitor",
+      "start_ticks": "751188938",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1132740": {
+      "exe": "/home/el01/binance_exec_trade06/exec-pre-trade",
+      "start_ticks": "751188983",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1134088": {
+      "exe": "/home/el01/binance_exec_trade07/trade_engine",
+      "start_ticks": "751190963",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1134240": {
+      "exe": "/home/el01/binance_exec_trade07/account_monitor",
+      "start_ticks": "751191094",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1134412": {
+      "exe": "/home/el01/binance_exec_trade07/exec-pre-trade",
+      "start_ticks": "751191142",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1136243": {
+      "exe": "/home/el01/binance_exec_trade08/trade_engine",
+      "start_ticks": "751192316",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1136381": {
+      "exe": "/home/el01/binance_exec_trade08/account_monitor",
+      "start_ticks": "751192446",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1136469": {
+      "exe": "/home/el01/binance_exec_trade08/exec-pre-trade",
+      "start_ticks": "751192492",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1137966": {
+      "exe": "/home/el01/binance_exec_trade09/trade_engine",
+      "start_ticks": "751196885",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1138099": {
+      "exe": "/home/el01/binance_exec_trade09/account_monitor",
+      "start_ticks": "751197014",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1138192": {
+      "exe": "/home/el01/binance_exec_trade09/exec-pre-trade",
+      "start_ticks": "751197065",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1140271": {
+      "exe": "/home/el01/binance_exec_trade10/trade_engine",
+      "start_ticks": "751201252",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1140402": {
+      "exe": "/home/el01/binance_exec_trade10/account_monitor",
+      "start_ticks": "751201381",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1140489": {
+      "exe": "/home/el01/binance_exec_trade10/exec-pre-trade",
+      "start_ticks": "751201429",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1146450": {
+      "exe": "/home/el01/binance_exec_trade11/trade_engine",
+      "start_ticks": "751205816",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1146587": {
+      "exe": "/home/el01/binance_exec_trade11/account_monitor",
+      "start_ticks": "751205940",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1146673": {
+      "exe": "/home/el01/binance_exec_trade11/exec-pre-trade",
+      "start_ticks": "751205985",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1151200": {
+      "exe": "/home/el01/binance_exec_trade12/trade_engine",
+      "start_ticks": "751210179",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1151833": {
+      "exe": "/home/el01/crypto_cta_manager/bin/cta_monitor",
+      "start_ticks": "751210290",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1152064": {
+      "exe": "/home/el01/binance_exec_trade12/account_monitor",
+      "start_ticks": "751210314",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1152541": {
+      "exe": "/home/el01/binance_exec_trade12/exec-pre-trade",
+      "start_ticks": "751210367",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1161625": {
+      "exe": "/home/el01/binance_exec_xy_lxy21_05/trade_engine",
+      "start_ticks": "751214563",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1162651": {
+      "exe": "/home/el01/binance_exec_xy_lxy21_05/account_monitor",
+      "start_ticks": "751214700",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1162737": {
+      "exe": "/home/el01/binance_exec_xy_lxy21_05/exec-pre-trade",
+      "start_ticks": "751214748",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1173001": {
+      "exe": "/home/el01/binance_exec_trade14/trade_engine",
+      "start_ticks": "751218936",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1173156": {
+      "exe": "/home/el01/binance_exec_trade14/account_monitor",
+      "start_ticks": "751219069",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1173254": {
+      "exe": "/home/el01/binance_exec_trade14/exec-pre-trade",
+      "start_ticks": "751219118",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1184391": {
+      "exe": "/home/el01/binance_exec_trade01/trade_engine",
+      "start_ticks": "751223451",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1184528": {
+      "exe": "/home/el01/binance_exec_trade01/account_monitor",
+      "start_ticks": "751223584",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1184613": {
+      "exe": "/home/el01/binance_exec_trade01/exec-pre-trade",
+      "start_ticks": "751223636",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1198417": {
+      "exe": "/home/el01/binance_exec_trade03/trade_engine",
+      "start_ticks": "751227841",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1198545": {
+      "exe": "/home/el01/binance_exec_trade03/account_monitor",
+      "start_ticks": "751227971",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1198627": {
+      "exe": "/home/el01/binance_exec_trade03/exec-pre-trade",
+      "start_ticks": "751228020",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1201657": {
+      "exe": "/home/el01/binance_exec_trade04/trade_engine",
+      "start_ticks": "751229315",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1201797": {
+      "exe": "/home/el01/binance_exec_trade04/account_monitor",
+      "start_ticks": "751229456",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1201885": {
+      "exe": "/home/el01/binance_exec_trade04/exec-pre-trade",
+      "start_ticks": "751229507",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1212926": {
+      "exe": "/home/el01/binance_exec_trade13/trade_engine",
+      "start_ticks": "751233855",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1213075": {
+      "exe": "/home/el01/binance_exec_trade13/account_monitor",
+      "start_ticks": "751233992",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1213172": {
+      "exe": "/home/el01/binance_exec_trade13/exec-pre-trade",
+      "start_ticks": "751234044",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1331834": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "742245770",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1450649": {
+      "exe": "/home/el01/binance_exec_trade03/viz_server",
+      "start_ticks": "742296921",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1486522": {
+      "exe": "/home/el01/binance_exec_trade03/persist_manager",
+      "start_ticks": "742312415",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1783984": {
+      "exe": "/home/el01/binance_exec_trade01/persist_manager",
+      "start_ticks": "673883042",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1787774": {
+      "exe": "/home/el01/binance_exec_trade01/viz_server",
+      "start_ticks": "673884592",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "1789675": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "673885009",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2044879": {
+      "exe": "/home/el01/binance_exec_trade07/persist_manager",
+      "start_ticks": "466031363",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2046840": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "466039550",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2107865": {
+      "exe": "/home/el01/binance_exec_trade13/persist_manager",
+      "start_ticks": "699957738",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2112979": {
+      "exe": "/home/el01/binance_exec_trade13/viz_server",
+      "start_ticks": "699959328",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2115007": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "699959763",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2428613": {
+      "exe": "/home/el01/binance_exec_xy_lxy21_05/persist_manager",
+      "start_ticks": "674289059",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2431966": {
+      "exe": "/home/el01/binance_exec_xy_lxy21_05/viz_server",
+      "start_ticks": "674290630",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2433882": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "674291064",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2837558": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "543300203",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2837623": {
+      "exe": "/home/el01/binance_exec_trade09/viz_server",
+      "start_ticks": "543300241",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2975407": {
+      "exe": "/home/el01/binance_exec_trade12/persist_manager",
+      "start_ticks": "543398114",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "2979284": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "543400065",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3192777": {
+      "exe": "/home/el01/binance_exec_trade12/viz_server",
+      "start_ticks": "727633575",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3493099": {
+      "exe": "/home/el01/binance_exec_trade10/persist_manager",
+      "start_ticks": "680231098",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3495679": {
+      "exe": "/home/el01/binance_exec_trade10/viz_server",
+      "start_ticks": "680232697",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3496588": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "680233126",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3500316": {
+      "exe": "/home/el01/binance_exec_trade11/persist_manager",
+      "start_ticks": "680235562",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3503307": {
+      "exe": "/home/el01/binance_exec_trade11/viz_server",
+      "start_ticks": "680237158",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3506049": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "680237593",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3607796": {
+      "exe": "/home/el01/binance_exec_trade02/persist_manager",
+      "start_ticks": "526152126",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3608413": {
+      "exe": "/home/el01/binance_exec_trade09/persist_manager",
+      "start_ticks": "543811833",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3611738": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "526154057",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3655127": {
+      "exe": "/home/el01/.local/opt/nginx/1.24.0-2ubuntu7.15/sbin/nginx",
+      "start_ticks": "664088182",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3708239": {
+      "exe": "/home/el01/binance_exec_trade08/persist_manager",
+      "start_ticks": "700925178",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3710805": {
+      "exe": "/home/el01/binance_exec_trade08/viz_server",
+      "start_ticks": "700926645",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3840899": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "474927527",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3979881": {
+      "exe": "/home/el01/binance_exec_trade14/viz_server",
+      "start_ticks": "724132775",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3979978": {
+      "exe": "/usr/bin/python3.12",
+      "start_ticks": "724132848",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "3980030": {
+      "exe": "/home/el01/.local/opt/nginx/1.24.0-2ubuntu7.15/sbin/nginx",
+      "start_ticks": "724133848",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "4002284": {
+      "exe": "/usr/bin/python3.12 (deleted)",
+      "start_ticks": "336119324",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "4088916": {
+      "exe": "/home/el01/binance_exec_trade04/persist_manager",
+      "start_ticks": "517645735",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    },
+    "4089459": {
+      "exe": "/home/el01/binance_exec_trade04/viz_server",
+      "start_ticks": "517645967",
+      "affinity": "Cpus_allowed_list:\t0-7"
+    }
+  },
+  "config_hashes": {
+    "/home/el01/crypto_cta_manager/nginx/nginx.conf": "6390d19985dff01c00e1858b48ad0d02f6aef2738c4bb8af7a0f015a77b2559a",
+    "/home/el01/.config/systemd/user/crypto-cta-manager-web.service": "23c6efe51cbd16ae215131e5a88ffe6978cc1a65cb19a41860d99d59ef5dfe01",
+    "/home/el01/binance_exec_trade01/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade02/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade03/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade04/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_xy_lxy21_05/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade06/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade07/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade08/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade09/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade10/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade11/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade12/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/el01/binance_exec_trade13/trade_engine.toml": "2745a205315b7935c77a5e68eb0e6a3078189be2e77db6f9231e63cb2eefc6a8",
+    "/home/el01/binance_exec_trade14/trade_engine.toml": "2745a205315b7935c77a5e68eb0e6a3078189be2e77db6f9231e63cb2eefc6a8"
+  },
+  "tables": {
+    "cta_position_snapshots": {
+      "count": 10,
+      "hash": "c4e476b4a0fc1f63cbd36071f7a855de"
+    },
+    "cta_position_snapshot_entries": {
+      "count": 197,
+      "hash": "3f6401bf1cf13169bf1171bead281fb6"
+    },
+    "cta_strategy_position_snapshots": {
+      "count": 11,
+      "hash": "a3a6ba6db8b0b3859cf79c029e258f6b"
+    },
+    "cta_strategy_position_snapshot_entries": {
+      "count": 341,
+      "hash": "d9135cb5386761e38e8151f61ec018dd"
+    }
+  },
+  "funding_settings": [
+    {
+      "source_id": "binance_exec_trade01",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade02",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade03",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade04",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade05",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade06",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade07",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade08",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade09",
+      "funding_enabled": true,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade10",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade11",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade12",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade13",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade14",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_xy_lxy21_05",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    }
+  ],
+  "manager_affinity": "Cpus_allowed_list:\t0-7",
+  "config_sha256": "e7f3c68da16eb37f8a28dd1b248adc1ccb198b8bf24541a61b303e48bdb21af7",
+  "configurations": {
+    "cta_account_follows": {
+      "count": 6,
+      "hash": "689f649184eaf10b473eaf272dceb56e"
+    },
+    "cta_account_strategy_bindings": {
+      "count": 73,
+      "hash": "0012475d4f148d4703fb5bc88746ebeb"
+    },
+    "cta_virtual_accounts": {
+      "count": 9,
+      "hash": "4afe8eb94c635558f96659866f1f4879"
+    },
+    "cta_virtual_account_bindings": {
+      "count": 28,
+      "hash": "c2e78b985f680b7a62b6f53074a58fe3"
+    },
+    "cta_virtual_account_managers": {
+      "count": 0,
+      "hash": "d41d8cd98f00b204e9800998ecf8427e"
+    }
+  },
+  "webroot_link": "/home/el01/crypto_cta_manager/web-releases/20261021T065251Z"
+}

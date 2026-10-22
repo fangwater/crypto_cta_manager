@@ -1,0 +1,25 @@
+{"name": "startup_pending", "body": {"http": 502}}
+{"name": "startup_pending", "body": {"http": 502}}
+{"name": "startup_pending", "body": {"http": 502}}
+{"name": "startup_pending", "body": {"http": 502}}
+{"name": "startup_pending", "body": {"http": 502}}
+{"name": "health", "body": {"status": "ok", "source_count": 14, "generated_at_us": 1792663072849163, "last_attempt_at_us": 1792663072849163, "refresh_interval_secs": 60, "last_refresh_error": null}}
+{"name": "account", "body": {"source": "binance_exec_trade01", "configuration": {"mode": "independent"}, "bindings": 4, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade02", "configuration": {"mode": "independent"}, "bindings": 6, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade03", "configuration": {"mode": "independent"}, "bindings": 1, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade04", "configuration": {"mode": "follow", "follows": [{"virtual_id": "virtual06", "multiplier": 150.0}]}, "bindings": 8, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade06", "configuration": {"mode": "independent"}, "bindings": 6, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade07", "configuration": {"mode": "independent"}, "bindings": 12, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade08", "configuration": {"mode": "independent"}, "bindings": 4, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade09", "configuration": {"mode": "independent"}, "bindings": 4, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade10", "configuration": {"mode": "follow", "follows": [{"virtual_id": "virtual03", "multiplier": 171.0}]}, "bindings": 4, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade11", "configuration": {"mode": "follow", "follows": [{"virtual_id": "virtual03", "multiplier": 261.0}]}, "bindings": 4, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade12", "configuration": {"mode": "independent"}, "bindings": 4, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_xy_lxy21_05", "configuration": {"mode": "follow", "follows": [{"virtual_id": "virtual01", "multiplier": 118.0}]}, "bindings": 2, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade13", "configuration": {"mode": "follow", "follows": [{"virtual_id": "virtual03", "multiplier": 17.8}]}, "bindings": 4, "pending_publishes": []}}
+{"name": "account", "body": {"source": "binance_exec_trade14", "configuration": {"mode": "follow", "follows": [{"virtual_id": "virtual07", "multiplier": 100.0}]}, "bindings": 5, "pending_publishes": []}}
+{"name": "virtuals", "body": {"count": 9, "followers": 6}}
+{"name": "kline_status", "body": {"active_backfills": 0, "cache_hits": 0, "disk_batch_reads": 0, "disk_range_reads": 15, "enabled": true, "fetched_candles": 1767, "last_error": null, "memory_candle_hits": 10866, "pricing_cache_hits": 0, "requests": 5, "retained_days": 30, "target_history": {"last_error": null, "loading": true, "processed_messages": 2144768, "ready": false}}}
+{"name": "diagnostic_session_removed", "body": true}
+{"name": "frontend", "body": {"verified_resources": 4}}
+{"name": "verification", "body": {"manager_pid": "3230777", "primary_key": "PRIMARY KEY (source_id, virtual_id)", "protected_processes": 90, "changes": {"processes": [], "config_hashes": [], "tables": [], "configurations": []}, "unchanged": {"config_sha256": true, "funding_settings": true, "manager_affinity": true}}}

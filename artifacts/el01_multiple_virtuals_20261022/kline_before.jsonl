@@ -1,0 +1,2 @@
+{"name": "kline_status", "body": {"active_backfills": 192, "cache_hits": 80775, "disk_batch_reads": 927287, "disk_range_reads": 176251, "enabled": true, "fetched_candles": 640610, "last_error": null, "memory_candle_hits": 1480731826, "pricing_cache_hits": 166478, "requests": 128470, "retained_days": 30, "target_history": {"last_error": null, "loading": false, "processed_messages": 4309751, "ready": true}}}
+{"name": "diagnostic_session_removed", "body": true}

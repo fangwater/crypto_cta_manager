@@ -1,0 +1,16 @@
+{
+  "manager_pid": "3230777",
+  "primary_key": "PRIMARY KEY (source_id, virtual_id)",
+  "protected_processes": 90,
+  "changes": {
+    "processes": [],
+    "config_hashes": [],
+    "tables": [],
+    "configurations": []
+  },
+  "unchanged": {
+    "config_sha256": true,
+    "funding_settings": true,
+    "manager_affinity": true
+  }
+}
