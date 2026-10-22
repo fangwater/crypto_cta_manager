@@ -1,0 +1,1 @@
+{"passed":true,"results":[{"authenticated":false,"recovered":true,"elapsedMs":10904,"attempts":2,"assets":["http://13.115.227.29:4191/manager/assets/index-DmO0kc2s.js"]},{"authenticated":true,"recovered":true,"elapsedMs":11085,"attempts":2,"assets":["http://13.115.227.29:4191/manager/assets/index-DmO0kc2s.js"]}]}

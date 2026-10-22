@@ -1,0 +1,214 @@
+{
+  "factual": {
+    "binance_exec_trade03_timeline": true,
+    "binance_exec_trade03_account-timeline": true,
+    "binance_exec_trade05_timeline": true,
+    "binance_exec_trade05_account-timeline": true,
+    "binance_exec_trade06_timeline": true,
+    "binance_exec_trade06_account-timeline": true,
+    "binance_exec_trade07_timeline": true,
+    "binance_exec_trade07_account-timeline": true
+  },
+  "existing_references": {
+    "binance_exec_trade03_timeline": true,
+    "binance_exec_trade03_account-timeline": true,
+    "binance_exec_trade03_cost": true,
+    "binance_exec_trade05_timeline": true,
+    "binance_exec_trade05_account-timeline": true,
+    "binance_exec_trade05_cost": true,
+    "binance_exec_trade06_timeline": true,
+    "binance_exec_trade06_account-timeline": true,
+    "binance_exec_trade06_cost": true,
+    "binance_exec_trade07_timeline": true,
+    "binance_exec_trade07_account-timeline": true,
+    "binance_exec_trade07_cost": true
+  },
+  "availability": {
+    "binance_exec_trade03_timeline": [
+      {
+        "model": "twap5m",
+        "points": 147,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade03_account-timeline": [
+      {
+        "model": "twap5m",
+        "points": 147,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade05_timeline": [
+      {
+        "model": "vwap3m",
+        "points": 181,
+        "missing": 0
+      },
+      {
+        "model": "twap3m",
+        "points": 182,
+        "missing": 0
+      },
+      {
+        "model": "instant_taker",
+        "points": 103,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade05_account-timeline": [
+      {
+        "model": "vwap3m",
+        "points": 181,
+        "missing": 0
+      },
+      {
+        "model": "twap3m",
+        "points": 182,
+        "missing": 0
+      },
+      {
+        "model": "instant_taker",
+        "points": 103,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade06_timeline": [
+      {
+        "model": "vwap3m",
+        "points": 150,
+        "missing": 0
+      },
+      {
+        "model": "twap3m",
+        "points": 148,
+        "missing": 0
+      },
+      {
+        "model": "instant_taker",
+        "points": 207,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade06_account-timeline": [
+      {
+        "model": "vwap3m",
+        "points": 150,
+        "missing": 0
+      },
+      {
+        "model": "twap3m",
+        "points": 148,
+        "missing": 0
+      },
+      {
+        "model": "instant_taker",
+        "points": 207,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade07_timeline": [
+      {
+        "model": "vwap3m",
+        "points": 143,
+        "missing": 0
+      },
+      {
+        "model": "twap3m",
+        "points": 143,
+        "missing": 0
+      },
+      {
+        "model": "instant_taker",
+        "points": 114,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade07_account-timeline": [
+      {
+        "model": "vwap3m",
+        "points": 143,
+        "missing": 0
+      },
+      {
+        "model": "twap3m",
+        "points": 143,
+        "missing": 0
+      },
+      {
+        "model": "instant_taker",
+        "points": 114,
+        "missing": 0
+      }
+    ]
+  },
+  "cost": {
+    "binance_exec_trade03_cost": [
+      {
+        "model": "twap5m",
+        "rows": 100,
+        "matched_fills": 1101,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade05_cost": [
+      {
+        "model": "vwap3m",
+        "rows": 7,
+        "matched_fills": 7,
+        "missing": 0
+      },
+      {
+        "model": "twap3m",
+        "rows": 7,
+        "matched_fills": 7,
+        "missing": 0
+      },
+      {
+        "model": "instant_taker",
+        "rows": 7,
+        "matched_fills": 7,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade06_cost": [
+      {
+        "model": "vwap3m",
+        "rows": 100,
+        "matched_fills": 140,
+        "missing": 0
+      },
+      {
+        "model": "twap3m",
+        "rows": 100,
+        "matched_fills": 140,
+        "missing": 0
+      },
+      {
+        "model": "instant_taker",
+        "rows": 100,
+        "matched_fills": 140,
+        "missing": 0
+      }
+    ],
+    "binance_exec_trade07_cost": [
+      {
+        "model": "vwap3m",
+        "rows": 3,
+        "matched_fills": 7,
+        "missing": 0
+      },
+      {
+        "model": "twap3m",
+        "rows": 3,
+        "matched_fills": 7,
+        "missing": 0
+      },
+      {
+        "model": "instant_taker",
+        "rows": 3,
+        "matched_fills": 7,
+        "missing": 0
+      }
+    ]
+  }
+}

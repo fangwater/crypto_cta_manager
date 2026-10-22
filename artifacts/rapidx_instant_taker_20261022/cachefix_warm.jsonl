@@ -1,0 +1,19 @@
+{"name": "health", "body": {"status": "ok", "source_count": 7, "generated_at_us": 1792652396466255, "last_attempt_at_us": 1792652396466255, "refresh_interval_secs": 60, "last_refresh_error": null}}
+{"name": "warm_progress", "body": {"elapsed_s": 0, "target_history": {"last_error": null, "loading": true, "processed_messages": 1533952, "ready": false}, "active_backfills": 0, "requests": 24}}
+{"name": "warm_progress", "body": {"elapsed_s": 20, "target_history": {"last_error": null, "loading": true, "processed_messages": 1574144, "ready": false}, "active_backfills": 0, "requests": 169}}
+{"name": "warm_progress", "body": {"elapsed_s": 40, "target_history": {"last_error": null, "loading": true, "processed_messages": 1950821, "ready": false}, "active_backfills": 0, "requests": 282}}
+{"name": "warm_progress", "body": {"elapsed_s": 60, "target_history": {"last_error": null, "loading": true, "processed_messages": 2525184, "ready": false}, "active_backfills": 0, "requests": 284}}
+{"name": "warm_progress", "body": {"elapsed_s": 80, "target_history": {"last_error": null, "loading": true, "processed_messages": 2963596, "ready": false}, "active_backfills": 0, "requests": 284}}
+{"name": "warm_progress", "body": {"elapsed_s": 100, "target_history": {"last_error": null, "loading": true, "processed_messages": 3095040, "ready": false}, "active_backfills": 0, "requests": 345}}
+{"name": "warm_progress", "body": {"elapsed_s": 120, "target_history": {"last_error": null, "loading": true, "processed_messages": 3106816, "ready": false}, "active_backfills": 0, "requests": 424}}
+{"name": "warm_progress", "body": {"elapsed_s": 140, "target_history": {"last_error": null, "loading": true, "processed_messages": 3489024, "ready": false}, "active_backfills": 0, "requests": 424}}
+{"name": "warm_progress", "body": {"elapsed_s": 160, "target_history": {"last_error": null, "loading": true, "processed_messages": 4126720, "ready": false}, "active_backfills": 0, "requests": 424}}
+{"name": "warm_progress", "body": {"elapsed_s": 180, "target_history": {"last_error": null, "loading": true, "processed_messages": 4502016, "ready": false}, "active_backfills": 0, "requests": 424}}
+{"name": "warm_progress", "body": {"elapsed_s": 200, "target_history": {"last_error": null, "loading": true, "processed_messages": 4523008, "ready": false}, "active_backfills": 0, "requests": 505}}
+{"name": "warm_progress", "body": {"elapsed_s": 220, "target_history": {"last_error": null, "loading": true, "processed_messages": 4527360, "ready": false}, "active_backfills": 0, "requests": 666}}
+{"name": "warm_progress", "body": {"elapsed_s": 240, "target_history": {"last_error": null, "loading": true, "processed_messages": 5003008, "ready": false}, "active_backfills": 0, "requests": 666}}
+{"name": "warm_progress", "body": {"elapsed_s": 260, "target_history": {"last_error": null, "loading": true, "processed_messages": 5391872, "ready": false}, "active_backfills": 0, "requests": 666}}
+{"name": "warm_progress", "body": {"elapsed_s": 280, "target_history": {"last_error": null, "loading": true, "processed_messages": 5505792, "ready": false}, "active_backfills": 0, "requests": 744}}
+{"name": "warm_progress", "body": {"elapsed_s": 300, "target_history": {"last_error": null, "loading": true, "processed_messages": 5517824, "ready": false}, "active_backfills": 0, "requests": 829}}
+{"name": "warm_progress", "body": {"elapsed_s": 320, "target_history": {"last_error": null, "loading": false, "processed_messages": 5763042, "ready": true}, "active_backfills": 1, "requests": 906}}
+{"name": "diagnostic_session_removed", "body": true}

@@ -1,0 +1,99 @@
+{
+  "temporary_archive": "/home/fanghaizhou/crypto_cta_manager-archives/20261022-rapidx-instant-taker",
+  "retained": false,
+  "reason": "Operator requested cleanup after deployment verification",
+  "files": {
+    "after.json": {
+      "bytes": 18061627,
+      "sha256": "e8b78fc31ef7406b39fe0123d266000e487394a14ff476a21a5f2b92110ca373"
+    },
+    "after_first_deployment.json": {
+      "bytes": 18061667,
+      "sha256": "ade5efdd94e8ea5968597eb5970050970cb8bf4994a376e4674db18f16e68b2b"
+    },
+    "backups/rapidx_instant_taker_20261022/cta_web.previous": {
+      "bytes": 42367064,
+      "sha256": "f07399edda74eee9ce3540073032e4ed57acd60acd2d650ea93c4d84e801159f"
+    },
+    "backups/rapidx_instant_taker_20261022/protected.json": {
+      "bytes": 16208,
+      "sha256": "90e922e1814e804fe36e79785c2a0159ca3b4179a4ce93570fbd432b410dcf69"
+    },
+    "backups/rapidx_instant_taker_20261022/rollback.json": {
+      "bytes": 192,
+      "sha256": "767cf7c53f5136bd125f8ad96ba196450f226b632c1232ca69e52b13452463e3"
+    },
+    "backups/rapidx_instant_taker_20261022/schema_before.sql": {
+      "bytes": 74253,
+      "sha256": "59a31827e8bed37595f830e8d909349b529fbc4df7bd8860279769b33574d2e8"
+    },
+    "backups/rapidx_instant_taker_20261022/snapshots_and_bindings.dump": {
+      "bytes": 25069,
+      "sha256": "1c3744af214760b1982ce3db7b8016e201a4f4a3930a04077fc7ad81181e2424"
+    },
+    "backups/rapidx_instant_taker_cachefix_20261022/cta_web.previous": {
+      "bytes": 42355008,
+      "sha256": "ed143312571f858a5e10c2faf5e0ad33318ec96d6b02e34a87bddda27f4237a1"
+    },
+    "backups/rapidx_instant_taker_cachefix_20261022/protected.json": {
+      "bytes": 16208,
+      "sha256": "bd9ba2ffe9ad664b80bd749d7fb2da0e730ba1eac6757f3e83a1bca275530f05"
+    },
+    "backups/rapidx_instant_taker_cachefix_20261022/rollback.json": {
+      "bytes": 201,
+      "sha256": "a30f19f855df31f5b452b53b550d994dfa13c10ad4c4fd196b8b216d04a36961"
+    },
+    "backups/rapidx_instant_taker_cachefix_20261022/schema_before.sql": {
+      "bytes": 74253,
+      "sha256": "004128fc462e6e6806fa8bdaca5a796b8d15fd31a742b7aafa30702611bd65c9"
+    },
+    "backups/rapidx_instant_taker_cachefix_20261022/snapshots_and_bindings.dump": {
+      "bytes": 25069,
+      "sha256": "b95303510bc28341cc54592f43863006646d0182907453977ec9801f639d9f6c"
+    },
+    "before.json": {
+      "bytes": 17484057,
+      "sha256": "e0683a850462597c9d256bd08351f11960cb26f1d4b09289a8c0f15db19c7a4f"
+    },
+    "frontend-auth.tar.gz": {
+      "bytes": 366731,
+      "sha256": "174d4a73e608f03c501a9a85cd80a54ccf8bdcb52175f38b01534372644c3eec"
+    },
+    "frontend.tar.gz": {
+      "bytes": 366670,
+      "sha256": "3efc909e29fb8cb4e1be87c50cd8f53dcb547504653ce78d0fd8543f69ed91ee"
+    },
+    "screenshots/binance_exec_trade03-nav-1440.png": {
+      "bytes": 186119,
+      "sha256": "c3314dab7e62c9fcbd690c966b2ffe941d544cf4f2c8fd94b1ffdc3fb6de2628"
+    },
+    "screenshots/binance_exec_trade05-nav-1440.png": {
+      "bytes": 184995,
+      "sha256": "81478e11bd87ee477ff8cb75c7422a535f5b4f9cbd08308aa5b7099f5dd7d79c"
+    },
+    "screenshots/binance_exec_trade06-cost-1440.png": {
+      "bytes": 151202,
+      "sha256": "4c76f3f50f51bd5be4f8a32619686404aa363239aaa25e22ff5b42cc994145bc"
+    },
+    "screenshots/binance_exec_trade06-cost-390.png": {
+      "bytes": 91049,
+      "sha256": "e370001f2eab3fd540d80ea3ed9ee99ce3301f71b5a592c89481737340d514e0"
+    },
+    "screenshots/binance_exec_trade06-nav-1440.png": {
+      "bytes": 243898,
+      "sha256": "b7e150168f18ea41d025a12cbb842cfc325e3debbcba4592268ac29f637301f3"
+    },
+    "screenshots/binance_exec_trade06-nav-390.png": {
+      "bytes": 97405,
+      "sha256": "b725a20f1f45937401c58ffb0dc5900d73284e1668f44609a04d881fb8c621db"
+    },
+    "screenshots/binance_exec_trade07-nav-1440.png": {
+      "bytes": 267278,
+      "sha256": "661a2936210fea3e227482182477fbe030623039e9c20c0437354ec65b3c178b"
+    },
+    "screenshots/binance_exec_trade07-nav-390.png": {
+      "bytes": 107049,
+      "sha256": "0d2b457ad37693fc8f616756f52248bca2488090f07ef2a6efe6793c74ce02d5"
+    }
+  }
+}

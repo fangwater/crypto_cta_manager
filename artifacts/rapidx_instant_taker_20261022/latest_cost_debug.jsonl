@@ -1,0 +1,4 @@
+{"name": "latest_cost", "body": {"model": "vwap3m", "rows": 0, "warnings": ["目标历史正在后台读取，请稍后重新查询"], "missing": 0, "pending": 0}}
+{"name": "latest_cost", "body": {"model": "twap3m", "rows": 100, "warnings": ["分钟 K 线正在后台补齐"], "missing": 1, "pending": 0}}
+{"name": "latest_cost", "body": {"model": "instant_taker", "rows": 0, "warnings": ["目标历史正在后台读取，请稍后重新查询"], "missing": 0, "pending": 0}}
+{"name": "diagnostic_session_removed", "body": true}

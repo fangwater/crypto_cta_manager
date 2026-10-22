@@ -1,0 +1,1 @@
+{"name": "dedicated_egress_missing_candles", "body": {"egress_verified": true, "symbol": "LTCUSDT", "rows": [{"open_ts_ms": 1792650720000, "open": "60.31", "close": "60.35", "volume": "646.423"}, {"open_ts_ms": 1792650780000, "open": "60.34", "close": "60.30", "volume": "686.747"}, {"open_ts_ms": 1792650840000, "open": "60.30", "close": "60.25", "volume": "209.604"}]}}

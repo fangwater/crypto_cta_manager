@@ -1,0 +1,4 @@
+{"name": "cost_ready", "body": {"source": "binance_exec_trade06", "rows": [100, 100, 100]}}
+{"name": "cost_ready", "body": {"source": "binance_exec_trade07", "rows": [3, 3, 3]}}
+{"name": "cache", "body": {"active_backfills": 8, "cache_hits": 3150, "disk_batch_reads": 17822, "disk_range_reads": 667, "enabled": true, "fetched_candles": 7854, "last_error": null, "memory_candle_hits": 304249678, "pricing_cache_hits": 13027351, "requests": 4253, "retained_days": 30, "target_history": {"last_error": null, "loading": false, "processed_messages": 5772747, "ready": true}}}
+{"name": "diagnostic_session_removed", "body": true}

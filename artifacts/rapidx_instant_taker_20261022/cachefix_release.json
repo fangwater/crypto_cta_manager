@@ -1,0 +1,13 @@
+{
+  "release": "20261022T065757ZInstantTakerCache",
+  "binary_sha256": "29ad3e458368b01a3de3cac009c56d9312cf7c567c4693b5f6d87deaa4cb872d",
+  "frontend": {
+    "assets/index-3c7PCPVT.css": "49faf4aeec6695e9944b8e9fd0193f06633f7dfa9735a149b3488391ca55ed2a",
+    "assets/index-DmO0kc2s.js": "a7945dad93e66cca15886bc017cd4720aea253c1d5bdb0c8515173baaec184df",
+    "favicon.svg": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+    "index.html": "1878301cfabbedc613766019025659a9b6ccf5b39011ff7628b7558de23ee2da"
+  },
+  "runtime_commit": "dbc0435534e61ef233db8fb22c8a9345fb403d30",
+  "frontend_commit": "20fdd59cd471ab1e12dda23423f39a6b1433807f",
+  "commit": "dbc0435534e61ef233db8fb22c8a9345fb403d30"
+}

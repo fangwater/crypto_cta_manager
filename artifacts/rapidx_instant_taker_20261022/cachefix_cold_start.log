@@ -1,0 +1,1 @@
+Oct 22 07:05:20 ip-172-31-35-228 cta_web[3590540]: 2026-10-22T07:05:20.814395Z  INFO crypto_cta_manager::theoretical_nav: rebuilt theoretical target index initial=true invalidated=false processed_messages=5763042 duration_ms=420701

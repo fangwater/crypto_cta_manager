@@ -1,0 +1,40 @@
+{
+  "completed_at_utc": "2026-10-22T07:34:01.051222+00:00",
+  "remote": {
+    "host": "jp-meta",
+    "removed": [
+      {
+        "path": "/home/ubuntu/crypto_cta_manager/deploy-staging/rapidx_instant_taker_20261022",
+        "existed_before": true,
+        "absent_after": true
+      },
+      {
+        "path": "/home/ubuntu/crypto_cta_manager/deploy-staging/rapidx_instant_taker_cachefix_20261022",
+        "existed_before": true,
+        "absent_after": true
+      },
+      {
+        "path": "/home/ubuntu/crypto_cta_manager/backups/rapidx_instant_taker_20261022",
+        "existed_before": true,
+        "absent_after": true
+      },
+      {
+        "path": "/home/ubuntu/crypto_cta_manager/backups/rapidx_instant_taker_cachefix_20261022",
+        "existed_before": true,
+        "absent_after": true
+      }
+    ],
+    "live_release": "20261022T065757ZInstantTakerCache",
+    "manager_active": true,
+    "live_data_retained": true
+  },
+  "local": {
+    "path": "/home/fanghaizhou/crypto_cta_manager-archives/20261022-rapidx-instant-taker",
+    "existed_before": true,
+    "absent_after": true
+  },
+  "browser": {
+    "browser_stopped": true,
+    "removed": "/home/fanghaizhou/snap/chromium/common/rapidx-instant-taker-20261022"
+  }
+}

@@ -1,0 +1,15 @@
+{"name": "health", "body": {"status": "ok", "source_count": 7, "generated_at_us": 1792649295355217, "last_attempt_at_us": 1792649288438244, "refresh_interval_secs": 60, "last_refresh_error": null}}
+{"name": "query", "body": {"source": "binance_exec_trade03", "endpoint": "timeline", "elapsed_s": 0.71, "references": [{"model": "twap5m", "points": 147, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade03", "endpoint": "account-timeline", "elapsed_s": 0.62, "references": [{"model": "twap5m", "points": 147, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade03", "reports": [{"model": "twap5m", "rows": 100, "missing": 0}]}}
+{"name": "query", "body": {"source": "binance_exec_trade05", "endpoint": "timeline", "elapsed_s": 0.13, "references": [{"model": "vwap3m", "points": 181, "missing": 0, "reason": null}, {"model": "twap3m", "points": 182, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade05", "endpoint": "account-timeline", "elapsed_s": 0.04, "references": [{"model": "vwap3m", "points": 181, "missing": 0, "reason": null}, {"model": "twap3m", "points": 182, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade05", "reports": [{"model": "vwap3m", "rows": 7, "missing": 0}, {"model": "twap3m", "rows": 7, "missing": 0}]}}
+{"name": "query", "body": {"source": "binance_exec_trade06", "endpoint": "timeline", "elapsed_s": 0.65, "references": [{"model": "vwap3m", "points": 150, "missing": 0, "reason": null}, {"model": "twap3m", "points": 148, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade06", "endpoint": "account-timeline", "elapsed_s": 2.05, "references": [{"model": "vwap3m", "points": 150, "missing": 0, "reason": null}, {"model": "twap3m", "points": 148, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade06", "reports": [{"model": "vwap3m", "rows": 100, "missing": 0}, {"model": "twap3m", "rows": 100, "missing": 0}]}}
+{"name": "query", "body": {"source": "binance_exec_trade07", "endpoint": "timeline", "elapsed_s": 0.05, "references": [{"model": "vwap3m", "points": 143, "missing": 0, "reason": null}, {"model": "twap3m", "points": 143, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade07", "endpoint": "account-timeline", "elapsed_s": 0.03, "references": [{"model": "vwap3m", "points": 143, "missing": 0, "reason": null}, {"model": "twap3m", "points": 143, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade07", "reports": [{"model": "vwap3m", "rows": 3, "missing": 0}, {"model": "twap3m", "rows": 3, "missing": 0}]}}
+{"name": "saved", "body": {"phase": "before", "window": {"startMs": 1792627080000, "endMs": 1792648680000}}}
+{"name": "diagnostic_session_removed", "body": true}

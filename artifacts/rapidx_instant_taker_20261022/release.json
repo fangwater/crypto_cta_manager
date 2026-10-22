@@ -1,0 +1,11 @@
+{
+  "release": "20261022T061727ZInstantTaker",
+  "commit": "4b60c1fe47e262ad86e239044f2192dba63d1e56",
+  "binary_sha256": "ed143312571f858a5e10c2faf5e0ad33318ec96d6b02e34a87bddda27f4237a1",
+  "frontend": {
+    "assets/index-3c7PCPVT.css": "49faf4aeec6695e9944b8e9fd0193f06633f7dfa9735a149b3488391ca55ed2a",
+    "assets/index-BsGqUyVb.js": "af8009adef8a386fba141758c4216b83933e85ee8d0a8ac1a4b4eec3754f58bb",
+    "favicon.svg": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+    "index.html": "8a921a679d5bcc97eddac06b047cc5003f90d02002bc8d8a3efd3404931a9f3f"
+  }
+}

@@ -1,0 +1,1 @@
+{"name": "independent_open_and_taker_fee", "body": {"binance_exec_trade05": {"rows": 7, "open_differs_from_close": 5, "fee_verified": 7, "buy": 3, "sell": 4}, "binance_exec_trade06": {"rows": 100, "open_differs_from_close": 64, "fee_verified": 100, "buy": 37, "sell": 63}, "binance_exec_trade07": {"rows": 3, "open_differs_from_close": 3, "fee_verified": 3, "buy": 1, "sell": 2}}}
