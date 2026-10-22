@@ -730,7 +730,10 @@ impl KlineStore {
             "Kline backfill cannot exceed retention"
         );
         let start = first_complete_open(start);
-        let end = end.min(now.div_euclid(MINUTE_US) * MINUTE_US);
+        // A partial end still includes its candle open in scan(start..end).
+        // Count that candle consistently so a fully cached request bypasses
+        // unrelated backfills instead of expanding into another 24-hour block.
+        let end = first_complete_open(end).min(now.div_euclid(MINUTE_US) * MINUTE_US);
         if start >= end {
             return Ok(());
         }
@@ -1524,15 +1527,17 @@ mod tests {
             .or_default()
             .clone();
         let _backfill = lock.lock().await;
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            store.ensure_range("ETHUSDT", start, end),
-        )
-        .await
-        .expect("cached range blocked behind an unrelated backfill")
-        .unwrap();
+        for requested_end in [end, end - 1, end - MINUTE_US / 2] {
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                store.ensure_range("ETHUSDT", start, requested_end),
+            )
+            .await
+            .expect("cached range blocked behind an unrelated backfill")
+            .unwrap();
+        }
         assert!(state.calls.lock().unwrap().is_empty());
-        assert_eq!(store.status().cache_hits, 1);
+        assert_eq!(store.status().cache_hits, 3);
         server.abort();
     }
     #[tokio::test]

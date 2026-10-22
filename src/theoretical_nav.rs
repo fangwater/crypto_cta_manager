@@ -274,7 +274,7 @@ impl TheoreticalTargetCache {
     ) -> Result<Option<Vec<VirtualDelta>>> {
         let models = resolve_models(&self.config, source_ids)?;
         Ok(self
-            .query_inputs(fee_rates, end, source_ids, strategy, None, models)
+            .query_inputs(fee_rates, end, source_ids, strategy, None, None, models)
             .await?
             .map(|(deltas, _, _)| deltas))
     }
@@ -288,6 +288,7 @@ impl TheoreticalTargetCache {
         source_ids: &[String],
         strategy: Option<&str>,
         nav_start: Option<i64>,
+        received_start: Option<i64>,
         models: ExecutionModels,
     ) -> Result<Option<(Vec<VirtualDelta>, CarriedInventory, u64)>> {
         self.refresh();
@@ -328,12 +329,21 @@ impl TheoreticalTargetCache {
                     let end_index = index
                         .positions
                         .partition_point(|position| values[*position].received_at_us <= end);
-                    let first_index = nav_start.map_or(0, |start| {
-                        index.positions[..end_index].partition_point(|position| {
-                            values[*position].execution_ts_us_for(models[&market.0]) < start
-                        })
-                    });
-                    if first_index > 0 {
+                    let first_index = nav_start.map_or_else(
+                        || {
+                            received_start.map_or(0, |start| {
+                                index.positions[..end_index].partition_point(|position| {
+                                    values[*position].received_at_us < start
+                                })
+                            })
+                        },
+                        |start| {
+                            index.positions[..end_index].partition_point(|position| {
+                                values[*position].execution_ts_us_for(models[&market.0]) < start
+                            })
+                        },
+                    );
+                    if nav_start.is_some() && first_index > 0 {
                         *carry.entry(market.clone()).or_default() +=
                             index.cumulative_quantity[first_index - 1];
                     }
@@ -487,8 +497,17 @@ pub async fn prepare_acquisition(
     // Older target metadata establishes deltas only; no older market data is read.
     let mut models = resolve_models(&targets.config, source_ids)?;
     crate::theoretical_execution::select_reference(&mut models, reference_model);
-    let Some((mut deltas, _, _)) = targets
-        .query_inputs(fees, end, source_ids, strategy, None, models.clone())
+    let received_start = (start - 300 * 1_000_000).max(store.cutoff_us(now_us()));
+    let Some((deltas, _, _)) = targets
+        .query_inputs(
+            fees,
+            end,
+            source_ids,
+            strategy,
+            None,
+            Some(received_start),
+            models.clone(),
+        )
         .await?
     else {
         return Ok((
@@ -497,9 +516,8 @@ pub async fn prepare_acquisition(
             models,
         ));
     };
-    // Keep the existing five-minute signal-reference lookup independent of
-    // the selected three- or five-minute pricing window.
-    deltas.retain(|d| d.received_at_us >= (start - 300 * 1_000_000).max(store.cutoff_us(now_us())));
+    // The five-minute signal lookup bound is applied before cloning metadata;
+    // short cost queries must not copy the source's entire target history.
     let mut ranges = BTreeMap::new();
     for delta in &deltas {
         if matches!(delta.venue.as_str(), "binance-futures" | "binance-margin") {
@@ -632,7 +650,15 @@ pub async fn load_timeline(
         }
     }
     let Some((deltas, mut carry, target_revision)) = targets
-        .query_inputs(fees, end, source_ids, None, Some(start), models.clone())
+        .query_inputs(
+            fees,
+            end,
+            source_ids,
+            None,
+            Some(start),
+            None,
+            models.clone(),
+        )
         .await?
     else {
         output.loading = true;
@@ -1400,6 +1426,7 @@ mod tests {
                 fees,
                 300,
                 std::slice::from_ref(&source),
+                None,
                 None,
                 None,
                 BTreeMap::from([(source.clone(), ExecutionModel::InstantTaker)]),
@@ -2453,6 +2480,7 @@ mod tests {
                 &scope,
                 None,
                 Some(start + 3 * MINUTE_US + 1),
+                None,
                 resolve_models(&config, &scope).unwrap(),
             )
             .await
@@ -3009,6 +3037,7 @@ mod tests {
                         &[source.clone()],
                         None,
                         Some(start),
+                        None,
                         resolve_models(&cache.config, &[source.clone()]).unwrap(),
                     )
                     .await
@@ -3032,6 +3061,28 @@ mod tests {
                 carry.retain(|_, quantity| clean_zero(*quantity) != 0.0);
                 assert_eq!(actual_deltas, deltas);
                 assert_eq!(actual_carry, carry);
+                for received_start in [start - MINUTE_US / 2, start] {
+                    let (bounded, unused_carry, _) = cache
+                        .query_inputs(
+                            rates.clone(),
+                            base + 200 * MINUTE_US,
+                            std::slice::from_ref(&source),
+                            None,
+                            None,
+                            Some(received_start),
+                            resolve_models(&cache.config, std::slice::from_ref(&source)).unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let expected: Vec<_> = full
+                        .iter()
+                        .filter(|delta| delta.received_at_us >= received_start)
+                        .cloned()
+                        .collect();
+                    assert_eq!(bounded, expected);
+                    assert!(unused_carry.is_empty());
+                }
             }
         }
     }
