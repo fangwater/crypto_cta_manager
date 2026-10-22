@@ -147,7 +147,7 @@ export function VirtualAccountsPage() {
 
                 <div className="space-y-3 border-t border-border-soft pt-5">
                   <div className="flex flex-wrap items-center gap-2"><h4 className="text-sm font-semibold text-ink">策略组合</h4><Badge>{bindings.length} 条</Badge></div>
-                  <FieldHint>实际账户生效份数 = Virtual 份数 × 跟随倍率。份数设为 0 可停止该策略。</FieldHint>
+                  <FieldHint>实际账户生效份数 = Virtual 份数 × 跟随倍率。份数设为 0 可停止此 Virtual 对该策略的贡献。</FieldHint>
                   {bindings.length === 0 ? <div className="rounded-xl border border-dashed border-border bg-canvas/50 px-4 py-6 text-center">
                     <p className="text-sm font-medium text-muted">尚未添加策略</p>
                     <p className="mt-1 text-xs text-subtle">从下方选择仓位策略，添加到组合中。</p>
@@ -182,14 +182,14 @@ export function VirtualAccountsPage() {
                   </div>}
                 </div>
 
-                {selectedAccount && selectedAccount.bindings.length > 0 && bindings.length === 0 && <Alert tone="warning">保存空组合将停止跟随账户中原有的全部策略。</Alert>}
-                <FieldHint>保存后自动更新全部跟随账户。移除的策略会同步停止。</FieldHint>
+                {selectedAccount && selectedAccount.bindings.length > 0 && bindings.length === 0 && <Alert tone="warning">保存空组合将移除此 Virtual 的全部策略贡献，其他 Virtual 的贡献保留。</Alert>}
+                <FieldHint>保存后自动更新全部跟随账户。移除策略时仅撤掉此 Virtual 的贡献，其他 Virtual 的贡献保留。</FieldHint>
                 {canEdit && <div className="flex flex-col gap-3 border-t border-border-soft pt-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                   <div className="flex flex-wrap gap-2">
                     <Button type="submit" variant="primary" disabled={!name.trim() || !validShares || (!!selected && !dirty)}><Save size={15} /> {saving ? '正在保存…' : selected ? '保存并同步' : '创建账户'}</Button>
                     <Button type="button" disabled={!dirty && !!selected} onClick={() => select(selected || accounts[0]?.virtual_id || '')}>{selected ? '撤销修改' : '取消新建'}</Button>
                   </div>
-                  {selectedAccount && <Button type="button" variant="danger" disabled={selectedAccount.followers.length > 0} title={selectedAccount.followers.length ? '请先将跟随账户切回独立配置' : undefined} onClick={() => void withWrite(async () => {
+                  {selectedAccount && <Button type="button" variant="danger" disabled={selectedAccount.followers.length > 0} title={selectedAccount.followers.length ? '请先从跟随账户中移除此 Virtual' : undefined} onClick={() => void withWrite(async () => {
                     await deleteVirtualAccount(selected)
                     const next = await listVirtualAccounts()
                     setAccounts(next)
@@ -239,7 +239,7 @@ export function VirtualAccountsPage() {
               <p className="mt-2 text-sm text-muted">跟随倍率：{follower.multiplier}x</p>
               {follower.pending_publishes.map((pending) => <p key={pending.binding_name} className="mt-1 break-words text-xs text-muted">{pending.binding_name}：{pending.error ?? '等待发布'}</p>)}
             </div>)}</div>}
-            {selectedAccount.followers.length > 0 && canEdit && <FieldHint className="mt-3">删除此 Virtual 账户前，请先将以上跟随账户切回独立配置。</FieldHint>}
+            {selectedAccount.followers.length > 0 && canEdit && <FieldHint className="mt-3">删除此 Virtual 账户前，请先从以上跟随账户中移除此 Virtual。</FieldHint>}
           </CardContent>
         </Card>}
       </div>

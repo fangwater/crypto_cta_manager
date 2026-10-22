@@ -1,0 +1,275 @@
+{
+  "window": {
+    "startMs": 1792569300000,
+    "endMs": 1792655700000
+  },
+  "queries": {
+    "binance_exec_trade07_account-timeline": {
+      "report_sha256": "e6c68be20588814ce38422b6c9d0a4b0317342da0c4a947642661e48d03e988f",
+      "factual_funding_sha256": "65d9da3faebe0392819c1fd8c2267d2d172e8790f2edef113b2c2f31c80dbe14",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 0.045864087842642384,
+        "settlement_count": 42,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade07_timeline": {
+      "report_sha256": "e6c68be20588814ce38422b6c9d0a4b0317342da0c4a947642661e48d03e988f",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 0.045864087842642384,
+        "settlement_count": 42,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade06_account-timeline": {
+      "report_sha256": "193eae18422d3fef2e84bcf1826bdc3cacc46959fbe75d67e402d5df8603ff8d",
+      "factual_funding_sha256": "e9041a7ffb673a6aefedbedb8fb798d606816bce045de7ed6f71f6f644cebbea",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 5.460587345529931,
+        "settlement_count": 186,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade06_timeline": {
+      "report_sha256": "d6fa60c53f531ed3af3c8ecc224774750704f97bb88bd687bd24a14e9df172f4",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 5.460587345529931,
+        "settlement_count": 186,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade05_account-timeline": {
+      "report_sha256": "0971c597bb7667cdc76e321506e8cb9df2a8f0542210e1c3874f183b18a8645b",
+      "factual_funding_sha256": "0928c363b7a4a59a31d4c5104bb57ccacf94014cb57e732cf2b4ac8761fda167",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 0.12346557867172797,
+        "settlement_count": 195,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade05_timeline": {
+      "report_sha256": "0971c597bb7667cdc76e321506e8cb9df2a8f0542210e1c3874f183b18a8645b",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 0.12346557867172797,
+        "settlement_count": 195,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade04_account-timeline": {
+      "report_sha256": "6a9ab02748115476a1a35ef41aad5780bf58453bbdec84a8193a35cdcd71b13f",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": -34.250421263817536,
+        "settlement_count": 1188,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade04_timeline": {
+      "report_sha256": "93d6dc32baa59f2c9dfcee40c543da177bd5599e9b66b1a2648eca8d1b4a9f26",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": -34.250421263817536,
+        "settlement_count": 1188,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade03_account-timeline": {
+      "report_sha256": "89e8b7f3250111d3f1fd2d61dbe6afbf388a5ac56d0811a93361333e5880c89e",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": -29.52305769657051,
+        "settlement_count": 1209,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade03_timeline": {
+      "report_sha256": "89e8b7f3250111d3f1fd2d61dbe6afbf388a5ac56d0811a93361333e5880c89e",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": -29.52305769657051,
+        "settlement_count": 1209,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade02_account-timeline": {
+      "report_sha256": "7d80e077d703f2796927c8cfbdf6426027d3157e4663a8ef5696ef1029c97ce7",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 1.2221951353570177,
+        "settlement_count": 537,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade02_timeline": {
+      "report_sha256": "7d80e077d703f2796927c8cfbdf6426027d3157e4663a8ef5696ef1029c97ce7",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 1.2221951353570177,
+        "settlement_count": 537,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade01_account-timeline": {
+      "report_sha256": "c3694df4f5382632ae647aea1a81f83b18ba8bd2cf33a17f06704e2b9ab85060",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 28.2411854245349,
+        "settlement_count": 750,
+        "synced_through_ts_us": 1792655700000000
+      }
+    },
+    "binance_exec_trade01_timeline": {
+      "report_sha256": "c3694df4f5382632ae647aea1a81f83b18ba8bd2cf33a17f06704e2b9ab85060",
+      "factual_funding_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "estimate": {
+        "loading": false,
+        "unavailable_reason": null,
+        "income_quote": 28.2411854245349,
+        "settlement_count": 750,
+        "synced_through_ts_us": 1792655700000000
+      }
+    }
+  },
+  "funding": {
+    "binance_exec_trade07": {
+      "enabled": true,
+      "refresh_secs": 300,
+      "local_ip": "172.31.35.228",
+      "public_ip": "13.115.227.29",
+      "summary": {
+        "status": "ok",
+        "last_error": null,
+        "record_count": 191,
+        "last_success_ts_us": 1792661150802907
+      }
+    },
+    "binance_exec_trade06": {
+      "enabled": true,
+      "refresh_secs": 300,
+      "local_ip": "172.31.35.228",
+      "public_ip": "13.115.227.29",
+      "summary": {
+        "status": "ok",
+        "last_error": null,
+        "record_count": 783,
+        "last_success_ts_us": 1792661090467708
+      }
+    },
+    "binance_exec_trade05": {
+      "enabled": true,
+      "refresh_secs": 300,
+      "local_ip": "172.31.35.228",
+      "public_ip": "13.115.227.29",
+      "summary": {
+        "status": "ok",
+        "last_error": null,
+        "record_count": 681,
+        "last_success_ts_us": 1792661029944859
+      }
+    },
+    "binance_exec_trade04": {
+      "enabled": false,
+      "refresh_secs": 300,
+      "local_ip": "172.31.35.228",
+      "public_ip": "13.115.227.29",
+      "summary": {
+        "status": "disabled",
+        "last_error": null,
+        "record_count": 0,
+        "last_success_ts_us": null
+      }
+    },
+    "binance_exec_trade03": {
+      "enabled": false,
+      "refresh_secs": 300,
+      "local_ip": "172.31.35.228",
+      "public_ip": "13.115.227.29",
+      "summary": {
+        "status": "disabled",
+        "last_error": null,
+        "record_count": 0,
+        "last_success_ts_us": null
+      }
+    },
+    "binance_exec_trade02": {
+      "enabled": false,
+      "refresh_secs": 300,
+      "local_ip": "172.31.35.228",
+      "public_ip": "13.115.227.29",
+      "summary": {
+        "status": "disabled",
+        "last_error": null,
+        "record_count": 0,
+        "last_success_ts_us": null
+      }
+    },
+    "binance_exec_trade01": {
+      "enabled": false,
+      "refresh_secs": 300,
+      "local_ip": "172.31.35.228",
+      "public_ip": "13.115.227.29",
+      "summary": {
+        "status": "disabled",
+        "last_error": null,
+        "record_count": 0,
+        "last_success_ts_us": null
+      }
+    }
+  },
+  "health": {
+    "status": "ok",
+    "source_count": 7,
+    "generated_at_us": 1792661145225910,
+    "last_attempt_at_us": 1792661138200932,
+    "refresh_interval_secs": 60,
+    "last_refresh_error": null
+  },
+  "kline_status": {
+    "active_backfills": 0,
+    "cache_hits": 2,
+    "disk_batch_reads": 6671,
+    "disk_range_reads": 162,
+    "enabled": true,
+    "fetched_candles": 2592,
+    "last_error": null,
+    "memory_candle_hits": 13559834,
+    "pricing_cache_hits": 0,
+    "requests": 1623,
+    "retained_days": 30,
+    "target_history": {
+      "last_error": null,
+      "loading": false,
+      "processed_messages": 5777964,
+      "ready": true
+    }
+  }
+}

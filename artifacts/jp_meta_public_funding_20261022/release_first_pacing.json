@@ -1,0 +1,13 @@
+{
+  "built_at_utc": "2026-10-22T08:38:59.554805+00:00",
+  "base_commit": "ac4ffcce172284abdd49cf7a5d5999bfa9abdea1",
+  "source_file": "src/funding_rates.rs",
+  "source_sha256": "9b8668ce99db6090a69881a701bb77d7b1c2550d3de099e8c71c46ec0cd71bbf",
+  "binary_sha256": "d7ce65514ffe6a3b74197f468deaf9adb184201b9778ed8e880061eab3a21b53",
+  "validation": [
+    "cargo fmt --check",
+    "cargo check",
+    "cargo test --lib funding_rates (7 passed)",
+    "cargo build --release --bin cta_web"
+  ]
+}

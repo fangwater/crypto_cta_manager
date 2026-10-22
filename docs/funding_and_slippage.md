@@ -65,13 +65,25 @@ RapidX 使用官方 [Query Statement](https://apidocliquidity.readme.io/referenc
 `local_ip` 固定出口；禁用 HTTP 环境代理。不改变账户查询、实际账单采集、Kline
 各自既有的出口规则。
 
+jp-meta 在 2026-10-22 将公开费率固定为
+`[funding_rates].local_ip = "172.31.46.92"`（公网 `52.192.54.88`），与 Kline
+的 `172.31.46.93` 分开。该地址已经绑定网卡，25 份交易 TOML 均未使用它，
+检查时已有 TCP 连接属于访问 Google 的 rclone；公共费率测试为 HTTP 200。
+默认出口和临时共用的 Kline 出口均曾返回 HTTP 403，不能只验证单个请求。
+此主机配置不改变 `[funding]` 的实际账单出口和账户采集开关。
+独立出口下每秒一次仍在约两分钟后出现 403，因此公开费率请求使用全局三秒最小间隔，避免一次耗尽
+滚动额度；403 使所有合约共享至少五分钟冷却，连续拒绝按指数延长至一小时，
+并保留更长的 `Retry-After`。冷却后的请求仍遵循三秒间隔，成功恢复后重置退避。
+具体 WAF 触发规则未由响应披露；[Binance 官方 HTTP 状态说明](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/general-info)
+将 403 定义为 WAF 限制。冷启动加载多个合约可能持续数分钟，已有完整历史仍保留。
+
 每个币种第一次请求直接以 `limit=1000` 查询最近 30 天，每小时结算的 720 条通常
 一页即可。默认在后台预热 BTCUSDT、ETHUSDT、BNBUSDT、SOLUSDT、XRPUSDT、DOGEUSDT。
 其他币种由可见账户的净值查询按需发现，支持 Binance USDT/USDC 永续及 Unicode
 币种；现金、币本位与 OKX 不使用 Binance USD-M 费率。跨账户共用一个内存缓存，
 同币种并发查询共用一次加载；进程重启重新加载，不创建数据库表或 RocksDB CF。
 缓存每 1800 秒增量刷新并重读最近一小时，保留最近 30 天及一分钟查询边界余量；
-30 天未查询的非默认币种会释放。并发上限 8，滚动每 300 秒至多 450 次请求，所有
+30 天未查询的非默认币种会释放。并发上限 8，滚动每 300 秒至多 90 次请求，所有
 请求共用 Retry-After 冷却。完整分页校验成功后才替换缓存；失败保留旧缓存，API
 明确提示不可用。查询不等待历史 HTTP，加载状态驱动浏览器十秒后重试。
 

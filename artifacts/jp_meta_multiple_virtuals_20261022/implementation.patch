@@ -1,0 +1,603 @@
+diff --git a/frontend/src/components/AccountFollowPanel.tsx b/frontend/src/components/AccountFollowPanel.tsx
+index 0e13eb9..4466ce4 100644
+--- a/frontend/src/components/AccountFollowPanel.tsx
++++ b/frontend/src/components/AccountFollowPanel.tsx
+@@ -15,19 +15,17 @@ export function AccountFollowPanel({ sourceId, studio, onChange }: {
+ }) {
+   const [accounts, setAccounts] = useState<VirtualAccount[]>([])
+   const [mode, setMode] = useState('independent')
+-  const [virtualId, setVirtualId] = useState('')
+-  const [multiplier, setMultiplier] = useState('1')
++  const [follows, setFollows] = useState<{ virtual_id: string; multiplier: string }[]>([])
+   const [readError, setReadError] = useState<string | null>(null)
+   const { withWrite, saving, error, notice } = useConfigWrite()
+   const config = studio?.configuration
+-  const followedId = config?.mode === 'follow' ? config.virtual_id : ''
+-  const followedMultiplier = config?.mode === 'follow' ? config.multiplier : 1
++  const savedFollows = JSON.stringify(config?.mode === 'follow' ? config.follows : [])
+   const pending = studio?.pending_publishes ?? []
+   useEffect(() => {
+     setMode(config?.mode ?? 'independent')
+-    setVirtualId(followedId)
+-    setMultiplier(String(followedMultiplier))
+-  }, [sourceId, config?.mode, followedId, followedMultiplier])
++    const saved = JSON.parse(savedFollows) as { virtual_id: string; multiplier: number }[]
++    setFollows(saved.map((follow) => ({ ...follow, multiplier: String(follow.multiplier) })))
++  }, [sourceId, config?.mode, savedFollows])
+   useEffect(() => {
+     const controller = new AbortController()
+     listVirtualAccounts(controller.signal).then(setAccounts).catch((reason: unknown) => {
+@@ -50,8 +48,7 @@ export function AccountFollowPanel({ sourceId, studio, onChange }: {
+     }, 5000)
+     return () => { window.clearInterval(timer); controller.abort() }
+   }, [sourceId, config?.mode, pending.length, onChange])
+-  const numericMultiplier = Number(multiplier)
+-  const valid = mode === 'independent' || (!!virtualId && multiplier.trim() !== '' && Number.isFinite(numericMultiplier) && numericMultiplier >= 0)
++  const valid = mode === 'independent' || (follows.length > 0 && new Set(follows.map((follow) => follow.virtual_id)).size === follows.length && follows.every((follow) => follow.virtual_id && follow.multiplier.trim() !== '' && Number.isFinite(Number(follow.multiplier)) && Number(follow.multiplier) >= 0))
+   return <Card>
+     <CardHeader><CardTitle>账户配置模式</CardTitle></CardHeader>
+     <CardContent className="space-y-4">
+@@ -62,31 +59,37 @@ export function AccountFollowPanel({ sourceId, studio, onChange }: {
+         if (!valid) return
+         void withWrite(async () => {
+           const next = await saveAccountConfiguration(sourceId, mode === 'follow'
+-            ? { mode: 'follow', virtual_id: virtualId, multiplier: numericMultiplier }
++            ? { mode: 'follow', follows: follows.map((follow) => ({ ...follow, multiplier: Number(follow.multiplier) })) }
+             : { mode: 'independent' })
+           onChange(next)
+           return next.pending_publishes.length ? '配置已保存，正在同步到 Exec。' : '配置模式已保存。'
+         })
+       }}>
+-        <fieldset disabled={saving || !studio} className={mode === 'follow'
+-          ? 'grid min-w-0 items-end gap-4 sm:grid-cols-2 xl:grid-cols-[12rem_minmax(0,1fr)_8rem_auto]'
+-          : 'grid min-w-0 items-end gap-4 sm:grid-cols-[minmax(0,20rem)_auto] sm:justify-start'}>
+-        <Label className="min-w-0">配置模式<Select value={mode} onChange={(event) => setMode(event.target.value)}>
+-          <option value="independent">独立配置</option><option value="follow">跟随 Virtual</option>
+-        </Select></Label>
+-        {mode === 'follow' && <>
+-          <Label className="min-w-0">Virtual 账户<Select className="min-w-0" value={virtualId} onChange={(event) => setVirtualId(event.target.value)}>
+-            <option value="">请选择</option>
+-            {followedId && !accounts.some((a) => a.virtual_id === followedId) && <option value={followedId}>{followedId}（无查看权限）</option>}
+-            {accounts.map((a) => <option key={a.virtual_id} value={a.virtual_id}>{a.virtual_id} · {a.name}</option>)}
++        <fieldset disabled={saving || !studio} className="min-w-0 space-y-4">
++          <Label className="max-w-sm">配置模式<Select value={mode} onChange={(event) => {
++            setMode(event.target.value)
++            if (event.target.value === 'follow' && follows.length === 0) setFollows([{ virtual_id: '', multiplier: '1' }])
++          }}>
++            <option value="independent">独立配置</option><option value="follow">跟随多个 Virtual</option>
+           </Select></Label>
+-          <Label className="min-w-0">跟随倍率<Input value={multiplier} inputMode="decimal" onChange={(event) => setMultiplier(event.target.value)} /></Label>
+-        </>}
+-        <Button type="submit" variant="primary" disabled={!valid}>{saving ? '正在保存…' : '保存模式'}</Button>
++          {mode === 'follow' && <div className="space-y-3">
++            {follows.map((follow, index) => <div key={index} className="grid min-w-0 items-end gap-3 rounded-xl border border-border p-3 sm:grid-cols-[minmax(0,1fr)_8rem_auto]">
++              <Label className="min-w-0">Virtual 账户 {index + 1}<Select className="min-w-0" value={follow.virtual_id} onChange={(event) => setFollows((old) => old.map((item, i) => i === index ? { ...item, virtual_id: event.target.value } : item))}>
++                <option value="">请选择</option>
++                {follow.virtual_id && !accounts.some((a) => a.virtual_id === follow.virtual_id) && <option value={follow.virtual_id}>{follow.virtual_id}（无查看权限）</option>}
++                {accounts.map((a) => <option key={a.virtual_id} value={a.virtual_id} disabled={follows.some((other, i) => i !== index && other.virtual_id === a.virtual_id)}>{a.virtual_id} · {a.name}</option>)}
++              </Select></Label>
++              <Label className="min-w-0">跟随倍率<Input value={follow.multiplier} inputMode="decimal" onChange={(event) => setFollows((old) => old.map((item, i) => i === index ? { ...item, multiplier: event.target.value } : item))} /></Label>
++              <Button type="button" variant="ghost" aria-label={`移除 Virtual 账户 ${index + 1}`} onClick={() => setFollows((old) => old.filter((_, i) => i !== index))}>移除</Button>
++            </div>)}
++            <Button type="button" disabled={!accounts.some((a) => !follows.some((follow) => follow.virtual_id === a.virtual_id))} onClick={() => setFollows((old) => [...old, { virtual_id: '', multiplier: '1' }])}>添加 Virtual</Button>
++            {follows.length === 0 && <FieldHint>请选择至少一个 Virtual；如需停止全部贡献，可将各倍率设为 0 后保存。</FieldHint>}
++          </div>}
++          <Button type="submit" variant="primary" disabled={!valid}>{saving ? '正在保存…' : '保存配置'}</Button>
+         </fieldset>
+       </form>
+       <FieldHint>{mode === 'follow'
+-        ? '跟随会替换本账户的策略组合。生效份数 = Virtual 份数 × 跟随倍率；倍率 0 停止全部策略，移除的策略也会同步停止。'
++        ? '跟随会替换本账户的策略组合。各 Virtual 的份数 × 倍率后叠加；相同发布名的仓位策略与下单模板须一致。倍率 0 或移除只撤掉对应 Virtual 的贡献，其他贡献继续保留。'
+         : '独立维护本账户的策略组合。从跟随模式切回独立配置时，会保留当前组合。'}</FieldHint>
+       <a href={routes.virtualAccounts} className="text-sm text-brand">管理 Virtual 账户 →</a>
+       {pending.length > 0 ? <Alert tone={'warning'}>
+diff --git a/frontend/src/pages/VirtualAccountsPage.tsx b/frontend/src/pages/VirtualAccountsPage.tsx
+index 633df3d..71b7260 100644
+--- a/frontend/src/pages/VirtualAccountsPage.tsx
++++ b/frontend/src/pages/VirtualAccountsPage.tsx
+@@ -147,7 +147,7 @@ export function VirtualAccountsPage() {
+ 
+                 <div className="space-y-3 border-t border-border-soft pt-5">
+                   <div className="flex flex-wrap items-center gap-2"><h4 className="text-sm font-semibold text-ink">策略组合</h4><Badge>{bindings.length} 条</Badge></div>
+-                  <FieldHint>实际账户生效份数 = Virtual 份数 × 跟随倍率。份数设为 0 可停止该策略。</FieldHint>
++                  <FieldHint>实际账户生效份数 = Virtual 份数 × 跟随倍率。份数设为 0 可停止此 Virtual 对该策略的贡献。</FieldHint>
+                   {bindings.length === 0 ? <div className="rounded-xl border border-dashed border-border bg-canvas/50 px-4 py-6 text-center">
+                     <p className="text-sm font-medium text-muted">尚未添加策略</p>
+                     <p className="mt-1 text-xs text-subtle">从下方选择仓位策略，添加到组合中。</p>
+@@ -182,14 +182,14 @@ export function VirtualAccountsPage() {
+                   </div>}
+                 </div>
+ 
+-                {selectedAccount && selectedAccount.bindings.length > 0 && bindings.length === 0 && <Alert tone="warning">保存空组合将停止跟随账户中原有的全部策略。</Alert>}
+-                <FieldHint>保存后自动更新全部跟随账户。移除的策略会同步停止。</FieldHint>
++                {selectedAccount && selectedAccount.bindings.length > 0 && bindings.length === 0 && <Alert tone="warning">保存空组合将移除此 Virtual 的全部策略贡献，其他 Virtual 的贡献保留。</Alert>}
++                <FieldHint>保存后自动更新全部跟随账户。移除策略时仅撤掉此 Virtual 的贡献，其他 Virtual 的贡献保留。</FieldHint>
+                 {canEdit && <div className="flex flex-col gap-3 border-t border-border-soft pt-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+                   <div className="flex flex-wrap gap-2">
+                     <Button type="submit" variant="primary" disabled={!name.trim() || !validShares || (!!selected && !dirty)}><Save size={15} /> {saving ? '正在保存…' : selected ? '保存并同步' : '创建账户'}</Button>
+                     <Button type="button" disabled={!dirty && !!selected} onClick={() => select(selected || accounts[0]?.virtual_id || '')}>{selected ? '撤销修改' : '取消新建'}</Button>
+                   </div>
+-                  {selectedAccount && <Button type="button" variant="danger" disabled={selectedAccount.followers.length > 0} title={selectedAccount.followers.length ? '请先将跟随账户切回独立配置' : undefined} onClick={() => void withWrite(async () => {
++                  {selectedAccount && <Button type="button" variant="danger" disabled={selectedAccount.followers.length > 0} title={selectedAccount.followers.length ? '请先从跟随账户中移除此 Virtual' : undefined} onClick={() => void withWrite(async () => {
+                     await deleteVirtualAccount(selected)
+                     const next = await listVirtualAccounts()
+                     setAccounts(next)
+@@ -239,7 +239,7 @@ export function VirtualAccountsPage() {
+               <p className="mt-2 text-sm text-muted">跟随倍率：{follower.multiplier}x</p>
+               {follower.pending_publishes.map((pending) => <p key={pending.binding_name} className="mt-1 break-words text-xs text-muted">{pending.binding_name}：{pending.error ?? '等待发布'}</p>)}
+             </div>)}</div>}
+-            {selectedAccount.followers.length > 0 && canEdit && <FieldHint className="mt-3">删除此 Virtual 账户前，请先将以上跟随账户切回独立配置。</FieldHint>}
++            {selectedAccount.followers.length > 0 && canEdit && <FieldHint className="mt-3">删除此 Virtual 账户前，请先从以上跟随账户中移除此 Virtual。</FieldHint>}
+           </CardContent>
+         </Card>}
+       </div>
+diff --git a/frontend/src/types.ts b/frontend/src/types.ts
+index 860e9dc..c297d53 100644
+--- a/frontend/src/types.ts
++++ b/frontend/src/types.ts
+@@ -652,8 +652,7 @@ export interface VirtualAccount {
+ 
+ export type AccountConfiguration = { mode: 'independent' } | {
+   mode: 'follow'
+-  virtual_id: string
+-  multiplier: number
++  follows: { virtual_id: string; multiplier: number }[]
+ }
+ 
+ export interface StrategyFundingEstimate {
+diff --git a/migrations/schema.sql b/migrations/schema.sql
+index aa2bf9c..99cf511 100644
+--- a/migrations/schema.sql
++++ b/migrations/schema.sql
+@@ -380,10 +380,11 @@ CREATE TABLE cta_virtual_account_bindings (
+     PRIMARY KEY (virtual_id, binding_name)
+ );
+ CREATE TABLE cta_account_follows (
+-    source_id text PRIMARY KEY REFERENCES cta_order_sources(source_id),
++    source_id text NOT NULL REFERENCES cta_order_sources(source_id),
+     virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id),
+     multiplier double precision NOT NULL CHECK (multiplier >= 0 AND multiplier < 'Infinity'::double precision),
+-    updated_at_us bigint NOT NULL
++    updated_at_us bigint NOT NULL,
++    PRIMARY KEY (source_id, virtual_id)
+ );
+ CREATE INDEX cta_account_follows_virtual_id_idx ON cta_account_follows(virtual_id);
+ 
+diff --git a/src/virtual_accounts.rs b/src/virtual_accounts.rs
+index 6120e12..43ab76e 100644
+--- a/src/virtual_accounts.rs
++++ b/src/virtual_accounts.rs
+@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
+ 
+ use anyhow::{Result, bail, ensure};
+ use serde::{Deserialize, Serialize};
+-use sqlx::{PgPool, Postgres, Row, Transaction};
++use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
+ 
+ use crate::strategy_catalog::{SaveBindingRequest, validate_nonnegative_multiplier};
+ 
+@@ -66,11 +66,16 @@ pub enum AccountConfiguration {
+     #[default]
+     Independent,
+     Follow {
+-        virtual_id: String,
+-        multiplier: f64,
++        follows: Vec<AccountFollow>,
+     },
+ }
+ 
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct AccountFollow {
++    pub virtual_id: String,
++    pub multiplier: f64,
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+ pub struct PendingPublish {
+     pub binding_name: String,
+@@ -78,27 +83,28 @@ pub struct PendingPublish {
+ }
+ 
+ pub async fn configuration(pool: &PgPool, source_id: &str) -> Result<AccountConfiguration> {
+-    let row =
+-        sqlx::query("SELECT virtual_id, multiplier FROM cta_account_follows WHERE source_id = $1")
+-            .bind(source_id)
+-            .fetch_optional(pool)
+-            .await?;
+-    Ok(match row {
+-        Some(row) => AccountConfiguration::Follow {
+-            virtual_id: row.try_get("virtual_id")?,
+-            multiplier: row.try_get("multiplier")?,
+-        },
+-        None => AccountConfiguration::Independent,
++    let follows = load_follows(&mut *pool.acquire().await?, source_id).await?;
++    Ok(if follows.is_empty() {
++        AccountConfiguration::Independent
++    } else {
++        AccountConfiguration::Follow { follows }
+     })
+ }
+ 
++async fn load_follows(conn: &mut PgConnection, source: &str) -> Result<Vec<AccountFollow>> {
++    sqlx::query("SELECT virtual_id, multiplier FROM cta_account_follows WHERE source_id = $1 ORDER BY virtual_id")
++        .bind(source).fetch_all(conn).await?.into_iter().map(|row| Ok(AccountFollow {
++            virtual_id: row.try_get("virtual_id")?, multiplier: row.try_get("multiplier")?,
++        })).collect()
++}
++
+ pub async fn require_independent(pool: &PgPool, source_id: &str) -> Result<()> {
+     ensure!(
+         matches!(
+             configuration(pool, source_id).await?,
+             AccountConfiguration::Independent
+         ),
+-        "account is following a virtual account; switch to independent mode before editing bindings"
++        "account is following virtual accounts; switch to independent mode before editing bindings"
+     );
+     let pending: bool = sqlx::query_scalar(
+         "SELECT EXISTS (SELECT 1 FROM cta_follow_publish_queue WHERE source_id = $1)",
+@@ -201,6 +207,96 @@ pub fn effective_bindings(
+         .collect()
+ }
+ 
++fn combined_bindings(
++    follows: &[AccountFollow],
++    templates: &BTreeMap<String, Vec<VirtualBinding>>,
++) -> Result<Vec<VirtualBinding>> {
++    ensure!(
++        !follows.is_empty(),
++        "select at least one virtual account or use independent mode"
++    );
++    let mut ids = BTreeSet::new();
++    let mut combined = BTreeMap::<String, VirtualBinding>::new();
++    // Canonical order keeps sums stable when a browser reorders follow rows.
++    let mut ordered: Vec<_> = follows.iter().collect();
++    ordered.sort_by(|a, b| a.virtual_id.cmp(&b.virtual_id));
++    for follow in ordered {
++        ensure!(
++            ids.insert(&follow.virtual_id),
++            "duplicate virtual account: {}",
++            follow.virtual_id
++        );
++        let bindings = templates
++            .get(&follow.virtual_id)
++            .ok_or_else(|| anyhow::anyhow!("unknown virtual account: {}", follow.virtual_id))?;
++        for b in effective_bindings(bindings, follow.multiplier)? {
++            if let Some(existing) = combined.get_mut(&b.binding_name) {
++                ensure!(
++                    existing.position_strategy_name == b.position_strategy_name
++                        && existing.order_strategy_name == b.order_strategy_name,
++                    "binding {} conflicts across virtual accounts: position strategy and order template must match",
++                    b.binding_name
++                );
++                existing.shares += b.shares;
++                validate_nonnegative_multiplier(existing.shares, "combined shares")
++                    .map_err(anyhow::Error::msg)?;
++            } else {
++                combined.insert(
++                    b.binding_name.clone(),
++                    VirtualBinding {
++                        binding_name: b.binding_name,
++                        position_strategy_name: b.position_strategy_name,
++                        order_strategy_name: b.order_strategy_name,
++                        shares: b.shares,
++                    },
++                );
++            }
++        }
++    }
++    Ok(combined.into_values().collect())
++}
++
++async fn load_combined_bindings(
++    conn: &mut PgConnection,
++    follows: &[AccountFollow],
++    replacement: Option<(&str, &[VirtualBinding])>,
++) -> Result<Vec<VirtualBinding>> {
++    let mut templates = BTreeMap::new();
++    for follow in follows {
++        let exists: bool = sqlx::query_scalar(
++            "SELECT EXISTS (SELECT 1 FROM cta_virtual_accounts WHERE virtual_id = $1)",
++        )
++        .bind(&follow.virtual_id)
++        .fetch_one(&mut *conn)
++        .await?;
++        ensure!(exists, "unknown virtual account: {}", follow.virtual_id);
++        let bindings = if let Some((_, bindings)) =
++            replacement.filter(|(id, _)| *id == follow.virtual_id)
++        {
++            bindings.to_vec()
++        } else {
++            sqlx::query("SELECT binding_name, position_strategy_name, order_strategy_name, shares FROM cta_virtual_account_bindings WHERE virtual_id = $1 ORDER BY binding_name")
++                .bind(&follow.virtual_id).fetch_all(&mut *conn).await?.into_iter().map(|row| Ok(VirtualBinding {
++                    binding_name: row.try_get("binding_name")?,
++                    position_strategy_name: row.try_get("position_strategy_name")?,
++                    order_strategy_name: row.try_get("order_strategy_name")?,
++                    shares: row.try_get("shares")?,
++                })).collect::<Result<Vec<_>>>()?
++        };
++        templates.insert(follow.virtual_id.clone(), bindings);
++    }
++    combined_bindings(follows, &templates)
++}
++
++// Preview the complete account target, including an unsaved template edit.
++pub async fn preview_bindings(
++    pool: &PgPool,
++    follows: &[AccountFollow],
++    replacement: Option<(&str, &[VirtualBinding])>,
++) -> Result<Vec<VirtualBinding>> {
++    load_combined_bindings(&mut *pool.acquire().await?, follows, replacement).await
++}
++
+ async fn begin(pool: &PgPool) -> Result<Transaction<'_, Postgres>> {
+     let mut tx = pool.begin().await?;
+     // Coordinate configuration replacements across callers and Manager processes.
+@@ -383,22 +479,6 @@ async fn save_in_transaction(
+ ) -> Result<()> {
+     sqlx::query("INSERT INTO cta_virtual_accounts (virtual_id,name,updated_at_us) VALUES ($1,$2,$3) ON CONFLICT (virtual_id) DO UPDATE SET name = EXCLUDED.name, updated_at_us = EXCLUDED.updated_at_us")
+         .bind(id).bind(request.name.trim()).bind(at).execute(&mut **tx).await?;
+-    let followers =
+-        sqlx::query("SELECT source_id, multiplier FROM cta_account_follows WHERE virtual_id = $1")
+-            .bind(id)
+-            .fetch_all(&mut **tx)
+-            .await?;
+-    for row in followers {
+-        materialize(
+-            tx,
+-            &row.try_get::<String, _>("source_id")?,
+-            &request.bindings,
+-            row.try_get("multiplier")?,
+-            at,
+-            false,
+-        )
+-        .await?;
+-    }
+     sqlx::query("DELETE FROM cta_virtual_account_bindings WHERE virtual_id = $1")
+         .bind(id)
+         .execute(&mut **tx)
+@@ -407,6 +487,17 @@ async fn save_in_transaction(
+         sqlx::query("INSERT INTO cta_virtual_account_bindings (virtual_id,binding_name,position_strategy_name,order_strategy_name,shares) VALUES ($1,$2,$3,$4,$5)")
+             .bind(id).bind(&b.binding_name).bind(&b.position_strategy_name).bind(&b.order_strategy_name).bind(b.shares).execute(&mut **tx).await?;
+     }
++    let followers: Vec<String> = sqlx::query_scalar(
++        "SELECT source_id FROM cta_account_follows WHERE virtual_id = $1 ORDER BY source_id",
++    )
++    .bind(id)
++    .fetch_all(&mut **tx)
++    .await?;
++    for source in followers {
++        let follows = load_follows(tx, &source).await?;
++        let combined = load_combined_bindings(tx, &follows, None).await?;
++        materialize(tx, &source, &combined, 1.0, at, false).await?;
++    }
+     Ok(())
+ }
+ 
+@@ -424,35 +515,17 @@ pub async fn set_configuration(
+                 .execute(&mut *tx)
+                 .await?;
+         }
+-        AccountConfiguration::Follow {
+-            virtual_id,
+-            multiplier,
+-        } => {
+-            validate_nonnegative_multiplier(*multiplier, "multiplier")
+-                .map_err(anyhow::Error::msg)?;
+-            let exists: bool = sqlx::query_scalar(
+-                "SELECT EXISTS (SELECT 1 FROM cta_virtual_accounts WHERE virtual_id = $1)",
+-            )
+-            .bind(virtual_id)
+-            .fetch_one(&mut *tx)
+-            .await?;
+-            ensure!(exists, "unknown virtual account: {virtual_id}");
+-            let rows = sqlx::query("SELECT binding_name, position_strategy_name, order_strategy_name, shares FROM cta_virtual_account_bindings WHERE virtual_id = $1")
+-                .bind(virtual_id).fetch_all(&mut *tx).await?;
+-            let bindings = rows
+-                .into_iter()
+-                .map(|row| {
+-                    Ok(VirtualBinding {
+-                        binding_name: row.try_get("binding_name")?,
+-                        position_strategy_name: row.try_get("position_strategy_name")?,
+-                        order_strategy_name: row.try_get("order_strategy_name")?,
+-                        shares: row.try_get("shares")?,
+-                    })
+-                })
+-                .collect::<Result<Vec<_>>>()?;
+-            materialize(&mut tx, source, &bindings, *multiplier, at, true).await?;
+-            sqlx::query("INSERT INTO cta_account_follows (source_id,virtual_id,multiplier,updated_at_us) VALUES ($1,$2,$3,$4) ON CONFLICT (source_id) DO UPDATE SET virtual_id = EXCLUDED.virtual_id, multiplier = EXCLUDED.multiplier, updated_at_us = EXCLUDED.updated_at_us")
+-                .bind(source).bind(virtual_id).bind(multiplier).bind(at).execute(&mut *tx).await?;
++        AccountConfiguration::Follow { follows } => {
++            let bindings = load_combined_bindings(&mut tx, follows, None).await?;
++            materialize(&mut tx, source, &bindings, 1.0, at, true).await?;
++            sqlx::query("DELETE FROM cta_account_follows WHERE source_id = $1")
++                .bind(source)
++                .execute(&mut *tx)
++                .await?;
++            for follow in follows {
++                sqlx::query("INSERT INTO cta_account_follows (source_id,virtual_id,multiplier,updated_at_us) VALUES ($1,$2,$3,$4)")
++                    .bind(source).bind(&follow.virtual_id).bind(follow.multiplier).bind(at).execute(&mut *tx).await?;
++            }
+         }
+     }
+     tx.commit().await?;
+@@ -468,7 +541,9 @@ pub async fn delete(pool: &PgPool, id: &str) -> Result<bool> {
+     .fetch_one(&mut *tx)
+     .await?;
+     if followed {
+-        bail!("virtual account still has followers; switch them to independent mode first");
++        bail!(
++            "virtual account still has followers; remove this virtual from their follow lists first"
++        );
+     }
+     let result = sqlx::query("DELETE FROM cta_virtual_accounts WHERE virtual_id = $1")
+         .bind(id)
+@@ -479,7 +554,7 @@ pub async fn delete(pool: &PgPool, id: &str) -> Result<bool> {
+ }
+ 
+ pub async fn enqueue_order_followers(pool: &PgPool, order: &str) -> Result<()> {
+-    sqlx::query("INSERT INTO cta_follow_publish_queue (source_id,binding_name,revision) SELECT b.source_id,b.binding_name,1 FROM cta_account_strategy_bindings b JOIN cta_account_follows f USING (source_id) JOIN cta_position_strategies p ON p.strategy_name = b.position_strategy_name WHERE b.shares > 0 AND (b.order_strategy_name = $1 OR EXISTS (SELECT 1 FROM jsonb_each_text(p.symbol_order_strategy_overrides) o WHERE o.value = $1)) ON CONFLICT (source_id,binding_name) DO UPDATE SET revision = cta_follow_publish_queue.revision + 1, archived = false, error = NULL")
++    sqlx::query("INSERT INTO cta_follow_publish_queue (source_id,binding_name,revision) SELECT b.source_id,b.binding_name,1 FROM cta_account_strategy_bindings b JOIN cta_position_strategies p ON p.strategy_name = b.position_strategy_name WHERE b.shares > 0 AND EXISTS (SELECT 1 FROM cta_account_follows f WHERE f.source_id = b.source_id) AND (b.order_strategy_name = $1 OR EXISTS (SELECT 1 FROM jsonb_each_text(p.symbol_order_strategy_overrides) o WHERE o.value = $1)) ON CONFLICT (source_id,binding_name) DO UPDATE SET revision = cta_follow_publish_queue.revision + 1, archived = false, error = NULL")
+         .bind(order).execute(pool).await?;
+     Ok(())
+ }
+@@ -615,4 +690,89 @@ mod tests {
+         }
+         assert!(effective_bindings(&[b.clone(), b], 1.0).is_err());
+     }
++    #[test]
++    fn multiple_virtuals_sum_matching_bindings_and_keep_distinct_publication_names() {
++        let binding = |name: &str, shares| VirtualBinding {
++            binding_name: name.into(),
++            position_strategy_name: "position".into(),
++            order_strategy_name: "order".into(),
++            shares,
++        };
++        let templates = BTreeMap::from([
++            (
++                "a".into(),
++                vec![binding("shared", 2.0), binding("only-a", 4.0)],
++            ),
++            (
++                "b".into(),
++                vec![binding("shared", 5.0), binding("only-b", 6.0)],
++            ),
++        ]);
++        let follows = vec![
++            AccountFollow {
++                virtual_id: "a".into(),
++                multiplier: 3.0,
++            },
++            AccountFollow {
++                virtual_id: "b".into(),
++                multiplier: 0.5,
++            },
++        ];
++        let combined = combined_bindings(&follows, &templates).unwrap();
++        assert_eq!(
++            combined
++                .iter()
++                .map(|b| (b.binding_name.as_str(), b.shares))
++                .collect::<Vec<_>>(),
++            vec![("only-a", 12.0), ("only-b", 3.0), ("shared", 8.5)]
++        );
++        let mut reversed = follows.clone();
++        reversed.reverse();
++        assert_eq!(combined, combined_bindings(&reversed, &templates).unwrap());
++        let mut paused = follows.clone();
++        paused[0].multiplier = 0.0;
++        assert_eq!(
++            combined_bindings(&paused, &templates).unwrap()[2].shares,
++            2.5
++        );
++        assert_eq!(
++            combined_bindings(&follows[1..], &templates).unwrap()[1].shares,
++            2.5
++        );
++    }
++
++    #[test]
++    fn multiple_virtuals_reject_conflicts_duplicates_empty_follows_and_sum_overflow() {
++        let binding = VirtualBinding {
++            binding_name: "shared".into(),
++            position_strategy_name: "position".into(),
++            order_strategy_name: "order".into(),
++            shares: f64::MAX,
++        };
++        let follows = vec![
++            AccountFollow {
++                virtual_id: "a".into(),
++                multiplier: 1.0,
++            },
++            AccountFollow {
++                virtual_id: "b".into(),
++                multiplier: 1.0,
++            },
++        ];
++        let mut templates = BTreeMap::from([
++            ("a".into(), vec![binding.clone()]),
++            ("b".into(), vec![binding]),
++        ]);
++        assert!(combined_bindings(&follows, &templates).is_err());
++        templates.get_mut("b").unwrap()[0].shares = 0.0;
++        assert!(combined_bindings(&follows, &templates).is_ok());
++        templates.get_mut("b").unwrap()[0].order_strategy_name = "other".into();
++        assert!(combined_bindings(&follows, &templates).is_err());
++        templates.get_mut("b").unwrap()[0].order_strategy_name = "order".into();
++        templates.get_mut("b").unwrap()[0].position_strategy_name = "other".into();
++        assert!(combined_bindings(&follows, &templates).is_err());
++        assert!(combined_bindings(&[follows[0].clone(), follows[0].clone()], &templates).is_err());
++        assert!(combined_bindings(&[], &templates).is_err());
++        assert!(combined_bindings(&follows, &BTreeMap::new()).is_err());
++    }
+ }
+diff --git a/src/web.rs b/src/web.rs
+index dac6f54..d1887ee 100644
+--- a/src/web.rs
++++ b/src/web.rs
+@@ -6335,14 +6335,22 @@ async fn save_virtual_account_response(
+         None => vec![],
+     };
+     for source_id in followers {
+-        let AccountConfiguration::Follow { multiplier, .. } =
++        let AccountConfiguration::Follow { follows } =
+             virtual_accounts::configuration(&state.pool, &source_id).await?
+         else {
+             continue;
+         };
+-        if let Err(message) =
+-            validate_virtual_activation(state, &source_id, &request.bindings, multiplier).await
++        let combined = match virtual_accounts::preview_bindings(
++            &state.pool,
++            &follows,
++            virtual_id.map(|id| (id, request.bindings.as_slice())),
++        )
++        .await
+         {
++            Ok(bindings) => bindings,
++            Err(error) => return Ok(catalog_error(error)),
++        };
++        if let Err(message) = validate_virtual_activation(state, &source_id, &combined, 1.0).await {
+             return Ok(bad_request(format!("source {source_id}: {message}")));
+         }
+     }
+@@ -6458,19 +6466,12 @@ async fn save_account_configuration(
+     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+         return Ok(response);
+     }
+-    if let AccountConfiguration::Follow {
+-        virtual_id,
+-        multiplier,
+-    } = &request
+-    {
+-        let Some(account) = virtual_accounts::list(&state.pool)
+-            .await?
+-            .into_iter()
+-            .find(|a| a.virtual_id == *virtual_id)
+-        else {
+-            return Ok(not_found("virtual account was not found"));
++    if let AccountConfiguration::Follow { follows } = &request {
++        let combined = match virtual_accounts::preview_bindings(&state.pool, follows, None).await {
++            Ok(bindings) => bindings,
++            Err(error) => return Ok(catalog_error(error)),
+         };
+-        for binding in &account.bindings {
++        for binding in &combined {
+             if !user.is_admin()
+                 && !user_can_configure_position_strategy(
+                     &state.pool,
+@@ -6480,12 +6481,11 @@ async fn save_account_configuration(
+                 .await?
+             {
+                 return Ok(forbidden(
+-                    "strategy configure permission required to follow this virtual account",
++                    "strategy configure permission required to follow these virtual accounts",
+                 ));
+             }
+         }
+-        if let Err(message) =
+-            validate_virtual_activation(&state, &source_id, &account.bindings, *multiplier).await
++        if let Err(message) = validate_virtual_activation(&state, &source_id, &combined, 1.0).await
+         {
+             return Ok(bad_request(message));
+         }

@@ -6335,14 +6335,22 @@ async fn save_virtual_account_response(
         None => vec![],
     };
     for source_id in followers {
-        let AccountConfiguration::Follow { multiplier, .. } =
+        let AccountConfiguration::Follow { follows } =
             virtual_accounts::configuration(&state.pool, &source_id).await?
         else {
             continue;
         };
-        if let Err(message) =
-            validate_virtual_activation(state, &source_id, &request.bindings, multiplier).await
+        let combined = match virtual_accounts::preview_bindings(
+            &state.pool,
+            &follows,
+            virtual_id.map(|id| (id, request.bindings.as_slice())),
+        )
+        .await
         {
+            Ok(bindings) => bindings,
+            Err(error) => return Ok(catalog_error(error)),
+        };
+        if let Err(message) = validate_virtual_activation(state, &source_id, &combined, 1.0).await {
             return Ok(bad_request(format!("source {source_id}: {message}")));
         }
     }
@@ -6458,19 +6466,12 @@ async fn save_account_configuration(
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
-    if let AccountConfiguration::Follow {
-        virtual_id,
-        multiplier,
-    } = &request
-    {
-        let Some(account) = virtual_accounts::list(&state.pool)
-            .await?
-            .into_iter()
-            .find(|a| a.virtual_id == *virtual_id)
-        else {
-            return Ok(not_found("virtual account was not found"));
+    if let AccountConfiguration::Follow { follows } = &request {
+        let combined = match virtual_accounts::preview_bindings(&state.pool, follows, None).await {
+            Ok(bindings) => bindings,
+            Err(error) => return Ok(catalog_error(error)),
         };
-        for binding in &account.bindings {
+        for binding in &combined {
             if !user.is_admin()
                 && !user_can_configure_position_strategy(
                     &state.pool,
@@ -6480,12 +6481,11 @@ async fn save_account_configuration(
                 .await?
             {
                 return Ok(forbidden(
-                    "strategy configure permission required to follow this virtual account",
+                    "strategy configure permission required to follow these virtual accounts",
                 ));
             }
         }
-        if let Err(message) =
-            validate_virtual_activation(&state, &source_id, &account.bindings, *multiplier).await
+        if let Err(message) = validate_virtual_activation(&state, &source_id, &combined, 1.0).await
         {
             return Ok(bad_request(message));
         }

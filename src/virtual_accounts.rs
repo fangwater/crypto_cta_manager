@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::strategy_catalog::{SaveBindingRequest, validate_nonnegative_multiplier};
 
@@ -66,9 +66,14 @@ pub enum AccountConfiguration {
     #[default]
     Independent,
     Follow {
-        virtual_id: String,
-        multiplier: f64,
+        follows: Vec<AccountFollow>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountFollow {
+    pub virtual_id: String,
+    pub multiplier: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,18 +83,19 @@ pub struct PendingPublish {
 }
 
 pub async fn configuration(pool: &PgPool, source_id: &str) -> Result<AccountConfiguration> {
-    let row =
-        sqlx::query("SELECT virtual_id, multiplier FROM cta_account_follows WHERE source_id = $1")
-            .bind(source_id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(match row {
-        Some(row) => AccountConfiguration::Follow {
-            virtual_id: row.try_get("virtual_id")?,
-            multiplier: row.try_get("multiplier")?,
-        },
-        None => AccountConfiguration::Independent,
+    let follows = load_follows(&mut *pool.acquire().await?, source_id).await?;
+    Ok(if follows.is_empty() {
+        AccountConfiguration::Independent
+    } else {
+        AccountConfiguration::Follow { follows }
     })
+}
+
+async fn load_follows(conn: &mut PgConnection, source: &str) -> Result<Vec<AccountFollow>> {
+    sqlx::query("SELECT virtual_id, multiplier FROM cta_account_follows WHERE source_id = $1 ORDER BY virtual_id")
+        .bind(source).fetch_all(conn).await?.into_iter().map(|row| Ok(AccountFollow {
+            virtual_id: row.try_get("virtual_id")?, multiplier: row.try_get("multiplier")?,
+        })).collect()
 }
 
 pub async fn require_independent(pool: &PgPool, source_id: &str) -> Result<()> {
@@ -98,7 +104,7 @@ pub async fn require_independent(pool: &PgPool, source_id: &str) -> Result<()> {
             configuration(pool, source_id).await?,
             AccountConfiguration::Independent
         ),
-        "account is following a virtual account; switch to independent mode before editing bindings"
+        "account is following virtual accounts; switch to independent mode before editing bindings"
     );
     let pending: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM cta_follow_publish_queue WHERE source_id = $1)",
@@ -199,6 +205,96 @@ pub fn effective_bindings(
             })
         })
         .collect()
+}
+
+fn combined_bindings(
+    follows: &[AccountFollow],
+    templates: &BTreeMap<String, Vec<VirtualBinding>>,
+) -> Result<Vec<VirtualBinding>> {
+    ensure!(
+        !follows.is_empty(),
+        "select at least one virtual account or use independent mode"
+    );
+    let mut ids = BTreeSet::new();
+    let mut combined = BTreeMap::<String, VirtualBinding>::new();
+    // Canonical order keeps sums stable when a browser reorders follow rows.
+    let mut ordered: Vec<_> = follows.iter().collect();
+    ordered.sort_by(|a, b| a.virtual_id.cmp(&b.virtual_id));
+    for follow in ordered {
+        ensure!(
+            ids.insert(&follow.virtual_id),
+            "duplicate virtual account: {}",
+            follow.virtual_id
+        );
+        let bindings = templates
+            .get(&follow.virtual_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown virtual account: {}", follow.virtual_id))?;
+        for b in effective_bindings(bindings, follow.multiplier)? {
+            if let Some(existing) = combined.get_mut(&b.binding_name) {
+                ensure!(
+                    existing.position_strategy_name == b.position_strategy_name
+                        && existing.order_strategy_name == b.order_strategy_name,
+                    "binding {} conflicts across virtual accounts: position strategy and order template must match",
+                    b.binding_name
+                );
+                existing.shares += b.shares;
+                validate_nonnegative_multiplier(existing.shares, "combined shares")
+                    .map_err(anyhow::Error::msg)?;
+            } else {
+                combined.insert(
+                    b.binding_name.clone(),
+                    VirtualBinding {
+                        binding_name: b.binding_name,
+                        position_strategy_name: b.position_strategy_name,
+                        order_strategy_name: b.order_strategy_name,
+                        shares: b.shares,
+                    },
+                );
+            }
+        }
+    }
+    Ok(combined.into_values().collect())
+}
+
+async fn load_combined_bindings(
+    conn: &mut PgConnection,
+    follows: &[AccountFollow],
+    replacement: Option<(&str, &[VirtualBinding])>,
+) -> Result<Vec<VirtualBinding>> {
+    let mut templates = BTreeMap::new();
+    for follow in follows {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM cta_virtual_accounts WHERE virtual_id = $1)",
+        )
+        .bind(&follow.virtual_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        ensure!(exists, "unknown virtual account: {}", follow.virtual_id);
+        let bindings = if let Some((_, bindings)) =
+            replacement.filter(|(id, _)| *id == follow.virtual_id)
+        {
+            bindings.to_vec()
+        } else {
+            sqlx::query("SELECT binding_name, position_strategy_name, order_strategy_name, shares FROM cta_virtual_account_bindings WHERE virtual_id = $1 ORDER BY binding_name")
+                .bind(&follow.virtual_id).fetch_all(&mut *conn).await?.into_iter().map(|row| Ok(VirtualBinding {
+                    binding_name: row.try_get("binding_name")?,
+                    position_strategy_name: row.try_get("position_strategy_name")?,
+                    order_strategy_name: row.try_get("order_strategy_name")?,
+                    shares: row.try_get("shares")?,
+                })).collect::<Result<Vec<_>>>()?
+        };
+        templates.insert(follow.virtual_id.clone(), bindings);
+    }
+    combined_bindings(follows, &templates)
+}
+
+// Preview the complete account target, including an unsaved template edit.
+pub async fn preview_bindings(
+    pool: &PgPool,
+    follows: &[AccountFollow],
+    replacement: Option<(&str, &[VirtualBinding])>,
+) -> Result<Vec<VirtualBinding>> {
+    load_combined_bindings(&mut *pool.acquire().await?, follows, replacement).await
 }
 
 async fn begin(pool: &PgPool) -> Result<Transaction<'_, Postgres>> {
@@ -383,22 +479,6 @@ async fn save_in_transaction(
 ) -> Result<()> {
     sqlx::query("INSERT INTO cta_virtual_accounts (virtual_id,name,updated_at_us) VALUES ($1,$2,$3) ON CONFLICT (virtual_id) DO UPDATE SET name = EXCLUDED.name, updated_at_us = EXCLUDED.updated_at_us")
         .bind(id).bind(request.name.trim()).bind(at).execute(&mut **tx).await?;
-    let followers =
-        sqlx::query("SELECT source_id, multiplier FROM cta_account_follows WHERE virtual_id = $1")
-            .bind(id)
-            .fetch_all(&mut **tx)
-            .await?;
-    for row in followers {
-        materialize(
-            tx,
-            &row.try_get::<String, _>("source_id")?,
-            &request.bindings,
-            row.try_get("multiplier")?,
-            at,
-            false,
-        )
-        .await?;
-    }
     sqlx::query("DELETE FROM cta_virtual_account_bindings WHERE virtual_id = $1")
         .bind(id)
         .execute(&mut **tx)
@@ -406,6 +486,17 @@ async fn save_in_transaction(
     for b in &request.bindings {
         sqlx::query("INSERT INTO cta_virtual_account_bindings (virtual_id,binding_name,position_strategy_name,order_strategy_name,shares) VALUES ($1,$2,$3,$4,$5)")
             .bind(id).bind(&b.binding_name).bind(&b.position_strategy_name).bind(&b.order_strategy_name).bind(b.shares).execute(&mut **tx).await?;
+    }
+    let followers: Vec<String> = sqlx::query_scalar(
+        "SELECT source_id FROM cta_account_follows WHERE virtual_id = $1 ORDER BY source_id",
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for source in followers {
+        let follows = load_follows(tx, &source).await?;
+        let combined = load_combined_bindings(tx, &follows, None).await?;
+        materialize(tx, &source, &combined, 1.0, at, false).await?;
     }
     Ok(())
 }
@@ -424,35 +515,17 @@ pub async fn set_configuration(
                 .execute(&mut *tx)
                 .await?;
         }
-        AccountConfiguration::Follow {
-            virtual_id,
-            multiplier,
-        } => {
-            validate_nonnegative_multiplier(*multiplier, "multiplier")
-                .map_err(anyhow::Error::msg)?;
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM cta_virtual_accounts WHERE virtual_id = $1)",
-            )
-            .bind(virtual_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            ensure!(exists, "unknown virtual account: {virtual_id}");
-            let rows = sqlx::query("SELECT binding_name, position_strategy_name, order_strategy_name, shares FROM cta_virtual_account_bindings WHERE virtual_id = $1")
-                .bind(virtual_id).fetch_all(&mut *tx).await?;
-            let bindings = rows
-                .into_iter()
-                .map(|row| {
-                    Ok(VirtualBinding {
-                        binding_name: row.try_get("binding_name")?,
-                        position_strategy_name: row.try_get("position_strategy_name")?,
-                        order_strategy_name: row.try_get("order_strategy_name")?,
-                        shares: row.try_get("shares")?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            materialize(&mut tx, source, &bindings, *multiplier, at, true).await?;
-            sqlx::query("INSERT INTO cta_account_follows (source_id,virtual_id,multiplier,updated_at_us) VALUES ($1,$2,$3,$4) ON CONFLICT (source_id) DO UPDATE SET virtual_id = EXCLUDED.virtual_id, multiplier = EXCLUDED.multiplier, updated_at_us = EXCLUDED.updated_at_us")
-                .bind(source).bind(virtual_id).bind(multiplier).bind(at).execute(&mut *tx).await?;
+        AccountConfiguration::Follow { follows } => {
+            let bindings = load_combined_bindings(&mut tx, follows, None).await?;
+            materialize(&mut tx, source, &bindings, 1.0, at, true).await?;
+            sqlx::query("DELETE FROM cta_account_follows WHERE source_id = $1")
+                .bind(source)
+                .execute(&mut *tx)
+                .await?;
+            for follow in follows {
+                sqlx::query("INSERT INTO cta_account_follows (source_id,virtual_id,multiplier,updated_at_us) VALUES ($1,$2,$3,$4)")
+                    .bind(source).bind(&follow.virtual_id).bind(follow.multiplier).bind(at).execute(&mut *tx).await?;
+            }
         }
     }
     tx.commit().await?;
@@ -468,7 +541,9 @@ pub async fn delete(pool: &PgPool, id: &str) -> Result<bool> {
     .fetch_one(&mut *tx)
     .await?;
     if followed {
-        bail!("virtual account still has followers; switch them to independent mode first");
+        bail!(
+            "virtual account still has followers; remove this virtual from their follow lists first"
+        );
     }
     let result = sqlx::query("DELETE FROM cta_virtual_accounts WHERE virtual_id = $1")
         .bind(id)
@@ -479,7 +554,7 @@ pub async fn delete(pool: &PgPool, id: &str) -> Result<bool> {
 }
 
 pub async fn enqueue_order_followers(pool: &PgPool, order: &str) -> Result<()> {
-    sqlx::query("INSERT INTO cta_follow_publish_queue (source_id,binding_name,revision) SELECT b.source_id,b.binding_name,1 FROM cta_account_strategy_bindings b JOIN cta_account_follows f USING (source_id) JOIN cta_position_strategies p ON p.strategy_name = b.position_strategy_name WHERE b.shares > 0 AND (b.order_strategy_name = $1 OR EXISTS (SELECT 1 FROM jsonb_each_text(p.symbol_order_strategy_overrides) o WHERE o.value = $1)) ON CONFLICT (source_id,binding_name) DO UPDATE SET revision = cta_follow_publish_queue.revision + 1, archived = false, error = NULL")
+    sqlx::query("INSERT INTO cta_follow_publish_queue (source_id,binding_name,revision) SELECT b.source_id,b.binding_name,1 FROM cta_account_strategy_bindings b JOIN cta_position_strategies p ON p.strategy_name = b.position_strategy_name WHERE b.shares > 0 AND EXISTS (SELECT 1 FROM cta_account_follows f WHERE f.source_id = b.source_id) AND (b.order_strategy_name = $1 OR EXISTS (SELECT 1 FROM jsonb_each_text(p.symbol_order_strategy_overrides) o WHERE o.value = $1)) ON CONFLICT (source_id,binding_name) DO UPDATE SET revision = cta_follow_publish_queue.revision + 1, archived = false, error = NULL")
         .bind(order).execute(pool).await?;
     Ok(())
 }
@@ -614,5 +689,90 @@ mod tests {
             assert!(effective_bindings(&[b.clone()], multiplier).is_err());
         }
         assert!(effective_bindings(&[b.clone(), b], 1.0).is_err());
+    }
+    #[test]
+    fn multiple_virtuals_sum_matching_bindings_and_keep_distinct_publication_names() {
+        let binding = |name: &str, shares| VirtualBinding {
+            binding_name: name.into(),
+            position_strategy_name: "position".into(),
+            order_strategy_name: "order".into(),
+            shares,
+        };
+        let templates = BTreeMap::from([
+            (
+                "a".into(),
+                vec![binding("shared", 2.0), binding("only-a", 4.0)],
+            ),
+            (
+                "b".into(),
+                vec![binding("shared", 5.0), binding("only-b", 6.0)],
+            ),
+        ]);
+        let follows = vec![
+            AccountFollow {
+                virtual_id: "a".into(),
+                multiplier: 3.0,
+            },
+            AccountFollow {
+                virtual_id: "b".into(),
+                multiplier: 0.5,
+            },
+        ];
+        let combined = combined_bindings(&follows, &templates).unwrap();
+        assert_eq!(
+            combined
+                .iter()
+                .map(|b| (b.binding_name.as_str(), b.shares))
+                .collect::<Vec<_>>(),
+            vec![("only-a", 12.0), ("only-b", 3.0), ("shared", 8.5)]
+        );
+        let mut reversed = follows.clone();
+        reversed.reverse();
+        assert_eq!(combined, combined_bindings(&reversed, &templates).unwrap());
+        let mut paused = follows.clone();
+        paused[0].multiplier = 0.0;
+        assert_eq!(
+            combined_bindings(&paused, &templates).unwrap()[2].shares,
+            2.5
+        );
+        assert_eq!(
+            combined_bindings(&follows[1..], &templates).unwrap()[1].shares,
+            2.5
+        );
+    }
+
+    #[test]
+    fn multiple_virtuals_reject_conflicts_duplicates_empty_follows_and_sum_overflow() {
+        let binding = VirtualBinding {
+            binding_name: "shared".into(),
+            position_strategy_name: "position".into(),
+            order_strategy_name: "order".into(),
+            shares: f64::MAX,
+        };
+        let follows = vec![
+            AccountFollow {
+                virtual_id: "a".into(),
+                multiplier: 1.0,
+            },
+            AccountFollow {
+                virtual_id: "b".into(),
+                multiplier: 1.0,
+            },
+        ];
+        let mut templates = BTreeMap::from([
+            ("a".into(), vec![binding.clone()]),
+            ("b".into(), vec![binding]),
+        ]);
+        assert!(combined_bindings(&follows, &templates).is_err());
+        templates.get_mut("b").unwrap()[0].shares = 0.0;
+        assert!(combined_bindings(&follows, &templates).is_ok());
+        templates.get_mut("b").unwrap()[0].order_strategy_name = "other".into();
+        assert!(combined_bindings(&follows, &templates).is_err());
+        templates.get_mut("b").unwrap()[0].order_strategy_name = "order".into();
+        templates.get_mut("b").unwrap()[0].position_strategy_name = "other".into();
+        assert!(combined_bindings(&follows, &templates).is_err());
+        assert!(combined_bindings(&[follows[0].clone(), follows[0].clone()], &templates).is_err());
+        assert!(combined_bindings(&[], &templates).is_err());
+        assert!(combined_bindings(&follows, &BTreeMap::new()).is_err());
     }
 }

@@ -1,0 +1,30 @@
+{
+  "base_commit": "ac4ffcce172284abdd49cf7a5d5999bfa9abdea1",
+  "binary_sha256": "ccb2fb93b137e9363d4e235ce764dd37d39c97b67b861987a1355beacdce1269",
+  "files_sha256": {
+    "src/virtual_accounts.rs": "22a2f7f02e1eacc70963a44daeb26e59dcf321c63ebee5aef0bc301d0f810de2",
+    "src/web.rs": "e367d184668317cb2f92dc102d52cc185b9930e4f982b850359f9f4daee47fdf",
+    "migrations/schema.sql": "a564f38d4aa796b006212cd5dbf7070e50e953709f21999d7c4962f7414abbfc",
+    "scripts/apply_multiple_virtual_follows_schema.sql": "406ae595b98dc4c2b5ebd5c0a45105c63210617ba3ba8d65ceb6238ac99ac6ad",
+    "frontend/src/types.ts": "4c4e95e7d3198c78a672cacc6a17a394c9bbacb958f419919f6997eb32569316",
+    "frontend/src/components/AccountFollowPanel.tsx": "dca3b269eadfd4fc2a23d7fe902091c074414b7778c846c28e52454e074012ab",
+    "frontend/src/pages/VirtualAccountsPage.tsx": "7de442b0cc8a178df9cf2fdb99492f7d260b84a4c88c334028bf6ec40d35519a"
+  },
+  "funding_source_sha256": "bd861bba4b58376d72343003f722aaeeea3ac079f09997dde4d2ead96fa28186",
+  "validation": [
+    "cargo fmt --check",
+    "cargo check",
+    "cargo test",
+    "16 PostgreSQL integration tests",
+    "npm run build",
+    "npm run lint (two existing unused warnings)",
+    "cargo build --release --bin cta_web"
+  ],
+  "frontend_archive_sha256": "5ef2aa724b96e915e4cb74abf457dae64e666052c8b1f9e2d53c22dc259982c4",
+  "frontend_files_sha256": {
+    "favicon.svg": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+    "index.html": "32a820a3c26c2de63c713360cfd9c1c8d6e891c096e0b852b3d092f8b5a6244a",
+    "assets/index-By5cSNB-.js": "cd73f5949eb1aaa519c54b612a7a7680e80a74a82dd8b0067ba1c7f7c2cbfa1a",
+    "assets/index-CY0h6jwA.css": "91292991d3a2b0d7f3e4d8c746638bd940525804039234258127c81fb46d7da2"
+  }
+}

@@ -1,14 +1,14 @@
 # Virtual accounts and following
 
-Virtual accounts contain strategy bindings only, with no exchange credentials, Exec, RocksDB, positions, or NAV. Administrators maintain them in the independent Virtual 账户管理 workspace at `/manager/virtual/`, reachable from the main navigation, workspace overview, and strategy configuration. The workspace lists virtual accounts, strategy combinations, follower multipliers, and pending publication status. Follower identities and statuses are filtered by real account view grants. Each real account can use independent configuration or follow exactly one virtual account with a finite nonnegative multiplier. Effective shares are virtual shares × multiplier. Template edits synchronize the real catalog transactionally and queue immediate runtime publication. Position strategy publications use the usual account archive and publishing paths. Order template edits also queue followers.
+Virtual accounts contain strategy bindings only, with no exchange credentials, Exec, RocksDB, positions, or NAV. Administrators maintain them in the independent Virtual 账户管理 workspace at `/manager/virtual/`, reachable from the main navigation, workspace overview, and strategy configuration. The workspace lists virtual accounts, strategy combinations, follower multipliers, and pending publication status. Follower identities and statuses are filtered by real account view grants. Each real account can use independent configuration or follow multiple virtual accounts, each with a finite nonnegative multiplier. Effective shares for each publication binding are the sum of virtual shares × that virtual's multiplier. Matching binding names must reference the same position strategy and order template; conflicts reject the whole change, including template edits. Different publication names remain separate strategy identities even when they use the same position template. Template edits synchronize the real catalog transactionally and queue immediate runtime publication. Position strategy publications use the usual account archive and publishing paths. Order template edits also queue followers.
 
-Removing a template binding or changing follow targets sets obsolete real bindings to zero and publishes the complete zero target under the original strategy name. The stopped bindings remain for retry and attribution. A binding name cannot be reassigned to another position strategy. Switching back to independent preserves the effective configuration; pending deliveries finish before independent edits are accepted. A followed virtual account cannot be deleted. Multiplier zero stops all its strategies. Follow mode disables manual binding and direct Exec order-parameter edits, but permits manual republishing after pending configuration deliveries complete. An explicit follow-mode save republishes the full effective configuration, including retained zero stops.
+Removing a template binding or a followed virtual recomputes all remaining contributions and sets only obsolete real bindings to zero and publishes the complete zero target under the original strategy name. The stopped bindings remain for retry and attribution. A binding name cannot be reassigned to another position strategy. Switching back to independent preserves the effective configuration; pending deliveries finish before independent edits are accepted. A followed virtual account cannot be deleted. Multiplier zero removes that virtual's contribution; contributions from other followed virtuals remain. Empty follow lists and duplicate virtual IDs are rejected; switching to independent remains an explicit action. Follow mode disables manual binding and direct Exec order-parameter edits, but permits manual republishing after pending configuration deliveries complete. An explicit follow-mode save republishes the full effective configuration, including retained zero stops.
 
 New virtual accounts receive an automatic number (`virtual01`, `virtual02`, and so on) and an editable display alias. Numbers are allocated in the same PostgreSQL transaction as account creation, under the shared configuration lock, so concurrent creations cannot overwrite one another. Existing account IDs and follow relationships remain unchanged when aliases are edited.
 
 The workspace opens the first existing account by default. The account list shows the fixed number and alias on separate lines, while the editor separates identity, strategy cards, save/reset actions, and follower status. Each strategy card keeps its name above the execution-template and shares controls; long names wrap and narrow screens stack the controls. Adding a strategy requires an explicit Add action. Refreshing follower status preserves unsaved edits, and Reset restores the selected account. Accounts with followers show why deletion is unavailable.
 
-Only admins write virtual accounts. Real account configuration uses existing account configure grants, and attaching a template requires configure rights for every included strategy. Virtual account listings are filtered by strategy visibility. Creating, editing, or following a virtual account uses these existing permissions without a separate experimental-algorithm token. Venue and reserved-hedge target checks still run before configuration changes.
+Admins, virtual creators and delegated managers may edit virtual accounts. Only admins and creators manage delegation. Real account configuration uses existing account configure grants, and attaching a template requires configure rights for every included strategy. Virtual account listings are filtered by strategy visibility. Creating, editing, or following a virtual account uses these existing permissions without a separate experimental-algorithm token. Venue and reserved-hedge target checks still run before configuration changes.
 
 Delivery status appears in the account editor. Failures remain durable across Manager restarts and retry every ten seconds. Archive writes precede runtime publishes, freezing effective shares and current theoretical fees. Multiple pending changes coalesce to the newest desired configuration. No startup DDL, Exec RocksDB writes, or trading-service changes.
 
@@ -35,10 +35,29 @@ risk checks, venue rules, and its usual net execution and position ledger.
 - `POST /api/catalog/virtual-accounts` creates `{name, bindings}` and returns the account with its automatic number.
 - `PUT /api/catalog/virtual-accounts/{virtual_id}` replaces `{name, bindings: [{binding_name, position_strategy_name, order_strategy_name, shares}]}`.
 - `DELETE /api/catalog/virtual-accounts/{virtual_id}` deletes an unfollowed template.
-- `PUT /api/catalog/accounts/{source_id}/configuration` accepts `{"mode":"follow","virtual_id":"virtual01","multiplier":2}` or `{"mode":"independent"}`.
+- `PUT /api/catalog/accounts/{source_id}/configuration` accepts `{"mode":"follow","follows":[{"virtual_id":"virtual01","multiplier":2},{"virtual_id":"virtual02","multiplier":0.5}]}` or `{"mode":"independent"}`.
 - Existing account studio responses add `configuration` and `pending_publishes`.
 
 ## Existing database maintenance
+
+For multiple follows, apply `scripts/apply_multiple_virtual_follows_schema.sql`
+explicitly after a backup, with configuration writes paused during the coordinated
+backend/frontend replacement. It changes only the follow primary key from
+`source_id` to `(source_id, virtual_id)`; existing multipliers, bindings, pending
+publications and historical records are preserved. Fresh databases already use
+this key in `migrations/schema.sql`. Normal startup never applies maintenance.
+The API has one current `follows` array format; upgrade frontend and backend
+together. A single existing follow appears as one row. Do not roll back to an
+older single-follow binary after adding a second follow without first restoring
+one follow per account and reviewing effective targets.
+
+For example, virtual01 contributes 2 shares × 3 and virtual02 contributes
+5 shares × 0.5 to the same binding: the account publishes 8.5 shares once.
+Pausing virtual01 leaves 2.5 shares. Editing either template recalculates both;
+order-template updates queue each effective binding once. The account form
+supports adding/removing rows and changing each multiplier, and background
+status refreshes preserve unsaved rows.
+
 
 The 2026-10-11 deployment also applied the current owner/manager-grant schema
 explicitly after a full PostgreSQL backup. Existing virtual accounts retained
@@ -69,10 +88,11 @@ CREATE TABLE cta_virtual_account_bindings (
     PRIMARY KEY (virtual_id, binding_name)
 );
 CREATE TABLE cta_account_follows (
-    source_id text PRIMARY KEY REFERENCES cta_order_sources(source_id),
+    source_id text NOT NULL REFERENCES cta_order_sources(source_id),
     virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id),
     multiplier double precision NOT NULL CHECK (multiplier >= 0 AND multiplier < 'Infinity'::double precision),
-    updated_at_us bigint NOT NULL
+    updated_at_us bigint NOT NULL,
+    PRIMARY KEY (source_id, virtual_id)
 );
 CREATE INDEX cta_account_follows_virtual_id_idx ON cta_account_follows(virtual_id);
 -- Durable delivery status, not a second order/target history.

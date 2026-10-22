@@ -1,0 +1,2 @@
+{"name": "sample_error", "body": {"status": 400, "body": "{\"error\":\"none of the requested symbols exist in the selected time range\"}"}}
+{"name": "diagnostic_session_removed", "body": true}

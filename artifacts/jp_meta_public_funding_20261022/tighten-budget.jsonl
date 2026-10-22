@@ -1,0 +1,1 @@
+{"name": "tightened_budget", "body": {"binary_sha256": "8ff48b6a8193a723bac39ebe5037a5c86c1c2edb80a69188eb87d8c36ebe0515", "old_pid": "3849323", "new_pid": "3874116", "restart_time": "2026-10-22 09:07:47 UTC", "interval_seconds": 3, "five_minute_budget": 90}}

@@ -380,10 +380,11 @@ CREATE TABLE cta_virtual_account_bindings (
     PRIMARY KEY (virtual_id, binding_name)
 );
 CREATE TABLE cta_account_follows (
-    source_id text PRIMARY KEY REFERENCES cta_order_sources(source_id),
+    source_id text NOT NULL REFERENCES cta_order_sources(source_id),
     virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id),
     multiplier double precision NOT NULL CHECK (multiplier >= 0 AND multiplier < 'Infinity'::double precision),
-    updated_at_us bigint NOT NULL
+    updated_at_us bigint NOT NULL,
+    PRIMARY KEY (source_id, virtual_id)
 );
 CREATE INDEX cta_account_follows_virtual_id_idx ON cta_account_follows(virtual_id);
 

@@ -225,8 +225,10 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
         }
     }
     let follow = AccountConfiguration::Follow {
-        virtual_id: "virtual01".into(),
-        multiplier: 2.0,
+        follows: vec![crypto_cta_manager::virtual_accounts::AccountFollow {
+            virtual_id: "virtual01".into(),
+            multiplier: 2.0,
+        }],
     };
     virtual_accounts::set_configuration(&db.pool, "test-source", &follow, 10).await?;
     virtual_accounts::save(
@@ -255,6 +257,235 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
     );
     let next = virtual_accounts::create(&db.pool, &legacy, None, 12).await?;
     assert_eq!(next, "virtual09");
+    db.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomically() -> Result<()>
+{
+    use crypto_cta_manager::order_config::OrderParameters;
+    use crypto_cta_manager::strategy_catalog::{self, SaveOrderStrategyRequest};
+    use crypto_cta_manager::virtual_accounts::{
+        self, AccountConfiguration, AccountFollow, SaveVirtualAccount, VirtualBinding,
+    };
+    let db = TestDatabase::create().await?;
+    postgres::initialize(&db.pool).await?;
+    seed_business_data(&db.pool).await?;
+    for order in ["order-a", "order-b"] {
+        strategy_catalog::upsert_order_strategy(
+            &db.pool,
+            &SaveOrderStrategyRequest {
+                strategy_name: order.into(),
+                order_parameters: OrderParameters::default(),
+            },
+            1,
+            None,
+        )
+        .await?;
+    }
+    let binding = |name: &str, shares| VirtualBinding {
+        binding_name: name.into(),
+        position_strategy_name: "test-strategy".into(),
+        order_strategy_name: "order-a".into(),
+        shares,
+    };
+    let template = |shares| SaveVirtualAccount {
+        name: "A".into(),
+        bindings: vec![binding("shared", shares), binding("only-a", 4.0)],
+    };
+    virtual_accounts::save(&db.pool, "a", &template(2.0), 1).await?;
+    virtual_accounts::save(
+        &db.pool,
+        "b",
+        &SaveVirtualAccount {
+            name: "B".into(),
+            bindings: vec![binding("shared", 5.0), binding("only-b", 6.0)],
+        },
+        1,
+    )
+    .await?;
+    // Recreate the old single-follow key and prove maintenance preserves its rows.
+    sqlx::raw_sql("ALTER TABLE cta_account_follows DROP CONSTRAINT cta_account_follows_pkey; ALTER TABLE cta_account_follows ADD PRIMARY KEY (source_id);
+        INSERT INTO cta_account_follows VALUES ('test-source','a',3,1);")
+        .execute(&db.pool).await?;
+    let config = |a, b| AccountConfiguration::Follow {
+        follows: vec![
+            AccountFollow {
+                virtual_id: "a".into(),
+                multiplier: a,
+            },
+            AccountFollow {
+                virtual_id: "b".into(),
+                multiplier: b,
+            },
+        ],
+    };
+    sqlx::raw_sql(include_str!(
+        "../scripts/apply_multiple_virtual_follows_schema.sql"
+    ))
+    .execute(&db.pool)
+    .await?;
+    assert_eq!(
+        virtual_accounts::configuration(&db.pool, "test-source").await?,
+        AccountConfiguration::Follow {
+            follows: vec![AccountFollow {
+                virtual_id: "a".into(),
+                multiplier: 3.0
+            }]
+        }
+    );
+    virtual_accounts::set_configuration(&db.pool, "test-source", &config(3.0, 0.5), 2).await?;
+    let studio = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
+    assert_eq!(studio.configuration, config(3.0, 0.5));
+    assert_eq!(
+        studio
+            .bindings
+            .iter()
+            .map(|b| (b.binding_name.as_str(), b.shares))
+            .collect::<Vec<_>>(),
+        vec![("only-a", 12.0), ("only-b", 3.0), ("shared", 8.5)]
+    );
+    assert_eq!(studio.pending_publishes.len(), 3);
+    // The old JOIN produced duplicate queue inserts for multiple follows.
+    sqlx::query("DELETE FROM cta_follow_publish_queue")
+        .execute(&db.pool)
+        .await?;
+    virtual_accounts::enqueue_order_followers(&db.pool, "order-a").await?;
+    assert_eq!(
+        virtual_accounts::pending(&db.pool, "test-source")
+            .await?
+            .len(),
+        3
+    );
+    virtual_accounts::save(&db.pool, "a", &template(4.0), 3).await?;
+    let updated = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
+    assert_eq!(
+        updated
+            .bindings
+            .iter()
+            .find(|b| b.binding_name == "shared")
+            .unwrap()
+            .shares,
+        14.5
+    );
+    // Validate unsaved edits against all contributions, then test durable rollback.
+    let mut conflict = template(4.0);
+    conflict.bindings[0].order_strategy_name = "order-b".into();
+    if let AccountConfiguration::Follow { follows } = &updated.configuration {
+        assert!(
+            virtual_accounts::preview_bindings(&db.pool, follows, Some(("a", &conflict.bindings)))
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        virtual_accounts::save(&db.pool, "a", &conflict, 4)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        strategy_catalog::load_account_studio(&db.pool, "test-source").await?,
+        updated
+    );
+    assert_eq!(
+        virtual_accounts::list(&db.pool).await?[0].bindings[1].order_strategy_name,
+        "order-a"
+    );
+    let bad_config = AccountConfiguration::Follow {
+        follows: vec![
+            AccountFollow {
+                virtual_id: "a".into(),
+                multiplier: 1.0,
+            },
+            AccountFollow {
+                virtual_id: "a".into(),
+                multiplier: 2.0,
+            },
+        ],
+    };
+    assert!(
+        virtual_accounts::set_configuration(&db.pool, "test-source", &bad_config, 4)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        strategy_catalog::load_account_studio(&db.pool, "test-source").await?,
+        updated
+    );
+    virtual_accounts::set_configuration(&db.pool, "test-source", &config(0.0, 0.5), 5).await?;
+    let paused = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
+    assert_eq!(
+        paused
+            .bindings
+            .iter()
+            .find(|b| b.binding_name == "shared")
+            .unwrap()
+            .shares,
+        2.5
+    );
+    assert_eq!(
+        paused
+            .bindings
+            .iter()
+            .find(|b| b.binding_name == "only-a")
+            .unwrap()
+            .shares,
+        0.0
+    );
+    // Removing B's shared row keeps A's contribution when A is resumed.
+    virtual_accounts::set_configuration(&db.pool, "test-source", &config(3.0, 0.5), 6).await?;
+    virtual_accounts::save(
+        &db.pool,
+        "b",
+        &SaveVirtualAccount {
+            name: "B".into(),
+            bindings: vec![binding("only-b", 6.0)],
+        },
+        7,
+    )
+    .await?;
+    assert_eq!(
+        strategy_catalog::load_account_studio(&db.pool, "test-source")
+            .await?
+            .bindings
+            .iter()
+            .find(|b| b.binding_name == "shared")
+            .unwrap()
+            .shares,
+        12.0
+    );
+    // Detaching one virtual stops only its exclusive names and preserves the rest.
+    let only_b = AccountConfiguration::Follow {
+        follows: vec![AccountFollow {
+            virtual_id: "b".into(),
+            multiplier: 0.5,
+        }],
+    };
+    virtual_accounts::set_configuration(&db.pool, "test-source", &only_b, 8).await?;
+    let detached = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
+    assert_eq!(
+        detached
+            .bindings
+            .iter()
+            .map(|b| b.shares)
+            .collect::<Vec<_>>(),
+        vec![0.0, 3.0, 0.0]
+    );
+    assert!(virtual_accounts::delete(&db.pool, "a").await?);
+    virtual_accounts::set_configuration(
+        &db.pool,
+        "test-source",
+        &AccountConfiguration::Independent,
+        9,
+    )
+    .await?;
+    assert_eq!(
+        strategy_catalog::load_account_studio(&db.pool, "test-source")
+            .await?
+            .bindings,
+        detached.bindings
+    );
     db.remove().await
 }
 
@@ -316,8 +547,10 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
             &db.pool,
             source,
             &AccountConfiguration::Follow {
-                virtual_id: "model".into(),
-                multiplier,
+                follows: vec![crypto_cta_manager::virtual_accounts::AccountFollow {
+                    virtual_id: "model".into(),
+                    multiplier,
+                }],
             },
             3,
         )
@@ -360,8 +593,10 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
         &db.pool,
         "test-source",
         &AccountConfiguration::Follow {
-            virtual_id: "model".into(),
-            multiplier: 3.0,
+            follows: vec![crypto_cta_manager::virtual_accounts::AccountFollow {
+                virtual_id: "model".into(),
+                multiplier: 3.0,
+            }],
         },
         3,
     )
@@ -443,8 +678,10 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
         &db.pool,
         "test-source",
         &AccountConfiguration::Follow {
-            virtual_id: "model".into(),
-            multiplier: 0.0,
+            follows: vec![crypto_cta_manager::virtual_accounts::AccountFollow {
+                virtual_id: "model".into(),
+                multiplier: 0.0,
+            }],
         },
         7,
     )

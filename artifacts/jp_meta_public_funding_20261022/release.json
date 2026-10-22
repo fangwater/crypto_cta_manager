@@ -1,0 +1,18 @@
+{
+  "built_at_utc": "2026-10-22T09:06:09.735035+00:00",
+  "base_commit": "ac4ffcce172284abdd49cf7a5d5999bfa9abdea1",
+  "source_file": "src/funding_rates.rs",
+  "source_sha256": "bd861bba4b58376d72343003f722aaeeea3ac079f09997dde4d2ead96fa28186",
+  "binary_sha256": "8ff48b6a8193a723bac39ebe5037a5c86c1c2edb80a69188eb87d8c36ebe0515",
+  "previous_binary_sha256": "d7ce65514ffe6a3b74197f468deaf9adb184201b9778ed8e880061eab3a21b53",
+  "validation": [
+    "cargo fmt --check",
+    "cargo check",
+    "cargo test --lib funding_rates (7 passed)",
+    "cargo build --release --bin cta_web"
+  ],
+  "request_interval_seconds": 3,
+  "five_minute_budget": 90,
+  "local_ip": "172.31.46.92",
+  "public_ip": "52.192.54.88"
+}

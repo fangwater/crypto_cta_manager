@@ -652,8 +652,7 @@ export interface VirtualAccount {
 
 export type AccountConfiguration = { mode: 'independent' } | {
   mode: 'follow'
-  virtual_id: string
-  multiplier: number
+  follows: { virtual_id: string; multiplier: number }[]
 }
 
 export interface StrategyFundingEstimate {

@@ -1,0 +1,43 @@
+{
+  "observed_at_utc": "2026-10-22T08:22:27Z",
+  "endpoint": "https://fapi.binance.com/fapi/v1/fundingRate",
+  "same_request_symbol": "BTCUSDT",
+  "same_request_window": "last 24 hours, limit=1000",
+  "default": {
+    "local_ip": "172.31.35.228",
+    "public_ip": "13.115.227.29",
+    "status": 403,
+    "server": "awselb/2.0"
+  },
+  "market_data": {
+    "local_ip": "172.31.46.93",
+    "public_ip": "18.181.48.65",
+    "status": 200,
+    "rows": 3
+  },
+  "thirty_day_probes": {
+    "BTCUSDT": 90,
+    "ETHUSDT": 90,
+    "BNBUSDT": 90,
+    "SOLUSDT": 90,
+    "XRPUSDT": 90,
+    "DOGEUSDT": 90,
+    "BTCUSDC": 90,
+    "龙虾USDT": 180
+  },
+  "batch_warmup_followup": {
+    "first_403_at_utc": "2026-10-22T08:31:08Z",
+    "403_errors_by_083241": 212,
+    "inference": "Changing egress alone did not prevent rejection during bulk cache warmup; fix request bursts and global 403 cooldown."
+  },
+  "separate_egress_probe": {
+    "checked_at_utc": "2026-10-22T08:53:14Z",
+    "local_ip": "172.31.46.92",
+    "public_ip": "52.192.54.88",
+    "http_status": 200,
+    "btc_30_day_rows": 90,
+    "trade_engine_configs_checked": 25,
+    "matching_trading_bindings": 0,
+    "existing_connections": "rclone to Google HTTPS"
+  }
+}

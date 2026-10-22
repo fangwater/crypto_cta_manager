@@ -16,7 +16,13 @@ use crate::nav::{NavTimelinePoint, NavTimelineReport};
 pub const DAY_US: i64 = 86_400_000_000;
 pub const RETENTION_US: i64 = 30 * DAY_US;
 const OVERLAP_US: i64 = 3_600_000_000;
-const BUDGET: usize = 450; // Leave headroom below the shared 500 / 5 min / IP limit.
+// WAF rejected even a one-request/second cold load on a separate jp-meta IP.
+// Stay well below the documented shared 500 / 5 min / IP endpoint limit.
+const BUDGET: usize = 90;
+// The rolling quota alone permits a cold-cache burst large enough to hit WAF.
+// Public funding is a slow historical feed, so spread reservations across time.
+const REQUEST_INTERVAL: Duration = Duration::from_secs(3);
+const WAF_COOLDOWN_SECS: u64 = 300;
 
 pub fn supported_symbol(symbol: &str) -> bool {
     (symbol.ends_with("USDT") || symbol.ends_with("USDC"))
@@ -130,6 +136,8 @@ struct SymbolCache {
 struct Budget {
     requests: VecDeque<Instant>,
     cooldown: Option<Instant>,
+    next_request: Option<Instant>,
+    waf_rejections: u32,
 }
 
 #[derive(Clone)]
@@ -348,12 +356,44 @@ impl FundingRateCache {
                     until - now
                 } else if budget.requests.len() >= BUDGET {
                     budget.requests[0] + Duration::from_secs(300) - now
+                } else if let Some(until) = budget.next_request.filter(|ts| *ts > now) {
+                    until - now
                 } else {
                     budget.requests.push_back(now);
+                    budget.next_request = Some(now + REQUEST_INTERVAL);
                     return;
                 }
             };
             tokio::time::sleep(delay).await;
+        }
+    }
+
+    async fn observe_response(&self, status: reqwest::StatusCode, retry_after: Option<u64>) {
+        let mut budget = self.budget.lock().await;
+        let now = Instant::now();
+        let cooling_down = budget.cooldown.is_some_and(|until| until > now);
+        if status.is_success() {
+            // An older in-flight success must not reset a newly imposed cooldown.
+            if !cooling_down {
+                budget.waf_rejections = 0;
+            }
+        } else if matches!(status.as_u16(), 403 | 418 | 429) {
+            let seconds = if status.as_u16() == 403 {
+                // Multiple in-flight failures are one rejection episode. Escalate
+                // only if the first request after a cooldown is rejected again.
+                if !cooling_down {
+                    budget.waf_rejections = budget.waf_rejections.saturating_add(1);
+                }
+                let backoff = (WAF_COOLDOWN_SECS
+                    * (1_u64 << budget.waf_rejections.saturating_sub(1).min(4)))
+                .min(3600);
+                retry_after.unwrap_or(backoff).max(backoff)
+            } else {
+                retry_after.unwrap_or(300)
+            }
+            .clamp(1, 86400);
+            let until = now + Duration::from_secs(seconds);
+            budget.cooldown = Some(budget.cooldown.map_or(until, |old| old.max(until)));
         }
     }
 
@@ -379,18 +419,15 @@ impl FundingRateCache {
                 .await
                 .map_err(reqwest::Error::without_url)
                 .context("public funding request failed")?;
-            if matches!(response.status().as_u16(), 418 | 429) {
-                let seconds = response
+            self.observe_response(
+                response.status(),
+                response
                     .headers()
                     .get("retry-after")
                     .and_then(|h| h.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(300)
-                    .clamp(1, 86400);
-                let mut budget = self.budget.lock().await;
-                let until = Instant::now() + Duration::from_secs(seconds);
-                budget.cooldown = Some(budget.cooldown.map_or(until, |old| old.max(until)));
-            }
+                    .and_then(|s| s.parse::<u64>().ok()),
+            )
+            .await;
             ensure!(
                 response.status().is_success(),
                 "public funding REST returned HTTP {}",
@@ -561,6 +598,94 @@ mod tests {
         routing::get,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn concurrent_symbols_share_request_pacing() {
+        let cache = FundingRateCache::new(FundingRateConfig::default()).unwrap();
+        let reserve = || async {
+            cache.reserve().await;
+            Instant::now()
+        };
+        let (a, b, c) = tokio::join!(reserve(), reserve(), reserve());
+        let mut times = [a, b, c];
+        times.sort();
+        for pair in times.windows(2) {
+            assert!(pair[1] - pair[0] >= REQUEST_INTERVAL);
+        }
+    }
+
+    #[tokio::test]
+    async fn waf_rejection_blocks_other_symbols_and_recovers_without_a_retry_burst() {
+        use axum::http::StatusCode;
+        let count = Arc::new(AtomicUsize::new(0));
+        let requests = count.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/rates",
+                    get(move || {
+                        let count = requests.clone();
+                        async move {
+                            if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                                (StatusCode::FORBIDDEN, "blocked")
+                            } else {
+                                (StatusCode::OK, "[]")
+                            }
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let mut cache = FundingRateCache::new(FundingRateConfig::default()).unwrap();
+        cache.endpoint = format!("http://{address}/rates");
+        assert!(
+            cache
+                .fetch("BTCUSDT", 0, DAY_US)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("403")
+        );
+        let first_cooldown = cache.budget.lock().await.cooldown.unwrap();
+        assert!(first_cooldown > Instant::now() + Duration::from_secs(299));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                cache.fetch("ETHUSDT", 0, DAY_US)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        // In-flight failures share one episode; late successes do not reset it.
+        cache.observe_response(StatusCode::FORBIDDEN, None).await;
+        cache.observe_response(StatusCode::OK, None).await;
+        assert_eq!(cache.budget.lock().await.waf_rejections, 1);
+        // Model expiry, then another rejection: double the backoff, preserving
+        // a longer server-provided Retry-After if present.
+        cache.budget.lock().await.cooldown = Some(Instant::now());
+        cache
+            .observe_response(StatusCode::FORBIDDEN, Some(900))
+            .await;
+        assert_eq!(cache.budget.lock().await.waf_rejections, 2);
+        assert!(
+            cache.budget.lock().await.cooldown.unwrap() > Instant::now() + Duration::from_secs(899)
+        );
+        {
+            let mut budget = cache.budget.lock().await;
+            budget.cooldown = Some(Instant::now());
+            budget.next_request = Some(Instant::now());
+        }
+        assert!(cache.fetch("ETHUSDT", 0, DAY_US).await.unwrap().is_empty());
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert_eq!(cache.budget.lock().await.waf_rejections, 0);
+        server.abort();
+    }
 
     #[test]
     fn validates_public_settlements_and_preserves_negative_rates_and_usdc() {

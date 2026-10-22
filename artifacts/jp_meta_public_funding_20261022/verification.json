@@ -1,0 +1,35 @@
+{
+  "query_verification_manager_pid": "3874116",
+  "fixed_window_queries_passed": 14,
+  "all_order_reports_unchanged": true,
+  "all_factual_funding_records_unchanged": true,
+  "funding_errors_since_final_fix_at_verification": 0,
+  "protected_initial_count": 106,
+  "protected_unchanged_at_initial_verification": 96,
+  "operator_confirmed_stopped_rx02_processes": [
+    "94898",
+    "95314",
+    "95549",
+    "95871",
+    "100190",
+    "100253",
+    "100312",
+    "163597",
+    "384442",
+    "3639659"
+  ],
+  "configurations_unchanged_at_initial_verification": 26,
+  "snapshot_tables_unchanged": 5,
+  "concurrent_maintenance_after_query_verification": {
+    "manager_pid": "3922355",
+    "manager_restart_utc": "2026-10-22 09:31:16 UTC",
+    "added_source": "binance_exec_trade08",
+    "changed_sections": [
+      "sources",
+      "kline",
+      "funding"
+    ],
+    "nginx_snippet_changed": true
+  },
+  "note": "User confirmed RX02 was deliberately stopped; later host provisioning is recorded separately and was not reverted."
+}

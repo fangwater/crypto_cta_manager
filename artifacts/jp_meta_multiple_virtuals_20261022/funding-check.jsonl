@@ -1,0 +1,4 @@
+{"name": "funding", "body": {"loading": false, "unavailable_reason": null, "income_quote": 0.045864087842642384, "settlement_count": 42}}
+{"name": "kline_status", "body": {"active_backfills": 0, "cache_hits": 0, "disk_batch_reads": 62, "disk_range_reads": 14, "enabled": true, "fetched_candles": 54, "last_error": null, "memory_candle_hits": 21476, "pricing_cache_hits": 0, "requests": 17, "retained_days": 30, "target_history": {"last_error": null, "loading": true, "processed_messages": 3437312, "ready": false}}}
+{"name": "diagnostic_session_removed", "body": true}
+{"name": "public_funding_errors", "body": {"count": 0}}
