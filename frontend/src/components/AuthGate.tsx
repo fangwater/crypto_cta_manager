@@ -32,17 +32,28 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const controller = new AbortController()
-    getAuthStatus(controller.signal)
-      .then(setStatus)
-      .catch((reason: unknown) => {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return
+    let retry: ReturnType<typeof setTimeout> | undefined
+    const checkStatus = async () => {
+      try {
+        const next = await getAuthStatus(controller.signal)
+        if (controller.signal.aborted) return
+        setStatus(next)
+        setError(null)
+      } catch (reason: unknown) {
+        if (controller.signal.aborted) return
         setError(reason instanceof Error ? reason.message : String(reason))
-      })
-    return () => controller.abort()
+        retry = setTimeout(checkStatus, 10_000)
+      }
+    }
+    void checkStatus()
+    return () => {
+      controller.abort()
+      clearTimeout(retry)
+    }
   }, [])
 
   if (error) {
-    return <AuthMessage title="认证服务不可用" detail={error} />
+    return <AuthMessage title="认证服务不可用" detail={`${error}，10 秒后自动重试。`} />
   }
   if (!status) return <AuthMessage title="CTA Manager" detail="正在检查登录状态…" loading />
   if (!status.authenticated || !status.user) {
