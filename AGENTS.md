@@ -521,6 +521,24 @@ checked here contain USDT quotes; the generic "报价币" UI label was introduce
 by coin-margined support and does not change their currency.
 
 The theoretical target model freezes `delta = target - previous distinct target`.
+By operator instruction on 2026-10-22, RapidX sources expose two three-minute references
+for theoretical NAV and acquisition cost: `理论3min_vwap` and `理论3min_twap`. Identify the backend from each
+source's Exec environment, honoring the exchange-specific backend map; never
+infer it from RX01/RX02/RX03 labels. Starting at the first complete minute at or
+after publication, price `[t,t+180s)` as total quote volume / total base volume.
+For VWAP NAV replay, allocate the delta across those minutes in proportion to
+their market base volumes, using each minute's VWAP. TWAP is the arithmetic mean
+of the same three minute VWAPs and executes one third of the delta per minute;
+any zero-volume minute makes that TWAP unavailable. An all-zero-volume window is
+unavailable, never a close-price fallback. Preserve source/symbol/venue isolation,
+archived fees and shares, actual FIFO and funding, and the existing five-minute
+order-signal reference matching bound. Include the execution model in derived
+cache keys and expose both three-minute references in the browser. The latest RapidX
+curve ends two minutes before the latest closed-minute boundary. Existing
+unsupported venue feeds remain explicitly unavailable. See
+`docs/rapidx_theoretical_vwap.md`.
+
+Other sources retain the following five-minute theoretical TWAP unchanged.
 Each delta owns the first five complete wall-clock minutes after publication,
 excluding a partial arrival minute. Each traded minute price is Binance quote
 volume / base volume. By operator choice, cached minutes with zero base and

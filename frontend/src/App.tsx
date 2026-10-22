@@ -1,3 +1,4 @@
+import { theoreticalExecutionLabel } from './lib/theoreticalExecution'
 import { accountFeeSummary } from './format'
 import { serverClock } from './lib/serverClock'
 import {
@@ -35,6 +36,7 @@ import { displayedFunding, usesActualFunding } from './lib/fundingPresentation'
 import {
   NavTimelineChart,
   navSeriesMeta,
+  navSeriesLabel,
 } from './components/NavTimelineChart'
 import { PositionLeverageChart } from './components/PositionLeverageChart'
 import { ExecutionSlippagePanel } from './components/ExecutionSlippagePanel'
@@ -84,6 +86,8 @@ const seriesOptions: NavSeriesKey[] = [
   'nav_change_after_fee_quote',
   'theoretical_nav_before_fee_quote',
   'theoretical_nav_after_fee_quote',
+  'theoretical_twap3m_before_fee_quote',
+  'theoretical_twap3m_after_fee_quote',
   'realized_pnl_before_fee_quote',
   'floating_pnl_quote',
   'estimated_trading_fee_quote',
@@ -220,6 +224,8 @@ function NavPage() {
     'nav_change_after_fee_quote',
     'theoretical_nav_before_fee_quote',
     'theoretical_nav_after_fee_quote',
+    'theoretical_twap3m_before_fee_quote',
+    'theoretical_twap3m_after_fee_quote',
     'floating_pnl_quote',
     'funding_income_quote',
     'total_nav_after_fee_quote',
@@ -351,14 +357,14 @@ function NavPage() {
     })
       .then((next) => {
         if (controller.signal.aborted) return
-        const nextStart = next.theoretical.points.length > 0
+        const nextStart = next.theoretical.some((reference) => reference.points.length > 0)
           ? startMs
           : retainedQuickRangeStartMs(
               activeRange,
               startMs,
               endMs,
-              next.theoretical.available_from_us,
-              next.theoretical.execution_window_secs,
+              next.theoretical[0]?.available_from_us ?? null,
+              next.theoretical[0]?.execution_window_secs ?? 0,
             )
         if (nextStart !== startMs) {
           setRetainedRangeAdjusted(true)
@@ -369,8 +375,8 @@ function NavPage() {
         setTimeline(next)
         setNavPricingLoading(false)
         setTimelineError(null)
-        if (!includeTheoretical && next.theoretical.loading) void load(true)
-        else if (next.theoretical.loading || next.estimated_funding?.loading) retryTimer = window.setTimeout(() => void load(true), 10_000)
+        if (!includeTheoretical && next.theoretical.some((reference) => reference.loading)) void load(true)
+        else if (next.theoretical.some((reference) => reference.loading) || next.estimated_funding?.loading) retryTimer = window.setTimeout(() => void load(true), 10_000)
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -460,8 +466,8 @@ function NavPage() {
   const fundingIncome = displayed.income
   const hasFunding = displayed.kind !== 'unavailable'
   const strategyChart = chartMode === 'strategies' || chartMode === 'strategyFunding'
-  const fundingLabel = (key: NavSeriesKey) => usesEstimatedFunding ? navSeriesMeta[key].label.replace('Funding', '估算 Funding').replace('funding', '估算 funding') : navSeriesMeta[key].label
-  const fundingSeriesVisible = (key: NavSeriesKey) => hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_'))
+  const fundingLabel = (key: NavSeriesKey) => usesEstimatedFunding ? navSeriesLabel(key, timeline?.theoretical[0]?.execution_model).replace('Funding', '估算 Funding').replace('funding', '估算 funding') : navSeriesLabel(key, timeline?.theoretical[0]?.execution_model)
+  const fundingSeriesVisible = (key: NavSeriesKey) => (!key.startsWith('theoretical_twap3m_') || (timeline?.theoretical.length ?? 0) > 1) && (hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_')))
   const portfolioSeriesOptions = (
     selectedSymbols === null
       ? seriesOptions
@@ -541,8 +547,8 @@ function NavPage() {
       key,
       requestedStart,
       nextEnd,
-      timeline?.theoretical.available_from_us ?? null,
-      timeline?.theoretical.execution_window_secs ?? 0,
+      timeline?.theoretical[0]?.available_from_us ?? null,
+      timeline?.theoretical[0]?.execution_window_secs ?? 0,
     )
     setActiveRange(key)
     setRetainedRangeAdjusted(nextStart !== requestedStart)
@@ -827,7 +833,7 @@ function NavPage() {
         </section>
 
         <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />
-        {!noSymbolsSelected && <ExecutionSlippagePanel value={timeline?.execution_slippage} />}
+        {!noSymbolsSelected && timeline?.execution_slippage.map((value, index) => <ExecutionSlippagePanel key={index} value={value} model={timeline.theoretical[index]?.execution_model} />)}
         {pnlMode === 'account' && !noSymbolsSelected && <FundingPanel value={timeline?.funding} />}
         {!noSymbolsSelected && <FundingEstimatePanel value={estimate} />}
 
@@ -895,15 +901,13 @@ function NavPage() {
           {timeline?.report.valuation === 'quantity_fifo_closed_1m_window_delta' && (
             <p className="chart-notice">实际持仓按已完成的 1 分钟收盘价估值；成交价格、数量和交易费按真实成交计算。</p>
           )}
-          {timeline?.theoretical.unavailable_reason && (
-            <div className="chart-notice" role="status">理论净值：{timeline.theoretical.unavailable_reason}</div>
+          {timeline?.theoretical.map((reference, index) => reference.unavailable_reason && <div key={index} className="chart-notice" role="status">{theoreticalExecutionLabel(reference.execution_model)}：{reference.unavailable_reason}</div>)}
+          {timeline?.theoretical[0]?.latest_point_ts_us != null && timeline.theoretical[0].latest_point_ts_us < timeline.report.end_ts_us && (
+            <div className="chart-notice" role="status">最新 {timeline.theoretical[0].execution_window_secs / 60} 分钟窗口尚未结束，理论曲线截至 {timestampUs(timeline.theoretical[0].latest_point_ts_us)}。</div>
           )}
-          {timeline?.theoretical.latest_point_ts_us != null && timeline.theoretical.latest_point_ts_us < timeline.report.end_ts_us && (
-            <div className="chart-notice" role="status">最新五分钟窗口尚未结束，理论曲线截至 {timestampUs(timeline.theoretical.latest_point_ts_us)}。</div>
-          )}
-          {Boolean(timeline?.theoretical.zero_volume_skipped_sample_count) && <div className="chart-notice" role="status">跳过 {timeline?.theoretical.zero_volume_skipped_sample_count} 个无成交分钟样本，其余分钟均分理论成交量。</div>}
-          {Boolean(timeline?.theoretical.zero_volume_fallback_sample_count) && (
-            <div className="chart-notice" role="status">{integer((timeline?.theoretical.zero_volume_fallback_sample_count ?? 0) / 5)} 个目标的五分钟全部无成交，使用收盘价定价。</div>
+          {Boolean(timeline?.theoretical[0]?.zero_volume_skipped_sample_count) && <div className="chart-notice" role="status">跳过 {timeline?.theoretical[0]?.zero_volume_skipped_sample_count} 个无成交分钟样本，{timeline?.theoretical[0]?.execution_model === 'vwap3m' ? '其余分钟按市场成交量占比分配理论数量。' : '其余分钟按账户理论执行规则分配数量。'}</div>}
+          {Boolean(timeline?.theoretical[0]?.zero_volume_fallback_sample_count) && (
+            <div className="chart-notice" role="status">{integer((timeline?.theoretical[0]?.zero_volume_fallback_sample_count ?? 0) / 5)} 个目标的五分钟全部无成交，使用收盘价定价。</div>
           )}
           <div className="chart-body has-picker">
             <div className="chart-stage">
@@ -912,7 +916,7 @@ function NavPage() {
                 !(strategyChart && noStrategiesSelected) && (
                 <NavTimelineChart
                   points={timeline.report.points}
-                  theoreticalPoints={timeline.theoretical.points}
+                  theoretical={timeline.theoretical}
                   fundingPoints={fundingValue?.points}
                   fundingIsEstimate={usesEstimatedFunding}
                   strategyFunding={estimate?.strategies}

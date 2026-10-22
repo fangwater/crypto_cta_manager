@@ -37,7 +37,7 @@ export function deltaKey(row: AcquisitionCostRow) {
 export function analyzePricePath(row: AcquisitionCostRow) {
   const prices = row.sample_prices
   const traded = row.zero_volume_fallback_sample_count === 0
-  const complete = traded && prices.every((price) => price != null && price > 0)
+  const complete = traded && prices.length >= 3 && prices.every((price) => price != null && price > 0)
   let jumpBps: number | null = null
   let jumpMinute: number | null = null
   if (traded) {
@@ -55,8 +55,8 @@ export function analyzePricePath(row: AcquisitionCostRow) {
   let reversal: { outwardBps: number; returnBps: number; minute: number } | null = null
   if (complete) {
     const first = prices[0]!
-    const last = prices[4]!
-    for (let i = 1; i < 4; i++) {
+    const last = prices[prices.length - 1]!
+    for (let i = 1; i < prices.length - 1; i++) {
       const pivot = prices[i]!
       const outwardBps = (pivot - first) / first * 10_000
       const returnBps = (last - pivot) / pivot * 10_000

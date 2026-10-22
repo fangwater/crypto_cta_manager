@@ -52,7 +52,7 @@ export function AccountFeeEditor({ studio, disabled, onSave }: {
       </label>}
     </div>
     <div className="flex flex-wrap items-end gap-3">
-      {['Maker', 'Taker', '理论 TWAP'].map((label, index) => <Label key={label} className="min-w-[12rem] flex-1">
+      {['Maker', 'Taker', '理论成交'].map((label, index) => <Label key={label} className="min-w-[12rem] flex-1">
         {label} 费率（小数）
         <Input inputMode="decimal" value={values[index]} disabled={disabled || Boolean(quote && !separate)}
           onChange={event => setValues(previous => previous.map((value, i) => i === index ? event.target.value : value))} />
@@ -60,7 +60,7 @@ export function AccountFeeEditor({ studio, disabled, onSave }: {
       <Button type="button" size="sm" disabled={disabled} onClick={save}>保存</Button>
     </div>
     {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
-    <FieldHint>负数表示返佣。理论 TWAP 可设为 Maker/Taker 的平均值；已归档目标保留发布时的费率。</FieldHint>
+    <FieldHint>负数表示返佣。理论成交 可设为 Maker/Taker 的平均值；已归档目标保留发布时的费率。</FieldHint>
     <div className="space-y-1 text-xs text-muted">
       <p>默认：Maker {feeBps(studio.maker_fee_rate)} / Taker {feeBps(studio.taker_fee_rate)} / 理论 {feeBps(studio.theoretical_twap_fee_rate)}</p>
       {Object.entries(studio.quote_fee_rates).map(([asset, rates]) => <p key={asset}>

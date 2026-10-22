@@ -189,7 +189,7 @@ export function AccountOverviewPage() {
                 <div>
                   <CardTitle className="text-base">估算费率</CardTitle>
                   <CardDescription className="mt-1">
-                    按账户和合约报价币设置成交及理论 TWAP 费率。未单独设置的报价币使用默认费率。保存后自动更新。
+                    按账户和合约报价币设置成交及理论成交 费率。未单独设置的报价币使用默认费率。保存后自动更新。
                   </CardDescription>
                 </div>
               </CardHeader>

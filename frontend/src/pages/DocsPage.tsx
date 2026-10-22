@@ -130,7 +130,7 @@ function buildChapters(gateway: string): Chapter[] {
             {
               method: 'GET',
               path: `${CATALOG_PATH}/acquisition-cost`,
-              summary: '实际成交与五个完整分钟均价的成本比较',
+              summary: '实际成交与账户对应理论均价的成本比较',
             },
           ]}
         />
@@ -319,17 +319,19 @@ function buildChapters(gateway: string): Chapter[] {
     id: 'acquisition-cost',
     group: '策略目录',
     title: '持仓成本',
-    lead: '按需比较实际成交与五分钟窗口内按分钟 VWAP 定价的理论 TWAP，仅支持最近 30 天。',
+    lead: '按需比较实际成交与理论执行基准：RapidX 提供理论3min_vwap 与理论3min_twap 两个参考，其他账户保留五分钟 TWAP，仅支持最近 30 天。',
     content: (
       <>
         <Endpoint method="GET" path={`${CATALOG_PATH}/acquisition-cost`} summary="归档目标与 Binance 1m K 线生成虚拟价格，再与实际成交比较" />
         <FieldRows rows={[
           { field: 'startMs / endMs', detail: '最近 30 天内的查询区间；更早的数据不支持理论分析' },
           { field: 'sourceIds / strategyName', detail: '账户或策略筛选；省略策略则比较全部策略' },
-          { field: 'sample_prices', detail: '目标发布后的五个完整分钟 VWAP：每分钟成交额 ÷ 成交量，无成交分钟为 null，在其余 N 个分钟各执行 delta/N，理论 TWAP 均价为有效价格之和/N；五分钟全无成交才用五根收盘价的等权平均' },
-          { field: 'price_shortfall_usdt', detail: '实际有符号成交数量 × (实际成交价 − 有效计价分钟的等权均价)' },
+          { field: 'reports / theoretical', detail: '成本 API 的 reports 和净值 API 的 theoretical 按参考返回数组；RapidX 两个参考、其他账户一个。净值差滑点 execution_slippage 按同一顺序返回。逐 delta 的 reference_prices 同时列出各参考价格' },
+          { field: 'execution_model / execution_window_secs', detail: '按 Exec 后端识别：RapidX 返回 vwap3m 和 twap3m 两个参考，窗口均为 180 秒；其他账户为 twap5m / 300；窗口从目标发布时刻向上对齐的完整分钟开始' },
+          { field: 'sample_prices / sample_quantity_weights', detail: '分别为三个或五个分钟价格及理论数量权重。RapidX 的 VWAP 按分钟成交量占比分配数量，均价为三分钟总成交额 ÷ 总成交币数量；TWAP 每分钟分配三分之一数量，均价为三根分钟均价的算术平均；其他账户在有成交分钟均分数量，保留五分钟全部无成交时的收盘价回退' },
+          { field: 'price_shortfall_usdt', detail: '实际有符号成交数量 × (实际成交价 − 该账户的理论均价)' },
         ]} />
-        <Note>分钟 K 线存入 Manager 自己的 RocksDB。已缓存的分钟不重复请求，其他币对按查询缺口向前补拉 24 小时。缺失数据明确显示覆盖不足，不产生虚假的理论净值。</Note>
+        <Note>分钟 K 线存入 Manager 自己的 RocksDB。已缓存的分钟不重复请求，其他币对按查询缺口向前补拉 24 小时。缺失数据明确显示覆盖不足；RapidX 的 VWAP 在三分钟总成交量为零时不可用；TWAP 在任一分钟无成交时不可用。均不以收盘价替代。</Note>
       </>
     ),
   },
@@ -491,7 +493,7 @@ curl --noproxy '*' -sS -X PUT \\
             },
             {
               field: 'theoretical_twap_fee_rate',
-              detail: '理论 TWAP 默认费率；省略时取本次 Maker/Taker 平均值，已归档目标保持发布时的费率',
+              detail: '理论成交默认费率；省略时取本次 Maker/Taker 平均值，已归档目标保持发布时的费率',
             },
             {
               field: 'quote_fee_rates',

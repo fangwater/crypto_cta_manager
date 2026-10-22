@@ -1,12 +1,13 @@
+import { theoreticalExecutionLabel } from '../lib/theoreticalExecution'
 import { AnalysisMetric } from './AnalysisMetric'
-import type { ExecutionSlippage } from '../types'
+import type { ExecutionSlippage, TheoreticalExecutionModel } from '../types'
 import { money, timestampUs } from '../format'
 
-export function ExecutionSlippagePanel({ value }: { value?: ExecutionSlippage }) {
+export function ExecutionSlippagePanel({ value, model }: { value?: ExecutionSlippage; model?: TheoreticalExecutionModel | null }) {
   if (!value) return null
   const bps = (n: number | null) => n == null ? '--' : `${n.toFixed(2)} bps`
   return <section className="chart-section" aria-label="净值差滑点">
-    <div className="panel-heading"><h2>净值差滑点</h2></div>
+    <div className="panel-heading"><h2>{theoreticalExecutionLabel(model)} · 净值差滑点</h2></div>
     <div className="summary-strip nav-analysis-stats">
       <AnalysisMetric label="费前滑点" value={bps(value.before_fee_bps)} detail={`净值差 ${value.before_fee_gap_quote == null ? '--' : money(value.before_fee_gap_quote)} 报价币`} />
       <AnalysisMetric label="费后滑点" value={bps(value.after_fee_bps)} detail={`净值差 ${value.after_fee_gap_quote == null ? '--' : money(value.after_fee_gap_quote)} 报价币`} />

@@ -1,3 +1,4 @@
+import { theoreticalExecutionLabel } from '../lib/theoreticalExecution'
 import { BarChart, LineChart, ScatterChart } from 'echarts/charts'
 import { DataZoomComponent, GridComponent, LegendComponent, MarkAreaComponent, MarkLineComponent, TooltipComponent } from 'echarts/components'
 import * as echarts from 'echarts/core'
@@ -121,7 +122,8 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
   const sign = Math.sign(row.delta_qty)
   const offset = (ts: number) => (ts - row.received_at_us) / 1e6
   const plotPrice = (price: number) => priceMode === 'price' ? price : sign * (price / row.virtual_vwap - 1) * 10_000
-  const startUs = row.virtual_execution_ts_us - 300e6
+  const windowMinutes = row.execution_window_secs / 60
+  const startUs = row.virtual_execution_ts_us - row.execution_window_secs * 1e6
   const xEnd = Math.max(offset(row.virtual_execution_ts_us), offset(execution.last_fill_ts_us ?? row.received_at_us))
   const reversal = path.reversal
   const reversed = reversal != null && Math.min(Math.abs(reversal.outwardBps), Math.abs(reversal.returnBps)) >= moveThreshold
@@ -137,12 +139,12 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
       data: row.sample_prices.map((price, i) => [offset(startUs + (i * 60 + 30) * 1e6), price == null ? null : plotPrice(price)]),
       tooltip: { formatter: (p: { dataIndex: number }) => {
         const i = p.dataIndex
-        return `第 ${i + 1} 个完整分钟\n发布后 ${offset(startUs + i * 60e6).toFixed(1)}–${offset(startUs + (i + 1) * 60e6).toFixed(1)} 秒\n${row.zero_volume_fallback_sample_count ? '收盘价' : '分钟 VWAP'} ${formatPrice(row.sample_prices[i])}`
+        return `第 ${i + 1} 个完整分钟\n发布后 ${offset(startUs + i * 60e6).toFixed(1)}–${offset(startUs + (i + 1) * 60e6).toFixed(1)} 秒\n${row.zero_volume_fallback_sample_count ? '收盘价' : '分钟 VWAP'} ${formatPrice(row.sample_prices[i])}\n理论数量权重 ${(row.sample_quantity_weights[i] * 100).toFixed(2)}%`
       } },
       markArea: { silent: true, itemStyle: { color: 'rgba(37,99,167,0.05)' }, data: [[{ xAxis: offset(startUs) }, { xAxis: offset(row.virtual_execution_ts_us) }]] },
       markLine: { silent: true, symbol: 'none', label: { show: false }, lineStyle: { color: '#9ca3af', type: 'dotted' }, data: [{ xAxis: offset(row.virtual_execution_ts_us) }] },
     },
-    { type: 'line', name: '理论 TWAP', symbol: 'none', lineStyle: { color: better, type: 'dashed' }, data: [[0, plotPrice(row.virtual_vwap)], [xEnd, plotPrice(row.virtual_vwap)]] },
+    ...row.reference_prices.filter((reference) => reference.price != null).map((reference) => ({ type: 'line' as const, name: theoreticalExecutionLabel(reference.execution_model), symbol: 'none', lineStyle: { color: reference.execution_model === 'twap3m' ? '#d97706' : better, type: 'dashed' as const }, data: [[0, plotPrice(reference.price!)], [xEnd, plotPrice(reference.price!)]] })),
     ...(row.actual_vwap == null ? [] : [{ type: 'line', name: '实际 VWAP', symbol: 'none', lineStyle: { color: '#b7791f', type: 'dashed' }, data: [[0, plotPrice(row.actual_vwap)], [xEnd, plotPrice(row.actual_vwap)]] }]),
     ...(['maker', 'taker', 'unclassified', 'internal_cross'] as const).map((role, index) => ({
       type: 'scatter', name: ['Maker 成交', 'Taker 成交', '未分类成交', '内部对敲'][index], itemStyle: { color: [better, worse, '#7357a3', '#64748b'][index], opacity: 0.85 },
@@ -167,18 +169,18 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
         <Label>价格坐标<Select value={priceMode} onChange={(e) => setPriceMode(e.target.value)}><option value="bps">相对理论价 · 方向调整 bps</option><option value="price">币种原始价格</option></Select></Label>
       </div>
       <div className="grid gap-3 text-sm sm:grid-cols-3">
-        <div><div className="text-xs text-muted">理论 TWAP / 实际 VWAP</div><div className="mt-1 break-all font-medium tabular-nums">{formatPrice(row.virtual_vwap)} / {formatPrice(row.actual_vwap)}</div></div>
+        <div>{row.reference_prices.map((reference) => <div key={reference.execution_model}><div className="text-xs text-muted">{theoreticalExecutionLabel(reference.execution_model)}</div><div className="mt-1 break-all font-medium tabular-nums">{formatPrice(reference.price)}</div></div>)}<div className="text-xs text-muted">实际 VWAP</div><div className="mt-1 tabular-nums">{formatPrice(row.actual_vwap)}</div></div>
         <div><div className="text-xs text-muted">实际 − 理论（原始价格差）</div><div className="mt-1 break-all font-medium tabular-nums">{priceDifference != null && priceDifference > 0 ? '+' : ''}{differenceFormat(priceDifference)}</div></div>
         <div><div className="text-xs text-muted">方向调整价格差（正值更差）</div><div className={`mt-1 font-medium tabular-nums ${(row.price_shortfall_bps ?? 0) > 0 ? 'number-negative' : 'number-positive'}`}>{bps(row.price_shortfall_bps)}</div></div>
       </div>
-      <CostChart height={360} label={`${row.symbol} 五分钟均价与实际成交时点`} option={{
+      <CostChart height={360} label={`${row.symbol} ${windowMinutes} 分钟均价与实际成交时点`} option={{
         grid: { ...grid, top: 64, bottom: 80, right: 20 }, tooltip: { ...tooltip, trigger: 'item', formatter: (p: { seriesName: string; value: [number, number] }) => `${p.seriesName}\n${priceMode === 'price' ? formatPrice(p.value[1]) : bps(p.value[1])}` },
         legend: { type: 'scroll', top: 0, textStyle: { fontSize: 11 } },
         xAxis: { ...valueAxis, min: 0, max: Math.ceil(xEnd), name: '目标发布后 / 秒', nameLocation: 'middle', nameGap: 30 },
         yAxis: { ...valueAxis, scale: true, name: priceMode === 'price' ? '价格' : '方向调整 bps', axisLabel: { formatter: (value: number) => priceMode === 'price' ? formatPrice(value) : value.toFixed(1), fontSize: 10 } },
         dataZoom: [{ type: 'inside', filterMode: 'none' }, { type: 'slider', bottom: 0, height: 20, filterMode: 'none' }], series,
       }} />
-      <p className="text-xs leading-6 text-muted">阴影为目标后的五个完整分钟，右边界为窗口结束。均价画在分钟中点，连线只帮助观察走势，不代表逐笔路径；空白分钟不连线。成交点大小表示数量。{execution.fills_sampled ? `图中抽样 ${execution.fills.length} / ${row.matched_fill_count} 笔，保留首尾及价格极值；下方统计使用全部配对成交。` : `共 ${row.matched_fill_count} 笔配对成交。`}成交统计仅覆盖本次查询范围，不代表目标的全部生命周期。价格仅调整显示精度，不代表交易所 tick 精度。</p>
+      <p className="text-xs leading-6 text-muted">阴影为目标后的 {windowMinutes} 个完整分钟，右边界为窗口结束。均价画在分钟中点，连线只帮助观察走势，不代表逐笔路径；空白分钟不连线。成交点大小表示数量。{execution.fills_sampled ? `图中抽样 ${execution.fills.length} / ${row.matched_fill_count} 笔，保留首尾及价格极值；下方统计使用全部配对成交。` : `共 ${row.matched_fill_count} 笔配对成交。`}成交统计仅覆盖本次查询范围，不代表目标的全部生命周期。价格仅调整显示精度，不代表交易所 tick 精度。</p>
       <div className="grid gap-3 text-sm sm:grid-cols-3">
         <div><div className="text-xs text-muted">目标 → 成交 · 数量加权平均</div><div className="mt-1 tabular-nums">{seconds(execution.qty_weighted_target_delay_us)}</div></div>
         <div><div className="text-xs text-muted">订单 → 成交 · 数量加权平均</div><div className="mt-1 tabular-nums">{seconds(execution.qty_weighted_order_delay_us)}</div></div>
@@ -189,8 +191,8 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
         <Label>平均成交延迟阈值 · 秒<Input type="number" min="1" step="10" value={slowThreshold} onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= 1) setSlowThreshold(v) }} /></Label>
       </div>
       <div className="grid gap-3 lg:grid-cols-3">
-        <Diagnostic title={!path.complete ? '反转：数据不足' : reversed ? '五分钟内存在反转线索' : '未见显著反转'} detected={reversed}>
-          {!path.complete ? '需要五个都有成交的分钟。跳过分钟或全空窗口的收盘价不能用于反转判断。' : reversal ? `第 ${reversal.minute} 分钟附近转向：先${reversal.outwardBps > 0 ? '涨' : '跌'} ${Math.abs(reversal.outwardBps).toFixed(2)} bps，再${reversal.returnBps > 0 ? '涨' : '跌'} ${Math.abs(reversal.returnBps).toFixed(2)} bps。两段都达到 ${moveThreshold} bps 才标记。` : `首分钟到内部转折点、再到末分钟，未发现两段方向相反且都达到 ${moveThreshold} bps 的形态。`}
+        <Diagnostic title={!path.complete ? '反转：数据不足' : reversed ? `${windowMinutes} 分钟内存在反转线索` : '未见显著反转'} detected={reversed}>
+          {!path.complete ? `需要 ${windowMinutes} 个都有成交的分钟。跳过分钟或全空窗口的收盘价不能用于反转判断。` : reversal ? `第 ${reversal.minute} 分钟附近转向：先${reversal.outwardBps > 0 ? '涨' : '跌'} ${Math.abs(reversal.outwardBps).toFixed(2)} bps，再${reversal.returnBps > 0 ? '涨' : '跌'} ${Math.abs(reversal.returnBps).toFixed(2)} bps。两段都达到 ${moveThreshold} bps 才标记。` : `首分钟到内部转折点、再到末分钟，未发现两段方向相反且都达到 ${moveThreshold} bps 的形态。`}
         </Diagnostic>
         <Diagnostic title={path.jumpBps == null ? '跳变：数据不足' : jumped ? '存在分钟级跳变线索' : '未见显著分钟跳变'} detected={jumped}>
           {path.jumpBps == null ? '没有相邻且都有成交的分钟可供比较。' : `第 ${path.jumpMinute! - 1} → ${path.jumpMinute} 分钟均价变化最大，为 ${bps(path.jumpBps)}，判断阈值 ${moveThreshold} bps。分钟均价无法确认瞬时跳价，需要更细行情才能区分突跳与连续移动。`}
@@ -200,7 +202,7 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
         </Diagnostic>
       </div>
       <div className="rounded-lg bg-canvas p-3 text-xs leading-6 text-muted">
-        价格差拆解（方向调整）：实际相对首个计价分钟 <strong>{bps(path.versusFirstBps)}</strong> ＋ 首分钟相对五分钟理论均价 <strong>{bps(path.pathBps)}</strong> ＝ 总价格差 <strong>{bps(row.price_shortfall_bps)}</strong>。后半项反映基准随市场路径变化的影响；前半项也包含市场变化，不等于纯执行损失。两项均不含手续费。
+        价格差拆解（方向调整）：实际相对首个计价分钟 <strong>{bps(path.versusFirstBps)}</strong> ＋ 首分钟相对窗口理论均价 <strong>{bps(path.pathBps)}</strong> ＝ 总价格差 <strong>{bps(row.price_shortfall_bps)}</strong>。后半项反映基准随市场路径变化的影响；前半项也包含市场变化，不等于纯执行损失。两项均不含手续费。
       </div>
     </CardContent>
   </Card>

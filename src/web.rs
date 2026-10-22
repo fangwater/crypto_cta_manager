@@ -146,8 +146,8 @@ pub struct TimelineSnapshot {
     pub generated_at_us: i64,
     pub generation_duration_ms: u64,
     pub report: nav::NavTimelineReport,
-    pub theoretical: crate::theoretical_nav::TheoreticalNavTimeline,
-    pub execution_slippage: crate::execution_slippage::ExecutionSlippage,
+    pub theoretical: Vec<crate::theoretical_nav::TheoreticalNavTimeline>,
+    pub execution_slippage: Vec<crate::execution_slippage::ExecutionSlippage>,
     pub funding: crate::funding::FundingTimeline,
     pub estimated_funding: crate::funding_rates::FundingEstimate,
 }
@@ -296,7 +296,7 @@ struct PositionUpdatesQuery {
 struct AcquisitionCostSnapshot {
     generated_at_us: i64,
     generation_duration_ms: u64,
-    report: crate::acquisition_cost::AcquisitionCostReport,
+    reports: Vec<crate::acquisition_cost::AcquisitionCostReport>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1642,55 +1642,69 @@ async fn rebuild_timeline_snapshot(
     let actual_duration_ms = started.elapsed().as_millis();
     let theoretical = if theoretical_symbols.is_empty() && query.include_theoretical.unwrap_or(true)
     {
-        crate::theoretical_nav::load_timeline(
-            theoretical_fees.as_ref().clone(),
-            &state.theoretical_targets,
-            &state.klines,
-            report.start_ts_us,
-            report.end_ts_us,
-            &report.selected_source_ids,
-            max_points,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            warn!(%error, "minute-candle theoretical NAV unavailable");
-            crate::theoretical_nav::TheoreticalNavTimeline {
-                unavailable_reason: Some("理论分析暂不可用，请稍后重试".into()),
-                ..Default::default()
-            }
-        })
+        let mut references = Vec::new();
+        for twap_reference in
+            crate::theoretical_execution::references(&state.config, &report.selected_source_ids)
+                // Model errors belong to the theoretical overlay, never the factual report.
+                .unwrap_or_else(|_| vec![false])
+        {
+            references.push(
+                crate::theoretical_nav::load_timeline(
+                    theoretical_fees.as_ref().clone(),
+                    &state.theoretical_targets,
+                    &state.klines,
+                    report.start_ts_us,
+                    report.end_ts_us,
+                    &report.selected_source_ids,
+                    max_points,
+                    twap_reference,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    warn!(%error, "minute-candle theoretical NAV unavailable");
+                    crate::theoretical_nav::TheoreticalNavTimeline {
+                        unavailable_reason: Some("理论分析暂不可用，请稍后重试".into()),
+                        ..Default::default()
+                    }
+                }),
+            );
+        }
+        references
     } else if theoretical_symbols.is_empty() && state.klines.enabled() {
-        crate::theoretical_nav::TheoreticalNavTimeline {
+        vec![crate::theoretical_nav::TheoreticalNavTimeline {
             loading: true,
             unavailable_reason: Some("理论曲线正在计算".into()),
             ..Default::default()
-        }
+        }]
     } else {
-        crate::theoretical_nav::TheoreticalNavTimeline::default()
+        vec![crate::theoretical_nav::TheoreticalNavTimeline::default()]
     };
-    let execution_slippage = if let Some(point) = theoretical.points.last().copied() {
-        let aligned = nav::NavTimelineRequest {
-            start_ts_us: Some(report.start_ts_us),
-            end_ts_us: point.ts_us,
-            ..aligned_request
-        };
-        let actual = aligned_timelines
-            .rebuild_priced(aligned, use_strategy_allocation, state.klines.clone())
-            .await?;
-        crate::execution_slippage::ExecutionSlippage::calculate(
-            report.start_ts_us,
-            actual.summary,
-            point,
-        )
-    } else {
-        crate::execution_slippage::ExecutionSlippage::unavailable(
-            report.start_ts_us,
-            theoretical
-                .unavailable_reason
-                .clone()
-                .unwrap_or_else(|| "完整理论净值不可用；请选择全部币种及最近 1–30 天".into()),
-        )
-    };
+    let mut execution_slippage = Vec::new();
+    for reference in &theoretical {
+        execution_slippage.push(if let Some(point) = reference.points.last().copied() {
+            let aligned = nav::NavTimelineRequest {
+                start_ts_us: Some(report.start_ts_us),
+                end_ts_us: point.ts_us,
+                ..aligned_request.clone()
+            };
+            let actual = aligned_timelines
+                .rebuild_priced(aligned, use_strategy_allocation, state.klines.clone())
+                .await?;
+            crate::execution_slippage::ExecutionSlippage::calculate(
+                report.start_ts_us,
+                actual.summary,
+                point,
+            )
+        } else {
+            crate::execution_slippage::ExecutionSlippage::unavailable(
+                report.start_ts_us,
+                reference
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "完整理论净值不可用；请选择全部币种及最近 1–30 天".into()),
+            )
+        });
+    }
     let estimate_report = report.clone();
     let public_rates = state.funding_rates.clone();
     let supported = report.selected_source_ids.iter().all(|id| {
@@ -2019,31 +2033,37 @@ async fn acquisition_cost(
         .as_ref()
         .clone()
         .with_fee_rates(&fee_rates);
-    let report = crate::acquisition_cost::report_acquisition_cost(
-        theoretical_fees.as_ref().clone(),
-        &config,
-        &state.theoretical_targets,
-        &state.klines,
-        &histories,
-        start_received_at_us,
-        end_received_at_us,
-        generated_at_us,
-        &selected_source_ids,
-        strategy_name,
-        page,
-        page_size,
-        row_symbol.as_deref(),
-        row_strategy,
-        query.row_sort,
-    )
-    .await?;
+    let mut reports = Vec::new();
+    for twap_reference in crate::theoretical_execution::references(&config, &selected_source_ids)? {
+        reports.push(
+            crate::acquisition_cost::report_acquisition_cost(
+                theoretical_fees.as_ref().clone(),
+                &config,
+                &state.theoretical_targets,
+                &state.klines,
+                &histories,
+                start_received_at_us,
+                end_received_at_us,
+                generated_at_us,
+                &selected_source_ids,
+                strategy_name,
+                page,
+                page_size,
+                row_symbol.as_deref(),
+                row_strategy,
+                query.row_sort,
+                twap_reference,
+            )
+            .await?,
+        );
+    }
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok((
         NO_STORE,
         Json(AcquisitionCostSnapshot {
             generated_at_us,
             generation_duration_ms,
-            report,
+            reports,
         }),
     )
         .into_response())
@@ -5478,7 +5498,7 @@ mod tests {
                 }],
                 sampled: false,
             },
-            theoretical: crate::theoretical_nav::TheoreticalNavTimeline::default(),
+            theoretical: Vec::new(),
             execution_slippage: Default::default(),
             funding: Default::default(),
             estimated_funding: Default::default(),

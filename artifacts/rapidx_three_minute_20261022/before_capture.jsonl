@@ -1,0 +1,15 @@
+{"name": "health", "body": {"status": "ok", "source_count": 7, "generated_at_us": 1792641407127244, "last_attempt_at_us": 1792641385791771, "refresh_interval_secs": 60, "last_refresh_error": null}}
+{"name": "query", "body": {"source": "binance_exec_trade03", "endpoint": "timeline", "elapsed_s": 27.78, "references": [{"model": null, "points": 148, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade03", "endpoint": "account-timeline", "elapsed_s": 27.77, "references": [{"model": null, "points": 148, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade03", "reports": [{"model": null, "rows": 100, "missing": 0}]}}
+{"name": "query", "body": {"source": "binance_exec_trade05", "endpoint": "timeline", "elapsed_s": 42.12, "references": [{"model": null, "points": 278, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade05", "endpoint": "account-timeline", "elapsed_s": 0.08, "references": [{"model": null, "points": 278, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade05", "reports": [{"model": null, "rows": 52, "missing": 0}]}}
+{"name": "query", "body": {"source": "binance_exec_trade06", "endpoint": "timeline", "elapsed_s": 48.53, "references": [{"model": null, "points": 155, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade06", "endpoint": "account-timeline", "elapsed_s": 33.51, "references": [{"model": null, "points": 155, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade06", "reports": [{"model": null, "rows": 100, "missing": 0}]}}
+{"name": "query", "body": {"source": "binance_exec_trade07", "endpoint": "timeline", "elapsed_s": 0.76, "references": [{"model": null, "points": 194, "missing": 0, "reason": null}]}}
+{"name": "query", "body": {"source": "binance_exec_trade07", "endpoint": "account-timeline", "elapsed_s": 0.19, "references": [{"model": null, "points": 194, "missing": 0, "reason": null}]}}
+{"name": "cost", "body": {"source": "binance_exec_trade07", "reports": [{"model": null, "rows": 45, "missing": 0}]}}
+{"name": "saved", "body": {"phase": "before", "window": {"startMs": 1792619160000, "endMs": 1792640760000}}}
+{"name": "diagnostic_session_removed", "body": true}

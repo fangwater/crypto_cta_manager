@@ -1,3 +1,4 @@
+import { theoreticalExecutionDescription, theoreticalExecutionLabel } from '../lib/theoreticalExecution'
 import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, Scale } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getAcquisitionCost, getDashboard, getKlineCacheStatus } from '../api'
@@ -62,6 +63,7 @@ export function AcquisitionCostPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cacheStatus, setCacheStatus] = useState<KlineCacheStatus | null>(null)
+  const [referenceIndex, setReferenceIndex] = useState(0)
   const [selectedKey, setSelectedKey] = useState('')
   const [rowSymbol, setRowSymbol] = useState('')
   const [rowStrategy, setRowStrategy] = useState('')
@@ -153,16 +155,16 @@ export function AcquisitionCostPage() {
         })
         if (controller.signal.aborted) return
         setSnapshot(next)
-        const lastRow = next.report.rows.at(-1)
+        const lastRow = next.reports[referenceIndex]?.rows.at(-1)
         setSelectedKey(lastRow ? deltaKey(lastRow) : '')
-        setPage(next.report.page)
+        setPage(next.reports[referenceIndex]?.page ?? 1)
       } catch (reason: unknown) {
         if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason))
       } finally {
         if (queryController.current === controller) setLoading(false)
       }
     },
-    [endInput, rowSort, rowStrategy, rowSymbol, scope, scopeReady, startInput, strategyName],
+    [referenceIndex, endInput, rowSort, rowStrategy, rowSymbol, scope, scopeReady, startInput, strategyName],
   )
 
   function selectDetails(symbol: string, sort: 'latest' | 'price_shortfall', strategy = rowStrategy) {
@@ -173,13 +175,13 @@ export function AcquisitionCostPage() {
     document.getElementById('delta-details')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  const report = snapshot?.report
+  const report = snapshot?.reports[referenceIndex] ?? snapshot?.reports[0]
   const totals = report?.totals
   return (
     <AppShell
       active="acquisition-cost"
       title="持仓成本"
-      subtitle="实际成交与分钟 VWAP 定价的理论 TWAP"
+      subtitle={`实际成交与${theoreticalExecutionLabel(report?.execution_model)}`}
       icon={Scale}
       actions={
         <Button type="button" size="sm" variant="primary" disabled={loading || !scopeReady} onClick={() => void query(1)}>
@@ -191,7 +193,7 @@ export function AcquisitionCostPage() {
       <PageIntro
         eyebrow="Delta cost"
         title="实际成本 vs 虚拟成本"
-        description="理论 TWAP 使用目标发布后五个完整分钟的 VWAP（成交额 ÷ 成交量），跳过无成交分钟，在其余分钟均分数量；五分钟全部无成交时使用收盘价。按实际成交数量比较价格与费用，仅支持最近 30 天。"
+        description={theoreticalExecutionDescription(report?.execution_model)}
       />
 
       {error && <Alert className="mb-4">{error}</Alert>}
@@ -199,12 +201,12 @@ export function AcquisitionCostPage() {
         行情缓存：已补拉 {cacheStatus.fetched_candles.toLocaleString()} 根分钟 K 线 · {cacheStatus.active_backfills ? `${cacheStatus.active_backfills} 个币对正在补齐，可稍后重新查询` : '当前没有补拉任务'}
       </div>}
       {report?.warnings.map((warning) => <Alert key={warning} className="mb-4">{warning}</Alert>)}
-      {Boolean(totals?.pending_virtual_delta_count) && <Alert className="mb-4">{totals?.pending_virtual_delta_count} 个 delta 的五分钟执行窗口尚未结束。</Alert>}
-      {Boolean(totals?.zero_volume_skipped_sample_count) && <div className="mb-4 text-sm text-muted" role="status">跳过 {totals?.zero_volume_skipped_sample_count} 个无成交分钟样本，其余分钟均分理论成交量。</div>}
+      {Boolean(totals?.pending_virtual_delta_count) && <Alert className="mb-4">{totals?.pending_virtual_delta_count} 个 delta 的理论执行窗口尚未结束。</Alert>}
+      {Boolean(totals?.zero_volume_skipped_sample_count) && <div className="mb-4 text-sm text-muted" role="status">跳过 {totals?.zero_volume_skipped_sample_count} 个无成交分钟样本，{report?.execution_model === 'vwap3m' ? '其余分钟按市场成交量占比分配理论数量。' : '其余分钟按账户理论执行规则分配数量。'}</div>}
       {Boolean(totals?.zero_volume_fallback_sample_count) && <Alert className="mb-4">{totals?.zero_volume_fallback_delta_count} 个目标的五分钟全部无成交，使用收盘价定价。</Alert>}
       {totals && totals.missing_virtual_delta_count > 0 && (
         <Alert className="mb-4">
-          {totals.missing_virtual_delta_count} 个 delta 缺少完整五点行情，未进入可比成本。
+          {totals.missing_virtual_delta_count} 个 delta 缺少可定价的完整窗口行情，未进入可比成本。
         </Alert>
       )}
       {totals && totals.stale_reference_fill_count > 0 && (
@@ -244,6 +246,14 @@ export function AcquisitionCostPage() {
         </CardContent>
       </Card>
 
+      {(snapshot?.reports.length ?? 0) > 1 && <Card className="mb-6">
+        <CardHeader><CardTitle>两个三分钟参考</CardTitle><CardDescription>同一查询范围、实际成交和费用，分别计算参考价格与滑点。选择参考可查看对应的图表和逐 delta 明细。</CardDescription></CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-2">{snapshot?.reports.map((reference, index) => <div key={reference.execution_model} className="rounded-lg border border-border-soft p-4">
+          <Button variant={referenceIndex === index ? 'primary' : 'secondary'} onClick={() => setReferenceIndex(index)}>{theoreticalExecutionLabel(reference.execution_model)}</Button>
+          <div className="mt-3 text-sm">费前滑点 {reference.totals.matched_fill_count ? bps(reference.totals.price_shortfall_bps) : '--'} · 费后滑点 {reference.totals.matched_fill_count ? bps(reference.totals.after_fee_shortfall_bps) : '--'}</div>
+          <div className="mt-2 text-xs text-muted">可比成交 {reference.totals.matched_fill_count} 笔 · 缺价 {reference.totals.missing_virtual_delta_count} 个 delta</div>
+        </div>)}</CardContent>
+      </Card>}
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <StatTile label="目标虚拟成交额" value={totals ? moneyU(totals.virtual_turnover_usdt) : '--'} hint={totals ? `${totals.virtual_delta_count} 个 delta · 费 ${moneyU(totals.virtual_fee_usdt)}` : undefined} />
         <StatTile label="事实成交额" value={totals ? moneyU(totals.actual_turnover_usdt) : '--'} hint={totals ? `${totals.actual_fill_count} 笔 · 费 ${moneyU(totals.actual_fee_usdt)}` : undefined} />
@@ -326,7 +336,7 @@ export function AcquisitionCostPage() {
             <table className="min-w-full text-left text-[13px]">
               <thead className="border-b border-border-soft bg-canvas/80 text-[11px] uppercase tracking-wide text-muted">
                 <tr>
-                  <th className="px-4 py-2 font-medium">信号 / 策略</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">五个分钟价格</th><th className="px-4 py-2 text-right font-medium">计价分钟</th><th className="px-4 py-2 text-right font-medium">理论 TWAP 均价</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">实际 − 理论</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
+                  <th className="px-4 py-2 font-medium">信号 / 策略</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">分钟价格</th><th className="px-4 py-2 text-right font-medium">计价分钟</th><th className="px-4 py-2 text-right font-medium">{(snapshot?.reports.length ?? 0) > 1 ? "三分钟参考价" : theoreticalExecutionLabel(report?.execution_model)}</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">实际 − 理论</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
                 </tr>
               </thead>
               <tbody>
@@ -339,8 +349,8 @@ export function AcquisitionCostPage() {
                     <td className="px-4 py-2">{side(row.delta_qty)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{quantity(Math.abs(row.delta_qty))}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right text-[11px] tabular-nums text-muted">{sampleText(row)}</td>
-                    <td className="px-4 py-2 text-right tabular-nums">{row.zero_volume_fallback_sample_count ? "收盘价" : (5 - row.zero_volume_skipped_sample_count) + " / 5"}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{formatPrice(row.virtual_vwap)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{row.zero_volume_fallback_sample_count ? "收盘价" : (row.sample_prices.length - row.zero_volume_skipped_sample_count) + " / " + row.sample_prices.length}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{row.reference_prices.map((reference) => <div key={reference.execution_model}>{row.reference_prices.length > 1 && <span className="mr-2 text-xs text-muted">{theoreticalExecutionLabel(reference.execution_model)}</span>}{formatPrice(reference.price)}</div>)}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{formatPrice(row.actual_vwap)}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{difference != null && difference > 0 ? '+' : ''}{priceFormatter([difference])(difference)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{(row.fill_ratio * 100).toFixed(1)}%</td>

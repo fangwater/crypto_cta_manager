@@ -279,7 +279,16 @@ impl BreakdownAccumulator {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ExecutionReferencePrice {
+    pub execution_model: crate::theoretical_execution::ExecutionModel,
+    pub price: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct AcquisitionCostRow {
+    pub execution_model: crate::theoretical_execution::ExecutionModel,
+    pub execution_window_secs: u64,
+    pub reference_prices: Vec<ExecutionReferencePrice>,
     pub source_id: String,
     pub binding_name: String,
     pub strategy_name: String,
@@ -288,7 +297,8 @@ pub struct AcquisitionCostRow {
     pub received_at_us: i64,
     pub virtual_execution_ts_us: i64,
     pub delta_qty: f64,
-    pub sample_prices: [Option<f64>; 5],
+    pub sample_prices: Vec<Option<f64>>,
+    pub sample_quantity_weights: Vec<f64>,
     pub zero_volume_fallback_sample_count: usize,
     pub zero_volume_skipped_sample_count: usize,
     pub virtual_vwap: f64,
@@ -310,6 +320,8 @@ pub struct AcquisitionCostRow {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AcquisitionCostReport {
+    pub execution_model: Option<crate::theoretical_execution::ExecutionModel>,
+    pub execution_window_secs: u64,
     pub generated_at_us: i64,
     pub price_basis: &'static str,
     pub fee_basis: &'static str,
@@ -345,6 +357,8 @@ pub struct AcquisitionCostReport {
 
 #[derive(Clone, Debug)]
 struct VirtualFill {
+    reference_prices: Vec<ExecutionReferencePrice>,
+    execution_model: crate::theoretical_execution::ExecutionModel,
     source_id: String,
     binding_name: String,
     strategy_name: String,
@@ -353,7 +367,8 @@ struct VirtualFill {
     received_at_us: i64,
     execution_ts_us: i64,
     delta_qty: f64,
-    sample_prices: [Option<f64>; 5],
+    sample_prices: Vec<Option<f64>>,
+    sample_quantity_weights: Vec<f64>,
     first_price: f64,
     zero_volume_fallback_sample_count: usize,
     zero_volume_skipped_sample_count: usize,
@@ -483,6 +498,7 @@ pub async fn report_acquisition_cost(
     row_symbol: Option<&str>,
     row_strategy: Option<&str>,
     row_sort: AcquisitionRowSort,
+    twap_reference: bool,
 ) -> Result<AcquisitionCostReport> {
     if start_received_at_us < 0 || end_received_at_us < start_received_at_us {
         bail!("invalid acquisition-cost timestamp range");
@@ -490,7 +506,7 @@ pub async fn report_acquisition_cost(
     if page == 0 || page_size == 0 || page_size > MAX_PAGE_SIZE {
         bail!("invalid acquisition-cost pagination");
     }
-    let (deltas, warnings) = crate::theoretical_nav::prepare_acquisition(
+    let (deltas, mut warnings, execution_models) = crate::theoretical_nav::prepare_acquisition(
         theoretical_fees,
         targets,
         klines,
@@ -498,6 +514,7 @@ pub async fn report_acquisition_cost(
         end_received_at_us,
         source_ids,
         strategy_name,
+        twap_reference,
     )
     .await?;
     let analysis_now_us = crate::kline::now_us();
@@ -513,6 +530,16 @@ pub async fn report_acquisition_cost(
     for delta in deltas {
         let execution_ts_us = delta.execution_ts_us();
         let samples = delta.prices(klines)?;
+        if samples
+            .as_ref()
+            .is_some_and(|samples| samples.average().is_none())
+        {
+            let warning = delta.execution_model.missing_volume_reason(&delta.symbol);
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+        let samples = samples.filter(|samples| samples.average().is_some());
         let Some(priced) = samples else {
             unavailable
                 .entry((delta.source_id, delta.strategy_name, delta.symbol))
@@ -527,9 +554,10 @@ pub async fn report_acquisition_cost(
             }
             continue;
         };
-        let sample_prices = priced.prices;
+        let sample_prices = priced.prices.clone();
         if delta.received_at_us >= start_received_at_us {
-            zero_volume_fallback_sample_count += usize::from(priced.all_zero_volume_fallback) * 5;
+            zero_volume_fallback_sample_count +=
+                usize::from(priced.all_zero_volume_fallback) * sample_prices.len();
             zero_volume_skipped_sample_count += priced.zero_volume_skipped_sample_count;
             zero_volume_skipped_delta_count +=
                 usize::from(priced.zero_volume_skipped_sample_count > 0);
@@ -541,7 +569,29 @@ pub async fn report_acquisition_cost(
         let virtual_vwap = priced
             .average()
             .context("virtual schedule has no priced minutes")?;
+        let reference_models =
+            if delta.execution_model == crate::theoretical_execution::ExecutionModel::Twap5m {
+                vec![delta.execution_model]
+            } else {
+                vec![
+                    crate::theoretical_execution::ExecutionModel::Vwap3m,
+                    crate::theoretical_execution::ExecutionModel::Twap3m,
+                ]
+            };
+        let reference_prices = reference_models
+            .into_iter()
+            .map(|model| {
+                Ok(ExecutionReferencePrice {
+                    execution_model: model,
+                    price: klines
+                        .window_prices(&delta.symbol, delta.open_ts_us(0), model)?
+                        .and_then(|prices| prices.average()),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         virtual_fills.push(VirtualFill {
+            reference_prices,
+            execution_model: delta.execution_model,
             source_id: delta.source_id,
             binding_name: delta.binding_name,
             strategy_name: delta.strategy_name,
@@ -551,10 +601,12 @@ pub async fn report_acquisition_cost(
             execution_ts_us,
             delta_qty: delta.delta_qty,
             sample_prices,
+            sample_quantity_weights: priced.quantity_weights.clone(),
             first_price: priced
                 .first_price()
                 .context("virtual schedule has no arrival price")?,
-            zero_volume_fallback_sample_count: usize::from(priced.all_zero_volume_fallback) * 5,
+            zero_volume_fallback_sample_count: usize::from(priced.all_zero_volume_fallback)
+                * priced.prices.len(),
             zero_volume_skipped_sample_count: priced.zero_volume_skipped_sample_count,
             virtual_vwap,
             virtual_fee_usdt: delta.delta_qty.abs() * virtual_vwap * delta.fee_rate,
@@ -841,6 +893,9 @@ pub async fn report_acquisition_cost(
         }
         output_indices.push(index);
         output_rows.push(AcquisitionCostRow {
+            execution_model: fill.execution_model,
+            execution_window_secs: fill.execution_model.window_secs(),
+            reference_prices: fill.reference_prices,
             source_id: fill.source_id,
             binding_name: fill.binding_name,
             strategy_name: fill.strategy_name,
@@ -850,6 +905,7 @@ pub async fn report_acquisition_cost(
             virtual_execution_ts_us: fill.execution_ts_us,
             delta_qty: fill.delta_qty,
             sample_prices: fill.sample_prices,
+            sample_quantity_weights: fill.sample_quantity_weights,
             zero_volume_fallback_sample_count: fill.zero_volume_fallback_sample_count,
             zero_volume_skipped_sample_count: fill.zero_volume_skipped_sample_count,
             virtual_vwap: fill.virtual_vwap,
@@ -920,8 +976,13 @@ pub async fn report_acquisition_cost(
     });
     fill_diagnostics.truncate(100);
     Ok(AcquisitionCostReport {
+        execution_model: crate::theoretical_execution::scope_model(&execution_models),
+        execution_window_secs: crate::theoretical_execution::scope_window_secs(&execution_models),
         generated_at_us,
-        price_basis: "equal_qty_over_traded_minutes_in_complete_5m_window_or_all_empty_close",
+        price_basis: crate::theoretical_execution::scope_model(&execution_models).map_or(
+            "source_specific_execution",
+            crate::theoretical_execution::ExecutionModel::price_basis,
+        ),
         fee_basis: "actual_maker_taker_vs_archived_theoretical_rate_or_current_legacy_fallback",
         start_received_at_us,
         end_received_at_us,
@@ -959,6 +1020,10 @@ mod tests {
 
     fn detail_row(symbol: &str, received_at_us: i64, shortfall: Option<f64>) -> AcquisitionCostRow {
         AcquisitionCostRow {
+            execution_model: crate::theoretical_execution::ExecutionModel::Twap5m,
+            execution_window_secs: 300,
+            reference_prices: Vec::new(),
+            sample_quantity_weights: vec![0.2; 5],
             source_id: "source".into(),
             binding_name: "binding".into(),
             strategy_name: "strategy".into(),
@@ -967,7 +1032,7 @@ mod tests {
             received_at_us,
             virtual_execution_ts_us: received_at_us + 300_000_000,
             delta_qty: 1.0,
-            sample_prices: [Some(1.0); 5],
+            sample_prices: vec![Some(1.0); 5],
             zero_volume_fallback_sample_count: 0,
             zero_volume_skipped_sample_count: 0,
             virtual_vwap: 1.0,

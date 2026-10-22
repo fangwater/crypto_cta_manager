@@ -14,6 +14,7 @@ use tracing::warn;
 
 use crate::config::KlineConfig;
 use crate::manager_db::ManagerDb;
+use crate::theoretical_execution::ExecutionModel;
 
 pub const MINUTE_US: i64 = 60_000_000;
 pub const DAY_US: i64 = 86_400_000_000;
@@ -21,9 +22,12 @@ pub const CANDLES_CF: &str = "klines_1m";
 pub const VALUE_BYTES: usize = 56;
 const PAGE_LIMIT: usize = 499;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MinutePrices {
-    pub prices: [Option<f64>; 5],
+    pub prices: Vec<Option<f64>>,
+    pub quantity_weights: Vec<f64>,
+    pub execution_model: ExecutionModel,
+    average_price: Option<f64>,
     pub zero_volume_skipped_sample_count: usize,
     pub all_zero_volume_fallback: bool,
 }
@@ -32,8 +36,18 @@ impl MinutePrices {
         self.prices.iter().flatten().count()
     }
     pub fn average(&self) -> Option<f64> {
-        let count = self.priced_sample_count();
-        (count > 0).then(|| self.prices.iter().flatten().sum::<f64>() / count as f64)
+        self.average_price
+    }
+    pub fn quantity(&self, delta: f64, index: usize) -> f64 {
+        if self.prices[index].is_none() {
+            return 0.0;
+        }
+        match self.execution_model {
+            ExecutionModel::Twap5m | ExecutionModel::Twap3m => {
+                delta / self.priced_sample_count() as f64
+            }
+            ExecutionModel::Vwap3m => delta * self.quantity_weights[index],
+        }
     }
     pub fn first_price(&self) -> Option<f64> {
         self.prices.iter().flatten().copied().next()
@@ -43,7 +57,7 @@ impl MinutePrices {
 #[derive(Default)]
 struct MinuteCache {
     candles: BTreeMap<i64, Kline>,
-    prices: BTreeMap<i64, MinutePrices>,
+    prices: BTreeMap<(i64, ExecutionModel), MinutePrices>,
 }
 
 impl MinuteCache {
@@ -54,14 +68,21 @@ impl MinuteCache {
             .is_some_and(|old| *old != candle)
         {
             for index in 0..5 {
-                self.prices.remove(&(candle.open_ts_us - index * MINUTE_US));
+                for model in [
+                    ExecutionModel::Twap5m,
+                    ExecutionModel::Vwap3m,
+                    ExecutionModel::Twap3m,
+                ] {
+                    self.prices
+                        .remove(&(candle.open_ts_us - index * MINUTE_US, model));
+                }
             }
         }
         self.candles.insert(candle.open_ts_us, candle);
     }
     fn prune(&mut self, cutoff: i64) {
         self.candles = self.candles.split_off(&cutoff);
-        self.prices = self.prices.split_off(&cutoff);
+        self.prices = self.prices.split_off(&(cutoff, ExecutionModel::Twap5m));
     }
 }
 
@@ -436,21 +457,31 @@ impl KlineStore {
             .collect())
     }
 
-    /// Fully closed immutable five-minute schedules are shared across accounts.
-    pub fn window_prices(&self, symbol: &str, open: i64) -> Result<Option<MinutePrices>> {
-        if open < self.cutoff_us(now_us()) || open + 5 * MINUTE_US > now_us() {
+    /// Complete schedules share candles, but cache each execution model separately.
+    pub fn window_prices(
+        &self,
+        symbol: &str,
+        open: i64,
+        model: ExecutionModel,
+    ) -> Result<Option<MinutePrices>> {
+        let count = model.sample_count();
+        if open < self.cutoff_us(now_us()) || open + count as i64 * MINUTE_US > now_us() {
             return Ok(None);
         }
         let cache = self.minute_cache(symbol);
-        if let Some(priced) = cache.lock().unwrap().prices.get(&open).copied() {
+        if let Some(priced) = cache.lock().unwrap().prices.get(&(open, model)).cloned() {
             self.inner.status.lock().unwrap().pricing_cache_hits += 1;
             return Ok(Some(priced));
         }
-        let opens = std::array::from_fn::<_, 5, _>(|index| open + index as i64 * MINUTE_US);
+        let opens: Vec<_> = (0..count)
+            .map(|index| open + index as i64 * MINUTE_US)
+            .collect();
         self.read_minutes(symbol, &opens)?;
         let mut cache = cache.lock().unwrap();
-        let mut prices = [None; 5];
-        let mut closes = [0.0; 5];
+        let mut prices = vec![None; count];
+        let mut closes = vec![0.0; count];
+        let mut volumes = vec![0.0; count];
+        let mut quote_volume = 0.0;
         let mut skipped = 0;
         for (index, ts) in opens.iter().enumerate() {
             let Some(candle) = cache.candles.get(ts) else {
@@ -464,19 +495,65 @@ impl KlineStore {
                     return Ok(None);
                 };
                 prices[index] = Some(price);
+                volumes[index] = candle.base_volume;
+                quote_volume += candle.quote_volume;
             }
         }
-        let all_empty = skipped == 5;
-        if all_empty {
-            prices = closes.map(Some);
+        let all_empty_fallback = skipped == count && model == ExecutionModel::Twap5m;
+        if all_empty_fallback {
+            prices = closes.into_iter().map(Some).collect();
             skipped = 0;
         }
+        let priced_count = prices.iter().flatten().count();
+        let total_volume: f64 = volumes.iter().sum();
+        let (average_price, quantity_weights) = match model {
+            ExecutionModel::Twap3m => (
+                (priced_count == 3).then(|| prices.iter().flatten().sum::<f64>() / 3.0),
+                vec![1.0 / 3.0; 3],
+            ),
+            ExecutionModel::Twap5m => (
+                Some(prices.iter().flatten().sum::<f64>() / priced_count as f64),
+                prices
+                    .iter()
+                    .map(|price| {
+                        if price.is_some() {
+                            1.0 / priced_count as f64
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect(),
+            ),
+            ExecutionModel::Vwap3m => (
+                (total_volume > 0.0).then(|| quote_volume / total_volume),
+                volumes
+                    .iter()
+                    .map(|volume| {
+                        if total_volume > 0.0 {
+                            volume / total_volume
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect(),
+            ),
+        };
+        ensure!(
+            average_price.is_none_or(|price| price.is_finite() && price > 0.0),
+            "invalid theoretical window VWAP"
+        );
         let priced = MinutePrices {
             prices,
+            quantity_weights,
+            execution_model: model,
+            average_price,
             zero_volume_skipped_sample_count: skipped,
-            all_zero_volume_fallback: all_empty,
+            all_zero_volume_fallback: all_empty_fallback,
         };
-        cache.prices.insert(open, priced);
+        // An all-empty VWAP window is explicitly unpriceable; do not negative-cache it.
+        if priced.average().is_some() {
+            cache.prices.insert((open, model), priced.clone());
+        }
         Ok(Some(priced))
     }
     pub fn scan(&self, symbol: &str, start: i64, end: i64) -> Result<Vec<Kline>> {
@@ -1267,13 +1344,26 @@ mod tests {
         assert_eq!(store.status().disk_batch_reads, 1);
         store.read_minutes("BTCUSDT", &opens[..3]).unwrap();
         assert_eq!(store.status().disk_batch_reads, 1);
-        assert!(store.window_prices("BTCUSDT", start).unwrap().is_none());
+        assert!(
+            store
+                .window_prices("BTCUSDT", start, ExecutionModel::Twap5m)
+                .unwrap()
+                .is_none()
+        );
         let repaired = candle(start + MINUTE_US);
         store
             .save_page("BTCUSDT", start, start + 5 * MINUTE_US, &[repaired])
             .unwrap();
-        let first = store.window_prices("BTCUSDT", start).unwrap().unwrap();
-        assert_eq!(store.window_prices("BTCUSDT", start).unwrap(), Some(first));
+        let first = store
+            .window_prices("BTCUSDT", start, ExecutionModel::Twap5m)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .window_prices("BTCUSDT", start, ExecutionModel::Twap5m)
+                .unwrap(),
+            Some(first.clone())
+        );
         assert_eq!(store.status().pricing_cache_hits, 1);
         let mut corrected = candle(start);
         corrected.base_volume = 0.0;
@@ -1281,7 +1371,10 @@ mod tests {
         store
             .save_page("BTCUSDT", start, start + 5 * MINUTE_US, &[corrected])
             .unwrap();
-        let changed = store.window_prices("BTCUSDT", start).unwrap().unwrap();
+        let changed = store
+            .window_prices("BTCUSDT", start, ExecutionModel::Twap5m)
+            .unwrap()
+            .unwrap();
         assert_eq!(changed.zero_volume_skipped_sample_count, 1);
         assert_ne!(changed, first);
     }

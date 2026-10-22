@@ -18,7 +18,8 @@ import type {
   StrategyNavTimeline,
   StrategyFundingEstimate,
   SymbolNavTimeline,
-  TheoreticalNavPoint,
+  TheoreticalNavTimeline,
+  TheoreticalExecutionModel,
   TimelineChartMode,
 } from '../types'
 import { fundingMoney, strategyLabel, UI_FONT_SANS } from '../format'
@@ -35,7 +36,7 @@ echarts.use([
 
 interface Props {
   points: NavTimelinePoint[]
-  theoreticalPoints: TheoreticalNavPoint[]
+  theoretical: TheoreticalNavTimeline[]
   fundingPoints?: FundingNavPoint[]
   fundingIsEstimate?: boolean
   strategyFunding?: StrategyFundingEstimate[]
@@ -80,6 +81,8 @@ export const navSeriesMeta: Record<
     color: '#a33f55',
     lineType: 'dashed',
   },
+  theoretical_twap3m_before_fee_quote: { label: '理论3min_twap（费前）', color: '#0891b2', lineType: 'dotted' },
+  theoretical_twap3m_after_fee_quote: { label: '理论3min_twap（费后）', color: '#d97706', lineType: 'dashed' },
   realized_pnl_before_fee_quote: { label: '已实现盈亏', color: '#b7791f' },
   floating_pnl_quote: {
     label: '浮动盈亏',
@@ -91,6 +94,17 @@ export const navSeriesMeta: Record<
     color: '#c2413b',
     lineType: 'dashed',
   },
+}
+
+export function navSeriesLabel(key: NavSeriesKey, model?: TheoreticalExecutionModel | null) {
+  if (key.startsWith('theoretical_')) {
+    const fee = key.endsWith('before_fee_quote') ? '费前' : '费后'
+    if (key.startsWith('theoretical_twap3m_')) return `理论3min_twap（${fee}）`
+    if (model === 'vwap3m') return `理论3min_vwap（${fee}）`
+    if (model === 'twap5m') return `理论${fee}（5 分钟 TWAP）`
+    return `理论${fee}`
+  }
+  return navSeriesMeta[key].label
 }
 
 function isTheoreticalSeries(key: NavSeriesKey) {
@@ -115,7 +129,7 @@ function chartTime(value: number) {
 
 export function NavTimelineChart({
   points,
-  theoreticalPoints,
+  theoretical,
   fundingPoints,
   fundingIsEstimate,
   strategyFunding,
@@ -137,12 +151,13 @@ export function NavTimelineChart({
     const series =
       mode === 'portfolio'
         ? visibleSeries.map((key) => {
-            const meta = navSeriesMeta[key]
-            const theoretical = isTheoreticalSeries(key)
-            const data = theoretical
-              ? theoreticalPoints.map((point) => [
+            const meta = { ...navSeriesMeta[key], label: navSeriesLabel(key, theoretical[0]?.execution_model) }
+            const isTheoretical = isTheoreticalSeries(key)
+            const reference = key.startsWith('theoretical_twap3m_') ? theoretical[1] : theoretical[0]
+            const data = isTheoretical
+              ? (reference?.points ?? []).map((point) => [
                   point.ts_us / 1_000,
-                  key === 'theoretical_nav_after_fee_quote'
+                  key.endsWith('after_fee_quote')
                     ? point.nav_change_after_fee_quote
                     : point.nav_change_before_fee_quote,
                 ])
@@ -159,13 +174,13 @@ export function NavTimelineChart({
               showSymbol: false,
               sampling: 'lttb' as const,
               connectNulls: true,
-              step: theoretical || key === 'funding_income_quote' ? ('end' as const) : undefined,
+              step: isTheoretical || key === 'funding_income_quote' ? ('end' as const) : undefined,
               lineStyle: {
                 width:
                   key === 'nav_change_after_fee_quote' ||
                   key === 'funding_income_quote' ||
                   key === 'total_nav_after_fee_quote' ||
-                  key === 'theoretical_nav_after_fee_quote'
+                  key.endsWith('after_fee_quote')
                     ? 2.4
                     : 1.6,
                 color: meta.color,
@@ -293,7 +308,7 @@ export function NavTimelineChart({
     points,
     strategyPoints,
     symbolPoints,
-    theoreticalPoints,
+    theoretical,
     fundingPoints,
     fundingIsEstimate,
     strategyFunding,

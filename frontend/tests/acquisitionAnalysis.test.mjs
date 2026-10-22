@@ -71,3 +71,14 @@ test('delta selection identity stays isolated by source, venue, strategy and bin
   const base = { source_id: 'a', binding_name: 'b', strategy_name: 'c', symbol: 'BTCUSDT', venue: 'binance-futures', received_at_us: 123 }
   for (const field of Object.keys(base)) assert.notEqual(deltaKey(base), deltaKey({ ...base, [field]: 'different' }))
 })
+
+
+test('three-minute RapidX paths use the third minute as the endpoint', () => {
+  const reverse = analyzePricePath(row([100, 102, 101]))
+  assert.equal(reverse.complete, true)
+  assert.equal(reverse.reversal.minute, 2)
+  assert.ok(reverse.reversal.returnBps < 0)
+  assert.equal(analyzePricePath(row([100, 101, 102])).reversal, null)
+  assert.equal(analyzePricePath(row([100, null, 102])).complete, false)
+  assert.equal(analyzePricePath(row([])).complete, false)
+})

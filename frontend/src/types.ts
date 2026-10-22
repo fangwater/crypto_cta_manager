@@ -330,8 +330,8 @@ export interface TimelineSnapshot {
   generated_at_us: number
   generation_duration_ms: number
   report: NavTimelineReport
-  theoretical: TheoreticalNavTimeline
-  execution_slippage?: ExecutionSlippage
+  theoretical: TheoreticalNavTimeline[]
+  execution_slippage: ExecutionSlippage[]
   funding?: FundingTimeline
   estimated_funding?: FundingEstimate
 }
@@ -397,7 +397,10 @@ export interface TheoreticalNavPoint {
   estimated_trading_fee_quote: number
 }
 
+export type TheoreticalExecutionModel = 'twap5m' | 'vwap3m' | 'twap3m'
+
 export interface TheoreticalNavTimeline {
+  execution_model: TheoreticalExecutionModel | null
   loading: boolean
   unavailable_reason: string | null
   missing_price_count: number
@@ -519,6 +522,9 @@ export interface AcquisitionExecution {
 }
 
 export interface AcquisitionCostRow {
+  reference_prices: { execution_model: TheoreticalExecutionModel; price: number | null }[]
+  execution_model: TheoreticalExecutionModel
+  execution_window_secs: number
   source_id: string
   binding_name: string
   strategy_name: string
@@ -527,7 +533,8 @@ export interface AcquisitionCostRow {
   received_at_us: number
   virtual_execution_ts_us: number
   delta_qty: number
-  sample_prices: [number | null, number | null, number | null, number | null, number | null]
+  sample_prices: (number | null)[]
+  sample_quantity_weights: number[]
   zero_volume_fallback_sample_count: number
   zero_volume_skipped_sample_count: number
   virtual_vwap: number
@@ -548,6 +555,8 @@ export interface AcquisitionCostRow {
 }
 
 export interface AcquisitionCostReport {
+  execution_model: TheoreticalExecutionModel | null
+  execution_window_secs: number
   generated_at_us: number
   price_basis: string
   fee_basis: string
@@ -583,7 +592,7 @@ export interface AcquisitionCostReport {
 export interface AcquisitionCostSnapshot {
   generated_at_us: number
   generation_duration_ms: number
-  report: AcquisitionCostReport
+  reports: AcquisitionCostReport[]
 }
 
 export interface HealthResponse {
@@ -607,6 +616,8 @@ export type ActualNavSeriesKey =
 export type TheoreticalNavSeriesKey =
   | 'theoretical_nav_before_fee_quote'
   | 'theoretical_nav_after_fee_quote'
+  | 'theoretical_twap3m_before_fee_quote'
+  | 'theoretical_twap3m_after_fee_quote'
 export type FundingNavSeriesKey = 'funding_income_quote' | 'total_nav_before_fee_quote' | 'total_nav_after_fee_quote'
 export type NavSeriesKey = ActualNavSeriesKey | TheoreticalNavSeriesKey | FundingNavSeriesKey
 export type SymbolRow = AggregateSymbolNavReport & {
