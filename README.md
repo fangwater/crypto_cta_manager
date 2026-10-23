@@ -188,11 +188,17 @@ are read. Templates keep Kline disabled
 until dedicated egress is filled in. Existing host TOMLs must replace `[twap]`
 with `[kline]` before replacing the binary; deployment refuses the old section.
 
-REST concurrency defaults to 8 and a shared paced budget to 120 weight/minute.
+REST concurrency defaults to 8, with a shared rolling 60-second weight budget
+(default 600; el01 uses 1200 on its dedicated non-trading IP).
 Binance 429/418 responses pause the whole client according to Retry-After.
 `GET /api/catalog/kline-status` exposes active backfills, requests, cache hits,
 fetched candles and the latest error. Queries wait up to 10 seconds for warming;
 remaining work continues in the background and missing coverage is explicit.
+Concurrent queries share one backfill worker per symbol. Newer requested minutes
+interrupt and extend an older pass; both 24-hour blocks and their missing pages
+load newest first. HTTP capacity and weight are granted together, prioritizing
+newer candle ends, so historical requests cannot occupy all HTTP slots while
+waiting for budget. Completed cache ranges bypass those workers.
 
 Target history is indexed once in the background into an in-memory delta cache,
 then updated from a stable timestamp/sequence checkpoint, re-reading the recent

@@ -1,0 +1,64 @@
+{
+  "checks": {
+    "processes": true,
+    "config_hashes": true,
+    "tables": true,
+    "funding_settings": true,
+    "manager_affinity": true,
+    "webroot": true
+  },
+  "protected_process_count": 90,
+  "configuration_hash_count": 16,
+  "snapshot_table_count": 4,
+  "live_cycles": [
+    {
+      "cycle": 0,
+      "endMs": 1792736702001,
+      "attempt": 0,
+      "duration_ms": 476,
+      "points": 98
+    },
+    {
+      "cycle": 1,
+      "endMs": 1792736762000,
+      "attempt": 0,
+      "duration_ms": 310,
+      "points": 98
+    },
+    {
+      "cycle": 2,
+      "endMs": 1792736822000,
+      "attempt": 0,
+      "duration_ms": 354,
+      "points": 98
+    },
+    {
+      "cycle": 3,
+      "endMs": 1792736882000,
+      "attempt": 0,
+      "duration_ms": 681,
+      "points": 98
+    }
+  ],
+  "final_funding_loading": false,
+  "final_kline_status": {
+    "active_backfills": 0,
+    "cache_hits": 65,
+    "disk_batch_reads": 5522,
+    "disk_range_reads": 209,
+    "enabled": true,
+    "fetched_candles": 1897,
+    "last_error": null,
+    "memory_candle_hits": 9194382,
+    "pricing_cache_hits": 21359,
+    "requests": 1108,
+    "retained_days": 30,
+    "target_history": {
+      "last_error": null,
+      "loading": false,
+      "processed_messages": 4422920,
+      "ready": true
+    }
+  },
+  "config_only_change": "kline.weight_per_minute: 120 -> 1200"
+}

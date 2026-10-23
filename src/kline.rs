@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Client, StatusCode};
 use rocksdb::{IteratorMode, ReadOptions, WriteBatch};
 use serde::Serialize;
-use tokio::sync::{Mutex as AsyncMutex, OnceCell, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OnceCell, Semaphore, SemaphorePermit, watch};
 use tracing::warn;
 
 use crate::config::KlineConfig;
@@ -257,9 +257,13 @@ struct Inner {
     client: OnceCell<Client>,
     egress_retry_at: AsyncMutex<tokio::time::Instant>,
     markets: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    warming: Mutex<BTreeMap<String, Arc<WarmJob>>>,
     minutes: Mutex<BTreeMap<String, Arc<Mutex<MinuteCache>>>>,
     candle_revision: AtomicU64,
     permits: Semaphore,
+    request_queue: Mutex<BTreeMap<(std::cmp::Reverse<i64>, u64), ()>>,
+    request_sequence: AtomicU64,
+    request_ready: Notify,
     weight: AsyncMutex<WeightGate>,
     status: Mutex<CacheStatus>,
     // Fixed official origins in production; overridden only by in-module tests.
@@ -278,43 +282,88 @@ pub(crate) struct KlineWarmResult {
     pub pending: bool,
 }
 
-/// Detached backfills survive HTTP cancellation. Return coverage after at most
-/// 10s of waiting; a later query reuses the cache rather than restarting pulls.
+type WarmCompletion = Option<std::result::Result<(), String>>;
+
+struct WarmJob {
+    range: Mutex<(i64, i64)>,
+    changed: Notify,
+    completion: watch::Sender<WarmCompletion>,
+}
+
+// Also remove a failed/panicked worker, so later queries can retry the missing
+// candles. The identity check protects a replacement worker for the same symbol.
+struct WarmJobGuard {
+    store: KlineStore,
+    symbol: String,
+    job: Arc<WarmJob>,
+}
+impl Drop for WarmJobGuard {
+    fn drop(&mut self) {
+        let mut warming = self.store.inner.warming.lock().unwrap();
+        if warming
+            .get(&self.symbol)
+            .is_some_and(|job| Arc::ptr_eq(job, &self.job))
+        {
+            warming.remove(&self.symbol);
+            self.job
+                .completion
+                .send_replace(Some(Err("Kline backfill worker stopped".into())));
+        }
+    }
+}
+
+async fn wait_for_warm(mut completion: watch::Receiver<WarmCompletion>) -> Result<()> {
+    loop {
+        if let Some(result) = completion.borrow_and_update().clone() {
+            return result.map_err(anyhow::Error::msg);
+        }
+        completion
+            .changed()
+            .await
+            .context("Kline backfill worker stopped")?;
+    }
+}
+
+/// One detached worker per symbol survives HTTP cancellation. Retries extend
+/// its requested range instead of queuing stale jobs behind the symbol mutex.
+/// Only the waiters are cancelled after 10s; no retry records are persisted.
 pub(crate) async fn warm_ranges(
     store: &KlineStore,
     ranges: BTreeMap<String, (i64, i64)>,
 ) -> KlineWarmResult {
     let started = std::time::Instant::now();
     let symbol_count = ranges.len();
-    let store = store.clone();
-    let mut task = tokio::spawn(async move {
-        let mut jobs = tokio::task::JoinSet::new();
-        for (symbol, (start, end)) in ranges {
-            let store = store.clone();
-            jobs.spawn(async move { store.ensure_range(&symbol, start, end).await });
-        }
-        let mut errors = Vec::new();
-        while let Some(result) = jobs.join_next().await {
-            if let Err(error) = result.unwrap_or_else(|e| Err(e.into())) {
-                errors.push(error.to_string());
+    let mut jobs = tokio::task::JoinSet::new();
+    for (symbol, range) in ranges {
+        let store = store.clone();
+        jobs.spawn(async move {
+            // A complete query must bypass a worker for another time range.
+            let (start, end) = store.closed_range(&symbol, range.0, range.1)?;
+            if start >= end
+                || store.scan_async(&symbol, start, end).await?.len()
+                    == ((end - start) / MINUTE_US) as usize
+            {
+                store.inner.status.lock().unwrap().cache_hits += 1;
+                return Ok(());
+            }
+            wait_for_warm(store.warm_symbol(symbol, (start, end))).await
+        });
+    }
+    let mut result = KlineWarmResult::default();
+    let wait = async {
+        while let Some(joined) = jobs.join_next().await {
+            if let Err(error) = joined.unwrap_or_else(|e| Err(e.into())) {
+                result.errors.push(error.to_string());
             }
         }
-        errors
-    });
-    let result = match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
-        Ok(Ok(errors)) => KlineWarmResult {
-            errors,
-            pending: false,
-        },
-        Ok(Err(error)) => KlineWarmResult {
-            errors: vec![error.to_string()],
-            pending: false,
-        },
-        Err(_) => KlineWarmResult {
-            errors: vec!["分钟 K 线正在后台补齐".into()],
-            pending: true,
-        },
     };
+    if tokio::time::timeout(Duration::from_secs(10), wait)
+        .await
+        .is_err()
+    {
+        result.errors.push("分钟 K 线正在后台补齐".into());
+        result.pending = true;
+    }
     tracing::info!(
         symbol_count,
         duration_ms = started.elapsed().as_millis(),
@@ -328,6 +377,33 @@ struct BackfillGuard(KlineStore);
 impl Drop for BackfillGuard {
     fn drop(&mut self) {
         self.0.inner.status.lock().unwrap().active_backfills -= 1;
+    }
+}
+
+struct RequestQueueGuard<'a> {
+    store: &'a KlineStore,
+    key: (std::cmp::Reverse<i64>, u64),
+}
+impl Drop for RequestQueueGuard<'_> {
+    fn drop(&mut self) {
+        self.store
+            .inner
+            .request_queue
+            .lock()
+            .unwrap()
+            .remove(&self.key);
+        self.store.inner.request_ready.notify_waiters();
+    }
+}
+
+struct RequestPermit<'a> {
+    permit: Option<SemaphorePermit<'a>>,
+    ready: &'a Notify,
+}
+impl Drop for RequestPermit<'_> {
+    fn drop(&mut self) {
+        self.permit.take();
+        self.ready.notify_waiters();
     }
 }
 
@@ -348,10 +424,14 @@ impl KlineStore {
             inner: Arc::new(Inner {
                 db,
                 permits: Semaphore::new(config.concurrency),
+                request_queue: Mutex::new(BTreeMap::new()),
+                request_sequence: AtomicU64::new(0),
+                request_ready: Notify::new(),
                 config,
                 client: OnceCell::new(),
                 egress_retry_at: AsyncMutex::new(instant),
                 markets: Mutex::new(BTreeMap::new()),
+                warming: Mutex::new(BTreeMap::new()),
                 minutes: Mutex::new(BTreeMap::new()),
                 candle_revision: AtomicU64::new(0),
                 weight: AsyncMutex::new(WeightGate {
@@ -377,6 +457,56 @@ impl KlineStore {
     }
     pub fn revision(&self) -> u64 {
         self.inner.candle_revision.load(Ordering::Acquire)
+    }
+
+    fn warm_symbol(&self, symbol: String, range: (i64, i64)) -> watch::Receiver<WarmCompletion> {
+        let mut warming = self.inner.warming.lock().unwrap();
+        if let Some(job) = warming.get(&symbol) {
+            let mut requested = job.range.lock().unwrap();
+            let previous = *requested;
+            requested.0 = requested.0.min(range.0);
+            requested.1 = requested.1.max(range.1);
+            if *requested != previous {
+                job.changed.notify_one();
+            }
+            return job.completion.subscribe();
+        }
+        let (completion, receiver) = watch::channel(None);
+        let job = Arc::new(WarmJob {
+            range: Mutex::new(range),
+            changed: Notify::new(),
+            completion,
+        });
+        warming.insert(symbol.clone(), job.clone());
+        let store = self.clone();
+        tokio::spawn(async move {
+            let _guard = WarmJobGuard {
+                store: store.clone(),
+                symbol: symbol.clone(),
+                job: job.clone(),
+            };
+            loop {
+                let range = *job.range.lock().unwrap();
+                // A newer minute must not wait for all older holes in a long
+                // historical request. Cancel that pass and resume newest-first
+                // with the merged range; already saved candles remain cached.
+                let result = tokio::select! {
+                    result = store.ensure_range(&symbol, range.0, range.1) =>
+                        result.map_err(|error| error.to_string()),
+                    _ = job.changed.notified() => continue,
+                };
+                let mut warming = store.inner.warming.lock().unwrap();
+                if result.is_ok() && *job.range.lock().unwrap() != range {
+                    // All updates received during this pass collapse into one
+                    // next pass; ensure_range fetches only the remaining gaps.
+                    continue;
+                }
+                warming.remove(&symbol);
+                job.completion.send_replace(Some(result));
+                break;
+            }
+        });
+        receiver
     }
     pub fn validate_range(&self, start: i64, end: i64, now: i64) -> Result<()> {
         ensure!(
@@ -693,6 +823,7 @@ impl KlineStore {
             })
             .await
     }
+    #[cfg(test)]
     async fn reserve_weight(&self, weight: u32) {
         loop {
             let ready = {
@@ -709,6 +840,52 @@ impl KlineStore {
             }
         }
     }
+
+    /// Reserve HTTP capacity and weight together. Historical requests must not
+    /// occupy all HTTP permits while waiting for the next budget window: a new
+    /// live minute takes priority by its candle end, with FIFO ties.
+    async fn request_permit(&self, weight: u32, end: i64) -> RequestPermit<'_> {
+        let key = (
+            std::cmp::Reverse(end),
+            self.inner.request_sequence.fetch_add(1, Ordering::Relaxed),
+        );
+        self.inner.request_queue.lock().unwrap().insert(key, ());
+        let _queued = RequestQueueGuard { store: self, key };
+        loop {
+            let notified = self.inner.request_ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let first = self
+                .inner
+                .request_queue
+                .lock()
+                .unwrap()
+                .first_key_value()
+                .is_some_and(|(next, _)| *next == key);
+            let mut wake_at = None;
+            if first && let Ok(permit) = self.inner.permits.try_acquire() {
+                wake_at = self.inner.weight.lock().await.reserve(
+                    tokio::time::Instant::now(),
+                    weight,
+                    self.inner.config.weight_per_minute,
+                );
+                if wake_at.is_none() {
+                    return RequestPermit {
+                        permit: Some(permit),
+                        ready: &self.inner.request_ready,
+                    };
+                }
+            }
+            if let Some(wake_at) = wake_at {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(wake_at) => {},
+                    _ = &mut notified => {},
+                }
+            } else {
+                notified.await;
+            }
+        }
+    }
     /// Missing requested data backfills backwards in 24h blocks. A market mutex
     /// serializes overlapping misses; cached minutes are never requested again.
     async fn scan_async(&self, symbol: &str, start: i64, end: i64) -> Result<Vec<Kline>> {
@@ -721,7 +898,7 @@ impl KlineStore {
         .context("minute cache read task failed")?
     }
 
-    pub async fn ensure_range(&self, symbol: &str, start: i64, end: i64) -> Result<()> {
+    fn closed_range(&self, symbol: &str, start: i64, end: i64) -> Result<(i64, i64)> {
         ensure!(self.enabled(), "分钟 K 线分析未启用");
         prefix(symbol)?;
         let now = now_us();
@@ -734,6 +911,11 @@ impl KlineStore {
         // Count that candle consistently so a fully cached request bypasses
         // unrelated backfills instead of expanding into another 24-hour block.
         let end = first_complete_open(end).min(now.div_euclid(MINUTE_US) * MINUTE_US);
+        Ok((start, end))
+    }
+
+    pub async fn ensure_range(&self, symbol: &str, start: i64, end: i64) -> Result<()> {
+        let (start, end) = self.closed_range(symbol, start, end)?;
         if start >= end {
             return Ok(());
         }
@@ -776,24 +958,27 @@ impl KlineStore {
             .into_iter()
             .map(|bar| bar.open_ts_us)
             .collect::<std::collections::BTreeSet<_>>();
-        let mut cursor = start;
-        while cursor < end {
-            if existing.contains(&cursor) {
-                cursor += MINUTE_US;
+        // Complete the latest requested marks before older holes, including
+        // within each 24-hour block. This also makes a resumed warm job useful
+        // immediately to live NAV while its historical range is still loading.
+        let mut cursor = end;
+        while cursor > start {
+            if existing.contains(&(cursor - MINUTE_US)) {
+                cursor -= MINUTE_US;
                 continue;
             }
-            let first = cursor;
-            cursor += MINUTE_US;
-            while cursor < end
-                && (cursor - first) / MINUTE_US < PAGE_LIMIT as i64
-                && !existing.contains(&cursor)
+            let last = cursor;
+            cursor -= MINUTE_US;
+            while cursor > start
+                && (last - cursor) / MINUTE_US < PAGE_LIMIT as i64
+                && !existing.contains(&(cursor - MINUTE_US))
             {
-                cursor += MINUTE_US;
+                cursor -= MINUTE_US;
             }
-            let result = self.fetch_page(symbol, first, cursor).await;
+            let result = self.fetch_page(symbol, cursor, last).await;
             match result {
                 Ok(candles) => {
-                    self.save_page(symbol, first, cursor, &candles)?;
+                    self.save_page(symbol, cursor, last, &candles)?;
                     self.inner.status.lock().unwrap().last_error = None;
                 }
                 Err(error) => {
@@ -815,8 +1000,7 @@ impl KlineStore {
             symbol.to_string()
         };
         let weight = if spot || count >= 100 { 2 } else { 1 };
-        let _permit = self.inner.permits.acquire().await?;
-        self.reserve_weight(weight).await;
+        let _permit = self.request_permit(weight, end).await;
         self.inner.status.lock().unwrap().requests += 1;
         let response = client
             .get(if spot {
@@ -1167,6 +1351,9 @@ mod tests {
         calls: Arc<Mutex<Vec<(i64, i64)>>>,
         symbols: Arc<Mutex<Vec<String>>>,
         omit: Option<i64>,
+        stall_before: Arc<Mutex<Option<i64>>>,
+        stalled: Arc<Notify>,
+        release: Arc<Notify>,
     }
     async fn mock_candles(
         State(state): State<MockState>,
@@ -1178,6 +1365,15 @@ mod tests {
         let limit = params["limit"].parse::<usize>().unwrap();
         state.calls.lock().unwrap().push((start, end));
         state.symbols.lock().unwrap().push(params["symbol"].clone());
+        let stalled = state
+            .stall_before
+            .lock()
+            .unwrap()
+            .is_some_and(|before| end <= before);
+        if stalled {
+            state.stalled.notify_one();
+            state.release.notified().await;
+        }
         let mut result = Vec::new();
         let mut ts = start;
         while ts < end && result.len() < limit {
@@ -1538,6 +1734,199 @@ mod tests {
         }
         assert!(state.calls.lock().unwrap().is_empty());
         assert_eq!(store.status().cache_hits, 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn warm_retries_share_one_worker_and_merge_the_latest_range() {
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
+        let missing = end - 2 * MINUTE_US;
+        let (_dir, store, state, server) = fixture(Some(missing)).await;
+        let lock = store
+            .inner
+            .markets
+            .lock()
+            .unwrap()
+            .entry("ETHUSDT".into())
+            .or_default()
+            .clone();
+        let held = lock.lock().await;
+        let mut waiters = Vec::new();
+        for offset in (0..100).rev() {
+            waiters.push(store.warm_symbol(
+                "ETHUSDT".into(),
+                (end - 120 * MINUTE_US, end - offset * MINUTE_US),
+            ));
+        }
+        // All retries register before the blocked worker makes any HTTP calls.
+        assert_eq!(store.inner.warming.lock().unwrap().len(), 1);
+        drop(held);
+        for waiter in waiters {
+            tokio::time::timeout(Duration::from_secs(5), wait_for_warm(waiter))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            state.calls.lock().unwrap().len(),
+            3,
+            "retries must not queue additional passes over an omitted minute"
+        );
+        assert!(store.get("ETHUSDT", end - MINUTE_US).unwrap().is_some());
+        assert!(store.get("ETHUSDT", missing).unwrap().is_none());
+        assert!(store.inner.warming.lock().unwrap().is_empty());
+        // Missing data is not negatively cached: a genuinely later query retries it.
+        wait_for_warm(store.warm_symbol("ETHUSDT".into(), (end - 120 * MINUTE_US, end)))
+            .await
+            .unwrap();
+        assert_eq!(state.calls.lock().unwrap().len(), 4);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelled_warm_waiter_does_not_cancel_backfill_or_block_cached_queries() {
+        let (_dir, store, state, server) = fixture(None).await;
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
+        store
+            .save_page("ETHUSDT", end - MINUTE_US, end, &[candle(end - MINUTE_US)])
+            .unwrap();
+        let lock = store
+            .inner
+            .markets
+            .lock()
+            .unwrap()
+            .entry("ETHUSDT".into())
+            .or_default()
+            .clone();
+        let held = lock.lock().await;
+        let backfill_end = end - DAY_US;
+        let ranges = BTreeMap::from([("ETHUSDT".into(), (backfill_end - MINUTE_US, backfill_end))]);
+        // Cancels the HTTP-side wait, while leaving its shared worker running.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), warm_ranges(&store, ranges))
+                .await
+                .is_err()
+        );
+        assert_eq!(store.inner.warming.lock().unwrap().len(), 1);
+        let cached = tokio::time::timeout(
+            Duration::from_millis(100),
+            warm_ranges(
+                &store,
+                BTreeMap::from([("ETHUSDT".into(), (end - MINUTE_US, end - 1))]),
+            ),
+        )
+        .await
+        .expect("cached warm waited behind historical backfill");
+        assert!(!cached.pending && cached.errors.is_empty());
+        assert!(state.calls.lock().unwrap().is_empty());
+        // A new request extends the already-running job, including when its
+        // original requested range was captured before the mutex became ready.
+        let waiter = store.warm_symbol("ETHUSDT".into(), (end - 2 * MINUTE_US, end));
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(5), wait_for_warm(waiter))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .get("ETHUSDT", backfill_end - MINUTE_US)
+                .unwrap()
+                .is_some()
+        );
+        assert!(store.get("ETHUSDT", end - 2 * MINUTE_US).unwrap().is_some());
+        assert!(store.inner.warming.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_warm_worker_is_removed_so_later_queries_can_retry() {
+        let (_dir, store, _state, server) = fixture(None).await;
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US;
+        let expired = end - 31 * DAY_US;
+        let result = wait_for_warm(store.warm_symbol("ETHUSDT".into(), (expired, end))).await;
+        assert!(result.is_err());
+        assert!(store.inner.warming.lock().unwrap().is_empty());
+        wait_for_warm(store.warm_symbol("ETHUSDT".into(), (end - MINUTE_US, end)))
+            .await
+            .unwrap();
+        assert!(store.get("ETHUSDT", end - MINUTE_US).unwrap().is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn newest_minute_preempts_a_stalled_historical_pass() {
+        let (_dir, mut store, state, server) = fixture(None).await;
+        Arc::get_mut(&mut store.inner).unwrap().permits = Semaphore::new(1);
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US - 2 * MINUTE_US;
+        *state.stall_before.lock().unwrap() = Some(end - PAGE_LIMIT as i64 * MINUTE_US);
+        let old = store.warm_symbol("ETHUSDT".into(), (end - DAY_US, end));
+        tokio::time::timeout(Duration::from_secs(5), state.stalled.notified())
+            .await
+            .unwrap();
+        assert!(store.get("ETHUSDT", end - MINUTE_US).unwrap().is_some());
+        let calls_before = state.calls.lock().unwrap().len();
+        let latest = store.warm_symbol("ETHUSDT".into(), (end, end + MINUTE_US));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.get("ETHUSDT", end).unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("latest minute waited behind stalled historical fetch");
+        assert_eq!(
+            state.calls.lock().unwrap()[calls_before],
+            (end, end + MINUTE_US)
+        );
+        assert_eq!(store.inner.warming.lock().unwrap().len(), 1);
+        *state.stall_before.lock().unwrap() = None;
+        state.release.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(5), wait_for_warm(latest))
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_warm(old).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_capacity_prefers_latest_minutes_and_spends_no_weight_while_queued() {
+        let (_dir, mut store, _state, server) = fixture(None).await;
+        Arc::get_mut(&mut store.inner).unwrap().permits = Semaphore::new(1);
+        let held = store.inner.permits.acquire().await.unwrap();
+        let (sender, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut jobs = tokio::task::JoinSet::new();
+        for end in [10, 20, 30] {
+            let store = store.clone();
+            let sender = sender.clone();
+            jobs.spawn(async move {
+                let _permit = store.request_permit(1, end).await;
+                sender.send(end).unwrap();
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.inner.request_queue.lock().unwrap().len() < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(store.inner.weight.lock().await.used, 0);
+        drop(held);
+        // The test held a raw permit; production RequestPermit does this on drop.
+        store.inner.request_ready.notify_waiters();
+        for expected in [30, 20, 10] {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), received.recv())
+                    .await
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        while let Some(result) = jobs.join_next().await {
+            result.unwrap();
+        }
+        assert!(store.inner.request_queue.lock().unwrap().is_empty());
+        assert_eq!(store.inner.weight.lock().await.used, 3);
         server.abort();
     }
     #[tokio::test]

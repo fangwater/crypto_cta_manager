@@ -9,12 +9,15 @@ use std::path::PathBuf;
 struct Args {
     #[arg(long)]
     manager_db: PathBuf,
-    #[arg(long, required_unless_present = "archive_status")]
+    #[arg(long, required_unless_present_any = ["archive_status", "cache_coverage"])]
     ts_us: Vec<i64>,
-    #[arg(long = "symbol", required_unless_present_any = ["archive_status", "target_source"])]
+    #[arg(long = "symbol", required_unless_present_any = ["archive_status", "target_source", "cache_coverage"])]
     symbols: Vec<String>,
     #[arg(long)]
     archive_status: bool,
+    /// Summarize durable candle coverage by symbol, optionally within two timestamps.
+    #[arg(long)]
+    cache_coverage: bool,
     #[arg(long)]
     target_source: Option<String>,
 }
@@ -52,6 +55,38 @@ fn main() -> Result<()> {
     let cf = db
         .cf_handle("klines_1m")
         .context("no minute candle cache")?;
+    if args.cache_coverage {
+        ensure!(
+            args.ts_us.is_empty() || args.ts_us.len() == 2,
+            "coverage requires zero or two --ts-us values"
+        );
+        let mut coverage = std::collections::BTreeMap::<String, (usize, i64, i64)>::new();
+        for entry in db.iterator_cf(cf, IteratorMode::Start) {
+            let (key, _) = entry?;
+            ensure!(
+                !key.is_empty() && key.len() == key[0] as usize + 9,
+                "invalid candle key"
+            );
+            let symbol = std::str::from_utf8(&key[1..key.len() - 8])?;
+            if !args.symbols.is_empty() && !args.symbols.iter().any(|s| s == symbol) {
+                continue;
+            }
+            let open = i64::from_be_bytes(key[key.len() - 8..].try_into()?);
+            if !args.ts_us.is_empty() && (open < args.ts_us[0] || open >= args.ts_us[1]) {
+                continue;
+            }
+            let row = coverage.entry(symbol.to_owned()).or_insert((0, open, open));
+            row.0 += 1;
+            row.2 = open;
+        }
+        for (symbol, (count, first, last)) in coverage {
+            println!(
+                "{}",
+                json!({"symbol":symbol,"candles":count,"first_open_ts_us":first,"last_open_ts_us":last})
+            );
+        }
+        return Ok(());
+    }
     if let Some(source) = &args.target_source {
         ensure!(
             args.ts_us.len() == 2,

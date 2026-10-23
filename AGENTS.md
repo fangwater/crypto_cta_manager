@@ -383,6 +383,17 @@ request on 2026-10-06, jp-meta's budget is 600 weight/minute (previously 120).
 Latest-range verification must use the current clock, since a
 fully cached older range does not exercise fresh minute backfills.
 
+By operator instruction on 2026-10-23, el01's Kline budget is 1200 weight/minute
+(previously 120), with HTTP concurrency still 8 and the explicit non-trading
+local/public binding `154.197.32.10`. Both `.9` and `.10` public egresses were
+verified; live trading's unspecified bindings resolve to `154.197.32.6`.
+Keep existing IP exclusions and do not use a trading address to increase capacity.
+Backfills share one disposable worker per symbol; retries merge ranges and newer
+minutes interrupt an older pass. Fetch missing pages newest first and reserve
+HTTP capacity together with weight, prioritizing newer candle ends. Historical
+backfills must not hold every HTTP permit while waiting for the budget. Verify
+fresh 1D requests across multiple new minutes, in addition to cached windows.
+
 Require explicit `kline.local_ip` and expected `kline.public_ip` in TOML; disable
 HTTP environment proxies and default-route fallback. Verify public egress before
 Binance access. Read only the IP fields from every configured live trade engine

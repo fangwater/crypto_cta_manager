@@ -1,0 +1,19 @@
+{
+  "local_public_ipv4": [
+    "154.197.32.6",
+    "154.197.32.9",
+    "154.197.32.10"
+  ],
+  "resolved_trading_default_route": "154.197.32.6",
+  "verified_public_egress": [
+    "154.197.32.9",
+    "154.197.32.10"
+  ],
+  "kline_local_ip": "154.197.32.10",
+  "kline_public_ip": "154.197.32.10",
+  "configured_trading_ip_exclusions": 14,
+  "binance_request_weight_per_minute": 2400,
+  "previous_weight_per_minute": 120,
+  "requested_weight_per_minute": 1200,
+  "concurrency": 8
+}

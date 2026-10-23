@@ -1,0 +1,26 @@
+{"name": "startup_pending", "body": {"http": 502}}
+{"name": "startup_pending", "body": {"http": 502}}
+{"name": "startup_pending", "body": {"http": 502}}
+{"name": "health", "body": {"status": "ok", "source_count": 14, "generated_at_us": 1792736631400070, "last_attempt_at_us": 1792736631400070, "refresh_interval_secs": 60, "last_refresh_error": null}}
+{"name": "cached_comparison", "body": {"endpoint": "timeline", "identical": true, "points": 98}}
+{"name": "cached_comparison", "body": {"endpoint": "account-timeline", "identical": true, "points": 98}}
+{"name": "fresh_window", "body": {"startMs": 1792650180000, "endMs": 1792736580000, "maxPoints": 3500, "includeTheoretical": "false", "sourceIds": "binance_exec_trade04"}}
+{"name": "fresh_nav", "body": {"endpoint": "timeline", "duration_ms": 301, "points": 98, "summary": {"fill_count": 9663, "volume_quote": 477069.41723025043, "maker_fill_count": 4591, "maker_volume_quote": 441835.8098842886, "taker_fill_count": 186, "taker_volume_quote": 32660.989706400014, "unknown_liquidity_fill_count": 4886, "unknown_liquidity_volume_quote": 2572.617639581563, "realized_pnl_before_fee_quote": 2019.0671693058557, "estimated_trading_fee_quote": 53.981877900353915, "realized_pnl_after_fee_quote": 1965.0852914055015, "floating_pnl_quote": -1895.40709271742, "nav_change_before_fee_quote": 123.66007658843375, "nav_change_after_fee_quote": 69.67819868807953}, "valuation": "quantity_fifo_closed_1m_window_delta"}}
+{"name": "repeat_identical", "body": {"endpoint": "timeline", "identical": true}}
+{"name": "fresh_nav", "body": {"endpoint": "account-timeline", "duration_ms": 311, "points": 98, "summary": {"fill_count": 9663, "volume_quote": 477069.41723025043, "maker_fill_count": 4591, "maker_volume_quote": 441835.8098842886, "taker_fill_count": 186, "taker_volume_quote": 32660.989706400014, "unknown_liquidity_fill_count": 4886, "unknown_liquidity_volume_quote": 2572.617639581563, "realized_pnl_before_fee_quote": 2019.0671693058557, "estimated_trading_fee_quote": 53.981877900353915, "realized_pnl_after_fee_quote": 1965.0852914055015, "floating_pnl_quote": -1895.40709271742, "nav_change_before_fee_quote": 123.66007658843375, "nav_change_after_fee_quote": 69.67819868807953}, "valuation": "quantity_fifo_closed_1m_window_delta"}}
+{"name": "repeat_identical", "body": {"endpoint": "account-timeline", "identical": true}}
+{"name": "overlay", "body": {"theoretical": [{"model": "twap5m", "loading": true, "points": 0, "reason": "目标历史正在后台读取，完成后自动更新曲线"}], "funding_loading": true}}
+{"name": "awaiting_new_minute", "body": {"cycle": 0, "at_ms": 1792736702000}}
+{"name": "live_minute", "body": {"cycle": 0, "endMs": 1792736702001, "attempt": 0, "duration_ms": 476, "points": 98}}
+{"name": "live_status", "body": {"active_backfills": 0, "cache_hits": 0, "disk_batch_reads": 1084, "disk_range_reads": 200, "enabled": true, "fetched_candles": 685, "last_error": null, "memory_candle_hits": 1079033, "pricing_cache_hits": 0, "requests": 224, "retained_days": 30, "target_history": {"last_error": null, "loading": true, "processed_messages": 3267840, "ready": false}}}
+{"name": "awaiting_new_minute", "body": {"cycle": 1, "at_ms": 1792736762000}}
+{"name": "live_minute", "body": {"cycle": 1, "endMs": 1792736762000, "attempt": 0, "duration_ms": 310, "points": 98}}
+{"name": "live_status", "body": {"active_backfills": 0, "cache_hits": 0, "disk_batch_reads": 2084, "disk_range_reads": 200, "enabled": true, "fetched_candles": 1085, "last_error": null, "memory_candle_hits": 2814887, "pricing_cache_hits": 0, "requests": 424, "retained_days": 30, "target_history": {"last_error": null, "loading": true, "processed_messages": 4135380, "ready": false}}}
+{"name": "awaiting_new_minute", "body": {"cycle": 2, "at_ms": 1792736822000}}
+{"name": "live_minute", "body": {"cycle": 2, "endMs": 1792736822000, "attempt": 0, "duration_ms": 354, "points": 98}}
+{"name": "live_status", "body": {"active_backfills": 0, "cache_hits": 0, "disk_batch_reads": 2967, "disk_range_reads": 209, "enabled": true, "fetched_candles": 1303, "last_error": null, "memory_candle_hits": 4654141, "pricing_cache_hits": 0, "requests": 597, "retained_days": 30, "target_history": {"last_error": null, "loading": false, "processed_messages": 4422124, "ready": true}}}
+{"name": "awaiting_new_minute", "body": {"cycle": 3, "at_ms": 1792736882000}}
+{"name": "live_minute", "body": {"cycle": 3, "endMs": 1792736882000, "attempt": 0, "duration_ms": 681, "points": 98}}
+{"name": "live_status", "body": {"active_backfills": 0, "cache_hits": 5, "disk_batch_reads": 3272, "disk_range_reads": 209, "enabled": true, "fetched_candles": 1364, "last_error": null, "memory_candle_hits": 5524869, "pricing_cache_hits": 0, "requests": 658, "retained_days": 30, "target_history": {"last_error": null, "loading": false, "processed_messages": 4422124, "ready": true}}}
+{"name": "final_overlay", "body": {"theoretical": [{"model": "twap5m", "loading": false, "points": 1355, "reason": null}], "funding_loading": true}}
+{"name": "diagnostic_session_removed", "body": true}

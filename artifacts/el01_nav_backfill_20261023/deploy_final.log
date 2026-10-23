@@ -1,0 +1,7 @@
+MainPID=1716352
+NRestarts=0
+ExecMainStartTimestamp=Fri 2026-10-23 06:22:16 UTC
+ActiveState=active
+
+deployed_sha256=cd29a8fd695b6c91747cd45842861275dd62ec9b4941d60bfeb3427536a4329d
+kline_weight_per_minute=1200
