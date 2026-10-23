@@ -605,7 +605,10 @@ impl BnbManager {
         }
         if b.futures_bnb <= a.settings.futures_trigger_bnb {
             let amount = (a.settings.futures_target_bnb - b.futures_bnb).max(0.);
-            if b.spot_free_bnb >= amount - EPS {
+            // Fees can accrue between redemption and transfer. Move available
+            // Spot BNB first instead of repeatedly redeeming the tiny new gap.
+            let transferable = amount.min(b.spot_free_bnb);
+            if transferable > EPS {
                 return self
                     .transfer(
                         api,
@@ -615,7 +618,7 @@ impl BnbManager {
                         b,
                         "BNB",
                         "MAIN_UMFUTURE",
-                        amount,
+                        transferable,
                         "futures_bnb",
                     )
                     .await;
@@ -960,6 +963,16 @@ impl BnbManager {
                     .is_some() =>
             {
                 a.pending = None;
+                self.commit(state, &source.id, a.clone())?;
+                return Err(error);
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<crate::bfusd_auto::RedemptionBelowMinimum>()
+                    .is_some() =>
+            {
+                a.pending = None;
+                add_audit(a, action, &error.to_string());
                 self.commit(state, &source.id, a.clone())?;
                 return Err(error);
             }
@@ -1732,6 +1745,7 @@ mod tests {
         quote_from: String,
         lose_response: bool,
         settle: bool,
+        redeem_error: Option<(u16, i64)>,
     }
     impl Default for Exchange {
         fn default() -> Self {
@@ -1755,6 +1769,7 @@ mod tests {
                 quote_from: String::new(),
                 lose_response: false,
                 settle: true,
+                redeem_error: None,
             }
         }
     }
@@ -1852,6 +1867,13 @@ mod tests {
             json!({"feeBurn":true})
         } else if path.ends_with("/flexible/redeem") {
             e.writes.push(path.clone());
+            if let Some((status, code)) = e.redeem_error {
+                return (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    Json(json!({"code":code,"msg":"fixture redemption failure"})),
+                )
+                    .into_response();
+            }
             let amount = num("amount");
             e.balances.earn_bnb -= amount;
             e.balances.spot_bnb += amount;
@@ -2173,6 +2195,176 @@ mod tests {
         assert_eq!(e.accepted, 0);
         assert!((e.balances.futures_bnb - 1.5).abs() < EPS);
         assert!((e.balances.total() - 6.).abs() < EPS);
+    }
+    #[tokio::test]
+    async fn fees_after_redemption_do_not_cause_another_tiny_redemption() {
+        let f = Fixture::new(Exchange {
+            balances: Balances {
+                futures_bnb: 1.1999653,
+                earn_bnb: 4.8,
+                bnb_price_usdt: 600.,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+        let mut state = f.hub.state.lock().await;
+        let mut a = Fixture::account();
+        let positions = vec![json!({"productId":"BNB001","totalAmount":"4.8",
+            "collateralAmount":"0","canRedeem":true})];
+        f.hub
+            .manage_funds(
+                &f.api,
+                &f.source,
+                &mut state,
+                &mut a,
+                &f.balances().await,
+                &positions,
+            )
+            .await
+            .unwrap();
+        // The original failure: 0.30003470 arrived in Spot, while another
+        // 0.00006025 fee was consumed before the next round.
+        f.exchange.lock().await.balances.futures_bnb -= 0.00006025;
+        assert!(
+            f.hub
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &f.balances().await)
+                .await
+                .unwrap()
+        );
+        f.hub
+            .manage_funds(
+                &f.api,
+                &f.source,
+                &mut state,
+                &mut a,
+                &f.balances().await,
+                &positions,
+            )
+            .await
+            .unwrap();
+        assert!(
+            f.hub
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &f.balances().await)
+                .await
+                .unwrap()
+        );
+        let result = f
+            .hub
+            .manage_funds(
+                &f.api,
+                &f.source,
+                &mut state,
+                &mut a,
+                &f.balances().await,
+                &positions,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, "BNB reserve is within thresholds");
+        let e = f.exchange.lock().await;
+        assert_eq!(
+            e.writes,
+            [
+                "/sapi/v1/simple-earn/flexible/redeem",
+                "/sapi/v1/asset/transfer"
+            ]
+        );
+        assert!((e.balances.futures_bnb - 1.49993975).abs() < EPS);
+        assert!(a.pending.is_none());
+    }
+    #[tokio::test]
+    async fn partial_spot_balance_is_used_before_redeeming_remaining_fee_reserve() {
+        let f = Fixture::new(Exchange {
+            balances: Balances {
+                futures_bnb: 1.1,
+                spot_bnb: 0.05,
+                spot_free_bnb: 0.05,
+                earn_bnb: 4.85,
+                bnb_price_usdt: 600.,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+        let mut state = f.hub.state.lock().await;
+        let mut a = Fixture::account();
+        let positions = vec![json!({"productId":"BNB001","totalAmount":"4.85",
+            "collateralAmount":"0","canRedeem":true})];
+        for _ in 0..3 {
+            f.hub
+                .manage_funds(
+                    &f.api,
+                    &f.source,
+                    &mut state,
+                    &mut a,
+                    &f.balances().await,
+                    &positions,
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.hub
+                    .reconcile(&f.api, &mut state, &f.source, &mut a, &f.balances().await)
+                    .await
+                    .unwrap()
+            );
+        }
+        let e = f.exchange.lock().await;
+        assert_eq!(
+            e.writes,
+            [
+                "/sapi/v1/asset/transfer",
+                "/sapi/v1/simple-earn/flexible/redeem",
+                "/sapi/v1/asset/transfer"
+            ]
+        );
+        assert!((e.balances.futures_bnb - 1.5).abs() < EPS);
+        assert!((e.balances.total() - 6.).abs() < EPS);
+        assert_eq!(e.accepted, 0);
+    }
+    #[tokio::test]
+    async fn only_explicit_minimum_rejection_clears_redemption_journal() {
+        for (status, code, remains_pending) in
+            [(400, -6006, false), (504, -6006, true), (400, -1007, true)]
+        {
+            let f = Fixture::new(Exchange {
+                redeem_error: Some((status, code)),
+                ..Default::default()
+            })
+            .await;
+            let mut state = f.hub.state.lock().await;
+            let mut a = Fixture::account();
+            assert!(
+                f.hub
+                    .submit(
+                        &f.api,
+                        &f.source,
+                        &mut state,
+                        &mut a,
+                        &f.balances().await,
+                        false,
+                        "/sapi/v1/simple-earn/flexible/redeem",
+                        vec![
+                            ("productId", "BNB001".into()),
+                            ("amount", "0.00006025".into())
+                        ],
+                        "redeem BNB fee reserve",
+                        "spot_bnb",
+                        0.00006025
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(a.pending.is_some(), remains_pending);
+            let persisted: Disk = serde_json::from_slice(&fs::read(&f.hub.path).unwrap()).unwrap();
+            assert_eq!(
+                persisted.accounts[&f.source.id].pending.is_some(),
+                remains_pending
+            );
+            assert_eq!(a.audit.len(), usize::from(!remains_pending));
+            assert_eq!(f.exchange.lock().await.writes.len(), 1);
+        }
     }
     #[tokio::test]
     async fn dry_run_defaults_are_read_only() {

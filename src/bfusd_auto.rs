@@ -21,6 +21,19 @@ use crate::treasury_rate_limit::Limiter;
 type HmacSha256 = Hmac<Sha256>;
 const MIN_SPOT_BFUSD_TRANSFER: f64 = 0.0001;
 
+// Only this explicit validation rejection proves that no redemption occurred.
+// Transport errors, timeouts and other exchange errors remain ambiguous.
+#[derive(Debug)]
+pub(crate) struct RedemptionBelowMinimum;
+
+impl std::fmt::Display for RedemptionBelowMinimum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Binance flexible redemption rejected: amount below minimum (-6006)")
+    }
+}
+
+impl std::error::Error for RedemptionBelowMinimum {}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AccountSettings {
@@ -851,6 +864,12 @@ impl BinanceApi {
             .map_err(|_| anyhow::anyhow!("Binance {path} returned invalid JSON"))?;
         if !status.is_success() {
             let code = body.get("code").and_then(Value::as_i64).unwrap_or_default();
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && path == "/sapi/v1/simple-earn/flexible/redeem"
+                && code == -6006
+            {
+                return Err(RedemptionBelowMinimum.into());
+            }
             let message = body
                 .get("msg")
                 .and_then(Value::as_str)

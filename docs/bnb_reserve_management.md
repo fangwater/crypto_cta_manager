@@ -60,7 +60,10 @@ account must expose a BFUSD/BNB direct pair and the required API entitlements;
 offline fixtures establish behavior, not live pair availability.
 
 The futures fee wallet uses its own thresholds and consumes existing Spot/Earn
-BNB first. Earn redemptions are checked against the VIP requirement because BNB
+BNB first. Transfer available Spot BNB up to the fee-wallet target before
+redeeming more Earn BNB, even if Spot cannot fill the whole gap. This avoids
+another sub-minimum redemption for fees accrued after the preceding redemption;
+the next round checks the normal fee-wallet trigger again. Earn redemptions are checked against the VIP requirement because BNB
 in redemption can be temporarily excluded from Binance's daily-average count.
 If a redemption would cross that requirement, refill the total reserve first.
 The BNB fee-discount switch is enabled for the USD-M account. Excess transferable
@@ -174,7 +177,10 @@ submission. Pending actions survive restarts and block subsequent mutations.
 Convert results are queried by the persisted quote ID; successful acceptance
 alone is not considered final. The receiving balance must also be observed.
 An unknown non-Convert response requires operator reconciliation, not blind
-resubmission. The UI acknowledgment requires a checkbox and the exact pending
+resubmission. A Flexible redemption explicitly rejected with HTTP 400 / `-6006`
+(below the minimum redemption amount) is recorded in the audit and clears its
+pending action; other exchange errors and uncertain responses retain the pending
+journal. The UI acknowledgment requires a checkbox and the exact pending
 operation timestamp to prevent acknowledging a different operation by mistake.
 
 ## Configuration and API

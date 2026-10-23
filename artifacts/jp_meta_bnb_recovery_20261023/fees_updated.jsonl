@@ -1,0 +1,3 @@
+{"name": "fee_update", "body": {"maker_fee_rate": 0.000144, "taker_fee_rate": 0.00036, "theoretical_twap_fee_rate": 0.000252}}
+{"name": "fee_rates_verified", "body": {"source_id": "binance_exec_trade03", "maker_fee_rate": 0.000144, "taker_fee_rate": 0.00036, "theoretical_twap_fee_rate": 0.000252, "quote_fee_rates": {}}}
+{"name": "diagnostic_session_removed", "body": true}
