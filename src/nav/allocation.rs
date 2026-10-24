@@ -430,7 +430,8 @@ mod tests {
         )]);
         let funding = cache
             .estimate_funding_records(&report, false, &rates)
-            .unwrap();
+            .unwrap()
+            .records;
         assert_eq!(funding[0].quantity, 0.0);
         assert!((funding[0].strategies["system_position_close"] - 0.24).abs() < 1e-10);
         assert_eq!(funding[1].quantity, 0.0);

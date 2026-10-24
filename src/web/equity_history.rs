@@ -107,6 +107,12 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
     .await
     .map_err(|error| error.0)?
     .map_err(|_| anyhow::anyhow!("account NAV range is not ready"))?;
+    // The interactive endpoint can use trade-price estimates beyond retention;
+    // persisted daily audit anchors must still require complete minute marks.
+    anyhow::ensure!(
+        snapshot.report.valuation == "quantity_fifo_closed_1m_window_delta",
+        "daily equity reconstruction requires complete minute-close valuation"
+    );
     anyhow::ensure!(
         strategy_allocation == !state.funding.settings(&source.id).enabled,
         "funding selection changed during reconstruction"

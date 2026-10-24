@@ -506,6 +506,30 @@ only the account-level PostgreSQL position snapshot and later RocksDB fills; it
 therefore remains available for total-account PnL before a strategy allocation
 anchor. The browser exposes these as separate `策略归因` and `账户 PnL` modes.
 
+Quick ranges are `ALL`, `1D`, `7D`, `30D`, `60D`, and `90D`. Order history comes from
+local RocksDB and is not capped by exchange REST or candle retention. For a
+timeline starting before candle retention, the whole window uses the existing
+local latest-fill valuation (`quantity_fifo_window_delta`): FIFO realized PnL,
+quantities and fees remain factual, while floating PnL and total NAV use the
+latest local execution price per source/symbol/venue, not a current market mark.
+The UI identifies this valuation. `60D`, `90D` and `ALL` are never shortened to 30 days;
+only `30D` aligns to the moving candle boundary. Retained windows continue to use
+complete minute-close marks and retry pending backfills. Daily equity audit
+reconstruction remains strict about minute marks.
+
+Missing theoretical coverage makes slippage unavailable with a reason, without
+failing the order timeline. Local funding statements remain visible, including
+saved records from a paused collector. Public estimates sum available overlapping
+rates and label incomplete coverage; unknown periods are not fabricated as zero.
+Settlements with unreconstructable pre-snapshot holdings or non-finite amounts
+are excluded individually, preserving the remaining known income. If no
+settlement can be measured, the estimate stays unavailable rather than zero.
+In account mode, saved actual funding takes precedence when estimates are
+incomplete; a complete estimate remains the default for a paused collector.
+Actual and estimated income are never added together. Strategy funding stays
+estimated and account statements are displayed separately. See
+[funding and slippage](docs/funding_and_slippage.md).
+
 For DataFrame clients, `GET /api/pnl/account` returns a versioned Arrow IPC
 account-PnL table keyed by `ts_us`; `GET /api/pnl/strategies` returns a long
 Arrow IPC table keyed by `strategy_name, ts_us`. Both accept `startMs`, `endMs`,

@@ -1,6 +1,7 @@
 const MINUTE_MS = 60_000
 
-/** Keep the 30D shortcut inside the server's rolling candle retention. */
+/** Keep 30D inside candle retention. 60D/90D/ALL deliberately preserve the full
+ * local order-history window and use the server's latest-fill valuation. */
 export function retainedQuickRangeStartMs(
   range: string | null,
   startMs: number,

@@ -33,12 +33,16 @@ test('a long backfill realigns before its crossing execution window expires', ()
   assert.equal(retainedQuickRangeStartMs('30D', start, serverNow, advanced * 1_000, 300), advanced + 5 * minute)
 })
 
-test('custom, ALL, 1D and 7D historical ranges are never silently shortened', () => {
-  const start = serverNow - 40 * day
-  for (const range of [null, 'ALL', '1D', '7D']) {
-    assert.equal(retainedQuickRangeStartMs(range, start, serverNow, available * 1_000, 300), start)
-  }
-})
+for (const days of [60, 90]) {
+  test(`${days}D, custom, ALL, 1D and 7D historical ranges are never silently shortened`, () => {
+    const start = serverNow - days * day
+    for (const range of [`${days}D`, null, 'ALL', '1D', '7D']) {
+      for (const boundary of [available, available + 10 * minute]) {
+        assert.equal(retainedQuickRangeStartMs(range, start, serverNow, boundary * 1_000, 300), start)
+      }
+    }
+  })
+}
 
 test('an entirely expired range is not moved past its end or turned into a zero-duration window', () => {
   for (const end of [available - minute, available, available + 5 * minute]) {

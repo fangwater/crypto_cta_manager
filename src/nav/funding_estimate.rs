@@ -1,6 +1,8 @@
 //! Reuse the same validated fills, snapshot choice and strategy ownership as NAV.
 use super::*;
-use crate::funding_rates::{FundingEstimateRecord, FundingRate, supported_symbol};
+use crate::funding_rates::{
+    FundingEstimateRecord, FundingEstimateRecords, FundingRate, supported_symbol,
+};
 
 impl NavTimelineCache {
     /// Read-only settlement diagnostics, using the exact validated NAV fill stream.
@@ -78,7 +80,7 @@ impl NavTimelineCache {
         report: &NavTimelineReport,
         allocation: bool,
         rates: &BTreeMap<String, Arc<Vec<FundingRate>>>,
-    ) -> Result<Vec<FundingEstimateRecord>> {
+    ) -> Result<FundingEstimateRecords> {
         let mut settlements: Vec<_> = rates
             .values()
             .flat_map(|rows| rows.iter())
@@ -92,10 +94,7 @@ impl NavTimelineCache {
         settlements.sort_by(|a, b| {
             (a.0, &a.1.symbol, &a.1.rate_type).cmp(&(b.0, &b.1.symbol, &b.1.rate_type))
         });
-        let Some(first) = settlements.first() else {
-            return Ok(Vec::new());
-        };
-        let mut records = Vec::new();
+        let mut measured = FundingEstimateRecords::default();
         for source_id in &report.selected_source_ids {
             let source = self
                 .sources
@@ -110,6 +109,23 @@ impl NavTimelineCache {
             if config.venue != "binance-futures" {
                 continue;
             }
+            // A snapshot is an after-events anchor. Skip only settlements whose
+            // pre-settlement holdings cannot be reconstructed, then initialize
+            // at the first measurable settlement so opening lots are preserved.
+            let measurable: Vec<_> = settlements
+                .iter()
+                .copied()
+                .filter(|(ts, _)| {
+                    source
+                        .prepared
+                        .snapshot_ts_us
+                        .is_none_or(|anchor| anchor < *ts)
+                })
+                .collect();
+            measured.skipped_settlements += settlements.len() - measurable.len();
+            let Some(first) = measurable.first() else {
+                continue;
+            };
             let checkpoint = source
                 .checkpoints
                 .iter()
@@ -147,7 +163,7 @@ impl NavTimelineCache {
             let fills = &source.prepared.fill_events;
             let mut allocation_index = state.next_allocation;
             let allocations = &source.prepared.allocations;
-            for &(settlement_ts_us, rate) in &settlements {
+            for &(settlement_ts_us, rate) in &measurable {
                 // The operator-selected estimate uses the scheduled hour.
                 // At/after-boundary fills never move the estimated cutoff.
                 while index < fills.len() && fills[index].fill_ts_us < settlement_ts_us {
@@ -181,15 +197,6 @@ impl NavTimelineCache {
                     settlement_ts_us,
                     &mut strategies,
                 );
-                if source
-                    .prepared
-                    .snapshot_ts_us
-                    .is_some_and(|ts| ts >= settlement_ts_us)
-                {
-                    // A snapshot is an after-events anchor. Its own settlement
-                    // cannot be reconstructed from the post-anchor fill stream.
-                    anyhow::bail!("资金费结算时刻不晚于仓位快照，无法还原结算前持仓");
-                }
                 let quantity = quantities.get(&rate.symbol).copied().unwrap_or(0.0);
                 let factor = -rate.mark_price * rate.rate;
                 let mut owners = BTreeMap::new();
@@ -217,11 +224,11 @@ impl NavTimelineCache {
                     })
                     .count();
                 let income = quantity * factor;
-                anyhow::ensure!(
-                    income.is_finite() && owners.values().all(|v: &f64| v.is_finite()),
-                    "funding quantity/amount overflow"
-                );
-                records.push(FundingEstimateRecord {
+                if !income.is_finite() || !owners.values().all(|v: &f64| v.is_finite()) {
+                    measured.skipped_settlements += 1;
+                    continue;
+                }
+                measured.records.push(FundingEstimateRecord {
                     source_id: source_id.clone(),
                     symbol: rate.symbol.clone(),
                     asset: rate.symbol[rate.symbol.len() - 4..].to_string(),
@@ -236,7 +243,7 @@ impl NavTimelineCache {
                 });
             }
         }
-        records.sort_by(|a, b| {
+        measured.records.sort_by(|a, b| {
             (a.ts_us, &a.source_id, &a.symbol, &a.rate_type).cmp(&(
                 b.ts_us,
                 &b.source_id,
@@ -244,7 +251,7 @@ impl NavTimelineCache {
                 &b.rate_type,
             ))
         });
-        Ok(records)
+        Ok(measured)
     }
 }
 
@@ -381,17 +388,25 @@ mod tests {
         let records = cache
             .estimate_funding_records(&report, true, &rates)
             .unwrap();
-        let usdt = records.iter().find(|r| r.symbol == "BTCUSDT").unwrap();
+        let usdt = records
+            .records
+            .iter()
+            .find(|r| r.symbol == "BTCUSDT")
+            .unwrap();
         assert_eq!(usdt.quantity, 2.0); // Equal-timestamp buy is excluded.
         assert!((usdt.income_quote + 0.2).abs() < 1e-12);
         assert!((usdt.strategies["alpha"] + 0.5).abs() < 1e-12);
         assert!((usdt.strategies["beta"] - 0.2).abs() < 1e-12);
         assert!((usdt.strategies["__unallocated__"] - 0.1).abs() < 1e-12);
         assert_eq!(usdt.boundary_fill_count, 1);
-        let usdc = records.iter().find(|r| r.symbol == "BTCUSDC").unwrap();
+        let usdc = records
+            .records
+            .iter()
+            .find(|r| r.symbol == "BTCUSDC")
+            .unwrap();
         assert_eq!(usdc.asset, "USDC");
         assert!((usdc.income_quote + 1.6).abs() < 1e-12);
-        for record in &records {
+        for record in &records.records {
             assert!((record.strategies.values().sum::<f64>() - record.income_quote).abs() < 1e-12);
         }
         let coverage = crate::funding_rates::RateCoverage {
@@ -415,7 +430,108 @@ mod tests {
         let selected = cache
             .estimate_funding_records(&filtered, true, &coverage.rates)
             .unwrap();
-        assert_eq!(selected.len(), 1);
+        assert_eq!(selected.records.len(), 1);
+    }
+
+    #[test]
+    fn partial_funding_keeps_known_income_and_never_replaces_absent_coverage_with_zero() {
+        let (cache, report) = fixture();
+        let coverage = crate::funding_rates::RateCoverage {
+            rates: BTreeMap::from([(
+                "BTCUSDT".into(),
+                Arc::new(vec![FundingRate {
+                    symbol: "BTCUSDT".into(),
+                    ts_us: OFFSET + 200_000_000,
+                    rate: 0.001,
+                    mark_price: 100.0,
+                    rate_type: "Regular".into(),
+                }]),
+            )]),
+            unavailable_reason: Some("仅部分时段及币种有公开费率".into()),
+            ..Default::default()
+        };
+        let records = cache
+            .estimate_funding_records(&report, true, &coverage.rates)
+            .unwrap();
+        let estimate = crate::funding_rates::estimate_timeline(&report, &coverage, &records);
+        assert!((estimate.income_quote.unwrap() + 0.2).abs() < 1e-12);
+        assert_eq!(estimate.settlement_count, 1);
+        assert!(estimate.unavailable_reason.is_some());
+        assert_eq!(estimate.points.first().unwrap().funding_income_quote, 0.0);
+        assert_eq!(
+            estimate.points.last().unwrap().funding_income_quote,
+            estimate.income_quote.unwrap()
+        );
+        assert!(
+            (estimate
+                .strategies
+                .iter()
+                .map(|s| s.income_quote)
+                .sum::<f64>()
+                + 0.2)
+                .abs()
+                < 1e-12
+        );
+        let absent = crate::funding_rates::RateCoverage {
+            rates: BTreeMap::new(),
+            ..coverage
+        };
+        let estimate =
+            crate::funding_rates::estimate_timeline(&report, &absent, &Default::default());
+        assert_eq!(estimate.income_quote, None);
+        assert!(estimate.points.is_empty());
+        assert!(estimate.strategies.is_empty());
+    }
+
+    #[test]
+    fn unmeasurable_settlements_are_excluded_without_losing_known_income() {
+        let (cache, mut report) = fixture();
+        let anchor = OFFSET + 100_000_000;
+        report.start_ts_us = anchor - 1;
+        let rate = |ts_us, rate| FundingRate {
+            symbol: "BTCUSDT".into(),
+            ts_us,
+            rate,
+            mark_price: 100.0,
+            rate_type: "Special".into(),
+        };
+        let coverage = crate::funding_rates::RateCoverage {
+            rates: BTreeMap::from([(
+                "BTCUSDT".into(),
+                Arc::new(vec![
+                    rate(anchor - 1, 0.001),
+                    rate(anchor, 0.001),
+                    rate(OFFSET + 200_000_000, 0.001),
+                    rate(OFFSET + 201_000_000, f64::MAX),
+                ]),
+            )]),
+            ..Default::default()
+        };
+        for allocation in [false, true] {
+            let measured = cache
+                .estimate_funding_records(&report, allocation, &coverage.rates)
+                .unwrap();
+            assert_eq!(measured.skipped_settlements, 3);
+            assert_eq!(measured.records.len(), 1);
+            assert_eq!(measured.records[0].quantity, 2.0);
+            let estimate = crate::funding_rates::estimate_timeline(&report, &coverage, &measured);
+            assert_eq!(estimate.settlement_count, 1);
+            assert!((estimate.income_quote.unwrap() + 0.2).abs() < 1e-12);
+            assert!(estimate.unavailable_reason.unwrap().contains("3 次结算"));
+            assert_eq!(
+                estimate.points.last().unwrap().funding_income_quote,
+                estimate.income_quote.unwrap()
+            );
+        }
+        report.end_ts_us = anchor;
+        let measured = cache
+            .estimate_funding_records(&report, true, &coverage.rates)
+            .unwrap();
+        assert_eq!(measured.skipped_settlements, 2);
+        let estimate = crate::funding_rates::estimate_timeline(&report, &coverage, &measured);
+        assert_eq!(estimate.income_quote, None);
+        assert_eq!(estimate.total_nav_after_fee_quote, None);
+        assert!(estimate.points.is_empty());
     }
 
     #[test]
@@ -434,10 +550,10 @@ mod tests {
         let records = cache
             .estimate_funding_records(&report, true, &rates)
             .unwrap();
-        assert_eq!(records.len(), 1); // Included in a window ending exactly at the hour.
-        assert_eq!(records[0].ts_us, hour);
-        assert_eq!(records[0].quantity, 2.0); // At-hour buy of 10 is excluded.
-        assert_eq!(records[0].boundary_fill_count, 1);
+        assert_eq!(records.records.len(), 1); // Included in a window ending exactly at the hour.
+        assert_eq!(records.records[0].ts_us, hour);
+        assert_eq!(records.records[0].quantity, 2.0); // At-hour buy of 10 is excluded.
+        assert_eq!(records.records[0].boundary_fill_count, 1);
         let special = FundingRate {
             rate_type: "Special".into(),
             ..rate
@@ -461,9 +577,13 @@ mod tests {
         let records = cache
             .estimate_funding_records(&report, false, &rates)
             .unwrap();
-        assert!((records[0].strategies["__initial_position__"] + 0.1).abs() < 1e-12);
-        assert!(!records[0].strategies.contains_key("SYSTEM_POSITION_CLOSE"));
-        assert!((records[0].income_quote + 0.2).abs() < 1e-12);
+        assert!((records.records[0].strategies["__initial_position__"] + 0.1).abs() < 1e-12);
+        assert!(
+            !records.records[0]
+                .strategies
+                .contains_key("SYSTEM_POSITION_CLOSE")
+        );
+        assert!((records.records[0].income_quote + 0.2).abs() < 1e-12);
         report.selected_source_ids = vec!["another-account".into()];
         assert!(
             cache

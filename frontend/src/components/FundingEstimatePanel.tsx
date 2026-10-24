@@ -5,7 +5,7 @@ import { AnalysisMetric } from './AnalysisMetric'
 export function FundingEstimatePanel({ value }: { value?: FundingEstimate }) {
   if (!value) return null
   return <section className="chart-section" aria-label="估算资金费">
-    <div className="panel-heading"><h2>估算资金费</h2><span>{value.loading ? '加载中' : value.income_quote != null ? '已计算' : '暂不可用'}</span></div>
+    <div className="panel-heading"><h2>估算资金费</h2><span>{value.loading ? '加载中' : value.income_quote != null ? value.unavailable_reason ? '部分覆盖' : '已计算' : '暂不可用'}</span></div>
     {value.income_quote != null && <div className="summary-strip nav-analysis-stats">
       <AnalysisMetric label="区间估算 Funding" value={fundingMoney(value.income_quote)} detail="正数收入，负数支出" />
       {Object.entries(value.income_by_asset).map(([asset, amount]) => <AnalysisMetric key={asset} label={asset} value={fundingMoney(amount)} />)}

@@ -1630,7 +1630,7 @@ async fn rebuild_timeline_snapshot(
     let aligned_timelines = nav_timelines.clone();
     let funding_timelines = nav_timelines.clone();
     let report = nav_timelines
-        .rebuild_priced(request, use_strategy_allocation, state.klines.clone())
+        .rebuild_available(request, use_strategy_allocation, state.klines.clone())
         .await;
     let report = match report {
         Ok(report) => report,
@@ -1687,21 +1687,26 @@ async fn rebuild_timeline_snapshot(
                 end_ts_us: point.ts_us,
                 ..aligned_request.clone()
             };
-            let actual = aligned_timelines
+            match aligned_timelines
                 .rebuild_priced(aligned, use_strategy_allocation, state.klines.clone())
-                .await?;
-            crate::execution_slippage::ExecutionSlippage::calculate(
-                report.start_ts_us,
-                actual.summary,
-                point,
-            )
+                .await
+            {
+                Ok(actual) => crate::execution_slippage::ExecutionSlippage::calculate(
+                    report.start_ts_us,
+                    actual.summary,
+                    point,
+                ),
+                Err(error) => crate::execution_slippage::ExecutionSlippage::unavailable(
+                    report.start_ts_us,
+                    format!("滑点所需的分钟估值暂不可用：{error}"),
+                ),
+            }
         } else {
             crate::execution_slippage::ExecutionSlippage::unavailable(
                 report.start_ts_us,
-                reference
-                    .unavailable_reason
-                    .clone()
-                    .unwrap_or_else(|| "完整理论净值不可用；请选择全部币种及最近 1–30 天".into()),
+                reference.unavailable_reason.clone().unwrap_or_else(|| {
+                    "完整理论净值不可用；需要全部币种及 K 线保留范围内的数据".into()
+                }),
             )
         });
     }
@@ -1725,20 +1730,17 @@ async fn rebuild_timeline_snapshot(
         let coverage = public_rates.request(&symbols, report.start_ts_us, report.end_ts_us);
         let factual_funding = state.funding.clone();
         tokio::task::spawn_blocking(move || {
-            let records = if coverage.unavailable_reason.is_none() {
-                cache.estimate_funding_records(
-                    &estimate_report,
-                    use_strategy_allocation,
-                    &coverage.rates,
-                )?
-            } else {
-                Vec::new()
-            };
+            // An incomplete window/symbol must not discard other available rates.
+            let records = cache.estimate_funding_records(
+                &estimate_report,
+                use_strategy_allocation,
+                &coverage.rates,
+            )?;
             let mut estimate =
                 crate::funding_rates::estimate_timeline(&estimate_report, &coverage, &records);
             if estimate.income_quote.is_some() {
                 estimate.reconciliation =
-                    factual_funding.reconcile_estimates(&estimate_report, &records);
+                    factual_funding.reconcile_estimates(&estimate_report, &records.records);
             }
             Ok::<_, anyhow::Error>(estimate)
         })
@@ -1756,11 +1758,9 @@ async fn rebuild_timeline_snapshot(
             ..Default::default()
         }
     };
-    let funding = if use_strategy_allocation {
-        crate::funding::FundingTimeline::default()
-    } else {
-        state.funding.timeline(&report)
-    };
+    // Keep local statements visible even when public estimates cannot cover the
+    // range. These remain account-owned and are never allocated to strategies.
+    let funding = state.funding.timeline(&report);
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     info!(
         actual_duration_ms,
@@ -5449,6 +5449,175 @@ mod tests {
         assert_eq!(milliseconds_to_microseconds(123, "startMs"), Ok(123_000));
         assert!(milliseconds_to_microseconds(-1, "startMs").is_err());
         assert!(milliseconds_to_microseconds(i64::MAX, "endMs").is_err());
+    }
+
+    #[tokio::test]
+    async fn long_window_timeline_handlers_succeed_without_funding_or_minute_prices() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = crate::funding_rates::DAY_US;
+        let end = (unix_now_us() / 1000 - 60_000) * 1000;
+        let start = end - 90 * day;
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        config.sources.truncate(1);
+        config.sources[0].id = "timeline-fixture".into();
+        config.sources[0].enabled = true;
+        config.sources[0].venue = "binance-futures".into();
+        config.sources[0].rocksdb_path = dir.path().join("exec");
+        config.kline.rocksdb_path = dir.path().join("manager");
+        config.kline.enabled = false;
+        config.funding_rates.enabled = false;
+        let id = config.sources[0].id.clone();
+        let events = [
+            (start, 1, 100.0, 2.0),
+            (end - 40 * day, 2, 110.0, 1.0),
+            (end - day, 2, 120.0, 0.5),
+        ]
+        .into_iter()
+        .map(|(ts, side, price, qty)| {
+            Arc::new(nav::NavEvent {
+                record_key: ts.to_string(),
+                event_ts_us: ts,
+                create_ts_us: ts,
+                update_ts_us: ts,
+                signal_ts_us: ts,
+                symbol: "BTCUSDT".into(),
+                client_order_id: ts,
+                venue_code: 1,
+                venue: "BinanceFutures".into(),
+                order_type_code: 1,
+                side_code: side,
+                price,
+                amount_update: qty,
+                from_key_text: "batch_exec:alpha".into(),
+                fill_liquidity: None,
+            })
+        })
+        .collect();
+        let histories = Arc::new(BTreeMap::from([(
+            id.clone(),
+            nav::NavSourceHistory::from_test_events(events),
+        )]));
+        let nav_timelines = Arc::new(
+            nav::NavTimelineCache::build(
+                config.clone(),
+                Arc::default(),
+                Arc::default(),
+                histories.clone(),
+            )
+            .unwrap(),
+        );
+        let cache = Arc::new(RwLock::new(CacheState {
+            dashboard: DashboardSnapshot {
+                generated_at_us: end,
+                generation_duration_ms: 0,
+                refresh_interval_secs: 60,
+                accounts: Vec::new(),
+                report: nav_timelines.dashboard_report(),
+            },
+            nav_histories: histories,
+            position_snapshots: Arc::default(),
+            strategy_position_snapshots: Arc::default(),
+            nav_timelines,
+            theoretical_fees: Arc::default(),
+            fee_rates: Arc::default(),
+            last_attempt_at_us: end,
+            last_refresh_error: None,
+        }));
+        let db = ManagerDb::open(&config.kline.rocksdb_path).unwrap();
+        let position_archive = Arc::new(PositionArchive::open(db.clone()).unwrap());
+        let config = Arc::new(config);
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let egress = crate::bfusd_auto::TreasuryEgress::new(config.treasury.clone());
+        let redis_runtime = RedisRuntime::connect(Default::default()).unwrap();
+        let reload_notify = ReloadNotifyHub::spawn();
+        // Clients stay idle: these handlers must use only the prepared local NAV
+        // generation when all optional REST data is unavailable.
+        let state = WebState {
+            cache,
+            dashboard_refresh: gate.clone(),
+            configuration_lock: gate.clone(),
+            configuration_notify: Arc::default(),
+            nav_history_store: Arc::default(),
+            pool: sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgresql://localhost/unused_timeline_test")
+                .unwrap(),
+            exec_config: ExecConfigClient::new(1).unwrap(),
+            live_equity: LiveEquityHub::default(),
+            account_overview: crate::account_overview::AccountOverview::open(db.clone()).unwrap(),
+            theoretical_targets: crate::theoretical_nav::TheoreticalTargetCache::new(
+                config.clone(),
+                position_archive.clone(),
+            ),
+            klines: Arc::new(KlineStore::from_db(db, config.kline.clone()).unwrap()),
+            position_archive,
+            viz_snapshot: VizSnapshotClient::new(1).unwrap(),
+            refresh_interval_secs: 60,
+            auto_earn: AutoEarnHub::new(&config, gate.clone(), egress.clone()).unwrap(),
+            bnb: crate::bnb_auto::BnbManager::new(
+                &config,
+                gate,
+                egress,
+                redis_runtime.clone(),
+                reload_notify.clone(),
+            )
+            .unwrap(),
+            funding: crate::funding::FundingHub::new(&config),
+            funding_rates: crate::funding_rates::FundingRateCache::new(
+                config.funding_rates.clone(),
+            )
+            .unwrap(),
+            config,
+            redis_runtime,
+            reload_notify,
+        };
+        for days in [Some(60), Some(90), None] {
+            for account in [false, true] {
+                for include_theoretical in [false, true] {
+                    let query = Query(TimelineQuery {
+                        start_ms: days.map(|days| (end - days * day) / 1000),
+                        end_ms: Some(end / 1000),
+                        source_ids: Some(id.clone()),
+                        include_theoretical: Some(include_theoretical),
+                        ..Default::default()
+                    });
+                    let visible = Extension(VisibleSources(BTreeSet::from([id.clone()])));
+                    let response = if account {
+                        account_timeline(State(state.clone()), query, visible).await
+                    } else {
+                        timeline(State(state.clone()), query, visible).await
+                    }
+                    .unwrap_or_else(|error| panic!("timeline handler failed: {}", error.0));
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let report = &value["report"];
+                    assert_eq!(
+                        report["start_ts_us"],
+                        days.map_or(start, |days| end - days * day)
+                    );
+                    assert_eq!(report["end_ts_us"], end);
+                    assert_eq!(report["valuation"], "quantity_fifo_window_delta");
+                    assert_eq!(
+                        report["summary"]["fill_count"],
+                        if days == Some(60) { 2 } else { 3 }
+                    );
+                    assert_eq!(report["summary"]["realized_pnl_before_fee_quote"], 20.0);
+                    assert!(value["estimated_funding"]["income_quote"].is_null());
+                    assert!(value["estimated_funding"]["unavailable_reason"].is_string());
+                    assert!(
+                        value["execution_slippage"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|s| s["unavailable_reason"].is_string())
+                    );
+                }
+            }
+        }
+        assert_eq!(state.klines.status().requests, 0);
     }
 
     fn timeline_snapshot_for_arrow() -> TimelineSnapshot {

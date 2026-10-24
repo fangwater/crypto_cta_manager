@@ -4,9 +4,21 @@ export function usesActualFunding(summary?: FundingSummary) {
   return summary?.enabled === true
 }
 
-/** Account collection selects factual income; strategies always use public estimates. */
+export function hasAvailableActualFunding(actual: FundingTimeline) {
+  if (actual.summary.record_count > 0) return true
+  const start = actual.points[0]?.ts_us
+  const end = actual.points.at(-1)?.ts_us
+  return start != null && end != null && actual.summary.symbols?.some((symbol) =>
+    symbol.synced_through_ts_us != null && symbol.start_ts_us <= end && symbol.synced_through_ts_us >= start,
+  ) === true
+}
+
+/** Partial public coverage may fall back to saved account income, including a
+ * paused collector. Never add actual and estimated income for the same window,
+ * and never assign an account statement to an individual strategy. */
 export function displayedFunding(mode: 'account' | 'strategy', actual?: FundingTimeline, estimate?: FundingEstimate) {
-  if (mode === 'account' && actual && usesActualFunding(actual.summary)) {
+  if (mode === 'account' && actual && hasAvailableActualFunding(actual)
+    && (usesActualFunding(actual.summary) || estimate?.income_quote == null || Boolean(estimate.unavailable_reason))) {
     return { kind: 'actual' as const, value: actual, income: actual.summary.income_quote }
   }
   if (estimate?.income_quote != null) {

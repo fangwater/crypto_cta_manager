@@ -96,6 +96,14 @@ struct HistoryChange {
 }
 
 impl NavSourceHistory {
+    #[cfg(test)]
+    pub(crate) fn from_test_events(events: im::Vector<Arc<NavEvent>>) -> Self {
+        Self {
+            events,
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn funding_symbols(&self) -> BTreeMap<String, i64> {
         let mut symbols = BTreeMap::<String, i64>::new();
         for event in &self.events {
@@ -5007,6 +5015,111 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn long_timelines_replay_local_rocksdb_without_candles() {
+        for days in [60, 90] {
+            assert_long_timeline_replays_local_rocksdb(days).await;
+        }
+    }
+
+    async fn assert_long_timeline_replays_local_rocksdb(days: i64) {
+        let dir = tempfile::tempdir().unwrap();
+        let day = crate::funding_rates::DAY_US;
+        let end = crate::kline::now_us() - 60_000_000;
+        let start = end - days * day;
+        let mut selected = source_at("trade01", &dir.path().join("exec-a"), 0.001);
+        selected.venue = "binance-futures".into();
+        let mut other = source_at("trade02", &dir.path().join("exec-b"), 0.001);
+        other.venue = "binance-futures".into();
+        write_events(
+            &selected.rocksdb_path,
+            &[
+                strategy_event_at(start, start, "BTCUSDT", 1, 1, 100.0, 2.0, "alpha"),
+                strategy_event_at(
+                    start + 20 * day,
+                    start + 20 * day,
+                    "BTCUSDT",
+                    1,
+                    2,
+                    110.0,
+                    1.0,
+                    "alpha",
+                ),
+                strategy_event_at(end - day, end - day, "BTCUSDT", 1, 2, 120.0, 0.5, "alpha"),
+            ],
+        );
+        write_events(
+            &other.rocksdb_path,
+            &[strategy_event_at(
+                start, start, "BTCUSDT", 1, 1, 1000.0, 100.0, "alpha",
+            )],
+        );
+        let config = app_config(vec![selected, other]);
+        let histories = load_nav_source_histories(&config, &[]).unwrap();
+        let cache = Arc::new(
+            NavTimelineCache::build(
+                config,
+                Arc::new(BTreeMap::new()),
+                Arc::new(BTreeMap::new()),
+                Arc::new(histories),
+            )
+            .unwrap(),
+        );
+        let db = crate::manager_db::ManagerDb::open(&dir.path().join("manager")).unwrap();
+        let store = Arc::new(crate::kline::KlineStore::from_db(db, Default::default()).unwrap());
+        for allocation in [false, true] {
+            for from in [Some(start), None] {
+                let request = NavTimelineRequest {
+                    start_ts_us: from,
+                    ..timeline_request(start, end, vec!["trade01".into()], vec![])
+                };
+                let report = cache
+                    .rebuild_available(request.clone(), allocation, store.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    report.as_ref(),
+                    cache.rebuild(request.clone(), allocation).unwrap().as_ref()
+                );
+                assert_eq!(report.valuation, "quantity_fifo_window_delta");
+                assert_eq!(report.start_ts_us, start);
+                assert_eq!(report.end_ts_us, end);
+                assert_eq!(report.summary.fill_count, 3);
+                assert_close(report.summary.realized_pnl_before_fee_quote, 20.0);
+                assert_close(report.summary.floating_pnl_quote, 10.0);
+                assert_close(report.summary.estimated_trading_fee_quote, 0.37);
+                assert_eq!(report.points.first().unwrap().totals, NavTotals::default());
+                assert_eq!(report.points.last().unwrap().totals, report.summary);
+                assert_eq!(report.strategy_points[0].summary, report.summary);
+                // Audited daily equity still requires minute valuation.
+                assert!(
+                    cache
+                        .rebuild_priced(request, allocation, store.clone())
+                        .await
+                        .is_err()
+                );
+            }
+        }
+        // Retained queries keep their existing missing-price behavior rather
+        // than silently switching valuation because the cache is disabled.
+        for days in [1, 7, 29] {
+            let error = cache
+                .rebuild_available(
+                    timeline_request(end - days * day, end, vec!["trade01".into()], vec![]),
+                    true,
+                    store.clone(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<minute_marks::PricingUnavailable>()
+                    .is_some()
+            );
+        }
+        assert_eq!(store.status().requests, 0);
+    }
+
     fn minute_marks(rows: &[(i64, f64)], revision: u64) -> MinuteMarks {
         MinuteMarks::Loaded {
             revision,
@@ -6244,7 +6357,8 @@ mod tests {
                 .unwrap();
             let funding = cache
                 .estimate_funding_records(&funding_report, true, &rates)
-                .unwrap();
+                .unwrap()
+                .records;
             assert_close(funding[0].strategies[INITIAL_POSITION_STRATEGY], 0.0);
             assert_close(funding[0].strategies["alpha"], -0.2);
             assert_close(funding[0].income_quote, -0.2);

@@ -186,8 +186,15 @@ Keep source/symbol/venue isolation and account/strategy/residual additivity,
 including offsetting strategy holdings in a flat account. Strategy exports,
 funding-inclusive NAV and daily equity reconstruction use the same valuation.
 Record the valuation in daily audit anchors without changing the daily write
-schedule or rewriting snapshots. Older-than-retention ranges cannot use minute
-valuation. Other venues and explicitly order-only offline diagnostics retain
+schedule or rewriting snapshots. By operator instruction on 2026-10-24,
+interactive timelines also support 60D, 90D and ALL beyond retention: replay the
+entire window with local latest-fill valuation (`quantity_fifo_window_delta`),
+explicitly identify floating/total NAV as trade-price estimates, and preserve
+factual FIFO realization and fees. Never shorten 60D/90D/ALL to candle retention or
+mix minute and fill marks in one curve. Unavailable theory/slippage must not
+fail the factual query. Daily equity audit reconstruction remains strict about
+minute prices. Older-than-retention ranges cannot use minute valuation.
+Other venues and explicitly order-only offline diagnostics retain
 their identified latest-fill valuation until their mark feed is connected.
 Order-only reconstruction does not include funding, deposits,
 withdrawals, liquidation charges, or other account-ledger movements; keep those
@@ -251,7 +258,16 @@ later fills that were charged and earlier fills that were not. See
 The operator's final display choice on 2026-10-15 keeps account and strategy
 funding separate: account overall NAV uses actual funding when collection is
 enabled and estimated funding when disabled, including RapidX. Retained historical
-statements must not override a disabled switch. Strategy PnL defaults to including
+statements normally do not override a disabled switch. By operator instruction
+on 2026-10-24, when estimates are incomplete or unavailable, account views prefer
+available saved actual income even for a paused collector. Show saved account
+income separately in strategy views, never allocate it to strategies. Public
+estimates must retain available overlapping periods/symbols with an explicit
+partial-coverage reason, never invent missing income or double-count it with
+actual income.
+Only measurable settlements enter funding totals; exclude unknown holdings or
+amounts individually and preserve other known settlements. An entirely unknown
+estimate stays null, never zero. Strategy PnL defaults to including
 the hourly estimate. Show
 strategy funding as its own numeric column and an independent cumulative curve
 with a zero reference, shared strategy selection, and enough decimal precision
@@ -613,7 +629,7 @@ isolated FIFO state, capture that state as the window baseline, and report only
 changes inside the selected window. A fill exactly at `startMs` belongs to the
 window. Include explicit start and end points, resample to fixed 15-minute step
 points, and preserve extrema when a response must be downsampled. The browser
-must expose custom datetime-local start/end controls, `ALL`/`1D`/`7D`/`30D`
+must expose custom datetime-local start/end controls, `ALL`/`1D`/`7D`/`30D`/`60D`/`90D`
 quick ranges, aggregate and per-symbol curves, account scope, and symbol
 all/none selection.
 

@@ -106,7 +106,12 @@ async fn main() -> Result<()> {
             let coverage = rates
                 .wait_for(&symbols, report.start_ts_us, report.end_ts_us)
                 .await?;
-            let records = cache.estimate_funding_records(&report, allocation, &coverage.rates)?;
+            let measured = cache.estimate_funding_records(&report, allocation, &coverage.rates)?;
+            anyhow::ensure!(
+                measured.skipped_settlements == 0,
+                "funding reconciliation requires measurable settlements"
+            );
+            let records = measured.records;
             let rows = sqlx::query("SELECT symbol,asset,ts_us,income::text AS income FROM cta_funding_income WHERE source_id=$1 AND ts_us >= $2 AND ts_us <= $3 ORDER BY ts_us,symbol")
                 .bind(&source.id).bind(report.start_ts_us).bind(report.end_ts_us).fetch_all(&pool).await?;
             let actual_records = rows

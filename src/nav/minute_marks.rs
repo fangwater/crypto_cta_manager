@@ -1,5 +1,5 @@
 //! Closed-minute valuation of factual FIFO positions. Execution prices and fees
-//! are never replaced. Missing prices reject the whole requested curve.
+//! are never replaced. Missing prices reject the whole minute-priced curve.
 use super::*;
 use crate::kline::{KlineStore, MINUTE_US, first_complete_open, now_us, warm_ranges};
 use std::sync::Mutex;
@@ -121,7 +121,7 @@ fn validate(store: &KlineStore, start: i64, end: i64) -> Result<()> {
         return Err(unavailable(
             store,
             false,
-            "分钟估值仅支持最近保留范围，起点需要前一个完整分钟；请选择最近 1–30 天",
+            "分钟估值仅支持 K 线保留范围，起点需要前一个完整分钟",
         ));
     }
     Ok(())
@@ -203,6 +203,38 @@ async fn load_prices(
 }
 
 impl NavTimelineCache {
+    /// Interactive history must remain readable beyond candle retention. Replay
+    /// the entire window with local latest-fill marks in that case, never mix
+    /// stale fill prices with minute marks within one curve. FIFO realization,
+    /// quantities and fees are unchanged; floating PnL is only a trade-price
+    /// estimate, identified by `quantity_fifo_window_delta` in the response.
+    /// Daily equity reconstruction continues to use strict `rebuild_priced`.
+    pub async fn rebuild_available(
+        self: &Arc<Self>,
+        request: NavTimelineRequest,
+        allocation: bool,
+        store: Arc<KlineStore>,
+    ) -> Result<Arc<NavTimelineReport>> {
+        let sources = select_sources(&self.config, &request.selected_source_ids)?;
+        let start = request.start_ts_us.unwrap_or_else(|| {
+            sources
+                .iter()
+                .filter_map(|s| self.start_ts_us(&s.id, request.end_ts_us, allocation))
+                .min()
+                .unwrap_or(request.end_ts_us)
+        });
+        let baseline_open = start.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
+        let now = now_us();
+        if baseline_open < store.cutoff_us(now)
+            && request.end_ts_us >= start
+            && request.end_ts_us <= now
+        {
+            let cache = self.clone();
+            return tokio::task::spawn_blocking(move || cache.rebuild(request, allocation)).await?;
+        }
+        self.rebuild_priced(request, allocation, store).await
+    }
+
     fn strategy_with_prices(
         &self,
         request: StrategyPnlRequest,

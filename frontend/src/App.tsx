@@ -73,6 +73,8 @@ const rangeOptions = [
   { key: '1D', days: 1 },
   { key: '7D', days: 7 },
   { key: '30D', days: 30 },
+  { key: '60D', days: 60 },
+  { key: '90D', days: 90 },
 ] as const
 
 type QuickRange = (typeof rangeOptions)[number]['key']
@@ -838,7 +840,7 @@ function NavPage() {
 
         <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />
         {!noSymbolsSelected && timeline?.execution_slippage.map((value, index) => <ExecutionSlippagePanel key={index} value={value} model={timeline.theoretical[index]?.execution_model} />)}
-        {pnlMode === 'account' && !noSymbolsSelected && <FundingPanel value={timeline?.funding} />}
+        {!noSymbolsSelected && <FundingPanel value={timeline?.funding} accountTotals={pnlMode === 'account'} selectedForNav={displayed.kind === 'actual'} />}
         {!noSymbolsSelected && <FundingEstimatePanel value={estimate} />}
 
         <section className="chart-section" aria-labelledby="chart-title">
@@ -904,6 +906,9 @@ function NavPage() {
           {chartMode === 'strategyFunding' && estimate?.income_quote == null && <p className="chart-notice" role="status">{estimate?.unavailable_reason ?? '正在加载策略估算 Funding'}</p>}
           {timeline?.report.valuation === 'quantity_fifo_closed_1m_window_delta' && (
             <p className="chart-notice">实际持仓按已完成的 1 分钟收盘价估值；成交价格、数量和交易费按真实成交计算。</p>
+          )}
+          {timeline?.report.valuation === 'quantity_fifo_window_delta' && (
+            <p className="chart-notice">当前区间使用本地成交历史重建：已实现盈亏、数量和手续费按真实成交计算；浮盈及总净值按各币种最近成交价估值，不代表分钟市价。超出 K 线保留范围时，理论净值与滑点不可用。</p>
           )}
           {timeline?.theoretical.map((reference, index) => reference.unavailable_reason && <div key={index} className="chart-notice" role="status">{theoreticalExecutionLabel(reference.execution_model)}：{reference.unavailable_reason}</div>)}
           {timeline?.theoretical[0]?.latest_point_ts_us != null && timeline.theoretical[0].latest_point_ts_us < timeline.report.end_ts_us && (

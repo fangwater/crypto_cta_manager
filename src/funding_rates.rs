@@ -278,20 +278,27 @@ impl FundingRateCache {
     pub fn request(&self, symbols: &[String], from: i64, through: i64) -> RateCoverage {
         let now = crate::kline::now_us();
         // Millisecond API requests and a moving wall clock allow a small boundary tolerance.
-        if !self.config.enabled
-            || from < now - RETENTION_US - 60_000_000
-            || through > now + 1_000_000
-        {
+        if !self.config.enabled || through > now + 1_000_000 || through < from {
             return RateCoverage {
                 unavailable_reason: Some(
-                    "公开资金费估算仅支持最近 30 天，且须启用 funding_rates".into(),
+                    "公开资金费估算须启用 funding_rates，且查询区间不能晚于当前时间".into(),
                 ),
                 ..Default::default()
             };
         }
-        self.schedule(symbols, now, true);
+        let retained_from = now - RETENTION_US - 60_000_000;
+        // Only request the retained overlap; older local orders still determine
+        // settlement quantities. A wholly expired query never triggers REST.
+        if through >= retained_from {
+            self.schedule(symbols, now, true);
+        }
         let entries = self.symbols.read().unwrap();
         let mut view = RateCoverage::default();
+        if from < retained_from {
+            view.unavailable_reason = Some(
+                "公开费率仅保留最近 30 天；仅汇总可用时段及币种的估算 Funding，缺失部分未知".into(),
+            );
+        }
         for symbol in symbols {
             let Some(entry) = entries.get(symbol) else {
                 view.unavailable_reason = Some(format!("资金费不支持合约 {symbol}"));
@@ -301,10 +308,15 @@ impl FundingRateCache {
             if let Some(error) = &entry.error {
                 view.unavailable_reason = Some(format!("{symbol} 资金费历史暂不可用：{error}"));
             }
-            if entry.from_us.is_none_or(|ts| ts > from) || entry.through_us.is_none() {
+            if entry.from_us.is_none_or(|ts| ts > from)
+                || entry.through_us.is_none_or(|ts| ts < through - 1000)
+            {
                 view.unavailable_reason
-                    .get_or_insert_with(|| "正在加载公开资金费历史".into());
-            } else {
+                    .get_or_insert_with(|| "公开资金费历史覆盖不完整；仅汇总已加载部分".into());
+            }
+            if entry.from_us.is_some_and(|ts| ts <= through)
+                && entry.through_us.is_some_and(|ts| ts >= from)
+            {
                 view.rates.insert(symbol.clone(), entry.rates.clone());
                 let end = entry.through_us.unwrap().min(through);
                 view.synced_through_ts_us =
@@ -466,6 +478,12 @@ pub struct FundingEstimateRecord {
     pub boundary_fill_count: usize,
 }
 
+#[derive(Default)]
+pub struct FundingEstimateRecords {
+    pub records: Vec<FundingEstimateRecord>,
+    pub skipped_settlements: usize,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct StrategyFundingEstimate {
     pub strategy: String,
@@ -495,15 +513,31 @@ pub struct FundingEstimate {
 pub fn estimate_timeline(
     report: &NavTimelineReport,
     coverage: &RateCoverage,
-    records: &[FundingEstimateRecord],
+    measured: &FundingEstimateRecords,
 ) -> FundingEstimate {
+    let records = &measured.records;
     let mut result = FundingEstimate {
         loading: coverage.loading,
         unavailable_reason: coverage.unavailable_reason.clone(),
         synced_through_ts_us: coverage.synced_through_ts_us,
         ..Default::default()
     };
-    if coverage.unavailable_reason.is_some() {
+    if measured.skipped_settlements > 0 {
+        let reason = result.unavailable_reason.get_or_insert_default();
+        if !reason.is_empty() {
+            reason.push_str("；");
+        }
+        reason.push_str(&format!(
+            "{} 次结算无法还原持仓或金额，已排除，不计入合计",
+            measured.skipped_settlements
+        ));
+        if records.is_empty() {
+            return result;
+        }
+    }
+    // A reason can describe partial coverage. Only absent coverage is null;
+    // an observed overlap with no settlements is a factual zero for that part.
+    if coverage.unavailable_reason.is_some() && coverage.rates.is_empty() {
         return result;
     }
     let income = records.iter().map(|r| r.income_quote).sum();
@@ -772,10 +806,53 @@ mod tests {
             assert!(!cache.request(&symbols, from, now).loading);
         }
         assert_eq!(cache.budget.lock().await.requests.len(), 1);
-        let old = cache.request(&["ETHUSDT".into()], now - RETENTION_US - DAY_US, now);
+        for days in [60, 90] {
+            let partial = cache.request(&symbols, now - days * DAY_US, now);
+            assert!(partial.unavailable_reason.is_some());
+            assert_eq!(partial.rates["BTCUSDC"].len(), 720);
+        }
+        assert_eq!(cache.budget.lock().await.requests.len(), 1);
+        let old = cache.request(
+            &["ETHUSDT".into()],
+            now - 60 * DAY_US,
+            now - RETENTION_US - DAY_US,
+        );
         assert!(old.unavailable_reason.is_some());
         assert!(!cache.symbols.read().unwrap().contains_key("ETHUSDT"));
         server.abort();
+    }
+
+    #[test]
+    fn stale_rate_coverage_keeps_known_settlements_and_marks_unknown_tail_partial() {
+        let cache = FundingRateCache::new(FundingRateConfig::default()).unwrap();
+        let now = crate::kline::now_us();
+        let through = now - 2 * DAY_US;
+        let symbols = vec!["BTCUSDT".into()];
+        cache.symbols.write().unwrap().insert(
+            "BTCUSDT".into(),
+            SymbolCache {
+                from_us: Some(now - 30 * DAY_US),
+                through_us: Some(through),
+                attempted_us: now, // No REST is needed for this cached-coverage test.
+                rates: Arc::new(vec![FundingRate {
+                    symbol: "BTCUSDT".into(),
+                    ts_us: through,
+                    rate: 0.001,
+                    mark_price: 100.0,
+                    rate_type: "Regular".into(),
+                }]),
+                ..Default::default()
+            },
+        );
+        let complete = cache.request(&symbols, now - 7 * DAY_US, through);
+        assert!(complete.unavailable_reason.is_none());
+        let partial = cache.request(&symbols, now - 7 * DAY_US, now);
+        assert!(partial.unavailable_reason.is_some());
+        assert_eq!(partial.rates["BTCUSDT"].len(), 1);
+        assert_eq!(partial.synced_through_ts_us, Some(through));
+        let absent = cache.request(&symbols, through + 1, now);
+        assert!(absent.unavailable_reason.is_some());
+        assert!(absent.rates.is_empty());
     }
 
     #[test]

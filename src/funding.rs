@@ -766,6 +766,9 @@ impl FundingHub {
         // explicitly scoped multi-source report; its sum uses the filtered records.
         summary.income_quote = records.iter().map(|r| r.income_quote).sum();
         summary.record_count = records.len();
+        summary
+            .symbols
+            .retain(|symbol| report.selected_symbols.contains(&symbol.symbol));
         summary.income_by_asset.clear();
         for record in &records {
             *summary
