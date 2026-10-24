@@ -211,18 +211,18 @@ impl NavTimelineCache {
     /// Daily equity reconstruction continues to use strict `rebuild_priced`.
     pub async fn rebuild_available(
         self: &Arc<Self>,
-        request: NavTimelineRequest,
+        mut request: NavTimelineRequest,
         allocation: bool,
         store: Arc<KlineStore>,
     ) -> Result<Arc<NavTimelineReport>> {
         let sources = select_sources(&self.config, &request.selected_source_ids)?;
-        let start = request.start_ts_us.unwrap_or_else(|| {
+        let start = request.resolved_start_ts_us(
             sources
                 .iter()
                 .filter_map(|s| self.start_ts_us(&s.id, request.end_ts_us, allocation))
-                .min()
-                .unwrap_or(request.end_ts_us)
-        });
+                .min(),
+        );
+        request.start_ts_us = Some(start);
         let baseline_open = start.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
         let now = now_us();
         if baseline_open < store.cutoff_us(now)
@@ -305,13 +305,13 @@ impl NavTimelineCache {
             return tokio::task::spawn_blocking(move || cache.rebuild(request, allocation)).await?;
         }
         let sources = select_sources(&self.config, &request.selected_source_ids)?;
-        let start = request.start_ts_us.unwrap_or_else(|| {
+        let start = request.resolved_start_ts_us(
             sources
                 .iter()
                 .filter_map(|s| self.start_ts_us(&s.id, request.end_ts_us, allocation))
-                .min()
-                .unwrap_or(request.end_ts_us)
-        });
+                .min(),
+        );
+        request.start_ts_us = Some(start);
         validate(&store, start, request.end_ts_us)?;
         request.selected_source_ids.sort();
         request.selected_source_ids.dedup();
@@ -388,6 +388,56 @@ mod tests {
         db.db()
             .put_cf(&db.db().cf_handle("klines_1m").unwrap(), key, value)
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn clamped_short_history_uses_minute_marks_for_every_window() {
+        let (_dir, db, store) = fixture();
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US;
+        let first = end - 2 * MINUTE_US + 123;
+        let mut cache =
+            super::super::tests::minute_mark_fixture(vec![super::super::tests::event_at(
+                first, first, "BTCUSDT", 1, 1, 100.0, 1.0,
+            )]);
+        cache.config.sources[0].venue = "binance-futures".into();
+        let cache = Arc::new(cache);
+        for open in [end - 3 * MINUTE_US, end - 2 * MINUTE_US, end - MINUTE_US] {
+            candle(&db, "BTCUSDT", open, 120.0);
+        }
+        for days in [Some(1), Some(7), Some(30), Some(60), Some(90), None] {
+            let request = NavTimelineRequest {
+                start_ts_us: days.map(|days| end - days * crate::funding_rates::DAY_US),
+                end_ts_us: end,
+                selected_source_ids: vec!["trade01".into()],
+                selected_symbols: vec![],
+                max_points: 200,
+            };
+            for allocation in [false, true] {
+                let report = cache
+                    .rebuild_available(request.clone(), allocation, store.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(report.start_ts_us, first);
+                assert_eq!(report.earliest_start_ts_us, first);
+                assert_eq!(report.end_ts_us, end);
+                assert_eq!(report.valuation, VALUATION);
+                assert_eq!(report.summary.fill_count, 1);
+                assert_eq!(report.summary.floating_pnl_quote, 20.0);
+                assert_eq!(report.points.first().unwrap().totals, NavTotals::default());
+                assert_eq!(report.points.last().unwrap().totals, report.summary);
+                // Strict pricing also validates the effective range, including
+                // ALL and raw starts older than candle retention.
+                assert_eq!(
+                    cache
+                        .rebuild_priced(request.clone(), allocation, store.clone())
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    report.as_ref()
+                );
+            }
+        }
+        assert_eq!(store.status().requests, 0);
     }
 
     #[tokio::test]

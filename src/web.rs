@@ -5453,10 +5453,19 @@ mod tests {
 
     #[tokio::test]
     async fn long_window_timeline_handlers_succeed_without_funding_or_minute_prices() {
+        assert_long_window_timeline_handlers(90).await;
+    }
+
+    #[tokio::test]
+    async fn timeline_handlers_clamp_windows_longer_than_local_history() {
+        assert_long_window_timeline_handlers(45).await;
+    }
+
+    async fn assert_long_window_timeline_handlers(history_days: i64) {
         let dir = tempfile::tempdir().unwrap();
         let day = crate::funding_rates::DAY_US;
         let end = (unix_now_us() / 1000 - 60_000) * 1000;
-        let start = end - 90 * day;
+        let start = end - history_days * day;
         let mut config: AppConfig =
             toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
         config.sources.truncate(1);
@@ -5596,13 +5605,18 @@ mod tests {
                     let report = &value["report"];
                     assert_eq!(
                         report["start_ts_us"],
-                        days.map_or(start, |days| end - days * day)
+                        days.map_or(start, |days| (end - days * day).max(start))
                     );
+                    assert_eq!(report["earliest_start_ts_us"], start);
                     assert_eq!(report["end_ts_us"], end);
                     assert_eq!(report["valuation"], "quantity_fifo_window_delta");
                     assert_eq!(
                         report["summary"]["fill_count"],
-                        if days == Some(60) { 2 } else { 3 }
+                        if days == Some(60) && history_days > 60 {
+                            2
+                        } else {
+                            3
+                        }
                     );
                     assert_eq!(report["summary"]["realized_pnl_before_fee_quote"], 20.0);
                     assert!(value["estimated_funding"]["income_quote"].is_null());

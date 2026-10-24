@@ -357,6 +357,16 @@ pub struct NavTimelineRequest {
     pub max_points: usize,
 }
 
+impl NavTimelineRequest {
+    /// Short account histories have the same boundary for every requested window.
+    fn resolved_start_ts_us(&self, earliest: Option<i64>) -> i64 {
+        match earliest {
+            Some(earliest) => self.start_ts_us.unwrap_or(earliest).max(earliest),
+            None => self.start_ts_us.unwrap_or(self.end_ts_us),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StrategyPnlRequest {
     pub source_id: String,
@@ -2757,17 +2767,7 @@ fn rebuild_nav_timeline_with_cache(
     }
 
     let earliest_start_ts_us = source_anchors.into_iter().min();
-    let start_ts_us = request
-        .start_ts_us
-        .or(earliest_start_ts_us)
-        .unwrap_or(request.end_ts_us);
-    if let Some(earliest) = earliest_start_ts_us {
-        if start_ts_us < earliest {
-            bail!(
-                "start timestamp must be greater than or equal to earliest source timestamp {earliest}"
-            );
-        }
-    }
+    let start_ts_us = request.resolved_start_ts_us(earliest_start_ts_us);
     let earliest_start_ts_us = earliest_start_ts_us.unwrap_or(start_ts_us);
     if request.end_ts_us < start_ts_us {
         bail!("end timestamp must be greater than or equal to start timestamp");
@@ -4102,7 +4102,7 @@ mod tests {
         payload
     }
 
-    fn event_at(
+    pub(super) fn event_at(
         record_ts_us: i64,
         fill_ts_us: i64,
         symbol: &str,
@@ -5001,7 +5001,7 @@ mod tests {
         );
     }
 
-    fn minute_mark_fixture(events: Vec<UniformOrderEvent>) -> NavTimelineCache {
+    pub(super) fn minute_mark_fixture(events: Vec<UniformOrderEvent>) -> NavTimelineCache {
         let history = NavSourceHistory {
             events: events.into_iter().map(Arc::<NavEvent>::from).collect(),
             ..Default::default()
@@ -5497,6 +5497,119 @@ mod tests {
                 .totals
                 .nav_change_before_fee_quote,
             10.0,
+        );
+    }
+
+    #[test]
+    fn timeline_clamps_all_windows_to_selected_history_and_keeps_boundary_fills() {
+        let day = crate::funding_rates::DAY_US;
+        let end = 100 * day;
+        let first = end - day / 2 + 123; // Preserve microseconds, including the first fill.
+        let config = app_config(vec![
+            source("trade01", Some(0.001)),
+            source("trade02", Some(0.001)),
+        ]);
+        let histories = Arc::new(NavSourceHistories::from([
+            (
+                "trade01".into(),
+                NavSourceHistory::from_test_events(im::vector![
+                    Arc::from(strategy_event_at(
+                        first, first, "BTCUSDT", 1, 1, 100.0, 1.0, "alpha"
+                    )),
+                    Arc::from(strategy_event_at(
+                        end, end, "BTCUSDT", 1, 2, 110.0, 1.0, "alpha"
+                    )),
+                ]),
+            ),
+            (
+                "trade02".into(),
+                NavSourceHistory::from_test_events(im::vector![Arc::from(event_at(
+                    1, 1, "BTCUSDT", 1, 1, 1000.0, 100.0
+                )),]),
+            ),
+        ]));
+        let cache = NavTimelineCache::build(
+            config.clone(),
+            Arc::default(),
+            Arc::default(),
+            histories.clone(),
+        )
+        .unwrap();
+        for days in [Some(1), Some(7), Some(30), Some(60), Some(90), None] {
+            let request = NavTimelineRequest {
+                start_ts_us: days.map(|days| end - days * day),
+                ..timeline_request(first, end, vec!["trade01".into()], vec![])
+            };
+            let uncached = rebuild_nav_timeline_from_histories_with_snapshots(
+                &config,
+                request.clone(),
+                &BTreeMap::new(),
+                &histories,
+            )
+            .unwrap();
+            for allocation in [false, true] {
+                let report = cache.rebuild(request.clone(), allocation).unwrap();
+                assert_eq!(report.as_ref(), &uncached);
+                assert_eq!(report.start_ts_us, first);
+                assert_eq!(report.earliest_start_ts_us, first);
+                assert_eq!(report.end_ts_us, end);
+                assert_eq!(report.summary.fill_count, 2);
+                assert_close(report.summary.realized_pnl_before_fee_quote, 10.0);
+                assert_close(report.summary.estimated_trading_fee_quote, 0.21);
+                assert_eq!(report.points.first().unwrap().totals, NavTotals::default());
+                assert_eq!(report.points.last().unwrap().totals, report.summary);
+                assert_eq!(report.strategy_points[0].summary, report.summary);
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_clamp_respects_snapshot_anchors_empty_history_and_invalid_ranges() {
+        let config = app_config(vec![source("trade01", Some(0.0))]);
+        let histories = Arc::new(NavSourceHistories::from([(
+            "trade01".into(),
+            NavSourceHistory::default(),
+        )]));
+        let snapshots = Arc::new(SourcePositionSnapshots::from([(
+            "trade01".into(),
+            position_snapshot("trade01", 10, 1.0, Some(100.0)),
+        )]));
+        let cache =
+            NavTimelineCache::build(config.clone(), snapshots, Arc::default(), histories.clone())
+                .unwrap();
+        let request = timeline_request(1, 20, vec!["trade01".into()], vec![]);
+        for allocation in [false, true] {
+            let report = cache.rebuild(request.clone(), allocation).unwrap();
+            assert_eq!(report.start_ts_us, 10);
+            assert_eq!(report.earliest_start_ts_us, 10);
+            assert_eq!(report.summary, NavTotals::default());
+            assert_eq!(report.symbols[0].net_quantity, 1.0);
+        }
+        let empty =
+            NavTimelineCache::build(config, Arc::default(), Arc::default(), histories).unwrap();
+        assert_eq!(
+            empty.rebuild(request.clone(), false).unwrap().start_ts_us,
+            1
+        );
+        assert_eq!(
+            empty
+                .rebuild(
+                    NavTimelineRequest {
+                        start_ts_us: None,
+                        ..request
+                    },
+                    false
+                )
+                .unwrap()
+                .start_ts_us,
+            20
+        );
+        assert!(
+            cache
+                .rebuild(timeline_request(21, 20, vec![], vec![]), false)
+                .unwrap_err()
+                .to_string()
+                .contains("end timestamp")
         );
     }
 
