@@ -76,13 +76,14 @@ export function WorkspacePage() {
       <div className="overview-stats" aria-live="polite">
         <Summary label="账户数" value={data ? String(rows.length) : '—'} />
         <Summary label="总权益" value={number(data && !externalPending ? overviewTotal(rows, 'equity') : null)} title="当前筛选账户的权益合计；有账户缺失或过期数据时不显示不完整合计" />
-        <Summary label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；需要完整且有效的昨日权益记录" />
+        <Summary label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；CTA 使用权益变化，FR 使用已实现净收益" />
         <Summary label="杠杆告警" value={leverageAlerts == null ? '—' : String(leverageAlerts)} title={data?.alerts.long_leverage_limit == null || data?.alerts.short_leverage_limit == null ? '尚未提供原页面的杠杆告警阈值' : `多头 > ${data.alerts.long_leverage_limit}，空头 > ${data.alerts.short_leverage_limit}`} warn={!!leverageAlerts} />
         <Summary label="超时告警" value={timeoutAlerts == null ? '—' : String(timeoutAlerts)} title={data?.alerts.timeout_secs == null ? '尚未提供原页面的超时告警阈值' : `权益数据超过 ${data.alerts.timeout_secs} 秒未更新`} warn={!!timeoutAlerts} />
       </div>
     </section>
     {error && <Alert tone="error" className="mb-4">更新失败：{error}。{data ? '当前保留上次数据。' : '请刷新重试。'}</Alert>}
     {externalIssues && <Alert tone="warning" className="mb-4">FR 账户正在同步或数据已过期。已有数据继续展示；含缺失或过期账户的汇总暂不显示。</Alert>}
+    {rows.some(row => row.account_kind === 'fr') && <p className="mb-4 text-sm text-muted">FR 今日盈利 = 已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息，不含未平仓浮盈亏；约每 5 分钟更新。权益及权益回撤仍反映账户净值。</p>}
     <section className="overview-panel" aria-labelledby="overview-table-title">
       <div className="overview-table-toolbar">
         <div className="overview-table-title"><h2 id="overview-table-title">账户监控</h2><span>{user.username}</span></div>
@@ -124,7 +125,12 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
       const side = sideClass(column.key)
       const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)
       const reconstructed = row.history_rebuilt_at_ms != null && ['yesterday_equity', 'today_profit', 'profit_percent', 'max_drawdown_15d_percent'].includes(column.key)
-      const title = value == null ? column.reason : time ? '上海时间' : reconstructed ? `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算；更新时间 ${dateTime.format(row.history_rebuilt_at_ms!)} 上海时间` : undefined
+      const updated = row.history_rebuilt_at_ms == null ? '' : `；更新时间 ${dateTime.format(row.history_rebuilt_at_ms)} 上海时间`
+      const title = row.account_kind === 'fr' && profit
+        ? value == null ? 'FR 已实现收益历史尚不可用，或缺少正的零点权益以计算收益率' : `FR 按当日已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息计算，不含未平仓浮盈亏；盈亏比例以零点权益为分母${updated}`
+        : value == null ? column.reason : time ? '上海时间' : reconstructed
+          ? row.account_kind === 'fr' ? `按事实权益与 FR 总盈亏重建，包含浮盈亏${updated}` : `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算${updated}`
+          : undefined
       return <td key={column.key} className={className} title={title}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}</td>
     })}
   </tr>

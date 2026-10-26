@@ -966,7 +966,9 @@ keep namespaced identities, separate read-only catalogs/view grants and NAV
 detail links. Never register an FR account as an Exec source or publish to it.
 Keep last good rows on failures, mark stale data and suppress incomplete totals.
 Existing databases need explicit `scripts/apply_external_overview_schema.sql`;
-normal startup never runs DDL. See `docs/fr_account_overview.md`.
+normal startup never runs DDL. FR homepage profit uses realized trading PnL plus
+actual funding minus fees and interest, excluding open-position floating PnL;
+equity remains factual. See `docs/fr_account_overview.md`.
 
 ## Central PostgreSQL Layout
 
