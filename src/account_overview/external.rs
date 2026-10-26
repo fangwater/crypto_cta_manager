@@ -24,7 +24,7 @@ impl Default for Settings {
             enabled: false,
             provider_id: "jp-meta-nav".into(),
             url: String::new(),
-            detail_base_url: "/nav/strategies/".into(),
+            detail_base_url: "/nav/#/strategies/".into(),
             token_env: "CRYPTO_NAV_OVERVIEW_TOKEN".into(),
             refresh_secs: 15,
             request_timeout_secs: 10,
@@ -59,7 +59,11 @@ impl Settings {
         ensure!(
             self.detail_base_url.starts_with('/')
                 && !self.detail_base_url.starts_with("//")
-                && !self.detail_base_url.contains(['?', '#', '\\'])
+                && !self.detail_base_url.contains(['?', '\\'])
+                && self
+                    .detail_base_url
+                    .split_once('#')
+                    .is_none_or(|(_, route)| { route.starts_with('/') && !route.contains('#') })
                 && self.detail_base_url.ends_with('/'),
             "nav_overview detail_base_url must be a same-origin directory"
         );
@@ -561,7 +565,11 @@ mod tests {
         assert_eq!(s.source_id("same"), "external:jp-meta-nav:same");
         s.detail_base_url = "//other/".into();
         assert!(s.validate().is_err());
-        s.detail_base_url = "/nav/strategies/".into();
+        s.detail_base_url = "/nav/#/strategies/".into();
+        assert!(s.validate().is_ok());
+        s.detail_base_url = "/nav/#https://other/".into();
+        assert!(s.validate().is_err());
+        s.detail_base_url = "/nav/#/strategies/".into();
         s.url = "http://user:secret@example.test/api".into();
         assert!(s.validate().is_err());
     }
@@ -632,7 +640,7 @@ mod tests {
         );
         assert_eq!(
             current.accounts[0].detail_url.as_deref(),
-            Some("/nav/strategies/binance_fr_arb02")
+            Some("/nav/#/strategies/binance_fr_arb02")
         );
         hub.cache.write().unwrap().latest_failed = true;
         let mut stale = empty();

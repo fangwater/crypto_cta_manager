@@ -25,7 +25,7 @@ CTA Manager 主动轮询 NAV Manager 的只读接口，将全部已启用的
 - 汇总包含当前有权限且筛选后的账户。缺失或过期的数据不会作为零计入，
   也不会显示成完整总额；CTA 数据和其他 FR 账户继续展示。
 
-FR 名称进入 `/nav/strategies/<slug>`，NAV 详情继续使用 NAV 自己的登录和权限。
+FR 名称进入 `/nav/#/strategies/<slug>`，NAV 详情继续使用 NAV 自己的登录和权限。
 首页的 FR 查看权限由 CTA 权限管理页单独管理，默认仅管理员可见。
 FR 只登记到 `cta_external_overview_accounts`，不进入 Exec 账户目录，不能
 绑定策略、发布目标或修改交易设置。查看授权单独保存在
