@@ -959,6 +959,15 @@ Install the pinned Ubuntu Noble Nginx package without sudo through
 package checksums are fixed in the script. Host-global Manager, frontend, and
 Nginx deployment files live under `deploy/crypto_cta_manager/`.
 
+FR homepage aggregation pulls the independent NAV Manager's
+`/api/integrations/fr-account-overview` over authenticated HTTP, enabled only
+through `[dashboard.nav_overview]`. Discover all enabled funding-rate accounts;
+keep namespaced identities, separate read-only catalogs/view grants and NAV
+detail links. Never register an FR account as an Exec source or publish to it.
+Keep last good rows on failures, mark stale data and suppress incomplete totals.
+Existing databases need explicit `scripts/apply_external_overview_schema.sql`;
+normal startup never runs DDL. See `docs/fr_account_overview.md`.
+
 ## Central PostgreSQL Layout
 
 el_dev runs the native PostgreSQL 16 cluster `16/cta` with the following

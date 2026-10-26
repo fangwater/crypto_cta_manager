@@ -21,6 +21,9 @@ import {
   type PublishToken,
   type SourceGrant,
   getDashboard,
+  getExternalOverviewAccess,
+  setExternalOverviewViewers,
+  type ExternalOverviewAccess,
 } from '../api'
 import { AppShell, PageIntro } from '../components/AppShell'
 import { useAuth } from '../components/AuthGate'
@@ -73,6 +76,8 @@ export function AdminPage() {
   const { user } = useAuth()
   const isAdmin = user.role === 'admin'
   const [users, setUsers] = useState<AuthUser[]>([])
+  const [externalAccounts, setExternalAccounts] = useState<ExternalOverviewAccess[]>([])
+  const [savingExternal, setSavingExternal] = useState<string | null>(null)
   const [sources, setSources] = useState<
     Array<{ source_id: string; account: string; access_level?: 'view' | 'configure' | null }>
   >([])
@@ -119,6 +124,7 @@ export function AdminPage() {
     ]
     if (isAdmin) {
       jobs.push(listPublishTokens(controller.signal).then(setFallbackTokens))
+      jobs.push(getExternalOverviewAccess(controller.signal).then(setExternalAccounts))
     }
     Promise.all(jobs).catch((reason: unknown) => {
       if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -399,6 +405,23 @@ export function AdminPage() {
           </CardContent>
         </Card>
       )}
+      {isAdmin && externalAccounts.length > 0 && <Card className="mt-5">
+        <CardHeader><CardTitle>FR 账户查看权限</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted">管理员可查看全部 FR 账户。普通用户须单独授权，授权后可在首页查看和汇总；NAV 详情仍使用 NAV 平台的登录与权限。</p>
+          {externalAccounts.map(account => <div key={account.source_id} className="rounded-xl border border-border-soft p-4">
+            <p className="text-sm font-medium text-ink">{account.account}</p>
+            <div className="mt-3 flex flex-wrap gap-4">{grantableUsers.map(target => <label key={target.user_id} className="flex items-center gap-2 text-xs text-ink">
+              <input type="checkbox" checked={account.viewers.includes(target.user_id)} disabled={savingExternal === account.source_id} onChange={event => {
+                const viewers = event.target.checked ? [...account.viewers, target.user_id] : account.viewers.filter(id => id !== target.user_id)
+                setSavingExternal(account.source_id)
+                void setExternalOverviewViewers(account.source_id, viewers).then(() => setExternalAccounts(current => current.map(row => row.source_id === account.source_id ? { ...row, viewers } : row)))
+                  .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason))).finally(() => setSavingExternal(null))
+              }} />{target.username}
+            </label>)}</div>
+          </div>)}
+        </CardContent>
+      </Card>}
       <Card className="mt-5">
         <CardHeader><CardTitle>策略权限</CardTitle></CardHeader>
         <CardContent className="space-y-5">

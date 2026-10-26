@@ -717,3 +717,16 @@ export function saveAccountFunding(sourceId: string, enabled: boolean, refreshSe
 export function getAccountOverview(date: string, signal?: AbortSignal) {
   return requestJson<AccountOverview>(`/account-overview${date ? `?date=${encodeURIComponent(date)}` : ''}`, { signal })
 }
+
+export interface ExternalOverviewAccess {
+  source_id: string
+  account: string
+  venue: string
+  viewers: number[]
+}
+export function getExternalOverviewAccess(signal?: AbortSignal) {
+  return requestJson<ExternalOverviewAccess[]>('/account-overview/external-access', { signal })
+}
+export function setExternalOverviewViewers(sourceId: string, viewers: number[]) {
+  return requestJson<{ ok: boolean }>(`/account-overview/external-access/${encodeURIComponent(sourceId)}`, { method: 'PUT', body: JSON.stringify({ viewers }) })
+}

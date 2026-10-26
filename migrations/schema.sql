@@ -261,6 +261,23 @@ CREATE TABLE cta_strategy_position_snapshots (
     CONSTRAINT cta_strategy_position_snapshots_snapshot_ts_us_check CHECK ((snapshot_ts_us > 0))
 );
 
+-- External monitoring accounts remain outside the Exec source catalog.
+CREATE TABLE cta_external_overview_accounts (
+    source_id text PRIMARY KEY,
+    provider_id text NOT NULL,
+    upstream_id text NOT NULL,
+    account_label text NOT NULL,
+    venue_label text NOT NULL,
+    enabled boolean NOT NULL DEFAULT true,
+    UNIQUE (provider_id, upstream_id)
+);
+
+CREATE TABLE cta_external_overview_viewers (
+    source_id text NOT NULL REFERENCES cta_external_overview_accounts(source_id),
+    user_id bigint NOT NULL,
+    PRIMARY KEY (source_id, user_id)
+);
+
 CREATE TABLE cta_user_source_permissions (
     user_id bigint NOT NULL,
     source_id text NOT NULL,
@@ -343,6 +360,9 @@ ALTER TABLE cta_user_source_permissions ADD CONSTRAINT cta_user_source_permissio
     FOREIGN KEY (source_id) REFERENCES cta_order_sources(source_id) ON DELETE CASCADE;
 
 ALTER TABLE cta_user_source_permissions ADD CONSTRAINT cta_user_source_permissions_user_id_fkey
+    FOREIGN KEY (user_id) REFERENCES cta_users(user_id) ON DELETE CASCADE;
+
+ALTER TABLE cta_external_overview_viewers ADD CONSTRAINT cta_external_overview_viewers_user_id_fkey
     FOREIGN KEY (user_id) REFERENCES cta_users(user_id) ON DELETE CASCADE;
 
 ALTER SEQUENCE cta_auth_sessions_session_id_seq OWNED BY cta_auth_sessions.session_id;

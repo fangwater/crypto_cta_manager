@@ -39,12 +39,14 @@ export function WorkspacePage() {
   const { user } = useAuth()
   const [search, setSearch] = useState('')
   const [venue, setVenue] = useState('all')
+  const [kind, setKind] = useState('all')
   const [filterOpen, setFilterOpen] = useState(false)
   const [hidden, setHidden] = useState<Set<string>>(new Set())
   const [sort, setSort] = useState<{ key: SortKey; descending: boolean }>({ key: 'account', descending: false })
   const accounts = data?.accounts ?? []
   const venues = [...new Set(accounts.map(account => account.venue))].sort()
   const rows = accounts.filter(account => !hidden.has(account.source_id)
+    && (kind === 'all' || (account.account_kind || 'cta') === kind)
     && (venue === 'all' || account.venue === venue)
     && `${account.account} ${account.source_id}`.toLowerCase().includes(search.trim().toLowerCase()))
     .sort((a, b) => {
@@ -61,22 +63,26 @@ export function WorkspacePage() {
   }
   const leverageAlerts = data ? overviewAlertCount(rows, 'leverage_alert') : null
   const timeoutAlerts = data ? overviewAlertCount(rows, 'timeout_alert') : null
+  const externalPending = kind !== 'cta' && !accounts.some(row => row.account_kind === 'fr') && data?.external_status?.some(status => status.status !== 'live')
+  const externalIssues = kind !== 'cta' && data?.external_status?.some(status => status.status !== 'live')
   return <AppShell active="workspace" title="CTA 管理平台" subtitle="账户监控总览" icon={LayoutDashboard} wide className="overview-page">
     <section className="overview-toolbar" aria-label="总览筛选与统计">
       <div className="overview-filters">
+        <label>账户类别<select aria-label="账户类别" value={kind} onChange={event => setKind(event.target.value)}><option value="all">全部账户</option><option value="cta">CTA</option><option value="fr">FR</option></select></label>
         <label>账户类型<select aria-label="账户类型" value={venue} onChange={event => setVenue(event.target.value)}><option value="all">全部类型</option>{venues.map(value => <option key={value} value={value}>{accountVenueLabel(value)}</option>)}</select></label>
         <label title="每日以上海时间 00:00 为结算边界，表内时间均为上海时间">日期（上海时间）<select aria-label="日期" value={date} onChange={event => setDate(event.target.value)}><option value="">最新</option>{[...new Set([...(date ? [date] : []), ...(data?.dates ?? [])])].sort().reverse().map(value => <option key={value} value={value}>{value}</option>)}</select></label>
         <label className="overview-auto"><input type="checkbox" checked={autoRefresh} onChange={event => setAutoRefresh(event.target.checked)} />自动刷新<span>{refreshing ? '更新中' : autoRefresh ? `${countdown} 秒` : '已暂停'}</span></label>
       </div>
       <div className="overview-stats" aria-live="polite">
         <Summary label="账户数" value={data ? String(rows.length) : '—'} />
-        <Summary label="总权益" value={number(data ? overviewTotal(rows, 'equity') : null)} title="当前筛选账户的权益合计；有账户缺失数据时不显示不完整合计" />
-        <Summary label="今日总盈利" value={number(data ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；需要完整的昨日权益记录" />
+        <Summary label="总权益" value={number(data && !externalPending ? overviewTotal(rows, 'equity') : null)} title="当前筛选账户的权益合计；有账户缺失或过期数据时不显示不完整合计" />
+        <Summary label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；需要完整且有效的昨日权益记录" />
         <Summary label="杠杆告警" value={leverageAlerts == null ? '—' : String(leverageAlerts)} title={data?.alerts.long_leverage_limit == null || data?.alerts.short_leverage_limit == null ? '尚未提供原页面的杠杆告警阈值' : `多头 > ${data.alerts.long_leverage_limit}，空头 > ${data.alerts.short_leverage_limit}`} warn={!!leverageAlerts} />
         <Summary label="超时告警" value={timeoutAlerts == null ? '—' : String(timeoutAlerts)} title={data?.alerts.timeout_secs == null ? '尚未提供原页面的超时告警阈值' : `权益数据超过 ${data.alerts.timeout_secs} 秒未更新`} warn={!!timeoutAlerts} />
       </div>
     </section>
     {error && <Alert tone="error" className="mb-4">更新失败：{error}。{data ? '当前保留上次数据。' : '请刷新重试。'}</Alert>}
+    {externalIssues && <Alert tone="warning" className="mb-4">FR 账户正在同步或数据已过期。已有数据继续展示；含缺失或过期账户的汇总暂不显示。</Alert>}
     <section className="overview-panel" aria-labelledby="overview-table-title">
       <div className="overview-table-toolbar">
         <div className="overview-table-title"><h2 id="overview-table-title">账户监控</h2><span>{user.username}</span></div>
@@ -108,12 +114,12 @@ function Summary({ label, value, title, warn }: { label: string; value: string; 
 function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
   return <tr data-source={row.source_id}>
     <td className="overview-index">{index + 1}</td>
-    <th scope="row" className="overview-account-cell"><a href={routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a></th>
+    <th scope="row" className="overview-account-cell"><a href={row.account_kind === 'fr' ? row.detail_url ?? undefined : routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a>{row.account_kind === 'fr' && <span className="ml-2 text-[10px] text-muted">FR{row.collection_status === 'stale' ? ' · 已过期' : row.collection_status === 'loading' ? ' · 同步中' : row.collection_status === 'unavailable' ? ' · 暂不可用' : ''}</span>}</th>
     {columns.map(column => {
       const value = row[column.key]
       const time = column.key === 'date_ms' || column.key === 'queried_at_ms'
       const profit = column.key === 'today_profit' || column.key === 'profit_percent'
-      const alert = column.key === 'date_ms' && row.timeout_alert || (column.key === 'long_leverage' || column.key === 'short_leverage') && row.leverage_alert
+      const alert = column.key === 'date_ms' && (row.timeout_alert || row.collection_status === 'stale') || (column.key === 'long_leverage' || column.key === 'short_leverage') && row.leverage_alert
       const className = alert ? 'overview-stale' : profit && value != null && value !== 0 ? value > 0 ? 'overview-positive' : 'overview-negative' : time ? 'overview-time' : column.key === 'equity' ? 'overview-equity' : ''
       const side = sideClass(column.key)
       const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)

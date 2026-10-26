@@ -219,6 +219,7 @@ struct WebState {
     reload_notify: ReloadNotifyHub,
     live_equity: LiveEquityHub,
     account_overview: crate::account_overview::AccountOverview,
+    external_overview: crate::account_overview::external::ExternalOverview,
     position_archive: Arc<PositionArchive>,
     theoretical_targets: Arc<crate::theoretical_nav::TheoreticalTargetCache>,
     klines: Arc<KlineStore>,
@@ -446,6 +447,11 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     crate::kline::validate_host_configs(&config)?;
     let manager_db = ManagerDb::open(&config.kline.rocksdb_path)?;
     let account_overview = crate::account_overview::AccountOverview::open(manager_db.clone())?;
+    let external_overview = crate::account_overview::external::ExternalOverview::new(
+        config.dashboard.nav_overview.clone(),
+    );
+    external_overview.initialize(&pool).await?;
+    external_overview.spawn(pool.clone())?;
     account_overview.spawn(
         config.sources.clone(),
         live_equity.clone(),
@@ -525,6 +531,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         reload_notify,
         live_equity,
         account_overview,
+        external_overview,
         position_archive,
         theoretical_targets,
         klines,
@@ -557,6 +564,14 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/manager_pnl_sdk.py", get(manager_sdk))
         .route("/api/dashboard", get(dashboard))
         .route("/api/account-overview", get(account_overview_report))
+        .route(
+            "/api/account-overview/external-access",
+            get(external_overview_access),
+        )
+        .route(
+            "/api/account-overview/external-access/{source_id}",
+            put(save_external_overview_access),
+        )
         .route("/api/symbols", get(list_symbols))
         .route("/api/timeline", get(timeline))
         .route("/api/account-timeline", get(account_timeline))
@@ -1174,6 +1189,7 @@ async fn account_overview_report(
     State(state): State<WebState>,
     Query(query): Query<AccountOverviewQuery>,
     Extension(visible): Extension<VisibleSources>,
+    Extension(user): Extension<AuthUser>,
 ) -> Result<Response, ApiError> {
     let date = match query
         .date
@@ -1196,10 +1212,57 @@ async fn account_overview_report(
         .collect::<Vec<_>>();
     let hub = state.account_overview.clone();
     let settings = state.config.dashboard.overview_alerts.clone();
-    let report = tokio::task::spawn_blocking(move || hub.report(&sources, date, &settings))
+    let mut report = tokio::task::spawn_blocking(move || hub.report(&sources, date, &settings))
         .await
         .map_err(|error| anyhow::anyhow!("account overview task failed: {error}"))??;
+    state
+        .external_overview
+        .merge(
+            &state.pool,
+            &user,
+            date,
+            &state.config.dashboard.overview_alerts,
+            &mut report,
+        )
+        .await?;
     Ok((NO_STORE, Json(report)).into_response())
+}
+
+async fn external_overview_access(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() {
+        return Ok(forbidden("administrator permission required"));
+    }
+    Ok((
+        NO_STORE,
+        Json(state.external_overview.access(&state.pool).await?),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct ExternalViewersRequest {
+    viewers: Vec<i64>,
+}
+async fn save_external_overview_access(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Path(source_id): Path<String>,
+    Json(body): Json<ExternalViewersRequest>,
+) -> Result<Response, ApiError> {
+    if !user.is_admin() {
+        return Ok(forbidden("administrator permission required"));
+    }
+    match state
+        .external_overview
+        .set_viewers(&state.pool, &source_id, &body.viewers)
+        .await
+    {
+        Ok(()) => Ok((NO_STORE, Json(serde_json::json!({"ok":true}))).into_response()),
+        Err(error) => Ok(bad_request(error.to_string())),
+    }
 }
 
 async fn dashboard(
@@ -5554,6 +5617,9 @@ mod tests {
             exec_config: ExecConfigClient::new(1).unwrap(),
             live_equity: LiveEquityHub::default(),
             account_overview: crate::account_overview::AccountOverview::open(db.clone()).unwrap(),
+            external_overview: crate::account_overview::external::ExternalOverview::new(
+                Default::default(),
+            ),
             theoretical_targets: crate::theoretical_nav::TheoreticalTargetCache::new(
                 config.clone(),
                 position_archive.clone(),

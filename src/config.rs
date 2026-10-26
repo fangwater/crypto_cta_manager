@@ -138,6 +138,7 @@ pub struct DatabaseConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct DashboardConfig {
     pub overview_alerts: crate::account_overview::OverviewAlertSettings,
+    pub nav_overview: crate::account_overview::external::Settings,
     pub refresh_secs: u64,
     /// CPU computation only; independent of Binance request concurrency/budget.
     pub compute_threads: usize,
@@ -345,6 +346,7 @@ impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
             overview_alerts: Default::default(),
+            nav_overview: Default::default(),
             refresh_secs: 60,
             compute_threads: crate::analysis::default_threads(),
         }
@@ -527,6 +529,7 @@ impl AppConfig {
         if self.database.max_connections == 0 {
             bail!("database.max_connections must be greater than zero");
         }
+        self.dashboard.nav_overview.validate()?;
         let alerts = &self.dashboard.overview_alerts;
         for limit in [alerts.long_leverage_limit, alerts.short_leverage_limit]
             .into_iter()

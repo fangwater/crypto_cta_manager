@@ -16,6 +16,7 @@ use crate::manager_db::ManagerDb;
 use crate::viz_snapshot::VizSnapshotClient;
 
 pub mod daily;
+pub mod external;
 mod margin;
 
 const CF: &str = "account_observations";
@@ -68,7 +69,8 @@ pub struct OverviewAlertSettings {
     pub timeout_secs: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct OverviewRow {
     pub source_id: String,
     pub account: String,
@@ -91,15 +93,20 @@ pub struct OverviewRow {
     pub timeout_alert: Option<bool>,
     pub history_start_ms: Option<i64>,
     pub history_rebuilt_at_ms: Option<i64>,
+    pub account_kind: String,
+    pub detail_url: Option<String>,
+    pub collection_status: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OverviewResponse {
     pub accounts: Vec<OverviewRow>,
     pub dates: Vec<String>,
     pub generated_at_ms: i64,
     pub alerts: OverviewAlertSettings,
     pub loading: bool,
+    #[serde(default)]
+    pub external_status: Vec<external::ProviderStatus>,
 }
 
 #[derive(Default)]
@@ -471,6 +478,7 @@ impl AccountOverview {
             generated_at_ms: now,
             alerts: alerts.clone(),
             loading,
+            external_status: Vec::new(),
         })
     }
 }
@@ -576,6 +584,9 @@ fn make_row(
         timeout_alert,
         history_start_ms: history.first().map(|row| row.equity_at_ms),
         history_rebuilt_at_ms: None,
+        account_kind: "cta".into(),
+        detail_url: None,
+        collection_status: None,
     }
 }
 

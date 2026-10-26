@@ -9,6 +9,18 @@ refresh_secs = 60
 # Bounded analysis CPU pool, independent of kline.concurrency and API weights.
 compute_threads = 16
 
+# Optional: read-only FR account summaries, polled by CTA Manager.
+# Apply scripts/apply_external_overview_schema.sql explicitly before enabling.
+[dashboard.nav_overview]
+enabled = false
+provider_id = "jp-meta-nav"
+url = "http://127.0.0.1:4191/nav-api/integrations/fr-account-overview"
+detail_base_url = "/nav/strategies/"
+token_env = "CRYPTO_NAV_OVERVIEW_TOKEN"
+refresh_secs = 15
+request_timeout_secs = 10
+stale_secs = 90
+
 [order_config]
 request_timeout_secs = 5
 

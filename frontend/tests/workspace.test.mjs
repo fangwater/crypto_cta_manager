@@ -17,3 +17,15 @@ test('unknown alert configuration or input does not mean zero alerts', () => {
   assert.equal(overviewAlertCount([{ timeout_alert: false }, { timeout_alert: true }], 'timeout_alert'), 1)
   assert.equal(overviewAlertCount([{ timeout_alert: false }], 'timeout_alert'), 0)
 })
+
+test('FR aggregation preserves losses and suppresses stale or unavailable totals', () => {
+  const cta = { equity: 100, today_profit: 5 }
+  const fr = { account_kind: 'fr', collection_status: 'live', equity: 200, today_profit: -9 }
+  assert.equal(overviewTotal([cta, fr], 'equity'), 300)
+  assert.equal(overviewTotal([cta, fr], 'today_profit'), -4)
+  assert.equal(overviewTotal([cta, { ...fr, collection_status: 'historical' }], 'equity'), 300)
+  for (const collection_status of ['stale', 'loading', 'unavailable']) {
+    assert.equal(overviewTotal([cta, { ...fr, collection_status }], 'equity'), null)
+    assert.equal(overviewTotal([cta], 'equity'), 100)
+  }
+})
