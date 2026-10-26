@@ -783,9 +783,13 @@ impl CachedTimelineSource {
     ) -> Result<Self> {
         for a in prepared.allocations.iter() {
             for p in &a.positions {
-                symbols.entry(p.symbol.clone()).or_insert(a.snapshot_ts_us);
+                symbols
+                    .entry(p.symbol.clone())
+                    .and_modify(|ts| *ts = (*ts).min(a.snapshot_ts_us))
+                    .or_insert(a.snapshot_ts_us);
                 strategies
                     .entry(p.strategy.clone())
+                    .and_modify(|ts| *ts = (*ts).min(a.snapshot_ts_us))
                     .or_insert(a.snapshot_ts_us);
             }
         }
@@ -793,6 +797,9 @@ impl CachedTimelineSource {
         for (index, fill) in prepared.fill_events.iter().enumerate().skip(first_fill) {
             symbols
                 .entry(fill.event.symbol.clone())
+                // Corrections are indexed before fills. An older fill must
+                // still establish historical visibility before that repair.
+                .and_modify(|ts| *ts = (*ts).min(fill.fill_ts_us))
                 .or_insert(fill.fill_ts_us);
             let strategy = fill.strategy();
             strategies
@@ -803,6 +810,7 @@ impl CachedTimelineSource {
                         strategy
                     },
                 )
+                .and_modify(|ts| *ts = (*ts).min(fill.fill_ts_us))
                 .or_insert(fill.fill_ts_us);
             if next_checkpoint.is_some_and(|ts| ts <= fill.fill_ts_us) {
                 let ts = fill.fill_ts_us.div_euclid(CHECKPOINT_US) * CHECKPOINT_US;
@@ -1864,10 +1872,12 @@ fn prepare_source_events<E: Into<Arc<NavEvent>>>(
         fill.attribute_initial_position(strategy_snapshot.is_some(), &initial_states);
     }
 
-    let allocations = allocations
-        .iter()
+    let allocations = allocation::resolve(allocations)?
+        .into_iter()
         .filter(|a| snapshot_ts_us.is_none_or(|ts| a.snapshot_ts_us > ts))
-        .cloned()
+        // Residual legs belong to the strategy-anchor projection. Account-only
+        // queries have no corresponding opening strategy ownership to correct.
+        .filter(|a| strategy_snapshot.is_some() || !a.uses_residual())
         .collect::<Vec<_>>();
     for a in &allocations {
         a.validate()?;
@@ -1879,10 +1889,22 @@ fn prepare_source_events<E: Into<Arc<NavEvent>>>(
             .all(|w| w[0].snapshot_ts_us < w[1].snapshot_ts_us),
         "allocation timestamps must increase"
     );
-    anyhow::ensure!(
-        allocations.is_empty() || strategy_snapshot.is_none(),
-        "allocation repair cannot override a strategy initial snapshot"
-    );
+    if strategy_snapshot.is_some() {
+        for a in &allocations {
+            let residual_markets: BTreeSet<_> = a
+                .positions
+                .iter()
+                .filter(|p| p.strategy == UNALLOCATED_STRATEGY)
+                .map(|p| (&p.symbol, p.venue_code))
+                .collect();
+            anyhow::ensure!(
+                a.positions
+                    .iter()
+                    .all(|p| residual_markets.contains(&(&p.symbol, p.venue_code))),
+                "strategy-anchor correction requires an explicit residual leg for every market"
+            );
+        }
+    }
     Ok(PreparedSourceEvents {
         allocations: Arc::new(allocations),
         snapshot_ts_us,

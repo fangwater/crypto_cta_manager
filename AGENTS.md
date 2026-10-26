@@ -711,9 +711,39 @@ history that invalidates an audited correction. Existing databases require the
 explicit `scripts/apply_allocation_schema.sql` maintenance before deploying a
 binary that loads these records. `nav_allocation_reconcile` prepares and verifies
 a candidate read-only; insertion requires `--candidate`, `--apply` and `--note`.
-Its current repair mode requires no initial strategy snapshot and a settled Exec
-snapshot without active orders. Never alter account initial quantities to hide a
-strategy ownership mismatch. See `docs/jp_meta_trade05_system_close_20261021.md`
+It supports full history without an opening snapshot, account-only anchors and
+immutable strategy anchors, and requires a settled Exec snapshot without active
+orders. Without a strategy anchor, corrections retain the legacy
+`system_position_close` FIFO as their zero-sum counterleg; never invent an
+opening position to enable a repair. Strategy-anchor corrections audit
+an explicit `__unallocated__` leg for every changed market; that residual remains
+derived from the account quantity. Signed account observations may bracket the
+Viz timestamp to provide complete decimal quantity coverage; both observations
+must agree, and the full-history account match remains strictly below `1e-8`.
+That preparation also requires unchanged complete Batch/Chase ownership ledgers
+in the source namespace, checked against every Viz ownership row. Preserve
+historical ownership for markets absent from both ledgers; retained explicit
+zero entries can prove a retired target is flat. Keep opposing strategy lots.
+Never alter account initial quantities to hide a strategy ownership mismatch.
+Historical ownership reconstruction uses `nav_allocation_history` with archived
+explicit strategy observations, completed minute marks and the same strict
+complete signed-account proof. Existing databases require explicit
+`scripts/apply_allocation_restatements_schema.sql` before the new binary.
+Append historical transfers atomically; never edit a later immutable correction.
+Additional observations may interleave unamended existing corrections, replayed
+at their original timestamps. Refuse a timestamp collision or a later fixed
+target that cannot stay zero-sum; never change that target or relax the gate.
+A fingerprint-bound `restatements` audit may replace that correction's effective
+before quantities only, preserving its original row, targets and reference marks.
+Reject late fills that invalidate those audited quantities. Preserve raw forced
+close and external-fill identity; an explicit flat ownership observation is a
+zero-volume transfer, never a relabeled fill. See
+`docs/jp_meta_prc_historical_ownership_20261024.md` for the prc repair evidence.
+Both maintenance tools require a new `--manager-secondary` directory outside all
+Exec and Manager stores. Their read-only candle view opens only the default and
+Kline column families and pins files while the live primary compacts. Keep that
+diagnostic metadata disposable and remove its exact directory after verification.
+See `docs/jp_meta_trade05_system_close_20261021.md`
 for the October 21 trade05 correction and its deployment evidence.
 
 The NAV page must also show interval execution analysis for the selected

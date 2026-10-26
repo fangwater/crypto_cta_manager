@@ -203,6 +203,58 @@ async fn load_prices(
 }
 
 impl NavTimelineCache {
+    /// Strict offline valuation from an operator-supplied read-only minute
+    /// reader. Missing candles reject the report. No downloads or cache writes.
+    pub fn rebuild_from_minute_reader(
+        &self,
+        request: NavTimelineRequest,
+        allocation: bool,
+        mut read: impl FnMut(&str, i16, i64) -> Result<Option<f64>>,
+    ) -> Result<Arc<NavTimelineReport>> {
+        let collector = MinuteMarks::Collect(Mutex::new(Requests::new()));
+        self.rebuild_with_prices(request.clone(), allocation, Some(&collector))?;
+        let MinuteMarks::Collect(requests) = collector else {
+            unreachable!()
+        };
+        let mut prices = Prices::new();
+        for ((symbol, venue), opens) in requests.into_inner().unwrap() {
+            let mut bars = BTreeMap::new();
+            for open in opens {
+                let value = read(&symbol, venue, open)?.with_context(|| {
+                    format!("missing cached minute for {symbol} venue {venue} at {open}")
+                })?;
+                anyhow::ensure!(
+                    value.is_finite() && value > 0.0,
+                    "invalid cached minute price"
+                );
+                bars.insert(open, value);
+            }
+            prices.insert((symbol, venue), bars);
+        }
+        let prices = MinuteMarks::Loaded {
+            revision: 0,
+            prices,
+        };
+        let empty = SourceStrategyPositionSnapshots::new();
+        // Do not put an offline reader's revision into the live priced cache.
+        crate::analysis::run(|| {
+            rebuild_nav_timeline_with_cache(
+                &self.config,
+                request,
+                &self.snapshots,
+                if allocation {
+                    &self.strategy_snapshots
+                } else {
+                    &empty
+                },
+                &self.histories,
+                Some((self, allocation)),
+                Some(&prices),
+            )
+        })
+        .map(Arc::new)
+    }
+
     /// Interactive history must remain readable beyond candle retention. Replay
     /// the entire window with local latest-fill marks in that case, never mix
     /// stale fill prices with minute marks within one curve. FIFO realization,

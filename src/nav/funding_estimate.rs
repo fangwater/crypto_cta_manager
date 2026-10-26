@@ -266,7 +266,7 @@ fn apply_funding_allocations(
             break;
         }
         for p in &snapshot.positions {
-            if p.venue_code == 1 {
+            if p.venue_code == 1 && p.strategy != UNALLOCATED_STRATEGY {
                 strategies.insert((p.strategy.clone(), p.symbol.clone()), p.after_qty);
             }
         }
@@ -280,6 +280,39 @@ mod tests {
     use crate::snapshot::StrategySnapshotPosition;
 
     const OFFSET: i64 = 3_400_000_000;
+
+    #[test]
+    fn residual_correction_is_derived_once_and_applies_after_equal_time_fills() {
+        let positions = [("alpha", 2.0, 0.0), (UNALLOCATED_STRATEGY, -2.0, 0.0)]
+            .into_iter()
+            .map(
+                |(strategy, before_qty, after_qty)| allocation::AllocationPosition {
+                    strategy: strategy.into(),
+                    symbol: "BTCUSDT".into(),
+                    venue_code: 1,
+                    before_qty,
+                    after_qty,
+                    reference_price: 100.0,
+                },
+            )
+            .collect();
+        let corrections = vec![allocation::AllocationSnapshot {
+            source_id: "alignment".into(),
+            snapshot_ts_us: 100,
+            positions,
+            restatements: Vec::new(),
+        }];
+        let mut owners = BTreeMap::from([(("alpha".into(), "BTCUSDT".into()), 2.0)]);
+        let mut index = 0;
+        apply_funding_allocations(&corrections, &mut index, 100, &mut owners);
+        assert_eq!(owners[&("alpha".into(), "BTCUSDT".into())], 2.0);
+        apply_funding_allocations(&corrections, &mut index, 101, &mut owners);
+        assert_eq!(owners[&("alpha".into(), "BTCUSDT".into())], 0.0);
+        assert!(!owners.keys().any(|(s, _)| s == UNALLOCATED_STRATEGY));
+        owners.insert(("alpha".into(), "BTCUSDT".into()), 1.0);
+        apply_funding_allocations(&corrections, &mut index, 200, &mut owners);
+        assert_eq!(owners[&("alpha".into(), "BTCUSDT".into())], 1.0);
+    }
 
     fn fixture() -> (NavTimelineCache, NavTimelineReport) {
         let mut config: AppConfig =
