@@ -7,22 +7,3 @@ __pycache__/
 
 # Locally compiled one-time archive diagnostic; keep its Rust source.
 /artifacts/acquisition_cost_jp_meta_20261013T034926Z/archive_count
-
-# Local operational evidence: retain raw logs, snapshots and exports outside Git.
-# Repair conclusions and schema requirements are recorded in docs/ and AGENTS.md.
-/artifacts/dzy2025b1_position_ready_20261022/
-/artifacts/dzy2025b1_trade04_upgrade_20261022/
-/artifacts/jp_meta_oct18_account_windows_20261024/
-/artifacts/jp_meta_prc_history_ownership_20261024/
-/artifacts/jp_meta_prc_residual_followup_20261024/
-/artifacts/jp_meta_trade01_02_fill_ownership_20261024/
-/artifacts/jp_meta_trade03_04_system_close_20261023/
-/artifacts/jp_meta_trade03_allocation_20261023/
-/artifacts/jp_meta_trade03_apply_alloc_20261024/
-/artifacts/jp_meta_trade03_fill_backfill_alloc_20261023/
-/artifacts/jp_meta_trade03_missing_trades_20261023/
-/artifacts/jp_meta_trade03_native_import_alloc_20261023/
-/artifacts/jp_meta_trade04_apply_alloc_20261024/
-/artifacts/jp_meta_trade04_external_fills_20261024/
-/artifacts/jp_meta_trade04_unallocated_20261024/
-/artifacts/jp_meta_trade07_health_20261024/
