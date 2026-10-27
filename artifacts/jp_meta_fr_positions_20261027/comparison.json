@@ -1,0 +1,17 @@
+{
+  "protected_process_count": 156,
+  "configuration_hash_count": 32,
+  "unchanged_tables": {
+    "cta_position_snapshots": 4,
+    "cta_position_snapshot_entries": 122,
+    "cta_strategy_position_snapshots": 4,
+    "cta_strategy_position_snapshot_entries": 131,
+    "cta_strategy_allocation_snapshots": 21095,
+    "cta_account_equity_daily": 182
+  },
+  "manager_affinity": "Cpus_allowed_list:\t24",
+  "account_count": 10,
+  "diagnostic_session_removed": true,
+  "historical_exposure_unknown": true,
+  "frontend_assets_match": true
+}

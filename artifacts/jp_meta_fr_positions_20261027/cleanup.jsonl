@@ -1,0 +1,4 @@
+{"unit": "crypto-nav-manager.service", "state": ["MainPID=2977395", "NRestarts=0", "ActiveState=active"]}
+{"unit": "crypto-cta-manager-web.service", "state": ["MainPID=2977372", "NRestarts=0", "ActiveState=active"]}
+{"removed": "/home/ubuntu/crypto_cta_manager/releases/fr-positions-20261027T082404Z"}
+{"removed": "/home/ubuntu/crypto_cta_manager/backups/fr-positions-20261027T082404Z"}
