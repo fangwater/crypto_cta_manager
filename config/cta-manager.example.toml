@@ -115,6 +115,8 @@ is_at_all = false
 # Public rate estimation is independent of account funding-income collection.
 # No API credentials or dedicated egress required. Optional local_ip fixes the route.
 [funding_rates]
+# Daily estimated fee totals in Manager RocksDB; reuse existing position anchors.
+daily_estimates_enabled = false
 enabled = true
 refresh_secs = 1800
 default_symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]

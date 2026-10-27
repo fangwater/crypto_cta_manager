@@ -5,6 +5,97 @@ use crate::funding_rates::{
 };
 
 impl NavTimelineCache {
+    /// Fingerprint funding quantity inputs at daily cutoffs in one ordered pass.
+    /// Late fills and audited ownership corrections invalidate affected daily fees.
+    pub fn funding_daily_fingerprints(
+        &self,
+        source_id: &str,
+        cutoffs: &[i64],
+    ) -> Result<BTreeMap<i64, String>> {
+        use sha2::{Digest, Sha256};
+        let source = self
+            .sources
+            .get(&(source_id.to_owned(), true))
+            .context("funding source unavailable")?;
+        let mut hash = Sha256::new();
+        hash.update(serde_json::to_vec(&source.prepared.snapshot_ts_us)?);
+        for (key, state) in &source.prepared.initial_states {
+            hash.update(serde_json::to_vec(&(
+                key,
+                state.fifo.long_quantity(1.0),
+                state.fifo.short_quantity(1.0),
+            ))?);
+        }
+        for (key, state) in &source.prepared.initial_strategy_states {
+            hash.update(serde_json::to_vec(&(
+                key,
+                state.fifo.long_quantity(1.0),
+                state.fifo.short_quantity(1.0),
+            ))?);
+        }
+        let mut index = 0;
+        let fills = &source.prepared.fill_events;
+        let mut result = BTreeMap::new();
+        for &end in cutoffs {
+            while index < fills.len() && fills[index].fill_ts_us <= end {
+                let fill = &fills[index];
+                let e = &fill.event;
+                // Millions of fills share the dashboard CPU: hash unambiguous
+                // length-prefixed bytes without allocating JSON per fill.
+                for text in [&e.record_key, &e.symbol, &e.from_key_text] {
+                    hash.update((text.len() as u64).to_be_bytes());
+                    hash.update(text.as_bytes());
+                }
+                hash.update(fill.fill_ts_us.to_be_bytes());
+                hash.update(e.venue_code.to_be_bytes());
+                hash.update(e.side_code.to_be_bytes());
+                hash.update(e.order_type_code.to_be_bytes());
+                hash.update(e.amount_update.to_bits().to_be_bytes());
+                index += 1;
+            }
+            let mut daily = hash.clone();
+            for allocation in source
+                .prepared
+                .allocations
+                .iter()
+                .take_while(|a| a.snapshot_ts_us <= end)
+            {
+                daily.update(serde_json::to_vec(allocation)?);
+            }
+            result.insert(end, hex::encode(daily.finalize()));
+        }
+        Ok(result)
+    }
+
+    /// Funding needs signed quantities, not a second priced NAV replay. Scope it
+    /// to exactly the same immutable anchor used by the cumulative dashboard.
+    pub fn cumulative_funding_scope(&self, source_id: &str, end: i64) -> Option<NavTimelineReport> {
+        let source = self.sources.get(&(source_id.to_owned(), true))?;
+        let start = self.start_ts_us(source_id, end, true)?;
+        let selected_symbols = source
+            .report
+            .symbols
+            .iter()
+            .map(|s| s.symbol.clone())
+            .collect::<Vec<_>>();
+        Some(NavTimelineReport {
+            valuation: "quantity_fifo_window_delta",
+            earliest_start_ts_us: start,
+            start_ts_us: start,
+            end_ts_us: end,
+            selected_source_ids: vec![source_id.to_owned()],
+            available_symbols: selected_symbols.clone(),
+            selected_symbols,
+            available_strategies: Vec::new(),
+            summary: source.report.totals,
+            symbols: Vec::new(),
+            points: Vec::new(),
+            symbol_points: Vec::new(),
+            strategy_points: Vec::new(),
+            sampled: false,
+        })
+    }
+
     /// Read-only settlement diagnostics, using the exact validated NAV fill stream.
     pub fn funding_boundary_fills(
         &self,
@@ -123,6 +214,17 @@ impl NavTimelineCache {
                 })
                 .collect();
             measured.skipped_settlements += settlements.len() - measurable.len();
+            for (_, rate) in settlements.iter().filter(|(ts, _)| {
+                source
+                    .prepared
+                    .snapshot_ts_us
+                    .is_some_and(|anchor| anchor >= *ts)
+            }) {
+                *measured
+                    .skipped_by_symbol
+                    .entry(rate.symbol.clone())
+                    .or_default() += 1;
+            }
             let Some(first) = measurable.first() else {
                 continue;
             };
@@ -226,6 +328,10 @@ impl NavTimelineCache {
                 let income = quantity * factor;
                 if !income.is_finite() || !owners.values().all(|v: &f64| v.is_finite()) {
                     measured.skipped_settlements += 1;
+                    *measured
+                        .skipped_by_symbol
+                        .entry(rate.symbol.clone())
+                        .or_default() += 1;
                     continue;
                 }
                 measured.records.push(FundingEstimateRecord {
@@ -464,6 +570,80 @@ mod tests {
             .estimate_funding_records(&filtered, true, &coverage.rates)
             .unwrap();
         assert_eq!(selected.records.len(), 1);
+    }
+
+    #[test]
+    fn shanghai_daily_fees_add_to_full_window_and_late_fills_invalidate_only_later_days() {
+        use crate::funding_daily::{DAY_US, day_start};
+        let (cache, mut report) = fixture();
+        let first_day = day_start(report.start_ts_us);
+        report.end_ts_us = first_day + 3 * DAY_US - 1;
+        let cutoffs = (1..=3)
+            .map(|i| first_day + i * DAY_US - 1)
+            .collect::<Vec<_>>();
+        let rates = BTreeMap::from([(
+            "BTCUSDT".into(),
+            Arc::new(
+                [
+                    OFFSET + 200_000_000,
+                    first_day + DAY_US,
+                    first_day + 2 * DAY_US,
+                ]
+                .into_iter()
+                .map(|ts_us| FundingRate {
+                    symbol: "BTCUSDT".into(),
+                    ts_us,
+                    rate: 0.001,
+                    mark_price: 100.0,
+                    rate_type: "Special".into(),
+                })
+                .collect(),
+            ),
+        )]);
+        let full = cache
+            .estimate_funding_records(&report, true, &rates)
+            .unwrap();
+        let mut daily = Vec::new();
+        for (i, end) in cutoffs.iter().enumerate() {
+            let mut day = report.clone();
+            day.start_ts_us = report.start_ts_us.max(first_day + i as i64 * DAY_US);
+            day.end_ts_us = *end;
+            daily.extend(
+                cache
+                    .estimate_funding_records(&day, true, &rates)
+                    .unwrap()
+                    .records,
+            );
+        }
+        assert_eq!(full.records.len(), 3);
+        assert_eq!(daily.len(), full.records.len());
+        let amount =
+            |rows: &[FundingEstimateRecord]| rows.iter().map(|r| r.income_quote).sum::<f64>();
+        assert!((amount(&daily) - amount(&full.records)).abs() < 1e-12);
+        assert!((amount(&daily) + 2.6).abs() < 1e-12);
+
+        let id = &report.selected_source_ids[0];
+        let original = cache.funding_daily_fingerprints(id, &cutoffs).unwrap();
+        let mut histories = cache.histories.as_ref().clone();
+        let history = histories.get_mut(id).unwrap();
+        let mut late = history.events[0].as_ref().clone();
+        late.record_key = "late-second-day".into();
+        late.event_ts_us = first_day + DAY_US + 1;
+        late.update_ts_us = late.event_ts_us;
+        late.create_ts_us = late.event_ts_us;
+        late.client_order_id = late.event_ts_us;
+        history.events.push_back(Arc::new(late));
+        let amended = NavTimelineCache::build(
+            cache.config.clone(),
+            cache.snapshots.clone(),
+            cache.strategy_snapshots.clone(),
+            Arc::new(histories),
+        )
+        .unwrap();
+        let changed = amended.funding_daily_fingerprints(id, &cutoffs).unwrap();
+        assert_eq!(original[&cutoffs[0]], changed[&cutoffs[0]]);
+        assert_ne!(original[&cutoffs[1]], changed[&cutoffs[1]]);
+        assert_ne!(original[&cutoffs[2]], changed[&cutoffs[2]]);
     }
 
     #[test]

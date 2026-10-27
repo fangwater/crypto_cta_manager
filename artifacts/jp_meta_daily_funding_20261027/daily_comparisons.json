@@ -1,0 +1,47 @@
+[
+  {
+    "source_id": "binance_exec_trade01",
+    "day_us": 1792944000000000,
+    "symbols": [
+      "XRPUSDT"
+    ],
+    "saved_daily_income": -0.6731249170307994,
+    "direct_estimated_income": -0.6731249170307994
+  },
+  {
+    "source_id": "binance_exec_trade02",
+    "day_us": 1792944000000000,
+    "symbols": [
+      "XRPUSDT"
+    ],
+    "saved_daily_income": -0.03714355980780003,
+    "direct_estimated_income": -0.03714355980780003
+  },
+  {
+    "source_id": "binance_exec_trade03",
+    "day_us": 1792944000000000,
+    "symbols": [
+      "XRPUSDT"
+    ],
+    "saved_daily_income": -0.14818725078900005,
+    "direct_estimated_income": -0.14818725078900005
+  },
+  {
+    "source_id": "binance_exec_trade04",
+    "day_us": 1792944000000000,
+    "symbols": [
+      "XRPUSDT"
+    ],
+    "saved_daily_income": 0.26963467897439897,
+    "direct_estimated_income": 0.26963467897439897
+  },
+  {
+    "source_id": "binance_exec_trade06",
+    "day_us": 1792944000000000,
+    "symbols": [
+      "XRPUSDT"
+    ],
+    "saved_daily_income": 0.0018428483526,
+    "direct_estimated_income": 0.0018428483526000002
+  }
+]

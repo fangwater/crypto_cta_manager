@@ -1,4 +1,4 @@
-import { accountFeeSummary } from '../format'
+import { accountFeeSummary, fundingMoney } from '../format'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import {
   Activity,
@@ -239,6 +239,10 @@ function AccountCard({
         : health.status === 'ok'
         ? '数据就绪'
         : '数据延迟'
+  const funding = account.cumulative_funding
+  const combinedNav = report && funding?.income_quote != null
+    ? report.nav_change_after_fee_quote + funding.income_quote : null
+  const displayedNav = funding ? combinedNav : report?.nav_change_after_fee_quote
   const gatewayReady = ready && account.gateway_prefix !== null
   const signalConfigPath = account.enabled && window.location.origin === 'http://13.115.227.29:4191'
     ? JP_META_SIGNAL_CONFIG_PATHS[account.source_id]
@@ -274,9 +278,9 @@ function AccountCard({
       <CardContent className="space-y-4 pt-0">
         <div className="grid grid-cols-2 gap-3 text-sm">
           <Metric
-            label="累计费后净值"
-            value={report ? `${money(report.nav_change_after_fee_quote)} 报价币` : '--'}
-            tone={report ? signedClass(report.nav_change_after_fee_quote) : ''}
+            label={funding ? '累计费后净值（含 Funding）' : '累计费后净值'}
+            value={displayedNav != null ? `${money(displayedNav)} 报价币` : '--'}
+            tone={displayedNav != null ? signedClass(displayedNav) : ''}
           />
           <Metric
             label="实时权益"
@@ -297,6 +301,12 @@ function AccountCard({
               tone={uniMmrTone(account.uni_mmr, account.uni_mmr_status)}
             />
           )}
+          {funding && <>
+            <Metric label="订单费后净值" value={report ? `${money(report.nav_change_after_fee_quote)} 报价币` : '--'} />
+            <Metric label={`Funding（${funding.kind === 'actual' ? '实际' : '估算'}）`}
+              value={funding.income_quote != null ? `${fundingMoney(funding.income_quote)} 报价币` : '--'}
+              tone={funding.income_quote != null ? signedClass(funding.income_quote) : ''} />
+          </>}
           <Metric label="当前持仓" value={report ? `${openPositions} 个合约` : '--'} />
           <Metric
             label="Maker / Taker 费率"
@@ -304,6 +314,9 @@ function AccountCard({
           />
           <Metric label="最近成交" value={timestampUs(report?.last_fill_ts_us ?? null)} />
         </div>
+        {funding && !funding.complete && <p className="text-xs text-muted" title={funding.unavailable_reason ?? undefined}>
+          {funding.loading ? 'Funding 补齐中' : funding.income_quote != null ? 'Funding 部分覆盖：仅计入已知收支' : 'Funding 暂不可用'}
+        </p>}
         <div className="flex flex-wrap gap-2 border-t border-border-soft pt-4">
           {ready ? (
             <>

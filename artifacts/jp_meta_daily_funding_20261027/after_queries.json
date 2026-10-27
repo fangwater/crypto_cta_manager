@@ -1,0 +1,150 @@
+{
+  "queries": {
+    "binance_exec_trade01": {
+      "report_sha256": "8a9a1466b857d4e126bc3045f31a18ab299b477d5ccb053d46a6e1bdea3ef0a3",
+      "estimate": {
+        "income_quote": -0.15976472907893735,
+        "loading": true,
+        "unavailable_reason": "\u516c\u5f00\u8d44\u91d1\u8d39\u5386\u53f2\u8986\u76d6\u4e0d\u5b8c\u6574\uff1b\u4ec5\u6c47\u603b\u5df2\u52a0\u8f7d\u90e8\u5206"
+      }
+    },
+    "binance_exec_trade02": {
+      "report_sha256": "27494827b135e01fad69ab4d3edcdf92ee03fba844a1dcb3b94346650a95076b",
+      "estimate": {
+        "income_quote": -0.00397161151479843,
+        "loading": true,
+        "unavailable_reason": "\u516c\u5f00\u8d44\u91d1\u8d39\u5386\u53f2\u8986\u76d6\u4e0d\u5b8c\u6574\uff1b\u4ec5\u6c47\u603b\u5df2\u52a0\u8f7d\u90e8\u5206"
+      }
+    },
+    "binance_exec_trade03": {
+      "report_sha256": "cff03068c8c785564e2991522c09fbcbb316bfd7f28c0f26b9a8f4a06f37f32b",
+      "estimate": {
+        "income_quote": -0.11621350315580763,
+        "loading": true,
+        "unavailable_reason": "\u516c\u5f00\u8d44\u91d1\u8d39\u5386\u53f2\u8986\u76d6\u4e0d\u5b8c\u6574\uff1b\u4ec5\u6c47\u603b\u5df2\u52a0\u8f7d\u90e8\u5206"
+      }
+    },
+    "binance_exec_trade04": {
+      "report_sha256": "2b561b81bc0319e05f1216b1933616a81e70af6465ba43a6de9ea95b4f770049",
+      "estimate": {
+        "income_quote": -0.018203223718588235,
+        "loading": true,
+        "unavailable_reason": "\u516c\u5f00\u8d44\u91d1\u8d39\u5386\u53f2\u8986\u76d6\u4e0d\u5b8c\u6574\uff1b\u4ec5\u6c47\u603b\u5df2\u52a0\u8f7d\u90e8\u5206"
+      }
+    },
+    "binance_exec_trade06": {
+      "report_sha256": "d52c7aea8597b18bb9a8381dec77d0783835a6ca5d170152ddb936ac512eea5a",
+      "estimate": {
+        "income_quote": -9.141218800000078e-05,
+        "loading": true,
+        "unavailable_reason": "\u516c\u5f00\u8d44\u91d1\u8d39\u5386\u53f2\u8986\u76d6\u4e0d\u5b8c\u6574\uff1b\u4ec5\u6c47\u603b\u5df2\u52a0\u8f7d\u90e8\u5206"
+      }
+    },
+    "binance_exec_trade07": {
+      "report_sha256": "8f4bcaee65260b9ed65f7651479459a83f475666cb9021926d22173c88483e84",
+      "estimate": {
+        "income_quote": -0.02581953079179994,
+        "loading": true,
+        "unavailable_reason": "\u516c\u5f00\u8d44\u91d1\u8d39\u5386\u53f2\u8986\u76d6\u4e0d\u5b8c\u6574\uff1b\u4ec5\u6c47\u603b\u5df2\u52a0\u8f7d\u90e8\u5206"
+      }
+    },
+    "binance_exec_trade08": {
+      "report_sha256": "de73f0396a44ccfecad7b323605c62066ec29179ef0a917e65b3c7063b10170f",
+      "estimate": {
+        "income_quote": null,
+        "loading": true,
+        "unavailable_reason": "\u516c\u5f00\u8d44\u91d1\u8d39\u5386\u53f2\u8986\u76d6\u4e0d\u5b8c\u6574\uff1b\u4ec5\u6c47\u603b\u5df2\u52a0\u8f7d\u90e8\u5206"
+      }
+    },
+    "binance_exec_rx04_5m05": {
+      "report_sha256": "edaa75f9a3664490f5726589e2c0936e9b773ed9010fd9aef79b3047c2ab0ea5",
+      "estimate": {
+        "income_quote": null,
+        "loading": true,
+        "unavailable_reason": "\u516c\u5f00\u8d44\u91d1\u8d39\u5386\u53f2\u8986\u76d6\u4e0d\u5b8c\u6574\uff1b\u4ec5\u6c47\u603b\u5df2\u52a0\u8f7d\u90e8\u5206"
+      }
+    }
+  },
+  "accounts": {
+    "binance_exec_trade01": {
+      "kind": "estimated",
+      "income_quote": -3.6987615584737568,
+      "complete": false,
+      "loading": true,
+      "unavailable_reason": "\u7d2f\u8ba1 Funding \u4ec5\u8ba1\u5165\u5df2\u8986\u76d6\u65e5\u671f\u53ca\u5e01\u79cd\uff0c\u7f3a\u5931\u90e8\u5206\u672a\u77e5",
+      "start_ts_us": 1787377620383000,
+      "end_ts_us": 1793079630342027,
+      "generation_us": 1793079630342027
+    },
+    "binance_exec_trade02": {
+      "kind": "estimated",
+      "income_quote": -1.732650570017786,
+      "complete": false,
+      "loading": true,
+      "unavailable_reason": "\u7d2f\u8ba1 Funding \u4ec5\u8ba1\u5165\u5df2\u8986\u76d6\u65e5\u671f\u53ca\u5e01\u79cd\uff0c\u7f3a\u5931\u90e8\u5206\u672a\u77e5",
+      "start_ts_us": 1790051458324269,
+      "end_ts_us": 1793079630342027,
+      "generation_us": 1793079630342027
+    },
+    "binance_exec_trade03": {
+      "kind": "",
+      "income_quote": null,
+      "complete": false,
+      "loading": true,
+      "unavailable_reason": "\u7d2f\u8ba1\u8d44\u91d1\u8d39\u8ba1\u7b97\u4e2d",
+      "start_ts_us": 0,
+      "end_ts_us": 0,
+      "generation_us": 0
+    },
+    "binance_exec_trade04": {
+      "kind": "",
+      "income_quote": null,
+      "complete": false,
+      "loading": true,
+      "unavailable_reason": "\u7d2f\u8ba1\u8d44\u91d1\u8d39\u8ba1\u7b97\u4e2d",
+      "start_ts_us": 0,
+      "end_ts_us": 0,
+      "generation_us": 0
+    },
+    "binance_exec_trade06": {
+      "kind": "",
+      "income_quote": null,
+      "complete": false,
+      "loading": true,
+      "unavailable_reason": "\u7d2f\u8ba1\u8d44\u91d1\u8d39\u8ba1\u7b97\u4e2d",
+      "start_ts_us": 0,
+      "end_ts_us": 0,
+      "generation_us": 0
+    },
+    "binance_exec_trade07": {
+      "kind": "",
+      "income_quote": null,
+      "complete": false,
+      "loading": true,
+      "unavailable_reason": "\u7d2f\u8ba1\u8d44\u91d1\u8d39\u8ba1\u7b97\u4e2d",
+      "start_ts_us": 0,
+      "end_ts_us": 0,
+      "generation_us": 0
+    },
+    "binance_exec_trade08": {
+      "kind": "",
+      "income_quote": null,
+      "complete": false,
+      "loading": true,
+      "unavailable_reason": "\u7d2f\u8ba1\u8d44\u91d1\u8d39\u8ba1\u7b97\u4e2d",
+      "start_ts_us": 0,
+      "end_ts_us": 0,
+      "generation_us": 0
+    },
+    "binance_exec_rx04_5m05": {
+      "kind": "",
+      "income_quote": null,
+      "complete": false,
+      "loading": true,
+      "unavailable_reason": "\u7d2f\u8ba1\u8d44\u91d1\u8d39\u8ba1\u7b97\u4e2d",
+      "start_ts_us": 0,
+      "end_ts_us": 0,
+      "generation_us": 0
+    }
+  }
+}

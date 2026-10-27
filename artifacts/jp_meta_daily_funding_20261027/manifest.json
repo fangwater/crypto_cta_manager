@@ -1,0 +1,9 @@
+{
+  "release": "/home/ubuntu/crypto_cta_manager/web-releases/daily-funding-20261027T052904Z",
+  "previous_webroot": "web-releases/signal-config-links-20261027T043802Z",
+  "binary_sha256": "eac49e1bcda5f1c8ac16751973a220d3a270b1822e8ec1c563a2de7cc5e2a58d",
+  "previous_binary_sha256": "5e50d3f43ec2a7cb6a581deb8cefeabccad379ce5e1a6b78b148945846e5f857",
+  "config_sha256_before": "e8bcd329d777e7ed522e643de8ddcb4ebea4d615c82df8b8f054a0f653e20467",
+  "config_sha256_after": "28c876122f811211b29af667a8eed6b032f43ebb3428d6aaab9d841034e5b7da",
+  "first_binary_sha256": "d80604ad87d48e5893e21a1306e8484862b61c86c5314f25be99c4c117f0797f"
+}

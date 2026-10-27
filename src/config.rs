@@ -308,6 +308,8 @@ pub struct FundingConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FundingRateConfig {
     pub enabled: bool,
+    /// Persist daily estimated Funding fees in Manager RocksDB; enable cumulative account cards.
+    pub daily_estimates_enabled: bool,
     pub local_ip: Option<IpAddr>,
     pub refresh_secs: u64,
     pub default_symbols: Vec<String>,
@@ -317,6 +319,7 @@ impl Default for FundingRateConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            daily_estimates_enabled: false,
             local_ip: None,
             refresh_secs: 1800,
             default_symbols: [

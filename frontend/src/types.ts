@@ -109,6 +109,16 @@ export interface DashboardAccount {
   uni_mmr?: number | null
   uni_mmr_status?: 'ok' | 'stale' | string | null
   funding?: FundingSummary
+  cumulative_funding?: {
+    kind: 'actual' | 'estimated' | string
+    income_quote: number | null
+    complete: boolean
+    loading: boolean
+    unavailable_reason: string | null
+    start_ts_us: number
+    end_ts_us: number
+    generation_us: number
+  } | null
   total_nav_before_fee_quote?: number | null
   total_nav_after_fee_quote?: number | null
 }

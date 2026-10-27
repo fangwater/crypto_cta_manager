@@ -21,6 +21,7 @@ reconnect_interval_ms = 500
 use_account_ip_rotation = true
 
 [funding_rates]
+daily_estimates_enabled = true
 # Verified jp-meta public-funding egress: 172.31.46.92 -> 52.192.54.88.
 # Keep this public feed separate from Kline's 172.31.46.93 egress.
 # This binding affects public rate estimates only; [funding] keeps its own egress.

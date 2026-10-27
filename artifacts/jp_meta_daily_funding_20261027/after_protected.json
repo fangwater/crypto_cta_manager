@@ -1,0 +1,764 @@
+{
+  "manager_pid": "2603414",
+  "binary_sha256": "eac49e1bcda5f1c8ac16751973a220d3a270b1822e8ec1c563a2de7cc5e2a58d",
+  "webroot": "/home/ubuntu/crypto_cta_manager/web-releases/daily-funding-20261027T052904Z",
+  "processes": {
+    "30584": {
+      "start_ticks": "93927",
+      "affinity": "Cpus_allowed_list:\t11"
+    },
+    "30676": {
+      "start_ticks": "93955",
+      "affinity": "Cpus_allowed_list:\t10"
+    },
+    "30763": {
+      "start_ticks": "93983",
+      "affinity": "Cpus_allowed_list:\t8"
+    },
+    "30865": {
+      "start_ticks": "94015",
+      "affinity": "Cpus_allowed_list:\t14"
+    },
+    "30974": {
+      "start_ticks": "94047",
+      "affinity": "Cpus_allowed_list:\t9"
+    },
+    "31052": {
+      "start_ticks": "94075",
+      "affinity": "Cpus_allowed_list:\t16"
+    },
+    "31341": {
+      "start_ticks": "94148",
+      "affinity": "Cpus_allowed_list:\t5"
+    },
+    "37086": {
+      "start_ticks": "101449",
+      "affinity": "Cpus_allowed_list:\t12"
+    },
+    "43876": {
+      "start_ticks": "120794",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "43996": {
+      "start_ticks": "120838",
+      "affinity": "Cpus_allowed_list:\t15"
+    },
+    "44293": {
+      "start_ticks": "120880",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "44461": {
+      "start_ticks": "121075",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "44581": {
+      "start_ticks": "121121",
+      "affinity": "Cpus_allowed_list:\t15"
+    },
+    "44889": {
+      "start_ticks": "121163",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "45056": {
+      "start_ticks": "121291",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "45178": {
+      "start_ticks": "121335",
+      "affinity": "Cpus_allowed_list:\t15"
+    },
+    "45486": {
+      "start_ticks": "121378",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "47756": {
+      "start_ticks": "127645",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "47920": {
+      "start_ticks": "127772",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "48089": {
+      "start_ticks": "127907",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "60648": {
+      "start_ticks": "154400",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "60809": {
+      "start_ticks": "154458",
+      "affinity": "Cpus_allowed_list:\t15"
+    },
+    "61143": {
+      "start_ticks": "154502",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "61465": {
+      "start_ticks": "154651",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "61805": {
+      "start_ticks": "154841",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "61932": {
+      "start_ticks": "154892",
+      "affinity": "Cpus_allowed_list:\t15"
+    },
+    "62192": {
+      "start_ticks": "154940",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "62350": {
+      "start_ticks": "155082",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "62577": {
+      "start_ticks": "155286",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "62705": {
+      "start_ticks": "155341",
+      "affinity": "Cpus_allowed_list:\t15"
+    },
+    "62997": {
+      "start_ticks": "155389",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "63195": {
+      "start_ticks": "155547",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "63432": {
+      "start_ticks": "155752",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "63556": {
+      "start_ticks": "155807",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "63801": {
+      "start_ticks": "155855",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "63990": {
+      "start_ticks": "156020",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "64192": {
+      "start_ticks": "156213",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "64315": {
+      "start_ticks": "156269",
+      "affinity": "Cpus_allowed_list:\t15"
+    },
+    "64572": {
+      "start_ticks": "156319",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "64734": {
+      "start_ticks": "156468",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "64965": {
+      "start_ticks": "156678",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "65088": {
+      "start_ticks": "156734",
+      "affinity": "Cpus_allowed_list:\t15"
+    },
+    "65382": {
+      "start_ticks": "156789",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "65577": {
+      "start_ticks": "156955",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "100495": {
+      "start_ticks": "226487",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "100556": {
+      "start_ticks": "226546",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "100626": {
+      "start_ticks": "226601",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "101151": {
+      "start_ticks": "228554",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "101408": {
+      "start_ticks": "228968",
+      "affinity": "Cpus_allowed_list:\t15"
+    },
+    "101876": {
+      "start_ticks": "229388",
+      "affinity": "Cpus_allowed_list:\t23"
+    },
+    "102472": {
+      "start_ticks": "230278",
+      "affinity": "Cpus_allowed_list:\t20"
+    },
+    "105323": {
+      "start_ticks": "233435",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "105844": {
+      "start_ticks": "233835",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "106116": {
+      "start_ticks": "234315",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "106434": {
+      "start_ticks": "235085",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "106578": {
+      "start_ticks": "235264",
+      "affinity": "Cpus_allowed_list:\t19"
+    },
+    "157817": {
+      "start_ticks": "36450478",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "160373": {
+      "start_ticks": "36462034",
+      "affinity": "Cpus_allowed_list:\t18"
+    },
+    "163885": {
+      "start_ticks": "24985600",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "166080": {
+      "start_ticks": "24986565",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "168550": {
+      "start_ticks": "36485530",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "168607": {
+      "start_ticks": "36485862",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "315020": {
+      "start_ticks": "36931678",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "342673": {
+      "start_ticks": "37027029",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "343474": {
+      "start_ticks": "37027459",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "351338": {
+      "start_ticks": "37052327",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "384621": {
+      "start_ticks": "25632810",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "502880": {
+      "start_ticks": "25957302",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "620503": {
+      "start_ticks": "26293163",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "620577": {
+      "start_ticks": "26293433",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "705737": {
+      "start_ticks": "26538366",
+      "affinity": "Cpus_allowed_list:\t28"
+    },
+    "1505185": {
+      "start_ticks": "52152462",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "1505483": {
+      "start_ticks": "52153023",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "1505753": {
+      "start_ticks": "52153977",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "1505836": {
+      "start_ticks": "52154559",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "1505921": {
+      "start_ticks": "52155233",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "1507026": {
+      "start_ticks": "52155922",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2010605": {
+      "start_ticks": "42396942",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2011312": {
+      "start_ticks": "42400388",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2011593": {
+      "start_ticks": "42401143",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2011864": {
+      "start_ticks": "42402170",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2012013": {
+      "start_ticks": "42402922",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2012588": {
+      "start_ticks": "42403650",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2012847": {
+      "start_ticks": "42404633",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144386": {
+      "start_ticks": "53846790",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144685": {
+      "start_ticks": "53847404",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2145909": {
+      "start_ticks": "53848522",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2147178": {
+      "start_ticks": "53849211",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2147249": {
+      "start_ticks": "53849854",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2147356": {
+      "start_ticks": "53850482",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2217069": {
+      "start_ticks": "54010734",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2218344": {
+      "start_ticks": "54011373",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2218472": {
+      "start_ticks": "54012293",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2218560": {
+      "start_ticks": "54012904",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2218848": {
+      "start_ticks": "54013662",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2218976": {
+      "start_ticks": "54014391",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2228427": {
+      "start_ticks": "54034668",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2229697": {
+      "start_ticks": "54035295",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2229828": {
+      "start_ticks": "54036212",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2229916": {
+      "start_ticks": "54036836",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2230097": {
+      "start_ticks": "54037643",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2230189": {
+      "start_ticks": "54038356",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2879569": {
+      "start_ticks": "8388285",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "3173585": {
+      "start_ticks": "67410949",
+      "affinity": "Cpus_allowed_list:\t17"
+    },
+    "3199097": {
+      "start_ticks": "9324950",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "3199439": {
+      "start_ticks": "9325179",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "3207816": {
+      "start_ticks": "9346838",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "3207923": {
+      "start_ticks": "9349113",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "3267446": {
+      "start_ticks": "67648835",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "3289558": {
+      "start_ticks": "67705138",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "3919545": {
+      "start_ticks": "35043720",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "3919789": {
+      "start_ticks": "35044586",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "1425": {
+      "start_ticks": "1274",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "1498": {
+      "start_ticks": "1281",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144042": {
+      "start_ticks": "42734859",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144043": {
+      "start_ticks": "42734859",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144044": {
+      "start_ticks": "42734859",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144045": {
+      "start_ticks": "42734859",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144047": {
+      "start_ticks": "42734859",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144048": {
+      "start_ticks": "42734859",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144049": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144050": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144051": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144052": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144053": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144054": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144055": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144056": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144057": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144058": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144059": {
+      "start_ticks": "42734860",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144060": {
+      "start_ticks": "42734861",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144061": {
+      "start_ticks": "42734861",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144062": {
+      "start_ticks": "42734861",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144063": {
+      "start_ticks": "42734861",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144064": {
+      "start_ticks": "42734861",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144065": {
+      "start_ticks": "42734861",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144066": {
+      "start_ticks": "42734861",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144067": {
+      "start_ticks": "42734862",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144069": {
+      "start_ticks": "42734862",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144070": {
+      "start_ticks": "42734862",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144071": {
+      "start_ticks": "42734862",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144072": {
+      "start_ticks": "42734862",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144073": {
+      "start_ticks": "42734862",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144074": {
+      "start_ticks": "42734863",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144075": {
+      "start_ticks": "42734863",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144076": {
+      "start_ticks": "42734863",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144077": {
+      "start_ticks": "42734863",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144078": {
+      "start_ticks": "42734863",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144079": {
+      "start_ticks": "42734863",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144080": {
+      "start_ticks": "42734863",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144081": {
+      "start_ticks": "42734864",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144082": {
+      "start_ticks": "42734864",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144083": {
+      "start_ticks": "42734864",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144084": {
+      "start_ticks": "42734864",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144085": {
+      "start_ticks": "42734864",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144086": {
+      "start_ticks": "42734864",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144087": {
+      "start_ticks": "42734864",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144088": {
+      "start_ticks": "42734864",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144089": {
+      "start_ticks": "42734865",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144090": {
+      "start_ticks": "42734865",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144091": {
+      "start_ticks": "42734865",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2144092": {
+      "start_ticks": "42734865",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    }
+  },
+  "config_hashes": {
+    "/etc/nginx/snippets/crypto_cta_manager.conf": "a85a748643ee01f0e6865c2ada4a3e5ac2a171135cea9a9b72f33b7f43529e0e",
+    "/home/ubuntu/binance-cta-rx01/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance-cta-special-rx02/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance-cta-special-rx03/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance-intra-arb01/trade_engine.toml": "c560f27c70e9b535de0a65e7f9948910f8d6bd9cd63e65fa1186048b14809f6d",
+    "/home/ubuntu/binance_exec_trade01/trade_engine.toml": "b40c54f7627a6722ea5a3c99aaed4fd7db2e0add8d949054286ef8804cf18028",
+    "/home/ubuntu/binance_exec_trade02/trade_engine.toml": "87b34c72bafe10728a2157bcd524f2e46b31a9be691b445ee046ee7443906dec",
+    "/home/ubuntu/binance_exec_trade03/trade_engine.toml": "87b34c72bafe10728a2157bcd524f2e46b31a9be691b445ee046ee7443906dec",
+    "/home/ubuntu/binance_exec_trade04/trade_engine.toml": "87b34c72bafe10728a2157bcd524f2e46b31a9be691b445ee046ee7443906dec",
+    "/home/ubuntu/binance_fr_arb01/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/binance_fr_arb02/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/binance_fr_arb03/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/binance_fr_arb04/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/binance_mm_alpha/trade_engine.toml": "fb6bee9dd17af4baf8dda52157d0b03bcf67efdbffb2029a65a9328bc4c4ad8c",
+    "/home/ubuntu/bitget-gate-cross-arb01/trade_engine.toml": "c8064dc3da0b30d004ea2e93d8a8960fb98f8dc351ad205bb09e34233efd3bfb",
+    "/home/ubuntu/bitget_fr_arb01/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/bitget_fr_arb02/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/bitget_fr_arb03/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/gate_fr_arb01/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/gate_fr_arb02/trade_engine.toml": "bdfa689c4a9bc82ea9fbdcaf4c743f4c819ddbbb5900479074ff913e7e905ed5",
+    "/home/ubuntu/gate_fr_arb03/trade_engine.toml": "388bb370fe85036d2fbd5c4cc1bdd4583fe3f4fcaa92a09c0bf788bd9202f60b",
+    "/home/ubuntu/okex-intra-arb01/trade_engine.toml": "3fb4d3557835f91bdb6ff4872297c208eed45047ce6d74002932525bd3173acd",
+    "/home/ubuntu/okex_mm_alpha/trade_engine.toml": "fb6bee9dd17af4baf8dda52157d0b03bcf67efdbffb2029a65a9328bc4c4ad8c",
+    "/home/ubuntu/binance_exec_trade05/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance_exec_rx04_5m05/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance_exec_trade07/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance_exec_trade06/trade_engine.toml": "b410d0512cc44ec64835d43593b9542ac2837f06369ddd058d9a0fbb040a6363",
+    "/home/ubuntu/binance_exec_trade08/trade_engine.toml": "aab1b4a75f872872f74268ccbf44ecf2000469a6a7f22b9295e37ba8fbfac42f",
+    "/etc/nginx/sites-enabled/crypto_proxy_4191.conf": "81674321ee45c92e8f2b97ac2af31ceded59b94aa44b6e6dd5b99ec56241bb98"
+  },
+  "tables": {
+    "cta_position_snapshots": {
+      "count": 4,
+      "hash": "1502c2fc04061030cd2670367d628048"
+    },
+    "cta_position_snapshot_entries": {
+      "count": 122,
+      "hash": "1956b485093521d03554823f6a6d2fc7"
+    },
+    "cta_strategy_position_snapshots": {
+      "count": 4,
+      "hash": "85882d16feaf860e4e7921e56d491905"
+    },
+    "cta_strategy_position_snapshot_entries": {
+      "count": 131,
+      "hash": "491f0c798c38f638c5f6b0da8a6c74b1"
+    },
+    "cta_strategy_allocation_snapshots": {
+      "count": 21095,
+      "hash": "3b1a82654a716128f8e9697ad0c9e1b5"
+    },
+    "cta_account_equity_daily": {
+      "count": 182,
+      "hash": "a7c842e76b0c0feb8bf59f3d10a2528a"
+    }
+  },
+  "funding_settings": [
+    {
+      "source_id": "binance_exec_rx04_5m05",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade01",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade02",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade03",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade04",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade05",
+      "funding_enabled": true,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade06",
+      "funding_enabled": true,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade07",
+      "funding_enabled": true,
+      "funding_refresh_secs": 300
+    },
+    {
+      "source_id": "binance_exec_trade08",
+      "funding_enabled": false,
+      "funding_refresh_secs": 300
+    }
+  ],
+  "manager_affinity": "Cpus_allowed_list:\t24"
+}

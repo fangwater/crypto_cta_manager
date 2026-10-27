@@ -128,6 +128,7 @@ struct SymbolCache {
     from_us: Option<i64>,
     through_us: Option<i64>,
     requested_us: i64,
+    requested_from_us: Option<i64>,
     attempted_us: i64,
     loading: bool,
     error: Option<String>,
@@ -152,6 +153,8 @@ pub struct FundingRateCache {
 
 #[derive(Clone, Debug, Default)]
 pub struct RateCoverage {
+    /// Complete symbol coverage captured under the same lock as the rate vectors.
+    pub complete_symbols: BTreeSet<String>,
     pub rates: BTreeMap<String, Arc<Vec<FundingRate>>>,
     pub loading: bool,
     pub unavailable_reason: Option<String>,
@@ -200,38 +203,58 @@ impl FundingRateCache {
                 }
                 symbols.sort();
                 symbols.dedup();
-                cache.schedule(&symbols, now, false);
+                cache.schedule(&symbols, now, None);
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
         });
     }
 
-    fn schedule(&self, symbols: &[String], now: i64, requested: bool) {
+    fn schedule(&self, symbols: &[String], now: i64, requested: Option<i64>) {
         if !self.config.enabled {
             return;
         }
         let mut entries = self.symbols.write().unwrap();
         for symbol in symbols.iter().filter(|s| supported_symbol(s)) {
             let entry = entries.entry(symbol.clone()).or_default();
-            if requested {
+            if let Some(from) = requested {
                 entry.requested_us = now;
+                entry.requested_from_us =
+                    Some(entry.requested_from_us.map_or(from, |old| old.min(from)));
             }
+            let minimum = if self.config.daily_estimates_enabled {
+                entry
+                    .requested_from_us
+                    .unwrap_or(now - RETENTION_US - 60_000_000)
+                    .max(1)
+            } else {
+                now - RETENTION_US - 60_000_000
+            };
+            let needs_earlier =
+                self.config.daily_estimates_enabled && entry.from_us.is_some_and(|ts| minimum < ts);
             let refresh_us = self.config.refresh_secs as i64 * 1_000_000;
             let retry_us = if entry.error.is_some() {
                 60_000_000
             } else {
                 refresh_us
             };
-            if entry.loading || (entry.attempted_us > 0 && now - entry.attempted_us < retry_us) {
+            if entry.loading
+                || (entry.attempted_us > 0
+                    && now - entry.attempted_us < retry_us
+                    && !(needs_earlier && entry.error.is_none()))
+            {
                 continue;
             }
             entry.loading = true;
             entry.attempted_us = now;
-            let from = entry
-                .through_us
-                .map_or(now - RETENTION_US - 60_000_000, |ts| {
-                    (ts - OVERLAP_US).max(now - RETENTION_US - 60_000_000)
-                });
+            let from = if needs_earlier {
+                minimum
+            } else {
+                entry
+                    .through_us
+                    .map_or(minimum, |ts| (ts - OVERLAP_US).max(minimum))
+            }
+            .div_euclid(1000)
+                * 1000;
             let cache = self.clone();
             let symbol = symbol.clone();
             tokio::spawn(async move {
@@ -247,7 +270,9 @@ impl FundingRateCache {
                             .rates
                             .iter()
                             .filter(|r| {
-                                r.ts_us >= now - RETENTION_US - 60_000_000 && r.ts_us < from
+                                (cache.config.daily_estimates_enabled
+                                    || r.ts_us >= now - RETENTION_US - 60_000_000)
+                                    && r.ts_us < from
                             })
                             .map(|r| ((r.ts_us, r.rate_type.clone()), r.clone()))
                             .collect();
@@ -256,12 +281,12 @@ impl FundingRateCache {
                                 .map(|r| ((r.ts_us, r.rate_type.clone()), r)),
                         );
                         entry.rates = Arc::new(merged.into_values().collect());
-                        entry.from_us = Some(
-                            entry
-                                .from_us
-                                .unwrap_or(from)
-                                .max(now - RETENTION_US - 60_000_000),
-                        );
+                        let earliest = entry.from_us.unwrap_or(from).min(from);
+                        entry.from_us = Some(if cache.config.daily_estimates_enabled {
+                            earliest
+                        } else {
+                            earliest.max(now - RETENTION_US - 60_000_000)
+                        });
                         entry.through_us = Some(now / 1000 * 1000);
                         entry.error = None;
                     }
@@ -289,12 +314,12 @@ impl FundingRateCache {
         let retained_from = now - RETENTION_US - 60_000_000;
         // Only request the retained overlap; older local orders still determine
         // settlement quantities. A wholly expired query never triggers REST.
-        if through >= retained_from {
-            self.schedule(symbols, now, true);
+        if self.config.daily_estimates_enabled || through >= retained_from {
+            self.schedule(symbols, now, Some(from));
         }
         let entries = self.symbols.read().unwrap();
         let mut view = RateCoverage::default();
-        if from < retained_from {
+        if !self.config.daily_estimates_enabled && from < retained_from {
             view.unavailable_reason = Some(
                 "公开费率仅保留最近 30 天；仅汇总可用时段及币种的估算 Funding，缺失部分未知".into(),
             );
@@ -313,6 +338,8 @@ impl FundingRateCache {
             {
                 view.unavailable_reason
                     .get_or_insert_with(|| "公开资金费历史覆盖不完整；仅汇总已加载部分".into());
+            } else if entry.error.is_none() {
+                view.complete_symbols.insert(symbol.clone());
             }
             if entry.from_us.is_some_and(|ts| ts <= through)
                 && entry.through_us.is_some_and(|ts| ts >= from)
@@ -482,6 +509,7 @@ pub struct FundingEstimateRecord {
 pub struct FundingEstimateRecords {
     pub records: Vec<FundingEstimateRecord>,
     pub skipped_settlements: usize,
+    pub skipped_by_symbol: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]

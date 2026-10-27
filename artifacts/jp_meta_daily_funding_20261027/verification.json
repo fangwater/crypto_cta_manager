@@ -1,0 +1,38 @@
+{
+  "protected_processes_unchanged": 163,
+  "configuration_hashes_unchanged": 29,
+  "snapshot_tables_unchanged": {
+    "cta_position_snapshots": {
+      "count": 4,
+      "hash": "1502c2fc04061030cd2670367d628048"
+    },
+    "cta_position_snapshot_entries": {
+      "count": 122,
+      "hash": "1956b485093521d03554823f6a6d2fc7"
+    },
+    "cta_strategy_position_snapshots": {
+      "count": 4,
+      "hash": "85882d16feaf860e4e7921e56d491905"
+    },
+    "cta_strategy_position_snapshot_entries": {
+      "count": 131,
+      "hash": "491f0c798c38f638c5f6b0da8a6c74b1"
+    },
+    "cta_strategy_allocation_snapshots": {
+      "count": 21095,
+      "hash": "3b1a82654a716128f8e9697ad0c9e1b5"
+    },
+    "cta_account_equity_daily": {
+      "count": 182,
+      "hash": "a7c842e76b0c0feb8bf59f3d10a2528a"
+    }
+  },
+  "funding_settings_unchanged": true,
+  "fixed_order_reports_unchanged": 8,
+  "manager_cpu_affinity": "Cpus_allowed_list:\t24",
+  "persisted_partial_fee_days": 200,
+  "daily_comparison_count": 5,
+  "complete_historical_coverage": false,
+  "frontend_assets_verified": 2,
+  "temporary_secondary_removed": true
+}

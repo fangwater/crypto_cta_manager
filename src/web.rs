@@ -46,6 +46,7 @@ use crate::strategy_catalog::{
 use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
 use crate::{nav, postgres};
 
+mod cumulative_funding;
 mod equity_history;
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
@@ -137,6 +138,7 @@ pub struct DashboardAccount {
     pub uni_mmr: Option<f64>,
     pub uni_mmr_status: Option<&'static str>,
     pub funding: crate::funding::FundingSummary,
+    pub cumulative_funding: Option<cumulative_funding::CumulativeFunding>,
     pub total_nav_before_fee_quote: Option<f64>,
     pub total_nav_after_fee_quote: Option<f64>,
 }
@@ -229,6 +231,8 @@ struct WebState {
     bnb: crate::bnb_auto::BnbManager,
     funding: crate::funding::FundingHub,
     funding_rates: crate::funding_rates::FundingRateCache,
+    funding_daily: Arc<crate::funding_daily::FundingDailyStore>,
+    cumulative_funding: Arc<RwLock<BTreeMap<String, cumulative_funding::CumulativeFunding>>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -458,7 +462,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         viz_snapshot.clone(),
     );
     let position_archive = Arc::new(PositionArchive::open(manager_db.clone())?);
-    let klines = Arc::new(KlineStore::from_db(manager_db, config.kline.clone())?);
+    let klines = Arc::new(KlineStore::from_db(
+        manager_db.clone(),
+        config.kline.clone(),
+    )?);
     klines.spawn_defaults();
     let theoretical_targets = crate::theoretical_nav::TheoreticalTargetCache::new(
         Arc::new(config.clone()),
@@ -517,6 +524,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let funding = crate::funding::FundingHub::new(&config);
     funding.load(&pool, &config).await?;
     let funding_rates = crate::funding_rates::FundingRateCache::new(config.funding_rates.clone())?;
+    let funding_daily = Arc::new(crate::funding_daily::FundingDailyStore::open(manager_db)?);
     funding_rates.spawn_refresh();
     let state = WebState {
         cache,
@@ -541,9 +549,12 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         bnb: bnb.clone(),
         funding,
         funding_rates,
+        funding_daily,
+        cumulative_funding: Arc::default(),
     };
     spawn_funding_collectors(&state);
     equity_history::spawn(state.clone());
+    cumulative_funding::spawn(state.clone());
 
     let app = Router::new()
         .route("/api/auth/status", get(auth_status))
@@ -1283,7 +1294,26 @@ async fn dashboard(
     }
     dashboard.report = nav::restrict_report(&dashboard.report, &visible.0);
     let now_ms = unix_now_ms();
+    let cumulative = state.cumulative_funding.read().await;
     for account in &mut dashboard.accounts {
+        account.cumulative_funding = if state.config.funding_rates.daily_estimates_enabled
+            && account.enabled
+            && account.venue == "binance-futures"
+        {
+            Some(
+                cumulative
+                    .get(&account.source_id)
+                    .cloned()
+                    .filter(|value| value.generation_us == dashboard.generated_at_us)
+                    .unwrap_or_else(|| cumulative_funding::CumulativeFunding {
+                        loading: true,
+                        unavailable_reason: Some("累计资金费计算中".into()),
+                        ..Default::default()
+                    }),
+            )
+        } else {
+            None
+        };
         apply_live_account(account, state.live_equity.get(&account.source_id), now_ms);
         if let Some(report) = dashboard
             .report
@@ -5269,6 +5299,7 @@ async fn build_dashboard(
                     .and_then(|reading| reading.uni_mmr_ts_ms)
                     .map(|ts_ms| live_equity_status(ts_ms, now_ms)),
                 funding: Default::default(),
+                cumulative_funding: None,
                 total_nav_before_fee_quote: None,
                 total_nav_after_fee_quote: None,
             }
@@ -5624,7 +5655,7 @@ mod tests {
                 config.clone(),
                 position_archive.clone(),
             ),
-            klines: Arc::new(KlineStore::from_db(db, config.kline.clone()).unwrap()),
+            klines: Arc::new(KlineStore::from_db(db.clone(), config.kline.clone()).unwrap()),
             position_archive,
             viz_snapshot: VizSnapshotClient::new(1).unwrap(),
             refresh_interval_secs: 60,
@@ -5637,6 +5668,10 @@ mod tests {
                 reload_notify.clone(),
             )
             .unwrap(),
+            funding_daily: Arc::new(
+                crate::funding_daily::FundingDailyStore::open(db.clone()).unwrap(),
+            ),
+            cumulative_funding: Arc::default(),
             funding: crate::funding::FundingHub::new(&config),
             funding_rates: crate::funding_rates::FundingRateCache::new(
                 config.funding_rates.clone(),

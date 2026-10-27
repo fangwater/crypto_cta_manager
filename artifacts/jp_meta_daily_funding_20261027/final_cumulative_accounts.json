@@ -1,0 +1,82 @@
+{
+  "binance_exec_trade01": {
+    "kind": "estimated",
+    "income_quote": -595.0398649057438,
+    "complete": false,
+    "loading": true,
+    "unavailable_reason": "\u7d2f\u8ba1 Funding \u4ec5\u8ba1\u5165\u5df2\u8986\u76d6\u65e5\u671f\u53ca\u5e01\u79cd\uff0c\u7f3a\u5931\u90e8\u5206\u672a\u77e5",
+    "start_ts_us": 1787377620383000,
+    "end_ts_us": 1793079796203407,
+    "generation_us": 1793079796203407
+  },
+  "binance_exec_trade02": {
+    "kind": "estimated",
+    "income_quote": -20.8481341131563,
+    "complete": false,
+    "loading": true,
+    "unavailable_reason": "\u7d2f\u8ba1 Funding \u4ec5\u8ba1\u5165\u5df2\u8986\u76d6\u65e5\u671f\u53ca\u5e01\u79cd\uff0c\u7f3a\u5931\u90e8\u5206\u672a\u77e5",
+    "start_ts_us": 1790051458324269,
+    "end_ts_us": 1793079796203407,
+    "generation_us": 1793079796203407
+  },
+  "binance_exec_trade03": {
+    "kind": "estimated",
+    "income_quote": -814.8998110087116,
+    "complete": false,
+    "loading": true,
+    "unavailable_reason": "\u7d2f\u8ba1 Funding \u4ec5\u8ba1\u5165\u5df2\u8986\u76d6\u65e5\u671f\u53ca\u5e01\u79cd\uff0c\u7f3a\u5931\u90e8\u5206\u672a\u77e5",
+    "start_ts_us": 1790053730307618,
+    "end_ts_us": 1793079796203407,
+    "generation_us": 1793079796203407
+  },
+  "binance_exec_trade04": {
+    "kind": "estimated",
+    "income_quote": -1447.980966281333,
+    "complete": false,
+    "loading": true,
+    "unavailable_reason": "\u7d2f\u8ba1 Funding \u4ec5\u8ba1\u5165\u5df2\u8986\u76d6\u65e5\u671f\u53ca\u5e01\u79cd\uff0c\u7f3a\u5931\u90e8\u5206\u672a\u77e5",
+    "start_ts_us": 1790173802678582,
+    "end_ts_us": 1793079796203407,
+    "generation_us": 1793079796203407
+  },
+  "binance_exec_trade06": {
+    "kind": "actual",
+    "income_quote": 8.872745368142818,
+    "complete": true,
+    "loading": false,
+    "unavailable_reason": null,
+    "start_ts_us": 1792404818623482,
+    "end_ts_us": 1793079796203407,
+    "generation_us": 1793079796203407
+  },
+  "binance_exec_trade07": {
+    "kind": "actual",
+    "income_quote": 0.6127559686137563,
+    "complete": true,
+    "loading": false,
+    "unavailable_reason": null,
+    "start_ts_us": 1791965764992000,
+    "end_ts_us": 1793079796203407,
+    "generation_us": 1793079796203407
+  },
+  "binance_exec_trade08": {
+    "kind": "estimated",
+    "income_quote": -0.02736464132619003,
+    "complete": false,
+    "loading": true,
+    "unavailable_reason": "\u7d2f\u8ba1 Funding \u4ec5\u8ba1\u5165\u5df2\u8986\u76d6\u65e5\u671f\u53ca\u5e01\u79cd\uff0c\u7f3a\u5931\u90e8\u5206\u672a\u77e5",
+    "start_ts_us": 1792681207853000,
+    "end_ts_us": 1793079796203407,
+    "generation_us": 1793079796203407
+  },
+  "binance_exec_rx04_5m05": {
+    "kind": "estimated",
+    "income_quote": 0.0021151345895896456,
+    "complete": false,
+    "loading": true,
+    "unavailable_reason": "\u7d2f\u8ba1 Funding \u4ec5\u8ba1\u5165\u5df2\u8986\u76d6\u65e5\u671f\u53ca\u5e01\u79cd\uff0c\u7f3a\u5931\u90e8\u5206\u672a\u77e5",
+    "start_ts_us": 1792735071172000,
+    "end_ts_us": 1793079796203407,
+    "generation_us": 1793079796203407
+  }
+}
