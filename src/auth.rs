@@ -446,7 +446,10 @@ pub async fn allowed_source_access(
     pool: &PgPool,
     user: &AuthUser,
     configured_source_ids: &BTreeSet<String>,
+    source_viewers: &BTreeMap<String, Vec<String>>,
 ) -> Result<SourceAccess> {
+    let configured_source_ids =
+        visible_source_boundary(configured_source_ids, source_viewers, Some(&user.username));
     if user.is_admin() {
         return Ok(SourceAccess {
             view: configured_source_ids.clone(),
@@ -472,6 +475,24 @@ pub async fn allowed_source_access(
         }
     }
     Ok(access)
+}
+
+/// An explicit host boundary cannot be widened by a database grant or role.
+/// Public symbol discovery may only include accounts without a boundary.
+pub fn visible_source_boundary(
+    configured: &BTreeSet<String>,
+    viewers: &BTreeMap<String, Vec<String>>,
+    username: Option<&str>,
+) -> BTreeSet<String> {
+    configured
+        .iter()
+        .filter(|id| {
+            viewers.get(*id).is_none_or(|names| {
+                username.is_some_and(|name| names.iter().any(|allowed| allowed == name))
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 pub async fn list_users(pool: &PgPool) -> Result<Vec<UserView>> {
@@ -525,11 +546,15 @@ pub async fn set_sources(
     .await
     .context("failed to load permission target")?
     .ok_or_else(|| anyhow::anyhow!("user was not found"))?;
-    sqlx::query("DELETE FROM cta_user_source_permissions WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await
-        .context("failed to clear user source permissions")?;
+    // Replace only the caller's manageable scope; hidden account grants survive.
+    sqlx::query(
+        "DELETE FROM cta_user_source_permissions WHERE user_id = $1 AND source_id = ANY($2)",
+    )
+    .bind(user_id)
+    .bind(configured_source_ids.iter().cloned().collect::<Vec<_>>())
+    .execute(&mut *tx)
+    .await
+    .context("failed to clear user source permissions")?;
     for (source_id, access_level) in unique {
         sqlx::query(
             "INSERT INTO cta_user_source_permissions (user_id, source_id, access_level) VALUES ($1, $2, $3)",
@@ -766,6 +791,120 @@ pub fn extract_session_cookie(cookie_header: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires an isolated local PostgreSQL test socket"]
+    async fn grant_replacement_preserves_hidden_sources_and_caps_regular_users() -> Result<()> {
+        use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+        let socket = std::env::var("CTA_AUTH_TEST_SOCKET")?;
+        anyhow::ensure!(
+            socket.starts_with("/tmp/cta-auth-test-"),
+            "isolated test socket required"
+        );
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                PgConnectOptions::new()
+                    .host(&socket)
+                    .port(15434)
+                    .username(&std::env::var("USER")?)
+                    .database("postgres"),
+            )
+            .await?;
+        // Temporary tables keep the regression self-contained on one connection.
+        sqlx::raw_sql("CREATE TEMP TABLE cta_users(user_id bigint PRIMARY KEY, username text, role text, disabled boolean DEFAULT false);
+            CREATE TEMP TABLE cta_user_source_permissions(user_id bigint, source_id text, access_level text, PRIMARY KEY(user_id,source_id));
+            INSERT INTO cta_users VALUES(1,'prc','admin',false),(3,'lgq','user',false);
+            INSERT INTO cta_user_source_permissions VALUES(3,'public','view'),(3,'private','configure'),(1,'private','configure');")
+            .execute(&pool).await?;
+        let configured = BTreeSet::from(["public".into(), "private".into()]);
+        let viewers = BTreeMap::from([("private".into(), vec!["lgq".into()])]);
+        let lgq = AuthUser {
+            user_id: 3,
+            username: "lgq".into(),
+            role: "user".into(),
+        };
+        let access = allowed_source_access(&pool, &lgq, &configured, &viewers).await?;
+        assert_eq!(access.view, configured);
+        assert_eq!(access.configure, BTreeSet::from(["private".into()]));
+        let scope = BTreeSet::from(["public".into()]);
+        let grants = [SourceGrantInput {
+            source_id: "public".into(),
+            access_level: "configure".into(),
+        }];
+        let view = set_sources(&pool, 3, &grants, &scope).await?;
+        assert_eq!(view.source_grants.len(), 2);
+        assert!(
+            view.source_grants
+                .iter()
+                .all(|grant| grant.access_level == "configure")
+        );
+        let view = set_sources(&pool, 3, &[], &scope).await?;
+        assert_eq!(view.source_grants.len(), 1);
+        assert_eq!(view.source_grants[0].source_id, "private");
+        let hidden = [SourceGrantInput {
+            source_id: "private".into(),
+            access_level: "view".into(),
+        }];
+        assert!(set_sources(&pool, 3, &hidden, &scope).await.is_err());
+        let prc = AuthUser {
+            user_id: 1,
+            username: "prc".into(),
+            role: "admin".into(),
+        };
+        assert_eq!(
+            allowed_source_access(&pool, &prc, &configured, &viewers)
+                .await?
+                .view,
+            scope
+        );
+        // Promoting an excluded user still cannot widen the host boundary.
+        let other = AuthUser {
+            user_id: 3,
+            username: "other".into(),
+            role: "user".into(),
+        };
+        assert!(
+            allowed_source_access(&pool, &other, &configured, &viewers)
+                .await?
+                .view
+                .is_empty()
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn host_visibility_caps_admin_access_and_public_discovery() {
+        let configured = BTreeSet::from(["public".into(), "private".into()]);
+        let viewers = BTreeMap::from([("private".into(), vec!["lgq".into()])]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused_auth_test")
+            .unwrap();
+        for (username, expected) in [
+            ("prc", BTreeSet::from(["public".into()])),
+            ("lgq", configured.clone()),
+        ] {
+            let user = AuthUser {
+                user_id: 1,
+                username: username.into(),
+                role: "admin".into(),
+            };
+            let access = allowed_source_access(&pool, &user, &configured, &viewers)
+                .await
+                .unwrap();
+            assert_eq!(access.view, expected);
+            assert_eq!(access.configure, expected);
+        }
+        assert_eq!(
+            visible_source_boundary(&configured, &viewers, None),
+            BTreeSet::from(["public".into()])
+        );
+        assert_eq!(
+            visible_source_boundary(&configured, &BTreeMap::new(), None),
+            configured
+        );
+    }
 
     #[test]
     fn password_records_verify_and_reject_changes() {

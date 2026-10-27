@@ -137,6 +137,9 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DashboardConfig {
+    /// Host-enforced account visibility cap, including administrators. Normal
+    /// database grants still determine view/configure within this boundary.
+    pub source_viewers: BTreeMap<String, Vec<String>>,
     pub overview_alerts: crate::account_overview::OverviewAlertSettings,
     pub nav_overview: crate::account_overview::external::Settings,
     pub external_overviews: Vec<crate::account_overview::external::Settings>,
@@ -350,6 +353,7 @@ impl Default for FundingConfig {
 impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
+            source_viewers: BTreeMap::new(),
             overview_alerts: Default::default(),
             nav_overview: Default::default(),
             external_overviews: vec![],
@@ -547,6 +551,19 @@ impl AppConfig {
             }
         }
         self.dashboard.overview_export.validate(&self.sources)?;
+        for (source_id, viewers) in &self.dashboard.source_viewers {
+            anyhow::ensure!(
+                self.sources.iter().any(|source| &source.id == source_id)
+                    && !viewers.is_empty()
+                    && viewers.iter().all(|name| {
+                        (3..=64).contains(&name.len())
+                            && name.bytes().all(|c| {
+                                c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'@')
+                            })
+                    }),
+                "dashboard.source_viewers requires configured source IDs and nonempty valid usernames"
+            );
+        }
         let alerts = &self.dashboard.overview_alerts;
         for limit in [alerts.long_leverage_limit, alerts.short_leverage_limit]
             .into_iter()
@@ -1065,6 +1082,25 @@ mod tests {
         assert!(toml::from_str::<FundingConfig>("enabled = true").is_err());
     }
     use super::*;
+
+    #[test]
+    fn source_visibility_requires_known_sources_and_named_viewers() {
+        let mut config = config_with_sources(vec![source("private", "/account/private")]);
+        config
+            .dashboard
+            .source_viewers
+            .insert("private".into(), vec!["lgq".into()]);
+        config.validate().unwrap();
+        for viewers in [vec![], vec![" lgq".into()], vec!["*".into()]] {
+            config
+                .dashboard
+                .source_viewers
+                .insert("private".into(), viewers);
+            assert!(config.validate().is_err());
+        }
+        config.dashboard.source_viewers = BTreeMap::from([("unknown".into(), vec!["lgq".into()])]);
+        assert!(config.validate().is_err());
+    }
 
     #[test]
     fn monitor_not_ready_threshold_defaults_and_validates() {

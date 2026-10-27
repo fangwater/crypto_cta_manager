@@ -20,6 +20,9 @@ pub struct Settings {
     /// Operator-defined visibility boundary, including administrators. When set,
     /// this explicit allowlist grants these users access to this provider only.
     pub viewer_usernames: Vec<String>,
+    /// Upstream account IDs temporarily omitted from the monitoring overview.
+    /// This changes neither the upstream collector nor its trading account.
+    pub excluded_source_ids: BTreeSet<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -33,6 +36,7 @@ impl Default for Settings {
             request_timeout_secs: 10,
             stale_secs: 90,
             viewer_usernames: vec![],
+            excluded_source_ids: BTreeSet::new(),
         }
     }
 }
@@ -353,6 +357,13 @@ impl ExternalOverview {
             .unwrap_or(&cache.catalog);
         let mut visible = 0;
         for original in rows {
+            if self
+                .settings
+                .excluded_source_ids
+                .contains(&original.source_id)
+            {
+                continue;
+            }
             let id = self.settings.source_id(&original.source_id);
             if allowed
                 .as_ref()
@@ -569,6 +580,66 @@ fn validate_report(report: &Upstream, time: i64, date: Option<&str>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn excluded_accounts_stay_out_of_latest_history_and_warmup() {
+        let hub = ExternalOverview::new(Settings {
+            enabled: true,
+            viewer_usernames: vec!["lgq".into()],
+            excluded_source_ids: BTreeSet::from(["gate_fr_arb04".into(), "gate_fr_arb05".into()]),
+            ..Default::default()
+        });
+        let time = now_ms();
+        let day = day_start(time) - DAY_MS;
+        let mut upstream = report();
+        for id in ["gate_fr_arb04", "gate_fr_arb05"] {
+            upstream.accounts.push(OverviewRow {
+                source_id: id.into(),
+                ..Default::default()
+            });
+        }
+        upstream.generated_at_ms = time;
+        upstream.dates = vec![date_label(day)];
+        let received = Received {
+            report: upstream.clone(),
+            at: time,
+        };
+        {
+            let mut cache = hub.cache.write().unwrap();
+            cache.catalog = upstream.accounts.clone();
+            cache.latest = Some(received.clone());
+            cache.days.insert(date_label(day), received);
+        }
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused_external_test")
+            .unwrap();
+        let user = AuthUser {
+            user_id: 3,
+            username: "lgq".into(),
+            role: "user".into(),
+        };
+        for selected in [None, Some(day), None] {
+            let mut response = OverviewResponse {
+                accounts: vec![],
+                dates: vec![],
+                generated_at_ms: time,
+                alerts: Default::default(),
+                loading: false,
+                external_status: vec![],
+            };
+            hub.merge(&pool, &user, selected, &Default::default(), &mut response)
+                .await
+                .unwrap();
+            assert_eq!(response.accounts.len(), 1);
+            assert_eq!(
+                response.accounts[0].source_id,
+                "external:jp-meta-nav:binance_fr_arb02"
+            );
+            if selected.is_some() {
+                hub.cache.write().unwrap().latest = None;
+            }
+        }
+        assert_eq!(upstream.accounts.len(), 3);
+    }
     #[tokio::test]
     async fn explicit_provider_viewers_exclude_admins_from_rows_dates_and_status() {
         let hub = ExternalOverview::new(Settings {

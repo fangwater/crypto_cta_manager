@@ -349,6 +349,7 @@ const MAX_PUBLISH_BODY_BYTES: usize = 1 << 20;
 struct AuthMiddlewareState {
     pool: PgPool,
     configured_source_ids: BTreeSet<String>,
+    source_viewers: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -767,6 +768,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             AuthMiddlewareState {
                 pool: pool.clone(),
                 configured_source_ids,
+                source_viewers: state.config.dashboard.source_viewers.clone(),
             },
             auth_middleware,
         ))
@@ -838,6 +840,7 @@ async fn auth_middleware(
         &auth_state.pool,
         &user,
         &auth_state.configured_source_ids,
+        &auth_state.source_viewers,
     )
     .await
     {
@@ -867,11 +870,11 @@ fn request_permission_error(
     path: &str,
     access: &auth::SourceAccess,
 ) -> Option<&'static str> {
-    if is_admin {
-        return None;
-    }
     if source_id.is_some_and(|source_id| !access.view.contains(source_id)) {
         return Some("you are not authorized to view or configure this account");
+    }
+    if is_admin {
+        return None;
     }
     if read_only {
         return None;
@@ -1008,6 +1011,24 @@ fn source_id_from_path(path: &str) -> Option<&str> {
     rest.split('/').next().filter(|value| !value.is_empty())
 }
 
+async fn session_user_view(state: &WebState, user: &AuthUser) -> Result<auth::UserView, ApiError> {
+    let configured = state
+        .config
+        .sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect();
+    let boundary = auth::visible_source_boundary(
+        &configured,
+        &state.config.dashboard.source_viewers,
+        Some(&user.username),
+    );
+    let mut view = auth::user_view(&state.pool, user).await?;
+    view.source_grants
+        .retain(|grant| boundary.contains(&grant.source_id));
+    Ok(view)
+}
+
 async fn auth_status(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1018,7 +1039,7 @@ async fn auth_status(
         authenticated: user.is_some(),
         setup_required,
         user: match user {
-            Some(user) => Some(auth::user_view(&state.pool, &user).await?),
+            Some(user) => Some(session_user_view(&state, &user).await?),
             None => None,
         },
     };
@@ -1045,7 +1066,7 @@ async fn auth_register(
         Err(error) => return Ok(bad_request(error.to_string())),
     };
     let token = auth::create_session(&state.pool, user.user_id).await?;
-    let view = auth::user_view(&state.pool, &user).await?;
+    let view = session_user_view(&state, &user).await?;
     Ok((
         [(
             header::SET_COOKIE,
@@ -1066,7 +1087,7 @@ async fn auth_login(
         Err(_) => return Ok(unauthorized("invalid username or password")),
     };
     let token = auth::create_session(&state.pool, user.user_id).await?;
-    let view = auth::user_view(&state.pool, &user).await?;
+    let view = session_user_view(&state, &user).await?;
     Ok((
         [(
             header::SET_COOKIE,
@@ -1109,21 +1130,25 @@ async fn auth_verify(
     let Some(user) = load_request_user(&state.pool, &headers).await? else {
         return Ok(unauthorized("login required"));
     };
-    if !user.is_admin() {
-        let source_id = headers
-            .get("x-cta-source-id")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        let configured = state
-            .config
-            .sources
-            .iter()
-            .map(|source| source.id.clone())
-            .collect();
-        let access = auth::allowed_source_access(&state.pool, &user, &configured).await?;
-        if !access.view.contains(source_id) {
-            return Ok(forbidden("you are not authorized to view this account"));
-        }
+    let source_id = headers
+        .get("x-cta-source-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let configured = state
+        .config
+        .sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect();
+    let access = auth::allowed_source_access(
+        &state.pool,
+        &user,
+        &configured,
+        &state.config.dashboard.source_viewers,
+    )
+    .await?;
+    if !access.view.contains(source_id) {
+        return Ok(forbidden("you are not authorized to view this account"));
     }
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1131,6 +1156,7 @@ async fn auth_verify(
 async fn auth_users(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
+    Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
     let mut users = auth::list_users(&state.pool).await?;
     // Grant managers pick grantees from the user list too, but only admins may
@@ -1139,6 +1165,11 @@ async fn auth_users(
         for target in &mut users {
             target.source_grants.clear();
         }
+    }
+    for target in &mut users {
+        target
+            .source_grants
+            .retain(|grant| visible.0.contains(&grant.source_id));
     }
     Ok((NO_STORE, Json(users)).into_response())
 }
@@ -1160,20 +1191,26 @@ async fn auth_create_user(
 async fn auth_user_sources(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
+    Extension(visible): Extension<VisibleSources>,
     Path(user_id): Path<i64>,
     Json(request): Json<auth::SetSourcesRequest>,
 ) -> Result<Response, ApiError> {
     if !user.is_admin() {
         return Ok(forbidden("administrator permission required"));
     }
-    let configured = state
-        .config
-        .sources
+    if request
+        .grants
         .iter()
-        .map(|source| source.id.clone())
-        .collect();
-    match auth::set_sources(&state.pool, user_id, &request.grants, &configured).await {
-        Ok(view) => Ok((NO_STORE, Json(view)).into_response()),
+        .any(|grant| !visible.0.contains(grant.source_id.trim()))
+    {
+        return Ok(forbidden("you are not authorized to manage this account"));
+    }
+    match auth::set_sources(&state.pool, user_id, &request.grants, &visible.0).await {
+        Ok(mut view) => {
+            view.source_grants
+                .retain(|grant| visible.0.contains(&grant.source_id));
+            Ok((NO_STORE, Json(view)).into_response())
+        }
         Err(error) => Ok(bad_request(error.to_string())),
     }
 }
@@ -1181,6 +1218,7 @@ async fn auth_user_sources(
 async fn auth_user_role(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
+    Extension(visible): Extension<VisibleSources>,
     Path(user_id): Path<i64>,
     Json(request): Json<auth::SetRoleRequest>,
 ) -> Result<Response, ApiError> {
@@ -1188,7 +1226,11 @@ async fn auth_user_role(
         return Ok(forbidden("administrator permission required"));
     }
     match auth::set_role(&state.pool, user_id, &request.role).await {
-        Ok(view) => Ok((NO_STORE, Json(view)).into_response()),
+        Ok(mut view) => {
+            view.source_grants
+                .retain(|grant| visible.0.contains(&grant.source_id));
+            Ok((NO_STORE, Json(view)).into_response())
+        }
         Err(error) => Ok(bad_request(error.to_string())),
     }
 }
@@ -1423,9 +1465,39 @@ struct SymbolView {
 async fn list_symbols(
     State(state): State<WebState>,
     Query(query): Query<SymbolsQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let selected_source_ids = parse_csv(query.source_ids.as_deref(), false);
-    let sources = match resolve_sources(&state.config, &selected_source_ids) {
+    let user = match load_request_user(&state.pool, &headers).await {
+        Ok(user) => user,
+        Err(_) => return internal_error(),
+    };
+    let configured = state
+        .config
+        .sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect();
+    let visible = match user {
+        Some(user) => match auth::allowed_source_access(
+            &state.pool,
+            &user,
+            &configured,
+            &state.config.dashboard.source_viewers,
+        )
+        .await
+        {
+            Ok(access) => access.view,
+            Err(_) => return internal_error(),
+        },
+        None => {
+            auth::visible_source_boundary(&configured, &state.config.dashboard.source_viewers, None)
+        }
+    };
+    if selected_source_ids.iter().any(|id| !visible.contains(id)) {
+        return forbidden("you are not authorized to view this account");
+    }
+    let sources = match resolve_visible_sources(&state.config, &selected_source_ids, &visible) {
         Ok(sources) => sources,
         Err(message) => return bad_request(message),
     };
@@ -2563,6 +2635,19 @@ async fn save_position_strategy(
         return Ok(bad_request(message));
     }
     let session_user = user.as_ref().map(|Extension(user)| user);
+    let publish_visibility = session_user.map(|user| {
+        let configured = state
+            .config
+            .sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect();
+        auth::visible_source_boundary(
+            &configured,
+            &state.config.dashboard.source_viewers,
+            Some(&user.username),
+        )
+    });
     let access =
         strategy_catalog::load_position_access(&state.pool, &request.strategy_name).await?;
     if !authorize_position_publish(&state.pool, session_user, access.as_ref(), &headers).await? {
@@ -2599,6 +2684,14 @@ async fn save_position_strategy(
         {
             for symbol in request.targets.keys() {
                 if let Err(error) = crate::exec_routing::validate_target_symbol(source, symbol) {
+                    if publish_visibility
+                        .as_ref()
+                        .is_some_and(|visible| !visible.contains(&source_id))
+                    {
+                        return Ok(bad_request(
+                            "a bound account rejected the target".to_string(),
+                        ));
+                    }
                     return Ok(bad_request(format!("source {source_id}: {error}")));
                 }
             }
@@ -2643,7 +2736,7 @@ async fn save_position_strategy(
                 );
                 return Err(error.into());
             }
-            let publishes =
+            let mut publishes =
                 publish_bound_accounts(&state, &saved.strategy_name, &published_accounts).await;
             if let Some(failed) = publishes.iter().find(|item| item.error.is_some()) {
                 let source_id = failed.source_id.as_str();
@@ -2659,12 +2752,17 @@ async fn save_position_strategy(
                 return Ok((
                     StatusCode::BAD_GATEWAY,
                     Json(ErrorResponse {
-                        error: format!(
+                        error: if publish_visibility.as_ref().is_some_and(|visible| !visible.contains(source_id)) {
+                            "position strategy saved, but a bound-account publish failed".to_string()
+                        } else { format!(
                             "position strategy saved, but publish failed for {source_id}/{binding_name}: {error}"
-                        ),
+                        ) },
                     }),
                 )
                     .into_response());
+            }
+            if let Some(visible) = &publish_visibility {
+                publishes.retain(|publish| visible.contains(&publish.source_id));
             }
             Ok((
                 NO_STORE,
@@ -6382,7 +6480,11 @@ mod tests {
                 );
                 assert_eq!(
                     request_permission_error(true, false, source_id, &path, &access),
-                    None
+                    if source == "account-c" {
+                        Some("you are not authorized to view or configure this account")
+                    } else {
+                        None
+                    }
                 );
             }
         }
@@ -6525,7 +6627,7 @@ mod tests {
                 account_path,
                 &access
             ),
-            None
+            Some("you are not authorized to view or configure this account")
         );
     }
 
@@ -6694,6 +6796,11 @@ async fn save_virtual_account_response(
             Err(error) => return Ok(catalog_error(error)),
         };
         if let Err(message) = validate_virtual_activation(state, &source_id, &combined, 1.0).await {
+            if !visible.0.contains(&source_id) {
+                return Ok(bad_request(
+                    "a following account rejected the configuration".to_string(),
+                ));
+            }
             return Ok(bad_request(format!("source {source_id}: {message}")));
         }
     }

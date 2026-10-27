@@ -983,6 +983,18 @@ returning rows, totals, dates, provider status or access metadata. Never treat
 administrator status as an override to that host-defined boundary. The optional
 CTA `/api/integrations/account-overview` requires its separate host-only Bearer
 token and an explicit export source list; never export external providers again.
+By operator request on 2026-10-27, jp-meta local sources `binance_exec_trade06`
+(`lgq_cta_RX01`), `binance_exec_trade07` (`lgq_cta_RX03`),
+`binance_exec_trade08` (`lgq_ltp_81857`) and `binance_exec_rx04_5m05`
+(`RX04 5min`) are also visible only to `lgq`, including against admin `prc`.
+`dashboard.source_viewers` caps ordinary database grants and administrator
+access on lists, source APIs, grant metadata and direct Exec gateway checks.
+Grant replacement must retain hidden-source grants. This visibility boundary
+does not change machine publishers or strategy publication authorization.
+Gate `gate_fr_arb04` and `gate_fr_arb05` are temporarily excluded from the
+jp-meta monitoring overview using `dashboard.nav_overview.excluded_source_ids`;
+preserve upstream collection and history. Other accounts still require complete
+data for total equity and profit; never turn missing values into zero.
 
 ## Central PostgreSQL Layout
 
