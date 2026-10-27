@@ -87,8 +87,9 @@ jp-meta 在 2026-10-22 将公开费率固定为
 请求共用 Retry-After 冷却。完整分页校验成功后才替换缓存；失败保留旧缓存，API
 明确提示不可用。查询不等待历史 HTTP，加载状态驱动浏览器十秒后重试。
 
-2026-10-27，jp-meta 启用 `[funding_rates].daily_estimates_enabled = true`
-（其他主机默认关闭）。账户卡片的累计费后净值在原订单净值上加有符号 Funding
+2026-10-27，jp-meta 和 el01 启用 `[funding_rates].daily_estimates_enabled = true`
+（其他主机默认关闭）。el01 的公开费率请求显式绑定预留数据地址 `154.197.32.10`。
+账户卡片的累计费后净值在原订单净值上加有符号 Funding
 收入，并分别显示订单净值、Funding 金额与实际/估算类型。沿用实际账单开关及
 不完整估算回退到已保存实际收入的规则，两类金额不相加。
 

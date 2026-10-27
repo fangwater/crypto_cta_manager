@@ -77,6 +77,12 @@ retry_backoff_ms = 1000
 at_mobiles = []
 is_at_all = false
 
+[funding_rates]
+# Persist daily estimated fees and show cumulative Funding on account cards.
+daily_estimates_enabled = true
+# el01's reserved public-data address; never use a normal trading address.
+local_ip = "154.197.32.10"
+
 [funding]
 enable_token_env = "CTA_FUNDING_ENABLE_TOKEN"
 local_ip = "154.197.32.9"

@@ -1,0 +1,1 @@
+{"name": "explicit_schema_maintenance", "body": {"table": "cta_strategy_allocation_snapshots", "added_column": "restatements", "row_count": 0, "backup": "/home/el01/crypto_cta_manager/backups/daily-funding-20261027T060024Z/cta_strategy_allocation_snapshots.before.sql", "backup_sha256": "528c5be842182bdc515357671821309594b376d139b33a46faeb63b139113b1d"}}
