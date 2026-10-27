@@ -114,6 +114,7 @@ export interface DashboardAccount {
     income_quote: number | null
     complete: boolean
     loading: boolean
+    refreshing: boolean
     unavailable_reason: string | null
     start_ts_us: number
     end_ts_us: number

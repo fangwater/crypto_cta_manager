@@ -7,10 +7,44 @@ pub struct CumulativeFunding {
     pub income_quote: Option<f64>,
     pub complete: bool,
     pub loading: bool,
+    pub refreshing: bool,
     pub unavailable_reason: Option<String>,
     pub start_ts_us: i64,
     pub end_ts_us: i64,
     pub generation_us: i64,
+}
+
+impl CumulativeFunding {
+    pub(super) fn for_dashboard(cached: Option<&Self>, generation: i64) -> Self {
+        match cached {
+            Some(value) => Self {
+                refreshing: value.refreshing || value.generation_us != generation,
+                ..value.clone()
+            },
+            None => Self {
+                loading: true,
+                refreshing: true,
+                unavailable_reason: Some("累计资金费计算中".into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn retain_known(previous: Option<&Self>, next: Self) -> Self {
+        if next.income_quote.is_none()
+            && let Some(previous) = previous.filter(|previous| {
+                previous.income_quote.is_some()
+                    && (next.start_ts_us == 0 || next.start_ts_us == previous.start_ts_us)
+                    && (next.kind.is_empty() || next.kind == previous.kind)
+            })
+        {
+            return Self {
+                refreshing: true,
+                ..previous.clone()
+            };
+        }
+        next
+    }
 }
 
 pub(super) fn spawn(state: WebState) {
@@ -76,11 +110,9 @@ pub(super) fn spawn(state: WebState) {
                         }
                     }
                 };
-                state
-                    .cumulative_funding
-                    .write()
-                    .await
-                    .insert(source.id.clone(), value);
+                let mut cached = state.cumulative_funding.write().await;
+                let value = CumulativeFunding::retain_known(cached.get(&source.id), value);
+                cached.insert(source.id.clone(), value);
             }
             next_retry = std::time::Instant::now() + Duration::from_secs(30);
         }
@@ -244,6 +276,7 @@ fn select(
             estimate_complete
         },
         loading: !use_actual && estimate.loading,
+        refreshing: false,
         unavailable_reason: if use_actual {
             (!complete_actual).then(|| {
                 actual
@@ -263,6 +296,67 @@ fn select(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refresh_keeps_known_funding_until_a_replacement_is_ready() {
+        let previous = CumulativeFunding {
+            kind: "estimated".into(),
+            income_quote: Some(-12.5),
+            complete: true,
+            start_ts_us: 10,
+            end_ts_us: 100,
+            generation_us: 100,
+            ..Default::default()
+        };
+        let stale = CumulativeFunding::for_dashboard(Some(&previous), 200);
+        assert_eq!(stale.income_quote, Some(-12.5));
+        assert!(stale.refreshing && stale.complete);
+        assert_eq!(stale.end_ts_us, 100);
+        let failed = CumulativeFunding::retain_known(
+            Some(&previous),
+            CumulativeFunding {
+                generation_us: 200,
+                ..Default::default()
+            },
+        );
+        assert_eq!(failed.income_quote, Some(-12.5));
+        assert!(CumulativeFunding::for_dashboard(Some(&failed), 100).refreshing);
+        let pending = CumulativeFunding {
+            kind: "estimated".into(),
+            start_ts_us: 10,
+            generation_us: 200,
+            loading: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            CumulativeFunding::retain_known(Some(&previous), pending.clone()).income_quote,
+            Some(-12.5)
+        );
+        let changed_anchor = CumulativeFunding {
+            start_ts_us: 20,
+            ..pending.clone()
+        };
+        assert!(
+            CumulativeFunding::retain_known(Some(&previous), changed_anchor)
+                .income_quote
+                .is_none()
+        );
+        assert!(
+            CumulativeFunding::retain_known(None, pending)
+                .income_quote
+                .is_none()
+        );
+        let replacement = CumulativeFunding {
+            income_quote: Some(-13.0),
+            generation_us: 200,
+            end_ts_us: 200,
+            ..previous
+        };
+        let ready = CumulativeFunding::retain_known(Some(&stale), replacement);
+        let ready = CumulativeFunding::for_dashboard(Some(&ready), 200);
+        assert_eq!(ready.income_quote, Some(-13.0));
+        assert!(!ready.refreshing);
+    }
+
     #[test]
     fn actual_and_estimates_are_never_added_and_unknown_is_not_zero() {
         let mut actual = crate::funding::FundingSummary {

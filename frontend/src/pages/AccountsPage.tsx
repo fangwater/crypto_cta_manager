@@ -305,6 +305,7 @@ function AccountCard({
             <Metric label="订单费后净值" value={report ? `${money(report.nav_change_after_fee_quote)} 报价币` : '--'} />
             <Metric label={`Funding（${funding.kind === 'actual' ? '实际' : '估算'}）`}
               value={funding.income_quote != null ? `${fundingMoney(funding.income_quote)} 报价币` : '--'}
+              title={funding.income_quote != null ? `统计截至 ${timestampUs(funding.end_ts_us)}${funding.refreshing ? '，更新中' : ''}` : undefined}
               tone={funding.income_quote != null ? signedClass(funding.income_quote) : ''} />
           </>}
           <Metric label="当前持仓" value={report ? `${openPositions} 个合约` : '--'} />
@@ -373,9 +374,9 @@ function uniMmrTone(value: number | null | undefined, status?: string | null) {
   return ''
 }
 
-function Metric({ label, value, tone = '' }: { label: string; value: string; tone?: string }) {
+function Metric({ label, value, tone = '', title }: { label: string; value: string; tone?: string; title?: string }) {
   return (
-    <div>
+    <div title={title}>
       <p className="text-xs text-muted">{label}</p>
       <p className={cn('mt-1 font-medium tabular-nums text-ink', tone)}>{value}</p>
     </div>

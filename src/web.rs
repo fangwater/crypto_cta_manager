@@ -1300,17 +1300,10 @@ async fn dashboard(
             && account.enabled
             && account.venue == "binance-futures"
         {
-            Some(
-                cumulative
-                    .get(&account.source_id)
-                    .cloned()
-                    .filter(|value| value.generation_us == dashboard.generated_at_us)
-                    .unwrap_or_else(|| cumulative_funding::CumulativeFunding {
-                        loading: true,
-                        unavailable_reason: Some("累计资金费计算中".into()),
-                        ..Default::default()
-                    }),
-            )
+            Some(cumulative_funding::CumulativeFunding::for_dashboard(
+                cumulative.get(&account.source_id),
+                dashboard.generated_at_us,
+            ))
         } else {
             None
         };
