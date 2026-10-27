@@ -139,6 +139,8 @@ pub struct DatabaseConfig {
 pub struct DashboardConfig {
     pub overview_alerts: crate::account_overview::OverviewAlertSettings,
     pub nav_overview: crate::account_overview::external::Settings,
+    pub external_overviews: Vec<crate::account_overview::external::Settings>,
+    pub overview_export: crate::account_overview::export::Settings,
     pub refresh_secs: u64,
     /// CPU computation only; independent of Binance request concurrency/budget.
     pub compute_threads: usize,
@@ -350,6 +352,8 @@ impl Default for DashboardConfig {
         Self {
             overview_alerts: Default::default(),
             nav_overview: Default::default(),
+            external_overviews: vec![],
+            overview_export: Default::default(),
             refresh_secs: 60,
             compute_threads: crate::analysis::default_threads(),
         }
@@ -533,6 +537,16 @@ impl AppConfig {
             bail!("database.max_connections must be greater than zero");
         }
         self.dashboard.nav_overview.validate()?;
+        let mut overview_providers = std::collections::BTreeSet::new();
+        for settings in
+            std::iter::once(&self.dashboard.nav_overview).chain(&self.dashboard.external_overviews)
+        {
+            settings.validate()?;
+            if settings.enabled && !overview_providers.insert(&settings.provider_id) {
+                bail!("duplicate overview provider identity");
+            }
+        }
+        self.dashboard.overview_export.validate(&self.sources)?;
         let alerts = &self.dashboard.overview_alerts;
         for limit in [alerts.long_leverage_limit, alerts.short_leverage_limit]
             .into_iter()

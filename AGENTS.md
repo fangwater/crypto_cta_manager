@@ -974,6 +974,15 @@ otherwise priced holdings. Display priced position/leverage/net subtotals with
 an explicit partial-valuation label and `position_unpriced_assets`; never assume
 unknown values are zero or dust based on base quantity alone. Entirely unpriced
 sides remain unknown, and partial leverage cannot establish a below-limit alert.
+By operator request on 2026-10-27, jp-meta also aggregates `okex_mm_alpha`,
+`bybit_mm_alpha` and SG's `bybit_exec_trade01` through independent HTTP summary
+providers. NAV retains MM's existing PnL model; SG owns its own Exec calculation.
+Provider `viewer_usernames = ["lgq"]` is an explicit visibility boundary for all
+these accounts and FR, including against administrator `prc`. Apply it before
+returning rows, totals, dates, provider status or access metadata. Never treat
+administrator status as an override to that host-defined boundary. The optional
+CTA `/api/integrations/account-overview` requires its separate host-only Bearer
+token and an explicit export source list; never export external providers again.
 
 ## Central PostgreSQL Layout
 

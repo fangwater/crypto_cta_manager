@@ -406,9 +406,9 @@ export function AdminPage() {
         </Card>
       )}
       {isAdmin && externalAccounts.length > 0 && <Card className="mt-5">
-        <CardHeader><CardTitle>FR 账户查看权限</CardTitle></CardHeader>
+        <CardHeader><CardTitle>外部账户查看权限</CardTitle></CardHeader>
         <CardContent className="space-y-4">
-          <p className="text-xs text-muted">管理员可查看全部 FR 账户。普通用户须单独授权，授权后可在首页查看和汇总；NAV 详情仍使用 NAV 平台的登录与权限。</p>
+          <p className="text-xs text-muted">外部账户按各数据源的可见范围展示。主机限定的可见用户范围也适用于管理员；其他来源按账户授权。详情继续使用对应平台的登录与权限。</p>
           {externalAccounts.map(account => <div key={account.source_id} className="rounded-xl border border-border-soft p-4">
             <p className="text-sm font-medium text-ink">{account.account}</p>
             <div className="mt-3 flex flex-wrap gap-4">{grantableUsers.map(target => <label key={target.user_id} className="flex items-center gap-2 text-xs text-ink">

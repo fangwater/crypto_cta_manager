@@ -5,6 +5,23 @@ CTA Manager 主动轮询 NAV Manager 的只读接口，将全部已启用的
 目录决定，不固定为 9 个。两个项目只通过 HTTP 通信，各自保留自己的
 数据库、历史数据、计算和运行目录。
 
+2026-10-27 按操作员要求，同一接口增加 `okex_mm_alpha` 与 `bybit_mm_alpha`。
+`account_kind` 区分 FR、MM 和 CTA；MM 使用 NAV 自己的既有金额 FIFO 模型，
+不会被改为 FR 数量 FIFO。每日收益同样为已实现净收益，权益倒算和回撤
+包含浮盈亏。历史重放单独后台执行且并发数为一，不阻塞实时仓位轮询。
+
+SG 的 `bybit_exec_trade01` 从 SG Manager 的
+`/manager/api/integrations/account-overview` 读取，由 SG 独立计算；
+配置为 `[[dashboard.external_overviews]]` 的第二个 provider。该接口仅
+导出 `[dashboard.overview_export].source_ids`，使用独立环境 Bearer token，
+浏览器 session 无效。不会在 jp-meta 注册一个指向 SG RocksDB 的 Exec 来源。
+SG 的详情链接直接进入其自己的 Manager，仍须通过 SG 登录与权限检查。
+
+两组 provider 在 jp-meta 均设置 `viewer_usernames = ["lgq"]`。这是主机
+明确授权及可见上限，管理员 `prc` 也不能绕过；账户行、汇总输入、外部日期、
+provider 状态与权限列表都按此过滤。空列表保留原来的管理员及账户授权行为。
+此设置只限定接入数据，不改变本机 CTA 权限或其他平台的登录权限。
+
 ## 展示与口径
 
 - 首页可筛选全部、CTA、FR，再按账户、交易所和上海日期筛选。

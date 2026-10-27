@@ -21,7 +21,7 @@ export interface OverviewRow {
   timeout_alert: boolean | null
   history_start_ms: number | null
   history_rebuilt_at_ms?: number | null
-  account_kind?: 'cta' | 'fr'
+  account_kind?: 'cta' | 'fr' | 'mm'
   detail_url?: string | null
   collection_status?: 'live' | 'historical' | 'stale' | 'loading' | 'unavailable' | null
 }
@@ -36,8 +36,12 @@ export interface AccountOverview {
 }
 
 // A partial sum would look like a factual total. Keep an incomplete total unknown.
+export function isExternalOverview(row: OverviewRow) {
+  return row.source_id?.startsWith('external:') || row.account_kind === 'fr' || row.account_kind === 'mm'
+}
+
 export function overviewTotal(rows: OverviewRow[], key: 'equity' | 'today_profit') {
-  if (rows.some(row => row[key] == null || !Number.isFinite(row[key]) || row.account_kind === 'fr' && !['live', 'historical'].includes(row.collection_status ?? ''))) return null
+  if (rows.some(row => row[key] == null || !Number.isFinite(row[key]) || isExternalOverview(row) && !['live', 'historical'].includes(row.collection_status ?? ''))) return null
   return rows.reduce((sum, row) => sum + row[key]!, 0)
 }
 

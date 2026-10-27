@@ -17,6 +17,9 @@ pub struct Settings {
     pub refresh_secs: u64,
     pub request_timeout_secs: u64,
     pub stale_secs: u64,
+    /// Operator-defined visibility boundary, including administrators. When set,
+    /// this explicit allowlist grants these users access to this provider only.
+    pub viewer_usernames: Vec<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -29,6 +32,7 @@ impl Default for Settings {
             refresh_secs: 15,
             request_timeout_secs: 10,
             stale_secs: 90,
+            viewer_usernames: vec![],
         }
     }
 }
@@ -56,16 +60,28 @@ impl Settings {
                 && url.fragment().is_none(),
             "nav_overview URL must be an HTTP endpoint without credentials or query"
         );
+        let local_detail = self.detail_base_url.starts_with('/')
+            && !self.detail_base_url.starts_with("//")
+            && !self.detail_base_url.contains(['?', '\\'])
+            && self
+                .detail_base_url
+                .split_once('#')
+                .is_none_or(|(_, route)| route.starts_with('/') && !route.contains('#'))
+            && self.detail_base_url.ends_with('/');
+        let remote_detail = reqwest::Url::parse(&self.detail_base_url).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none()
+                && url.query() == Some("source=")
+        });
+        ensure!(local_detail || remote_detail, "invalid overview detail URL");
         ensure!(
-            self.detail_base_url.starts_with('/')
-                && !self.detail_base_url.starts_with("//")
-                && !self.detail_base_url.contains(['?', '\\'])
-                && self
-                    .detail_base_url
-                    .split_once('#')
-                    .is_none_or(|(_, route)| { route.starts_with('/') && !route.contains('#') })
-                && self.detail_base_url.ends_with('/'),
-            "nav_overview detail_base_url must be a same-origin directory"
+            self.viewer_usernames
+                .iter()
+                .all(|name| !name.trim().is_empty() && name.len() <= 128),
+            "invalid overview viewers"
         );
         ensure!(
             (5..=300).contains(&self.refresh_secs)
@@ -123,6 +139,13 @@ pub struct ExternalOverview {
 }
 
 impl ExternalOverview {
+    pub fn user_allowed(&self, user: &AuthUser) -> bool {
+        self.settings.viewer_usernames.is_empty()
+            || self.settings.viewer_usernames.contains(&user.username)
+    }
+    pub fn owns(&self, source: &str) -> bool {
+        source.starts_with(&format!("external:{}:", self.settings.provider_id))
+    }
     pub fn new(settings: Settings) -> Self {
         Self {
             settings,
@@ -280,10 +303,10 @@ impl ExternalOverview {
         alerts: &OverviewAlertSettings,
         report: &mut OverviewResponse,
     ) -> Result<()> {
-        if !self.settings.enabled {
+        if !self.settings.enabled || !self.user_allowed(user) {
             return Ok(());
         }
-        let allowed = if user.is_admin() {
+        let allowed = if user.is_admin() || !self.settings.viewer_usernames.is_empty() {
             None
         } else {
             Some(sqlx::query_scalar::<_,String>("SELECT v.source_id FROM cta_external_overview_viewers v JOIN cta_external_overview_accounts a USING(source_id) WHERE v.user_id=$1 AND a.provider_id=$2 AND a.enabled")
@@ -349,7 +372,9 @@ impl ExternalOverview {
                 }
             };
             row.source_id = id;
-            row.account_kind = "fr".into();
+            if row.account_kind.is_empty() {
+                row.account_kind = "fr".into();
+            }
             row.detail_url = Some(format!(
                 "{}{}",
                 self.settings.detail_base_url, original.source_id
@@ -469,8 +494,15 @@ fn validate_report(report: &Upstream, time: i64, date: Option<&str>) -> Result<(
         ensure!(
             !row.account.is_empty()
                 && row.account.len() <= 256
-                && matches!(row.venue.as_str(), "binance" | "bybit" | "gate" | "bitget"),
+                && matches!(
+                    row.venue.as_str(),
+                    "binance" | "bybit" | "gate" | "bitget" | "okx" | "bybit-futures"
+                ),
             "invalid external account metadata"
+        );
+        ensure!(
+            matches!(row.account_kind.as_str(), "" | "fr" | "mm" | "cta"),
+            "invalid external account kind"
         );
         ensure!(
             row.collection_status
@@ -537,6 +569,56 @@ fn validate_report(report: &Upstream, time: i64, date: Option<&str>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn explicit_provider_viewers_exclude_admins_from_rows_dates_and_status() {
+        let hub = ExternalOverview::new(Settings {
+            enabled: true,
+            viewer_usernames: vec!["lgq".into()],
+            ..Default::default()
+        });
+        let time = now_ms();
+        let mut upstream = report();
+        upstream.generated_at_ms = time;
+        upstream.dates = vec![date_label(day_start(time) - DAY_MS)];
+        upstream.accounts[0].account_kind = "mm".into();
+        upstream.accounts[0].source_id = "bybit_mm_alpha".into();
+        hub.cache.write().unwrap().latest = Some(Received {
+            report: upstream,
+            at: time,
+        });
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused_external_test")
+            .unwrap();
+        for (name, role, count) in [
+            ("prc", "admin", 0),
+            ("lgq", "user", 1),
+            ("other", "admin", 0),
+        ] {
+            let user = AuthUser {
+                user_id: 1,
+                username: name.into(),
+                role: role.into(),
+            };
+            let mut response = OverviewResponse {
+                accounts: vec![],
+                dates: vec![],
+                generated_at_ms: time,
+                alerts: Default::default(),
+                loading: false,
+                external_status: vec![],
+            };
+            hub.merge(&pool, &user, None, &Default::default(), &mut response)
+                .await
+                .unwrap();
+            assert_eq!(response.accounts.len(), count);
+            assert_eq!(response.dates.len(), count);
+            assert_eq!(response.external_status.len(), count);
+            if count > 0 {
+                assert_eq!(response.accounts[0].account_kind, "mm");
+            }
+        }
+    }
+
     fn report() -> Upstream {
         Upstream {
             accounts: vec![OverviewRow {

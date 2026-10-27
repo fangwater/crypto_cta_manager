@@ -8,7 +8,7 @@ import { useAccountOverview } from '../hooks/useAccountOverview'
 import { money } from '../format'
 import { routes } from '../lib/routes'
 import { accountVenueLabel } from '../lib/workspace'
-import { overviewAlertCount, overviewTotal, type OverviewRow } from '../lib/accountOverview'
+import { overviewAlertCount, overviewTotal, isExternalOverview, type OverviewRow } from '../lib/accountOverview'
 import './workspace.css'
 
 type ValueKey = 'yesterday_equity' | 'equity' | 'today_profit' | 'profit_percent' | 'long_position' | 'short_position' | 'long_leverage' | 'short_leverage' | 'net_position' | 'max_drawdown_15d_percent' | 'margin' | 'margin_percent' | 'date_ms' | 'queried_at_ms'
@@ -63,12 +63,12 @@ export function WorkspacePage() {
   }
   const leverageAlerts = data ? overviewAlertCount(rows, 'leverage_alert') : null
   const timeoutAlerts = data ? overviewAlertCount(rows, 'timeout_alert') : null
-  const externalPending = kind !== 'cta' && !accounts.some(row => row.account_kind === 'fr') && data?.external_status?.some(status => status.status !== 'live')
-  const externalIssues = kind !== 'cta' && data?.external_status?.some(status => status.status !== 'live')
+  const externalPending = !accounts.some(isExternalOverview) && data?.external_status?.some(status => status.status !== 'live')
+  const externalIssues = data?.external_status?.some(status => status.status !== 'live')
   return <AppShell active="workspace" title="CTA 管理平台" subtitle="账户监控总览" icon={LayoutDashboard} wide className="overview-page">
     <section className="overview-toolbar" aria-label="总览筛选与统计">
       <div className="overview-filters">
-        <label>账户类别<select aria-label="账户类别" value={kind} onChange={event => setKind(event.target.value)}><option value="all">全部账户</option><option value="cta">CTA</option><option value="fr">FR</option></select></label>
+        <label>账户类别<select aria-label="账户类别" value={kind} onChange={event => setKind(event.target.value)}><option value="all">全部账户</option><option value="cta">CTA</option><option value="fr">FR</option><option value="mm">MM</option></select></label>
         <label>账户类型<select aria-label="账户类型" value={venue} onChange={event => setVenue(event.target.value)}><option value="all">全部类型</option>{venues.map(value => <option key={value} value={value}>{accountVenueLabel(value)}</option>)}</select></label>
         <label title="每日以上海时间 00:00 为结算边界，表内时间均为上海时间">日期（上海时间）<select aria-label="日期" value={date} onChange={event => setDate(event.target.value)}><option value="">最新</option>{[...new Set([...(date ? [date] : []), ...(data?.dates ?? [])])].sort().reverse().map(value => <option key={value} value={value}>{value}</option>)}</select></label>
         <label className="overview-auto"><input type="checkbox" checked={autoRefresh} onChange={event => setAutoRefresh(event.target.checked)} />自动刷新<span>{refreshing ? '更新中' : autoRefresh ? `${countdown} 秒` : '已暂停'}</span></label>
@@ -76,14 +76,14 @@ export function WorkspacePage() {
       <div className="overview-stats" aria-live="polite">
         <Summary label="账户数" value={data ? String(rows.length) : '—'} />
         <Summary label="总权益" value={number(data && !externalPending ? overviewTotal(rows, 'equity') : null)} title="当前筛选账户的权益合计；有账户缺失或过期数据时不显示不完整合计" />
-        <Summary label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；CTA 使用权益变化，FR 使用已实现净收益" />
+        <Summary label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；CTA 使用权益变化，FR/MM 使用已实现净收益" />
         <Summary label="杠杆告警" value={leverageAlerts == null ? '—' : String(leverageAlerts)} title={data?.alerts.long_leverage_limit == null || data?.alerts.short_leverage_limit == null ? '尚未提供原页面的杠杆告警阈值' : `多头 > ${data.alerts.long_leverage_limit}，空头 > ${data.alerts.short_leverage_limit}`} warn={!!leverageAlerts} />
         <Summary label="超时告警" value={timeoutAlerts == null ? '—' : String(timeoutAlerts)} title={data?.alerts.timeout_secs == null ? '尚未提供原页面的超时告警阈值' : `权益数据超过 ${data.alerts.timeout_secs} 秒未更新`} warn={!!timeoutAlerts} />
       </div>
     </section>
     {error && <Alert tone="error" className="mb-4">更新失败：{error}。{data ? '当前保留上次数据。' : '请刷新重试。'}</Alert>}
-    {externalIssues && <Alert tone="warning" className="mb-4">FR 账户正在同步或数据已过期。已有数据继续展示；含缺失或过期账户的汇总暂不显示。</Alert>}
-    {rows.some(row => row.account_kind === 'fr') && <p className="mb-4 text-sm text-muted">FR 今日盈利 = 已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息，不含未平仓浮盈亏；约每 5 分钟更新。权益及权益回撤仍反映账户净值。</p>}
+    {externalIssues && <Alert tone="warning" className="mb-4">外部账户正在同步或数据已过期。已有数据继续展示；含缺失或过期账户的汇总暂不显示。</Alert>}
+    {rows.some(row => row.account_kind === 'fr' || row.account_kind === 'mm') && <p className="mb-4 text-sm text-muted">FR/MM 今日盈利 = 已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息，不含未平仓浮盈亏；约每 5 分钟更新。权益及权益回撤仍反映账户净值。</p>}
     <section className="overview-panel" aria-labelledby="overview-table-title">
       <div className="overview-table-toolbar">
         <div className="overview-table-title"><h2 id="overview-table-title">账户监控</h2><span>{user.username}</span></div>
@@ -119,7 +119,7 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
     : undefined
   return <tr data-source={row.source_id}>
     <td className="overview-index">{index + 1}</td>
-    <th scope="row" className="overview-account-cell"><a href={row.account_kind === 'fr' ? row.detail_url ?? undefined : routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a>{row.account_kind === 'fr' && <span className="ml-2 text-[10px] text-muted">FR{row.collection_status === 'stale' ? ' · 已过期' : row.collection_status === 'loading' ? ' · 同步中' : row.collection_status === 'unavailable' ? ' · 暂不可用' : ''}</span>}{positionNotice && <details className="text-xs font-normal text-amber-700"><summary className="cursor-pointer">部分估值</summary><span>{positionNotice}</span></details>}</th>
+    <th scope="row" className="overview-account-cell"><a href={isExternalOverview(row) ? row.detail_url ?? undefined : routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a>{isExternalOverview(row) && <span className="ml-2 text-[10px] text-muted">{row.account_kind?.toUpperCase()}{row.collection_status === 'stale' ? ' · 已过期' : row.collection_status === 'loading' ? ' · 同步中' : row.collection_status === 'unavailable' ? ' · 暂不可用' : ''}</span>}{positionNotice && <details className="text-xs font-normal text-amber-700"><summary className="cursor-pointer">部分估值</summary><span>{positionNotice}</span></details>}</th>
     {columns.map(column => {
       const value = row[column.key]
       const time = column.key === 'date_ms' || column.key === 'queried_at_ms'
@@ -131,10 +131,10 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
       const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)
       const reconstructed = row.history_rebuilt_at_ms != null && ['yesterday_equity', 'today_profit', 'profit_percent', 'max_drawdown_15d_percent'].includes(column.key)
       const updated = row.history_rebuilt_at_ms == null ? '' : `；更新时间 ${dateTime.format(row.history_rebuilt_at_ms)} 上海时间`
-      const title = partialPosition ? positionNotice : row.account_kind === 'fr' && profit
-        ? value == null ? 'FR 已实现收益历史尚不可用，或缺少正的零点权益以计算收益率' : `FR 按当日已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息计算，不含未平仓浮盈亏；盈亏比例以零点权益为分母${updated}`
+      const title = partialPosition ? positionNotice : (row.account_kind === 'fr' || row.account_kind === 'mm') && profit
+        ? value == null ? 'FR/MM 已实现收益历史尚不可用，或缺少正的零点权益以计算收益率' : `FR/MM 按当日已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息计算，不含未平仓浮盈亏；盈亏比例以零点权益为分母${updated}`
         : value == null ? column.reason : time ? '上海时间' : reconstructed
-          ? row.account_kind === 'fr' ? `按事实权益与 FR 总盈亏重建，包含浮盈亏${updated}` : `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算${updated}`
+          ? row.account_kind === 'fr' || row.account_kind === 'mm' ? `按事实权益与 NAV 总盈亏重建，包含浮盈亏${updated}` : `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算${updated}`
           : undefined
       return <td key={column.key} className={className} title={title}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}{partialPosition && value != null && <sup aria-label="仅已定价持仓">*</sup>}</td>
     })}

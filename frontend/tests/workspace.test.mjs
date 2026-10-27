@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { overviewTotal, overviewAlertCount } from '../src/lib/accountOverview.ts'
+import { overviewTotal, overviewAlertCount, isExternalOverview } from '../src/lib/accountOverview.ts'
+
+test('MM and remote CTA use external status while local CTA keeps its local rules', () => {
+  const mm = { source_id: 'external:nav:bybit_mm_alpha', account_kind: 'mm', equity: 100, collection_status: 'live' }
+  const exec = { source_id: 'external:sg:bybit_exec_trade01', account_kind: 'cta', equity: 200, collection_status: 'live' }
+  assert.equal(isExternalOverview(mm), true)
+  assert.equal(isExternalOverview(exec), true)
+  assert.equal(overviewTotal([mm, exec], 'equity'), 300)
+  assert.equal(overviewTotal([mm, { ...exec, collection_status: 'stale' }], 'equity'), null)
+  assert.equal(isExternalOverview({ source_id: 'bybit_exec_trade01', account_kind: 'cta' }), false)
+})
 
 test('filtered totals preserve losses and distinguish missing data from zero', () => {
   const rows = [{ equity: 100, today_profit: 5 }, { equity: 200, today_profit: -9 }]

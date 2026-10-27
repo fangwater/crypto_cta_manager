@@ -221,7 +221,8 @@ struct WebState {
     reload_notify: ReloadNotifyHub,
     live_equity: LiveEquityHub,
     account_overview: crate::account_overview::AccountOverview,
-    external_overview: crate::account_overview::external::ExternalOverview,
+    external_overviews: Vec<crate::account_overview::external::ExternalOverview>,
+    overview_export: crate::account_overview::export::OverviewExport,
     position_archive: Arc<PositionArchive>,
     theoretical_targets: Arc<crate::theoretical_nav::TheoreticalTargetCache>,
     klines: Arc<KlineStore>,
@@ -451,11 +452,20 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     crate::kline::validate_host_configs(&config)?;
     let manager_db = ManagerDb::open(&config.kline.rocksdb_path)?;
     let account_overview = crate::account_overview::AccountOverview::open(manager_db.clone())?;
-    let external_overview = crate::account_overview::external::ExternalOverview::new(
-        config.dashboard.nav_overview.clone(),
-    );
-    external_overview.initialize(&pool).await?;
-    external_overview.spawn(pool.clone())?;
+    let mut external_overviews = vec![];
+    for settings in std::iter::once(&config.dashboard.nav_overview)
+        .chain(&config.dashboard.external_overviews)
+        .filter(|s| s.enabled)
+    {
+        let provider = crate::account_overview::external::ExternalOverview::new(settings.clone());
+        provider.initialize(&pool).await?;
+        provider.spawn(pool.clone())?;
+        external_overviews.push(provider);
+    }
+    let overview_export = crate::account_overview::export::OverviewExport::new(
+        &config.dashboard.overview_export,
+        &config.sources,
+    )?;
     account_overview.spawn(
         config.sources.clone(),
         live_equity.clone(),
@@ -539,7 +549,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         reload_notify,
         live_equity,
         account_overview,
-        external_overview,
+        external_overviews,
+        overview_export,
         position_archive,
         theoretical_targets,
         klines,
@@ -566,6 +577,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/auth/users/{user_id}/sources", put(auth_user_sources))
         .route("/api/auth/users/{user_id}/role", put(auth_user_role))
         .route("/api/health", get(health))
+        .route(
+            "/api/integrations/account-overview",
+            get(export_account_overview),
+        )
         .route("/api/nav/exchange", get(exchange_nav))
         .route(
             "/api/manager_publish_client.py",
@@ -787,6 +802,7 @@ async fn auth_middleware(
             | "/api/auth/login"
             | "/api/auth/logout"
             | "/api/symbols"
+            | "/api/integrations/account-overview"
     ) {
         return next.run(request).await;
     }
@@ -1226,16 +1242,17 @@ async fn account_overview_report(
     let mut report = tokio::task::spawn_blocking(move || hub.report(&sources, date, &settings))
         .await
         .map_err(|error| anyhow::anyhow!("account overview task failed: {error}"))??;
-    state
-        .external_overview
-        .merge(
-            &state.pool,
-            &user,
-            date,
-            &state.config.dashboard.overview_alerts,
-            &mut report,
-        )
-        .await?;
+    for provider in &state.external_overviews {
+        provider
+            .merge(
+                &state.pool,
+                &user,
+                date,
+                &state.config.dashboard.overview_alerts,
+                &mut report,
+            )
+            .await?;
+    }
     Ok((NO_STORE, Json(report)).into_response())
 }
 
@@ -1248,9 +1265,53 @@ async fn external_overview_access(
     }
     Ok((
         NO_STORE,
-        Json(state.external_overview.access(&state.pool).await?),
+        Json({
+            let mut rows = vec![];
+            for provider in state
+                .external_overviews
+                .iter()
+                .filter(|p| p.user_allowed(&user))
+            {
+                if let serde_json::Value::Array(accounts) = provider.access(&state.pool).await? {
+                    rows.extend(accounts);
+                }
+            }
+            rows
+        }),
     )
         .into_response())
+}
+
+async fn export_account_overview(
+    State(state): State<WebState>,
+    Query(query): Query<AccountOverviewQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if !state.overview_export.authorized(
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok()),
+    ) {
+        return Ok(unauthorized("integration token required"));
+    }
+    let date = match query
+        .date
+        .as_deref()
+        .map(crate::account_overview::selected_day)
+        .transpose()
+    {
+        Ok(date) => date,
+        Err(error) => return Ok(bad_request(error.to_string())),
+    };
+    if date.is_some_and(|date| date > crate::account_overview::day_start(unix_now_ms())) {
+        return Ok(bad_request("future date is unavailable".into()));
+    }
+    let report = state.overview_export.report(
+        &state.account_overview,
+        date,
+        &state.config.dashboard.overview_alerts,
+    )?;
+    Ok((NO_STORE, Json(report)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1266,8 +1327,14 @@ async fn save_external_overview_access(
     if !user.is_admin() {
         return Ok(forbidden("administrator permission required"));
     }
-    match state
-        .external_overview
+    let Some(provider) = state
+        .external_overviews
+        .iter()
+        .find(|p| p.owns(&source_id) && p.user_allowed(&user))
+    else {
+        return Ok(forbidden("external account access is restricted"));
+    };
+    match provider
         .set_viewers(&state.pool, &source_id, &body.viewers)
         .await
     {
@@ -5641,9 +5708,8 @@ mod tests {
             exec_config: ExecConfigClient::new(1).unwrap(),
             live_equity: LiveEquityHub::default(),
             account_overview: crate::account_overview::AccountOverview::open(db.clone()).unwrap(),
-            external_overview: crate::account_overview::external::ExternalOverview::new(
-                Default::default(),
-            ),
+            external_overviews: vec![],
+            overview_export: Default::default(),
             theoretical_targets: crate::theoretical_nav::TheoreticalTargetCache::new(
                 config.clone(),
                 position_archive.clone(),

@@ -20,6 +20,23 @@ token_env = "CRYPTO_NAV_OVERVIEW_TOKEN"
 refresh_secs = 15
 request_timeout_secs = 10
 stale_secs = 90
+# Optional operator boundary; applies to admins too. Empty keeps account grants.
+viewer_usernames = []
+
+# Additional independent providers use the same summary contract.
+# [[dashboard.external_overviews]]
+# enabled = true
+# provider_id = "sg-cta"
+# url = "http://SG_GATEWAY/manager/api/integrations/account-overview"
+# detail_base_url = "http://SG_GATEWAY/manager/nav/?source="
+# token_env = "CRYPTO_SG_OVERVIEW_TOKEN"
+# viewer_usernames = ["lgq"]
+
+# Explicit read-only machine export; never exports other providers recursively.
+[dashboard.overview_export]
+enabled = false
+token_env = "CRYPTO_CTA_OVERVIEW_TOKEN"
+source_ids = []
 
 [order_config]
 request_timeout_secs = 5

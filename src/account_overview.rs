@@ -16,6 +16,7 @@ use crate::manager_db::ManagerDb;
 use crate::viz_snapshot::VizSnapshotClient;
 
 pub mod daily;
+pub mod export;
 pub mod external;
 mod margin;
 
