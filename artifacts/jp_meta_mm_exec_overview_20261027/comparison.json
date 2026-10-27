@@ -1,0 +1,44 @@
+{
+  "sg": {
+    "protected_processes": 25,
+    "unchanged_configurations_excluding_planned_toml": 5,
+    "unchanged_tables": {
+      "cta_position_snapshots": 2,
+      "cta_position_snapshot_entries": 12,
+      "cta_strategy_position_snapshots": 0,
+      "cta_strategy_position_snapshot_entries": 0,
+      "cta_account_equity_daily": 0,
+      "cta_order_strategies": 1,
+      "cta_account_strategy_bindings": 20,
+      "cta_account_follows": 1,
+      "cta_virtual_account_bindings": 1
+    },
+    "manager_affinity": "Cpus_allowed_list:\t0-7"
+  },
+  "jp-meta-elvpn": {
+    "protected_processes": 132,
+    "unchanged_configurations_excluding_planned_toml": 31,
+    "unchanged_tables": {
+      "cta_position_snapshots": 4,
+      "cta_position_snapshot_entries": 122,
+      "cta_strategy_position_snapshots": 4,
+      "cta_strategy_position_snapshot_entries": 131,
+      "cta_strategy_allocation_snapshots": 21095,
+      "cta_account_equity_daily": 182,
+      "cta_order_strategies": 15,
+      "cta_account_strategy_bindings": 119,
+      "cta_account_follows": 4,
+      "cta_virtual_account_bindings": 109
+    },
+    "manager_affinity": "Cpus_allowed_list:\t24"
+  },
+  "visibility": {
+    "lgq_external_count": 15,
+    "prc_external_count": 0,
+    "account_kinds": {
+      "fr": 12,
+      "mm": 2,
+      "cta": 1
+    }
+  }
+}

@@ -1,0 +1,4 @@
+{"host": "sg", "unit": ["MainPID=3530578", "NRestarts=0", "ActiveState=active"]}
+{"database_backup": "/home/ubuntu/crypto_cta_manager/maintenance-backups/mm-exec-overview-20261027T090404Z.dump", "bytes": 76527, "sha256": "b588e0a0edca92a3874d0550f6149cee3c2f91cf42be7719c24a269799b7004b"}
+{"removed": "/home/ubuntu/crypto_cta_manager/releases/mm-exec-overview-20261027T090404Z"}
+{"removed": "/home/ubuntu/crypto_cta_manager/backups/mm-exec-overview-20261027T090404Z"}
