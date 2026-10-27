@@ -1,0 +1,53 @@
+{
+  "samples": 53,
+  "generations": 3,
+  "stale_values_retained": 21,
+  "known_accounts": 8,
+  "null_regressions": 0,
+  "duration_secs": 157,
+  "protected_processes_unchanged": 157,
+  "independent_sync_history_exited": {
+    "2730693": {
+      "exe": "/home/ubuntu/crypto_nav_manager/target/release/sync_history",
+      "start_ticks": "77197353",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    },
+    "2733012": {
+      "exe": "/home/ubuntu/crypto_nav_manager/target/release/sync_history",
+      "start_ticks": "77203353",
+      "affinity": "Cpus_allowed_list:\t0-5,48-95"
+    }
+  },
+  "configuration_hashes_unchanged": 32,
+  "snapshot_tables_unchanged": {
+    "cta_position_snapshots": {
+      "count": 4,
+      "hash": "1502c2fc04061030cd2670367d628048"
+    },
+    "cta_position_snapshot_entries": {
+      "count": 122,
+      "hash": "1956b485093521d03554823f6a6d2fc7"
+    },
+    "cta_strategy_position_snapshots": {
+      "count": 4,
+      "hash": "85882d16feaf860e4e7921e56d491905"
+    },
+    "cta_strategy_position_snapshot_entries": {
+      "count": 131,
+      "hash": "491f0c798c38f638c5f6b0da8a6c74b1"
+    },
+    "cta_strategy_allocation_snapshots": {
+      "count": 21095,
+      "hash": "3b1a82654a716128f8e9697ad0c9e1b5"
+    },
+    "cta_account_equity_daily": {
+      "count": 182,
+      "hash": "a7c842e76b0c0feb8bf59f3d10a2528a"
+    }
+  },
+  "funding_settings_unchanged": true,
+  "fixed_order_reports_unchanged": 16,
+  "manager_cpu_affinity": "Cpus_allowed_list:\t24",
+  "manager_pid": "2735398",
+  "frontend_assets_verified": 4
+}
