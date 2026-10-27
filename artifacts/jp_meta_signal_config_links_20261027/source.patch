@@ -1,0 +1,44 @@
+diff --git a/frontend/src/pages/AccountsPage.tsx b/frontend/src/pages/AccountsPage.tsx
+index 40c764c..a0b76f3 100644
+--- a/frontend/src/pages/AccountsPage.tsx
++++ b/frontend/src/pages/AccountsPage.tsx
+@@ -30,6 +30,15 @@ import type {
+ 
+ const UI_POLL_MS = 15_000
+ 
++// These signal publishers belong to jp-meta. Match source identities rather
++// than account labels or gateway slots, which can be reused after retirement.
++const JP_META_SIGNAL_CONFIG_PATHS: Readonly<Record<string, string>> = {
++  binance_exec_trade06: '/cta/binance-cta-spread-rx01/config/',
++  binance_exec_trade08: '/cta/binance-cta-perp-rx02/config/',
++  binance_exec_trade07: '/cta/binance-cta-perp-rx03/config/',
++  binance_exec_rx04_5m05: '/cta/binance-cta-perp-rx04/config/',
++}
++
+ function fallbackAccounts(dashboard: DashboardSnapshot): DashboardAccount[] {
+   return dashboard.report.sources.map((source) => ({
+     source_id: source.source_id,
+@@ -231,6 +240,9 @@ function AccountCard({
+         ? '数据就绪'
+         : '数据延迟'
+   const gatewayReady = ready && account.gateway_prefix !== null
++  const signalConfigPath = account.enabled && window.location.origin === 'http://13.115.227.29:4191'
++    ? JP_META_SIGNAL_CONFIG_PATHS[account.source_id]
++    : undefined
+   const openPositions =
+     report?.symbols.filter(
+       (symbol) =>
+@@ -328,6 +340,13 @@ function AccountCard({
+           ) : (
+             <ActionDisabled icon={<ExternalLink size={15} />} label="执行监控" />
+           )}
++          {signalConfigPath && (
++            <ActionLink
++              href={signalConfigPath}
++              icon={<Settings size={15} />}
++              label="信号配置"
++            />
++          )}
+         </div>
+       </CardContent>
+     </Card>

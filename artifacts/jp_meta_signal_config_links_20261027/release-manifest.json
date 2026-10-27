@@ -1,0 +1,23 @@
+{
+  "target": "jp-meta",
+  "release": "signal-config-links-20261027T043802Z",
+  "source_commit": "0dfef96c0114942a811d5ae75986bb15e04ecd13",
+  "source_patch_sha256": "86704a18f7f6efd735c587670f900c9fec8c131d387b60a17ec08317aacf0c44",
+  "frontend_files": {
+    "assets/index-BR8Lmap0.js": "7551215175dabde729b4f098b98802a1e3bf8f3849cc66b16c0017342a192a08",
+    "assets/index-CY0h6jwA.css": "91292991d3a2b0d7f3e4d8c746638bd940525804039234258127c81fb46d7da2",
+    "favicon.svg": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+    "index.html": "da0938485e612810f83d65931e55975f5bd0cc69085f9241a4e58b99582a9dc8"
+  },
+  "signal_config_paths": {
+    "binance_exec_trade06": "/cta/binance-cta-spread-rx01/config/",
+    "binance_exec_trade08": "/cta/binance-cta-perp-rx02/config/",
+    "binance_exec_trade07": "/cta/binance-cta-perp-rx03/config/",
+    "binance_exec_rx04_5m05": "/cta/binance-cta-perp-rx04/config/"
+  },
+  "checks": [
+    "npm run build passed",
+    "npm run lint passed with two existing warnings",
+    "git diff --check passed"
+  ]
+}

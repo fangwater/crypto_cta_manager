@@ -1,0 +1,26 @@
+{
+  "removed_source": "binance_exec_trade05",
+  "remaining_source_ids": [
+    "binance_exec_rx04_5m05",
+    "binance_exec_trade01",
+    "binance_exec_trade02",
+    "binance_exec_trade03",
+    "binance_exec_trade04",
+    "binance_exec_trade06",
+    "binance_exec_trade07",
+    "binance_exec_trade08"
+  ],
+  "rx04_gateway": "/exec_trade05",
+  "rx04_snapshot_http": 200,
+  "old_source_history_preserved": true,
+  "protected_processes_unchanged": 163,
+  "protected_configs_unchanged": 29,
+  "manager_pid_before": "7355",
+  "manager_pid_after": "2466307",
+  "manager_health": "ok",
+  "config_sha256_before": "018798cf5b63431f4569903c402b94ba8615482020e2e3389193a10d0d1d5d78",
+  "config_sha256_after": "e8bcd329d777e7ed522e643de8ddcb4ebea4d615c82df8b8f054a0f653e20467",
+  "backup": "/home/ubuntu/crypto_cta_manager/backups/hide_trade05_20261027T043430Z",
+  "webroot": "/home/ubuntu/crypto_cta_manager/web-releases/fr-realized-20261026",
+  "binary_unchanged": true
+}

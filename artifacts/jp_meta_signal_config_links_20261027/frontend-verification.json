@@ -1,0 +1,70 @@
+{
+  "release": "signal-config-links-20261027T043802Z",
+  "webroot_before": "/home/ubuntu/crypto_cta_manager/web-releases/fr-realized-20261026",
+  "webroot_after": "/home/ubuntu/crypto_cta_manager/web-releases/signal-config-links-20261027T043802Z",
+  "protected_processes_unchanged": 164,
+  "manager_binary_unchanged": true,
+  "host_config_unchanged": true,
+  "service_restarts": 0,
+  "checks": [
+    {
+      "path": "/manager/accounts/",
+      "status": 200,
+      "index_hash_verified": true
+    },
+    {
+      "path": "/manager/",
+      "status": 200,
+      "index_hash_verified": true
+    },
+    {
+      "path": "/manager/workspace/",
+      "status": 200,
+      "index_hash_verified": true
+    },
+    {
+      "path": "/manager/assets/index-BR8Lmap0.js",
+      "status": 200,
+      "sha256_verified": true
+    },
+    {
+      "path": "/manager/assets/index-CY0h6jwA.css",
+      "status": 200,
+      "sha256_verified": true
+    },
+    {
+      "path": "/manager/favicon.svg",
+      "status": 200,
+      "sha256_verified": true
+    },
+    {
+      "path": "/manager/index.html",
+      "status": 200,
+      "sha256_verified": true
+    },
+    {
+      "source_id": "binance_exec_trade06",
+      "path": "/cta/binance-cta-spread-rx01/config/",
+      "status": 200,
+      "title": "CTA Spread 配置中心"
+    },
+    {
+      "source_id": "binance_exec_trade08",
+      "path": "/cta/binance-cta-perp-rx02/config/",
+      "status": 200,
+      "title": "CTA Perp 配置中心"
+    },
+    {
+      "source_id": "binance_exec_trade07",
+      "path": "/cta/binance-cta-perp-rx03/config/",
+      "status": 200,
+      "title": "CTA Perp 配置中心"
+    },
+    {
+      "source_id": "binance_exec_rx04_5m05",
+      "path": "/cta/binance-cta-perp-rx04/config/",
+      "status": 200,
+      "title": "CTA Perp 配置中心"
+    }
+  ]
+}
