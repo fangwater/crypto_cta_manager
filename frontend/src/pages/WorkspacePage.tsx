@@ -113,25 +113,30 @@ function Summary({ label, value, title, warn }: { label: string; value: string; 
 }
 
 function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
+  const unpricedAssets = row.position_unpriced_assets ?? []
+  const positionNotice = unpricedAssets.length > 0
+    ? `仓位、杠杆和轧差仅包含已定价持仓；未计入缺价资产：${unpricedAssets.join('、')}。缺价资产金额未知，未按零估值。`
+    : undefined
   return <tr data-source={row.source_id}>
     <td className="overview-index">{index + 1}</td>
-    <th scope="row" className="overview-account-cell"><a href={row.account_kind === 'fr' ? row.detail_url ?? undefined : routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a>{row.account_kind === 'fr' && <span className="ml-2 text-[10px] text-muted">FR{row.collection_status === 'stale' ? ' · 已过期' : row.collection_status === 'loading' ? ' · 同步中' : row.collection_status === 'unavailable' ? ' · 暂不可用' : ''}</span>}</th>
+    <th scope="row" className="overview-account-cell"><a href={row.account_kind === 'fr' ? row.detail_url ?? undefined : routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a>{row.account_kind === 'fr' && <span className="ml-2 text-[10px] text-muted">FR{row.collection_status === 'stale' ? ' · 已过期' : row.collection_status === 'loading' ? ' · 同步中' : row.collection_status === 'unavailable' ? ' · 暂不可用' : ''}</span>}{positionNotice && <details className="text-xs font-normal text-amber-700"><summary className="cursor-pointer">部分估值</summary><span>{positionNotice}</span></details>}</th>
     {columns.map(column => {
       const value = row[column.key]
       const time = column.key === 'date_ms' || column.key === 'queried_at_ms'
       const profit = column.key === 'today_profit' || column.key === 'profit_percent'
+      const partialPosition = positionNotice && ['long_position', 'short_position', 'long_leverage', 'short_leverage', 'net_position'].includes(column.key)
       const alert = column.key === 'date_ms' && (row.timeout_alert || row.collection_status === 'stale') || (column.key === 'long_leverage' || column.key === 'short_leverage') && row.leverage_alert
       const className = alert ? 'overview-stale' : profit && value != null && value !== 0 ? value > 0 ? 'overview-positive' : 'overview-negative' : time ? 'overview-time' : column.key === 'equity' ? 'overview-equity' : ''
       const side = sideClass(column.key)
       const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)
       const reconstructed = row.history_rebuilt_at_ms != null && ['yesterday_equity', 'today_profit', 'profit_percent', 'max_drawdown_15d_percent'].includes(column.key)
       const updated = row.history_rebuilt_at_ms == null ? '' : `；更新时间 ${dateTime.format(row.history_rebuilt_at_ms)} 上海时间`
-      const title = row.account_kind === 'fr' && profit
+      const title = partialPosition ? positionNotice : row.account_kind === 'fr' && profit
         ? value == null ? 'FR 已实现收益历史尚不可用，或缺少正的零点权益以计算收益率' : `FR 按当日已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息计算，不含未平仓浮盈亏；盈亏比例以零点权益为分母${updated}`
         : value == null ? column.reason : time ? '上海时间' : reconstructed
           ? row.account_kind === 'fr' ? `按事实权益与 FR 总盈亏重建，包含浮盈亏${updated}` : `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算${updated}`
           : undefined
-      return <td key={column.key} className={className} title={title}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}</td>
+      return <td key={column.key} className={className} title={title}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}{partialPosition && value != null && <sup aria-label="仅已定价持仓">*</sup>}</td>
     })}
   </tr>
 }

@@ -84,6 +84,8 @@ pub struct OverviewRow {
     pub long_leverage: Option<f64>,
     pub short_leverage: Option<f64>,
     pub net_position: Option<f64>,
+    /// Assets omitted from the displayed FR position subtotals due to missing prices.
+    pub position_unpriced_assets: Vec<String>,
     pub max_drawdown_15d_percent: Option<f64>,
     pub margin: Option<f64>,
     pub margin_percent: Option<f64>,
@@ -575,6 +577,7 @@ fn make_row(
         long_leverage,
         short_leverage,
         net_position: long.zip(short).map(|(long, short)| long - short),
+        position_unpriced_assets: vec![],
         max_drawdown_15d_percent: max_drawdown.map(|value| value * 100.0),
         margin,
         margin_percent: ratio(margin, fresh_equity).map(|value| value * 100.0),

@@ -969,6 +969,11 @@ Existing databases need explicit `scripts/apply_external_overview_schema.sql`;
 normal startup never runs DDL. FR homepage profit uses realized trading PnL plus
 actual funding minus fees and interest, excluding open-position floating PnL;
 equity remains factual. See `docs/fr_account_overview.md`.
+By operator request on 2026-10-27, unpriced FR balances must not hide all
+otherwise priced holdings. Display priced position/leverage/net subtotals with
+an explicit partial-valuation label and `position_unpriced_assets`; never assume
+unknown values are zero or dust based on base quantity alone. Entirely unpriced
+sides remain unknown, and partial leverage cannot establish a below-limit alert.
 
 ## Central PostgreSQL Layout
 

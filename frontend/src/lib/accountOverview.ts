@@ -11,6 +11,7 @@ export interface OverviewRow {
   long_leverage: number | null
   short_leverage: number | null
   net_position: number | null
+  position_unpriced_assets?: string[]
   max_drawdown_15d_percent: number | null
   margin: number | null
   margin_percent: number | null

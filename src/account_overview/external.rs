@@ -364,7 +364,10 @@ impl ExternalOverview {
                 .long_leverage
                 .zip(alerts.long_leverage_limit)
                 .zip(row.short_leverage.zip(alerts.short_leverage_limit))
-                .map(|((a, b), (c, d))| a > b || c > d);
+                .map(|((a, b), (c, d))| a > b || c > d)
+                // A priced subtotal can prove a breach, but cannot prove that
+                // leverage is below the limit when other holdings lack prices.
+                .filter(|breached| *breached || row.position_unpriced_assets.is_empty());
             row.timeout_alert = alerts
                 .timeout_secs
                 .map(|secs| stale || row.date_ms.is_none_or(|ts| time - ts > secs as i64 * 1000));
@@ -475,6 +478,15 @@ fn validate_report(report: &Upstream, time: i64, date: Option<&str>) -> Result<(
                 .is_some_and(|s| matches!(s, "live" | "stale" | "unavailable" | "historical")),
             "invalid external collection status"
         );
+        ensure!(
+            row.position_unpriced_assets.len() <= 1000
+                && row.position_unpriced_assets.iter().all(|asset| {
+                    !asset.trim().is_empty()
+                        && asset.len() <= 128
+                        && !asset.chars().any(char::is_control)
+                }),
+            "invalid unpriced exposure assets"
+        );
         for value in [
             row.yesterday_equity,
             row.equity,
@@ -572,6 +584,60 @@ mod tests {
         s.detail_base_url = "/nav/#/strategies/".into();
         s.url = "http://user:secret@example.test/api".into();
         assert!(s.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn partial_positions_keep_coverage_and_do_not_claim_safe_leverage() {
+        let hub = ExternalOverview::new(Settings {
+            enabled: true,
+            ..Default::default()
+        });
+        let time = now_ms();
+        let upstream: Upstream = serde_json::from_value(json!({
+            "accounts": [{"source_id":"gate_fr_arb01","account":"Gate","venue":"gate",
+                "collection_status":"live","equity":100.0,"long_position":200.0,
+                "short_position":190.0,"long_leverage":2.0,"short_leverage":1.9,
+                "net_position":10.0,"position_unpriced_assets":["SLVON","TSLAX"]}],
+            "dates":[],"generated_at_ms":time,"loading":false
+        }))
+        .unwrap();
+        validate_report(&upstream, time, None).unwrap();
+        hub.cache.write().unwrap().latest = Some(Received {
+            report: upstream,
+            at: time,
+        });
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused_external_test")
+            .unwrap();
+        let user = AuthUser {
+            user_id: 1,
+            username: "admin".into(),
+            role: "admin".into(),
+        };
+        for (limit, expected_alert) in [(3.0, None), (1.0, Some(true))] {
+            let alerts = OverviewAlertSettings {
+                long_leverage_limit: Some(limit),
+                short_leverage_limit: Some(limit),
+                ..Default::default()
+            };
+            let mut response = OverviewResponse {
+                accounts: vec![],
+                dates: vec![],
+                generated_at_ms: time,
+                alerts: alerts.clone(),
+                loading: false,
+                external_status: vec![],
+            };
+            hub.merge(&pool, &user, None, &alerts, &mut response)
+                .await
+                .unwrap();
+            let row = &response.accounts[0];
+            assert_eq!(row.long_position, Some(200.0));
+            assert_eq!(row.net_position, Some(10.0));
+            assert_eq!(row.position_unpriced_assets, ["SLVON", "TSLAX"]);
+            assert_eq!(row.leverage_alert, expected_alert);
+            assert_eq!(row.equity, Some(100.0));
+        }
     }
 
     #[tokio::test]
