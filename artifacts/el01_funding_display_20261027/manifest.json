@@ -1,0 +1,12 @@
+{
+  "source_commit": "6ba6577ad959c691418d0bea8451355500c28266",
+  "release": "funding-display-20261027T062714Z",
+  "binary_sha256": "741bd80a5ccbc7dfcc27e3ba9e8223e674ce60e06740c7a11ca8dd1c68bdaca0",
+  "previous_binary_sha256": "eac49e1bcda5f1c8ac16751973a220d3a270b1822e8ec1c563a2de7cc5e2a58d",
+  "frontend": {
+    "favicon.svg": "20c8ea0da10b575dd201ceb76e79f167333751be323e711cd162e56735427157",
+    "index.html": "3a95c8a800c1b370654fa7b62b614b8a96deaa85f5a5d670a682f4d53015035a",
+    "assets/index-Ds9rM6O2.js": "f419695727d7cad0efa0b2ee821099d37af25641fee72d4aaf1768172427071a",
+    "assets/index-CY0h6jwA.css": "91292991d3a2b0d7f3e4d8c746638bd940525804039234258127c81fb46d7da2"
+  }
+}

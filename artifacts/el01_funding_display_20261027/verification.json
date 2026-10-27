@@ -1,0 +1,41 @@
+{
+  "samples": 45,
+  "generations": 3,
+  "stale_values_retained": 43,
+  "known_accounts": 14,
+  "null_regressions": 0,
+  "duration_secs": 132,
+  "protected_processes_unchanged": 90,
+  "configuration_hashes_unchanged": 16,
+  "snapshot_tables_unchanged": {
+    "cta_position_snapshots": {
+      "count": 10,
+      "hash": "c4e476b4a0fc1f63cbd36071f7a855de"
+    },
+    "cta_position_snapshot_entries": {
+      "count": 197,
+      "hash": "3f6401bf1cf13169bf1171bead281fb6"
+    },
+    "cta_strategy_position_snapshots": {
+      "count": 11,
+      "hash": "a3a6ba6db8b0b3859cf79c029e258f6b"
+    },
+    "cta_strategy_position_snapshot_entries": {
+      "count": 341,
+      "hash": "d9135cb5386761e38e8151f61ec018dd"
+    },
+    "cta_strategy_allocation_snapshots": {
+      "count": 0,
+      "hash": "d41d8cd98f00b204e9800998ecf8427e"
+    },
+    "cta_account_equity_daily": {
+      "count": 411,
+      "hash": "51cf6f503f56ab2b3041d404e00706fd"
+    }
+  },
+  "funding_settings_unchanged": true,
+  "fixed_order_reports_unchanged": 28,
+  "manager_cpu_affinity": "Cpus_allowed_list:\t0-7",
+  "manager_pid": "4002395",
+  "frontend_assets_verified": 4
+}
