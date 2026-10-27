@@ -1,0 +1,12 @@
+waiting for server to start.... done
+server started
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src/lib.rs (/mnt/nvme-raid0-28t/fanghaizhou/cargo-target/crypto_cta_manager/debug/deps/crypto_cta_manager-93158adb8c5dd1d6)
+
+running 1 test
+test auth::tests::grant_replacement_preserves_hidden_sources_and_caps_regular_users ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 443 filtered out; finished in 0.03s
+
+waiting for server to shut down.... done
+server stopped

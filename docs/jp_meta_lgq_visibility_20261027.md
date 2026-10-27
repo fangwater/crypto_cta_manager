@@ -28,3 +28,25 @@ Gate FR04/05 缺少当日盈利，因完整性规则导致“总权益”和“�
 不启动或重启 monitor、交易、Viz、Config、Nginx、NAV Manager 或 SG 服务。
 
 验证和发布记录见 `artifacts/jp_meta_lgq_visibility_20261027/`。
+
+发布完成：`lgq-visibility-20261027T094457Z`，功能提交 `cc5c9b2`。
+`cargo fmt --check`、`cargo check`、全量 `cargo test` 和 release 构建通过；
+438 项库测试、18 项二进制测试通过。另在隔离 PostgreSQL 中运行授权替换
+回归，确认隐藏授权保留、越界授权拒绝、数据库 configure 授权不能突破
+主机可见范围；测试集群和 socket 已清理。
+
+真实 4191 网关双用户验证通过：
+
+- `lgq` 看到 6 个本地 CTA 与 13 个外部账户，共 19 个；所有账户权益和
+  当日盈利完整，两个汇总可计算。四个私有 CTA 仍有 configure 权限。
+- `prc` 只看到本地 trade01–04，无私有来源或外部账户元数据；四个来源的
+  账户详情、授权、symbol、timeline、Exec snapshot 和 Config 请求均被
+  403 拒绝，尝试为自己添加私有账户授权也被 403 拒绝。
+- 最新及历史总览都排除 Gate FR04/05；匿名 symbol 发现不含私有来源，
+  显式匿名查询被拒绝。授权列表、虚拟账户跟随、归档也不暴露私有账户。
+- 133 个保护进程身份及 affinity、31 份非 Manager 配置、10 张快照/目录
+  表与所有账户授权哈希一致。前端目录不变，Manager CPU 仍为 24，
+  `MainPID=3163299`，`NRestarts=0`。
+
+只重启了 jp-meta `cta_web`。临时诊断 session 全部删除，核验后清理本次
+精确暂存目录和临时二进制/配置备份；此前前端 release 保留。

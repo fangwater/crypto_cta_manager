@@ -1,0 +1,33 @@
+{
+  "release": "lgq-visibility-20261027T094457Z",
+  "commit": "cc5c9b2dbea9587be9445761a1c5993064a4df39",
+  "binaries": {
+    "cta_web": "d06bc3e2a004307996a86d3cc617dceeeb164ee0470a52f2b245711e68a0299d",
+    "nav_rebuild": "ddcfc7789df2a4964cd3f67c7dda99bed8ca79df8c809182b45aee8db3a98408",
+    "nav_snapshot": "633e8c7d4d5e8fe6b8a70cd35d28763f76690408f48bf4136ed19b804165351b",
+    "nav_strategy_snapshot": "46338e722163ce76c3422aa3764990a9152536051f00d684d3172728053a0b4d",
+    "cta_monitor": "19d469d09aacae2c3c1d503f386f80f77c4b4ec76435bde1f7c6f2a51080033b"
+  },
+  "before": {
+    "binary": "7c3209ecfbda5e3a35421a8c463b07b898e5ca2a81cf9ea78d344f15c6e8b4f8",
+    "config": "1898d2f47dc9ff2078398b096b23eba037200e30fa8b76f519e9664eda576745"
+  },
+  "source_viewers": {
+    "binance_exec_trade06": [
+      "lgq"
+    ],
+    "binance_exec_trade07": [
+      "lgq"
+    ],
+    "binance_exec_trade08": [
+      "lgq"
+    ],
+    "binance_exec_rx04_5m05": [
+      "lgq"
+    ]
+  },
+  "excluded": [
+    "gate_fr_arb04",
+    "gate_fr_arb05"
+  ]
+}

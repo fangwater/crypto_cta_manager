@@ -1,0 +1,9 @@
+{
+  "protected_processes": 133,
+  "unchanged_config_files": 31,
+  "unchanged_tables": 10,
+  "manager_affinity": "Cpus_allowed_list:\t24",
+  "grants_unchanged": true,
+  "frontend_unchanged": true,
+  "binary_verified": true
+}
