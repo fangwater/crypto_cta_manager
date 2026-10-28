@@ -22,7 +22,7 @@ export function NavMonitorPage() {
       <div className="overview-filters">
         <label>账户类别<select aria-label="账户类别" value={kind} onChange={event => setKind(event.target.value)}><option value="all">全部账户</option><option value="cta">CTA</option><option value="fr">FR</option><option value="mm">MM</option></select></label>
         <label>账户类型<select aria-label="账户类型" value={venue} onChange={event => setVenue(event.target.value)}><option value="all">全部类型</option>{venues.map(value => <option key={value} value={value}>{accountVenueLabel(value)}</option>)}</select></label>
-        <label className="overview-search"><Search size={16} /><input type="search" aria-label="搜索账户" placeholder="搜索账户" value={search} onChange={event => setSearch(event.target.value)} /></label>
+        <label>搜索账户<span className="overview-search"><Search size={16} className="shrink-0" /><input type="search" aria-label="搜索账户" placeholder="搜索账户" value={search} onChange={event => setSearch(event.target.value)} /></span></label>
         <label className="overview-auto"><input type="checkbox" checked={autoRefresh} onChange={event => setAutoRefresh(event.target.checked)} />自动刷新</label>
       </div>
       <span className="text-sm text-muted">{data ? `${rows.length} 个账户` : '账户加载中'}</span>

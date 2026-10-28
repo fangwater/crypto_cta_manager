@@ -79,7 +79,7 @@ function AccountNavCard({ account, entry }: { account: OverviewRow; entry?: Entr
   const notice = entry?.error ?? value?.unavailable_reason
   const loading = !entry || value?.loading
   const hasPoints = Boolean(value?.points.length)
-  const status = entry?.stale ? '更新失败' : loading ? '加载中' : value?.complete ? '已更新' : hasPoints ? '部分数据' : '暂不可用'
+  const status = entry?.stale ? '更新失败' : loading ? hasPoints ? '更新中' : '加载中' : value?.complete ? '已更新' : hasPoints ? '部分数据' : '暂不可用'
   const valuation = value?.valuation === 'quantity_fifo_window_delta' ? '成交价估值（浮动及总体为估计值）'
     : value?.valuation === 'quantity_fifo_closed_1m_window_delta' ? '分钟收盘价估值'
     : account.account_kind === 'fr' ? '已实现收益，不计浮动盈亏' : '含浮动盈亏'
