@@ -1,0 +1,1 @@
+{"name": "deployed", "body": {"release": "net-value-20261028T051114Z", "commit": "6b5f525bbc26cd2bec5908c9b97e0a6b88f2580d", "protected_processes": 133, "config_hashes": 32, "manager_affinity": "Cpus_allowed_list:\t24", "snapshots_unchanged": true, "nav_unchanged": true}}
