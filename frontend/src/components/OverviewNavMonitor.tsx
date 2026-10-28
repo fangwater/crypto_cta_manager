@@ -134,19 +134,18 @@ function AccountNavChart({ account, entry }: { account: OverviewRow; entry?: Ent
       textStyle: { fontFamily: 'Inter, system-ui, sans-serif', color: '#64748b' },
       grid: { left: 20, right: 24, top: 20, bottom: 58, containLabel: true },
       tooltip: {
-        trigger: 'axis', renderMode: 'richText', confine: true, padding: [12, 16],
+        trigger: 'axis', renderMode: 'html', confine: true, padding: [12, 16],
         backgroundColor: '#fff', borderColor: '#e4eaf1', borderWidth: 1,
+        extraCssText: 'border-radius: 10px; box-shadow: 0 8px 28px rgba(15, 23, 42, .1)',
         axisPointer: { type: 'line', lineStyle: { color: '#94a3b8', type: 'dashed' } },
         formatter: (raw: unknown) => {
           const point = (Array.isArray(raw) ? raw[0] : raw) as { value?: [number, number] }
           if (!point?.value) return ''
-          return `{date|${fullTime.format(point.value[0])}}\n{label|累计变化}   {amount|${point.value[1] > 0 ? '+' : ''}${money(point.value[1])}}`
+          // Only formatted numeric data enters this HTML; account labels stay
+          // in React's escaped card header.
+          return `<div class="overview-nav-tooltip-date">${fullTime.format(point.value[0])}</div><div class="overview-nav-tooltip-value"><span>累计变化</span><strong style="color:${color}">${point.value[1] > 0 ? '+' : ''}${money(point.value[1])}</strong></div>`
         },
-        textStyle: { rich: {
-          date: { fontSize: 11, color: '#64748b', lineHeight: 24 },
-          label: { fontSize: 12, color: '#334155', lineHeight: 24 },
-          amount: { fontSize: 15, fontWeight: 600, color, fontFamily: 'monospace' },
-        } },
+        textStyle: { color: '#334155', fontSize: 12 },
       },
       xAxis: {
         type: 'time', splitNumber: 3, axisLine: { show: false }, axisTick: { show: false },

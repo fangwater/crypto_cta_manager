@@ -20,6 +20,9 @@
 .overview-nav-period { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 14px; font-variant-numeric: tabular-nums; }
 .overview-nav-method { display: flex; align-items: center; gap: 6px; }
 .overview-nav-dot { width: 4px; height: 4px; border-radius: 50%; background: #94a3b8; flex-shrink: 0; }
+.overview-nav-tooltip-date { margin-bottom: 8px; color: #8491a4; font-size: 10px; }
+.overview-nav-tooltip-value { display: flex; align-items: center; gap: 18px; }
+.overview-nav-tooltip-value strong { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
 @media (max-width: 1023px) { .overview-nav-grid { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 767px) {
   .overview-nav-card-header { padding: 18px 16px 0; gap: 10px; }
