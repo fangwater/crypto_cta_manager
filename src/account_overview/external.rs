@@ -143,6 +143,47 @@ pub struct ExternalOverview {
 }
 
 impl ExternalOverview {
+    /// Called only after the browser handler applies the same catalog/grant
+    /// filtering as the monitoring table. This request never accesses a store.
+    pub async fn nav_monitor(&self, source: &str) -> Result<super::nav::Monitor> {
+        let prefix = format!("external:{}:", self.settings.provider_id);
+        let upstream = source
+            .strip_prefix(&prefix)
+            .context("unknown NAV provider")?;
+        ensure!(
+            !self.settings.excluded_source_ids.contains(upstream),
+            "excluded NAV source"
+        );
+        let token = std::env::var(&self.settings.token_env).context("NAV token unavailable")?;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(self.settings.request_timeout_secs))
+            .build()?;
+        let mut response = client
+            .get(format!("{}/nav", self.settings.url.trim_end_matches('/')))
+            .bearer_auth(token)
+            .query(&[("sourceId", upstream)])
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(
+                bytes.len() + chunk.len() <= 16 * 1024 * 1024,
+                "NAV response too large"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        let mut report: super::nav::Monitor = serde_json::from_slice(&bytes)?;
+        report.validate(upstream, now_ms())?;
+        report.source_id = source.into();
+        if now_ms() - report.generated_at_ms > self.settings.stale_secs.max(600) as i64 * 1000 {
+            report.complete = false;
+            report.unavailable_reason = Some("外部净值历史已过期".into());
+        }
+        Ok(report)
+    }
     pub fn user_allowed(&self, user: &AuthUser) -> bool {
         self.settings.viewer_usernames.is_empty()
             || self.settings.viewer_usernames.contains(&user.username)

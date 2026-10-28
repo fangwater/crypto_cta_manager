@@ -703,6 +703,7 @@ mod tests {
                     selected_source_ids: vec!["alignment".into()],
                     selected_symbols: vec![],
                     max_points: 1000,
+                    tick_interval_us: None,
                 },
                 false,
             )
@@ -859,6 +860,7 @@ mod tests {
             selected_source_ids: vec!["alignment".into()],
             selected_symbols: vec![],
             max_points: 1000,
+            tick_interval_us: None,
         };
         let old = original
             .rebuild_with_prices(request(10, HOUR - 1), false, Some(&marks))
@@ -1147,6 +1149,7 @@ mod tests {
             selected_source_ids: vec!["alignment".into()],
             selected_symbols: vec![],
             max_points: 1000,
+            tick_interval_us: None,
         };
         assert_eq!(
             original.rebuild(request(10, 29), true).unwrap(),
@@ -1318,6 +1321,7 @@ mod tests {
             selected_source_ids: vec!["alignment".into()],
             selected_symbols: vec![],
             max_points: 1000,
+            tick_interval_us: None,
         };
         let before = original.rebuild(request.clone(), true).unwrap();
         let after = corrected.rebuild(request, true).unwrap();
@@ -1379,6 +1383,7 @@ mod tests {
                         selected_source_ids: vec!["alignment".into()],
                         selected_symbols: vec![],
                         max_points: 1000,
+                        tick_interval_us: None,
                     },
                     mode,
                 )

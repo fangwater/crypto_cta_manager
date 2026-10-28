@@ -43,6 +43,9 @@ pub struct OverviewExport {
     sources: Vec<SourceConfig>,
 }
 impl OverviewExport {
+    pub fn allows_source(&self, id: &str) -> bool {
+        self.sources.iter().any(|source| source.id == id)
+    }
     pub fn new(settings: &Settings, sources: &[SourceConfig]) -> Result<Self> {
         settings.validate(sources)?;
         if !settings.enabled {

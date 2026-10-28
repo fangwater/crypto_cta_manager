@@ -263,6 +263,7 @@ async fn main() -> Result<()> {
                 selected_source_ids: vec![args.source.clone()],
                 selected_symbols: vec![],
                 max_points: 1000,
+                tick_interval_us: None,
             };
             let strict = start.div_euclid(60_000_000) * 60_000_000 - 60_000_000 >= retention_floor;
             let before = if strict {

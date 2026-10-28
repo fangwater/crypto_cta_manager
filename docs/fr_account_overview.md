@@ -80,3 +80,58 @@ CTA 配置见 `config/cta-manager.example.toml` 的 `[dashboard.nav_overview]`�
 新数据库由当前 `migrations/schema.sql` 初始化。现有数据库必须先显式执行
 `scripts/apply_external_overview_schema.sql`，正常启动不执行 DDL。主机 token
 应保存在权限 `0600` 的独立环境文件，由两个 Manager 的服务读取，禁止提交。
+
+## 运行以来净值监控（2026-10-28）
+
+总览新增独立的运行以来累计变化曲线，每个账户从已有监控起点归零，不需要
+初始权益，也不从当前权益倒推本金。CTA 保留其 FIFO 浮动盈亏、费率和资金费
+选择；FR 使用已实现 FIFO 收益 + 实际资金费 − 手续费 − 利息，排除浮动盈亏；
+MM 沿用 NAV 原有金额 FIFO 总收益模型。各账户独立计算，不跨账户或报价币合计。
+已有起点之前的数据不会凭空补齐。入金、出金不作为交易收益加入。
+
+NAV 提供 `GET /api/integrations/fr-account-overview/nav?sourceId=<slug>`，
+网关路径为 `/nav-api/integrations/fr-account-overview/nav`，沿用机器 Bearer
+认证，浏览器 session 不授予访问权。只返回已启用的总览账户，不导出逐笔、
+凭证或数据路径。接口只读后台缓存；重放不依赖实时权益，也不阻塞事实轮询。
+
+外部 CTA 主机提供同格式的
+`GET /api/integrations/account-overview/nav?sourceId=<source_id>`，仍受独立
+export token 和显式 source_ids 限制，不递归导出其他 provider。
+
+CTA 浏览器接口为 `GET /api/account-overview/nav?sourceId=<namespaced_id>`。
+本地账户按已有 source 权限过滤；外部账户必须先通过总览完全相同的主机
+viewer_usernames、excluded_source_ids 和数据库 grant 过滤，之后才请求上游。
+上游地址由已配置的总览 URL 加 `/nav` 得到；没有共享数据库、文件路径或运行时。
+
+响应格式为：
+
+```json
+{
+  "source_id": "account_id",
+  "start_ms": 1792800000000,
+  "end_ms": 1792814400000,
+  "generated_at_ms": 1792814400000,
+  "interval_hours": 4,
+  "valuation": "realized_fifo_after_fees_funding_interest",
+  "funding": "actual",
+  "complete": true,
+  "loading": false,
+  "unavailable_reason": null,
+  "points": [
+    {"ts_ms": 1792800000000, "pnl_quote": 0.0},
+    {"ts_ms": 1792814400000, "pnl_quote": 12.5}
+  ]
+}
+```
+
+常规点位对齐上海时间 00/04/08/12/16/20 点，另保留真实起点和最新点。
+NAV 的边界沿用自身成交前边界约定（该时刻成交进入随后区间），最新点包含
+截至时间的全部事件。CTA 沿用既有 FIFO 边界语义。初始值始终为零。
+`complete=false` 明确指出缺失资金费、过期历史等原因，不把未知资金费当作零。
+NAV 重放约每 5 分钟更新；总览净值通常每 60 秒请求，加载中每 10 秒重试，
+关闭自动刷新后仅手动更新。失败保留上次曲线并标明状态；更改账户范围取消旧请求。
+曲线独立于每日总览日期筛选，始终展示运行以来历史。
+
+CTA 超出分钟行情保留期时沿用完整窗口成交价估值，界面标明浮动和总体净值为
+估计值；不会截短历史或混合分钟/成交价格。资金费覆盖不足独立标明，不阻断订单
+收益曲线。没有数据库 DDL、快照改写或 Exec RocksDB 写入。

@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
                     selected_source_ids: vec![source.id.clone()],
                     selected_symbols: Vec::new(),
                     max_points: 200,
+                    tick_interval_us: None,
                 },
                 allocation,
             )?;
@@ -99,6 +100,7 @@ async fn main() -> Result<()> {
                     selected_source_ids: vec![source.id.clone()],
                     selected_symbols: Vec::new(),
                     max_points: 3000,
+                    tick_interval_us: None,
                 },
                 allocation,
             )?;

@@ -375,6 +375,7 @@ impl NavTimelineCache {
             sources: request.selected_source_ids.clone(),
             symbols: request.selected_symbols.clone(),
             max_points: request.max_points,
+            tick_interval_us: request.tick_interval_us,
             strategy_allocation: allocation,
             minute_marks_revision: Some(store.revision()),
         };
@@ -463,6 +464,7 @@ mod tests {
                 selected_source_ids: vec!["trade01".into()],
                 selected_symbols: vec![],
                 max_points: 200,
+                tick_interval_us: None,
             };
             for allocation in [false, true] {
                 let report = cache

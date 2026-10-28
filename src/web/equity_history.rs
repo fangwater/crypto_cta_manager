@@ -100,6 +100,7 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
             symbols: None,
             max_points: Some(10_000),
             include_theoretical: Some(false),
+            interval_hours: None,
         },
         strategy_allocation,
         BTreeSet::from([source.id.clone()]),

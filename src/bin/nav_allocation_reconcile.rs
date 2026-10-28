@@ -352,6 +352,7 @@ async fn main() -> Result<()> {
             selected_source_ids: vec![args.source.clone()],
             selected_symbols: vec![],
             max_points: 3500,
+            tick_interval_us: None,
         };
         let before_report = cache.rebuild(request.clone(), strategy_allocation)?;
         let after_report = adjusted.rebuild(request, strategy_allocation)?;

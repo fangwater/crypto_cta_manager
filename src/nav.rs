@@ -355,6 +355,7 @@ pub struct NavTimelineRequest {
     pub selected_source_ids: Vec<String>,
     pub selected_symbols: Vec<String>,
     pub max_points: usize,
+    pub tick_interval_us: Option<i64>,
 }
 
 impl NavTimelineRequest {
@@ -899,6 +900,7 @@ struct TimelineCacheKey {
     sources: Vec<String>,
     symbols: Vec<String>,
     max_points: usize,
+    tick_interval_us: Option<i64>,
     strategy_allocation: bool,
     minute_marks_revision: Option<u64>,
 }
@@ -1132,6 +1134,7 @@ impl NavTimelineCache {
             sources: request.selected_source_ids.clone(),
             symbols: request.selected_symbols.clone(),
             max_points: request.max_points,
+            tick_interval_us: request.tick_interval_us,
             strategy_allocation,
             minute_marks_revision: prices.and_then(MinuteMarks::revision),
         };
@@ -2851,9 +2854,11 @@ fn rebuild_nav_timeline_with_cache(
         prices,
     )?;
 
-    // The HTTP response contains fixed 15-minute points. Capture those points while
+    // Capture fixed-interval points while
     // applying events instead of building one complete strategy/symbol series per fill.
-    let mut next_tick_ts_us = next_timeline_tick(start_ts_us, NAV_TICK_INTERVAL_US);
+    let tick_interval_us = request.tick_interval_us.unwrap_or(NAV_TICK_INTERVAL_US);
+    anyhow::ensure!(tick_interval_us > 0, "invalid timeline tick interval");
+    let mut next_tick_ts_us = next_timeline_tick(start_ts_us, tick_interval_us);
     let mut event_index = split;
     while event_index < timeline_events.len() {
         let event_ts_us = timeline_events[event_index].ts_us();
@@ -2873,7 +2878,7 @@ fn rebuild_nav_timeline_with_cache(
                 &mut points_by_strategy,
                 prices,
             )?;
-            let advanced_tick_ts_us = next_tick_ts_us.saturating_add(NAV_TICK_INTERVAL_US);
+            let advanced_tick_ts_us = next_tick_ts_us.saturating_add(tick_interval_us);
             if advanced_tick_ts_us == next_tick_ts_us {
                 break;
             }
@@ -2899,7 +2904,7 @@ fn rebuild_nav_timeline_with_cache(
                 &mut points_by_strategy,
                 prices,
             )?;
-            let advanced_tick_ts_us = next_tick_ts_us.saturating_add(NAV_TICK_INTERVAL_US);
+            let advanced_tick_ts_us = next_tick_ts_us.saturating_add(tick_interval_us);
             if advanced_tick_ts_us != next_tick_ts_us {
                 next_tick_ts_us = advanced_tick_ts_us;
             }
@@ -2918,7 +2923,7 @@ fn rebuild_nav_timeline_with_cache(
             &mut points_by_strategy,
             prices,
         )?;
-        let advanced_tick_ts_us = next_tick_ts_us.saturating_add(NAV_TICK_INTERVAL_US);
+        let advanced_tick_ts_us = next_tick_ts_us.saturating_add(tick_interval_us);
         if advanced_tick_ts_us == next_tick_ts_us {
             break;
         }
@@ -4234,6 +4239,7 @@ mod tests {
             selected_source_ids,
             selected_symbols,
             max_points: 3_000,
+            tick_interval_us: None,
         }
     }
 
@@ -6841,6 +6847,30 @@ mod tests {
                 30 * MINUTE_US,
                 1_810 * 1_000_000,
             ]
+        );
+    }
+
+    #[test]
+    fn timeline_can_sample_at_four_hour_boundaries() {
+        const HOUR_US: i64 = 3_600_000_000;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("trade01");
+        write_events(&path, &[event_at(1, HOUR_US, "BTCUSDT", 1, 1, 100.0, 1.0)]);
+        let mut request = timeline_request(HOUR_US, 10 * HOUR_US, Vec::new(), Vec::new());
+        request.tick_interval_us = Some(4 * HOUR_US);
+        let report = rebuild_nav_timeline_from_rocksdb_with_snapshots(
+            &app_config(vec![source_at("trade01", &path, 0.0)]),
+            request,
+            &SourcePositionSnapshots::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            report
+                .points
+                .iter()
+                .map(|point| point.ts_us)
+                .collect::<Vec<_>>(),
+            vec![HOUR_US, 4 * HOUR_US, 8 * HOUR_US, 10 * HOUR_US]
         );
     }
 

@@ -10,6 +10,7 @@ import { routes } from '../lib/routes'
 import { accountVenueLabel } from '../lib/workspace'
 import { overviewAlertCount, overviewTotal, isExternalOverview, type OverviewRow } from '../lib/accountOverview'
 import './workspace.css'
+import { OverviewNavMonitor } from '../components/OverviewNavMonitor'
 
 type ValueKey = 'yesterday_equity' | 'equity' | 'today_profit' | 'profit_percent' | 'long_position' | 'short_position' | 'long_leverage' | 'short_leverage' | 'net_position' | 'max_drawdown_15d_percent' | 'margin' | 'margin_percent' | 'date_ms' | 'queried_at_ms'
 type SortKey = 'account' | ValueKey
@@ -84,6 +85,7 @@ export function WorkspacePage() {
     {error && <Alert tone="error" className="mb-4">更新失败：{error}。{data ? '当前保留上次数据。' : '请刷新重试。'}</Alert>}
     {externalIssues && <Alert tone="warning" className="mb-4">外部账户正在同步或数据已过期。已有数据继续展示；含缺失或过期账户的汇总暂不显示。</Alert>}
     {rows.some(row => row.account_kind === 'fr' || row.account_kind === 'mm') && <p className="mb-4 text-sm text-muted">FR/MM 今日盈利 = 已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息，不含未平仓浮盈亏；约每 5 分钟更新。权益及权益回撤仍反映账户净值。</p>}
+    <OverviewNavMonitor accounts={rows} autoRefresh={autoRefresh} />
     <section className="overview-panel" aria-labelledby="overview-table-title">
       <div className="overview-table-toolbar">
         <div className="overview-table-title"><h2 id="overview-table-title">账户监控</h2><span>{user.username}</span></div>

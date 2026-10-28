@@ -495,6 +495,7 @@ mod tests {
                     selected_source_ids: vec![id],
                     selected_symbols: Vec::new(),
                     max_points: 1000,
+                    tick_interval_us: None,
                 },
                 true,
             )

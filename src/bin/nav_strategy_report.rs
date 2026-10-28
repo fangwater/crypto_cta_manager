@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
             selected_source_ids: vec![source.id.clone()],
             selected_symbols: args.symbols.clone(),
             max_points: 10_000,
+            tick_interval_us: None,
         },
         &snapshots,
         &strategy_snapshots,

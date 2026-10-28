@@ -19,6 +19,7 @@ pub mod daily;
 pub mod export;
 pub mod external;
 mod margin;
+pub mod nav;
 
 const CF: &str = "account_observations";
 const DAY_MS: i64 = 86_400_000;

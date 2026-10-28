@@ -48,6 +48,7 @@ use crate::{nav, postgres};
 
 mod cumulative_funding;
 mod equity_history;
+mod nav_monitor;
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");
@@ -245,6 +246,7 @@ struct TimelineQuery {
     symbols: Option<String>,
     max_points: Option<usize>,
     include_theoretical: Option<bool>,
+    interval_hours: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -591,6 +593,11 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .route("/api/manager_pnl_sdk.py", get(manager_sdk))
         .route("/api/dashboard", get(dashboard))
         .route("/api/account-overview", get(account_overview_report))
+        .route("/api/account-overview/nav", get(nav_monitor::report))
+        .route(
+            "/api/integrations/account-overview/nav",
+            get(nav_monitor::export),
+        )
         .route(
             "/api/account-overview/external-access",
             get(external_overview_access),
@@ -805,6 +812,7 @@ async fn auth_middleware(
             | "/api/auth/logout"
             | "/api/symbols"
             | "/api/integrations/account-overview"
+            | "/api/integrations/account-overview/nav"
     ) {
         return next.run(request).await;
     }
@@ -1843,13 +1851,24 @@ async fn rebuild_timeline_snapshot(
             cache.dashboard.generated_at_us,
         )
     };
-    let max_points = query.max_points.unwrap_or(3_000).clamp(200, 10_000);
+    let point_limit = if query.interval_hours == Some(4) {
+        100_000
+    } else {
+        10_000
+    };
+    let max_points = query.max_points.unwrap_or(3_000).clamp(200, point_limit);
+    let tick_interval_us = match query.interval_hours {
+        None => None,
+        Some(4) => Some(4 * 3_600_000_000),
+        Some(_) => return Ok(Err(bad_request("intervalHours must be 4".into()))),
+    };
     let request = nav::NavTimelineRequest {
         start_ts_us,
         end_ts_us,
         selected_source_ids,
         selected_symbols,
         max_points,
+        tick_interval_us,
     };
     let aligned_request = request.clone();
     let aligned_timelines = nav_timelines.clone();

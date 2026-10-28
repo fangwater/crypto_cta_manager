@@ -718,6 +718,24 @@ export function getAccountOverview(date: string, signal?: AbortSignal) {
   return requestJson<AccountOverview>(`/account-overview${date ? `?date=${encodeURIComponent(date)}` : ''}`, { signal })
 }
 
+export interface NavMonitor {
+  source_id: string
+  start_ms: number | null
+  end_ms: number | null
+  generated_at_ms: number
+  interval_hours: number
+  valuation: string
+  funding: string
+  complete: boolean
+  loading: boolean
+  unavailable_reason: string | null
+  points: { ts_ms: number; pnl_quote: number }[]
+}
+
+export function getNavMonitor(sourceId: string, signal?: AbortSignal) {
+  return requestJson<NavMonitor>(`/account-overview/nav?sourceId=${encodeURIComponent(sourceId)}`, { signal })
+}
+
 export interface ExternalOverviewAccess {
   source_id: string
   account: string
