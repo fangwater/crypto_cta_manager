@@ -35,6 +35,9 @@ SG 通过自己独立的 `/manager/api/integrations/account-overview/nav` 导出
   prc 可见 4 个。prc 直接访问受限外部净值返回 403，无法绕过主机可见上限。
 - 验证响应的首点为零、时间有序、金额有限、首尾与范围一致、常规点为四小时
   网格；complete 曲线不得缺失中间点。NAV Binance FR 历史已覆盖 2354 个点。
+- 最终逐账户验收取得 23 份有效曲线响应（lgq 19 份、prc 4 份）；12 个当前
+  可见 NAV 账户全部有点且 complete，SG 的 HTTP 转发曲线正常。原已排除的
+  Gate 两个来源继续遵循现场排除配置，不扩大可见范围。
 - 受保护进程：jp-meta 128 个、SG 32 个 PID/启动时间一致；配置哈希分别
   37 份及 9 份一致。
 - 四张 immutable 快照表的行数及整表内容哈希在发布前后一致：jp-meta
