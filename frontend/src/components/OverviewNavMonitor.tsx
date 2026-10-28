@@ -4,7 +4,7 @@ import { LineChart } from 'echarts/charts'
 import { DataZoomComponent, GridComponent, LegendComponent, MarkLineComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { RefreshCw } from 'lucide-react'
-import { getNavMonitor, type NavMonitor } from '../api'
+import { ApiError, getNavMonitor, type NavMonitor } from '../api'
 import { money } from '../format'
 import type { OverviewRow } from '../lib/accountOverview'
 import { Button } from './ui/Button'
@@ -41,6 +41,7 @@ export function OverviewNavMonitor({ accounts, autoRefresh }: { accounts: Overvi
               : { value } }))
           } catch (error) {
             if (controller.signal.aborted) return
+            pending ||= error instanceof ApiError && error.navPricing?.loading === true
             setEntries(previous => ({ ...previous, [id]: { value: previous[id]?.value, stale: true, error: error instanceof Error ? error.message : String(error) } }))
           }
         }
