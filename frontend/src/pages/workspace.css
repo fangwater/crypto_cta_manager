@@ -1,4 +1,13 @@
 .overview-page { --overview-accent: #4f46e5; padding-top: 25px; }
+.overview-nav-monitor { min-width: 0; }
+.overview-nav-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.overview-nav-card { min-width: 0; }
+.overview-nav-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px 8px; }
+.overview-nav-chart { height: 270px; width: 100%; }
+.overview-nav-card-footer { display: grid; gap: 10px; padding: 12px 20px 16px; border-top: 1px solid #edf0f5; font-size: 11px; line-height: 1.6; color: #64748b; }
+.overview-nav-period { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 14px; font-variant-numeric: tabular-nums; }
+@media (max-width: 1023px) { .overview-nav-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 767px) { .overview-nav-card-header { padding: 16px 12px 8px; gap: 10px; } .overview-nav-card-footer { padding: 12px; } .overview-nav-chart { height: 250px; } }
 .overview-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 23px; }
 .overview-eyebrow { color: #64748b; font-size: 11px; letter-spacing: .12em; margin-bottom: 5px; }
 .overview-heading h2 { display: flex; align-items: center; gap: 16px; font-size: 25px; font-weight: 650; letter-spacing: -.04em; }

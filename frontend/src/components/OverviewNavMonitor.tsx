@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import * as echarts from 'echarts/core'
 import { LineChart } from 'echarts/charts'
-import { DataZoomComponent, GridComponent, LegendComponent, MarkLineComponent, TooltipComponent } from 'echarts/components'
+import { DataZoomComponent, GridComponent, MarkLineComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { RefreshCw } from 'lucide-react'
 import { ApiError, getNavMonitor, type NavMonitor } from '../api'
 import { money } from '../format'
-import type { OverviewRow } from '../lib/accountOverview'
+import { isExternalOverview, type OverviewRow } from '../lib/accountOverview'
+import { accountVenueLabel } from '../lib/workspace'
+import { routes } from '../lib/routes'
+import { Badge } from './ui/Badge'
 import { Button } from './ui/Button'
 
-echarts.use([LineChart, DataZoomComponent, GridComponent, LegendComponent, MarkLineComponent, TooltipComponent, CanvasRenderer])
+echarts.use([LineChart, DataZoomComponent, GridComponent, MarkLineComponent, TooltipComponent, CanvasRenderer])
 const time = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
 const fullTime = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
 type Entry = { value?: NavMonitor; error?: string; stale?: boolean }
@@ -19,7 +22,6 @@ export function OverviewNavMonitor({ accounts, autoRefresh }: { accounts: Overvi
   const [revision, setRevision] = useState(0)
   const [refreshing, setRefreshing] = useState(false)
   const scope = JSON.stringify(accounts.map(a => a.source_id).sort())
-  const node = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const ids = JSON.parse(scope) as string[]
     const controller = new AbortController()
@@ -55,56 +57,83 @@ export function OverviewNavMonitor({ accounts, autoRefresh }: { accounts: Overvi
     return () => { controller.abort(); window.clearTimeout(timer) }
   }, [scope, revision, autoRefresh])
 
-  useEffect(() => {
-    if (!node.current) return
-    const chart = echarts.init(node.current)
-    const observer = new ResizeObserver(() => chart.resize())
-    observer.observe(node.current)
-    return () => { observer.disconnect(); chart.dispose() }
-  }, [])
-  useEffect(() => {
-    const chart = node.current && echarts.getInstanceByDom(node.current)
-    if (!chart) return
-    chart.setOption({
-      animation: false,
-      useUTC: true,
-      legend: { type: 'scroll', top: 4, data: accounts.map(a => ({ name: a.source_id, icon: 'roundRect' })), formatter: (id: string) => accounts.find(a => a.source_id === id)?.account ?? id },
-      grid: { left: 80, right: 24, top: 48, bottom: 76 },
-      tooltip: { trigger: 'axis', renderMode: 'richText', valueFormatter: (v: unknown) => typeof v === 'number' ? money(v) : '—' },
-      xAxis: { type: 'time', axisLabel: { formatter: (v: number) => time.format(v) } },
-      yAxis: { type: 'value', name: '累计变化（报价币）', scale: true, axisLabel: { formatter: (v: number) => money(v) } },
-      dataZoom: [{ type: 'inside' }, { type: 'slider', bottom: 12 }],
-      series: accounts.map(account => ({
-        id: account.source_id, name: account.source_id, type: 'line', showSymbol: false, connectNulls: false,
-        lineStyle: { width: 1.5, type: entries[account.source_id]?.stale ? 'dashed' : 'solid' },
-        data: entries[account.source_id]?.value?.points.map(p => [p.ts_ms, p.pnl_quote]) ?? [],
-        markLine: { silent: true, symbol: 'none', label: { show: false }, data: [{ yAxis: 0 }], lineStyle: { color: '#94a3b8', width: 1 } },
-      })),
-    }, { replaceMerge: ['series'] })
-  }, [accounts, entries])
-
-  return <section className="overview-panel mb-5" aria-labelledby="nav-monitor-title">
-    <div className="overview-table-toolbar">
-      <div><h2 id="nav-monitor-title" className="font-semibold">净值监控</h2><p className="mt-1 text-xs text-muted">从各盘监控历史起点归零，每 4 小时一个点，并保留起点与最新点。FR 不计浮动盈亏；资金费沿用各账户口径。</p></div>
+  return <section className="overview-nav-monitor mb-5" aria-labelledby="nav-monitor-title">
+    <div className="overview-table-toolbar !px-0">
+      <div><h2 id="nav-monitor-title" className="font-semibold">分账户净值监控</h2><p className="mt-1 text-xs text-muted">每个账户独立展示监控以来的累计变化，每 4 小时一个点，保留起点与最新点。</p></div>
       <Button type="button" onClick={() => setRevision(v => v + 1)} disabled={refreshing} aria-label="刷新净值"><RefreshCw size={14} />{refreshing ? '更新中' : '刷新净值'}</Button>
     </div>
-    <div ref={node} className="h-[420px] w-full" role="img" aria-label="各账户运行以来累计净值变化曲线，时间为上海时间" />
-    <div className="overview-table-scroll" tabIndex={0} role="region" aria-label="净值监控账户明细">
-      <table className="overview-table"><thead><tr><th>账户</th><th>累计变化</th><th>历史起点（上海）</th><th>截至（上海）</th><th>口径与状态</th></tr></thead>
-        <tbody>{accounts.map(account => {
-          const entry = entries[account.source_id]
-          const value = entry?.value
-          const latest = value?.points.at(-1)?.pnl_quote
-          const notice = entry?.error ?? value?.unavailable_reason
-          return <tr key={account.source_id}>
-            <th scope="row">{account.account}</th><td>{latest == null ? '—' : money(latest)}</td>
-            <td>{value?.start_ms ? fullTime.format(value.start_ms) : '—'}</td><td>{value?.end_ms ? fullTime.format(value.end_ms) : '—'}</td>
-            <td className="!whitespace-normal !min-w-64 text-xs">{value?.valuation === 'quantity_fifo_window_delta' ? '成交价估值 · ' : value?.valuation === 'quantity_fifo_closed_1m_window_delta' ? '分钟收盘价 · ' : account.account_kind === 'fr' ? '已实现收益 · ' : '含浮动盈亏 · '}{value?.funding === 'estimated' ? '估算资金费 · ' : value?.funding === 'actual' ? '实际资金费 · ' : ''}{notice ?? (value?.loading ? '历史加载中' : value?.complete ? '已更新' : '等待数据')}{entry?.stale ? '（保留上次结果）' : ''}</td>
-          </tr>
-        })}</tbody>
-      </table>
-      {accounts.length === 0 && <div className="overview-empty">没有匹配的账户</div>}
+    <div className="overview-nav-grid">
+      {accounts.map(account => <AccountNavCard key={account.source_id} account={account} entry={entries[account.source_id]} />)}
     </div>
-    <p className="px-5 py-3 text-xs text-muted">曲线展示当前筛选账户的运行以来变化，不受上方日期选择影响。不同账户各自归零；金额按各自报价币计量，不作跨币种合计。成交价估值的浮动及总体净值为估计值。</p>
+    {accounts.length === 0 && <div className="overview-panel overview-empty">没有匹配的账户</div>}
+    <p className="py-3 text-xs text-muted">各账户从自己的监控历史起点归零，时间均为上海时间。上方日期选择用于每日账户表，曲线始终展示运行以来的历史。</p>
   </section>
+}
+
+function AccountNavCard({ account, entry }: { account: OverviewRow; entry?: Entry }) {
+  const value = entry?.value
+  const latest = value?.points.at(-1)?.pnl_quote
+  const notice = entry?.error ?? value?.unavailable_reason
+  const loading = !entry || value?.loading
+  const hasPoints = Boolean(value?.points.length)
+  const status = entry?.stale ? '更新失败' : loading ? '加载中' : value?.complete ? '已更新' : hasPoints ? '部分数据' : '暂不可用'
+  const valuation = value?.valuation === 'quantity_fifo_window_delta' ? '成交价估值（浮动及总体为估计值）'
+    : value?.valuation === 'quantity_fifo_closed_1m_window_delta' ? '分钟收盘价估值'
+    : account.account_kind === 'fr' ? '已实现收益，不计浮动盈亏' : '含浮动盈亏'
+  const funding = value?.funding === 'estimated' ? '估算资金费' : value?.funding === 'actual' ? '实际资金费' : undefined
+  const href = isExternalOverview(account) ? account.detail_url ?? undefined : routes.nav(account.source_id)
+  return <article className="overview-panel overview-nav-card" data-nav-source={account.source_id} aria-label={`${account.account} 净值监控`}>
+    <header className="overview-nav-card-header">
+      <div className="min-w-0">
+        <h3 className="break-words text-sm font-semibold text-ink"><a className="hover:text-brand" href={href}>{account.account}</a></h3>
+        <p className="mt-1 break-words text-[11px] text-muted">{(account.account_kind || 'cta').toUpperCase()} · {accountVenueLabel(account.venue)}</p>
+      </div>
+      <div className="shrink-0 text-right">
+        <p className="text-[11px] text-muted">累计净值变化（报价币）</p>
+        <p className={`mt-1 font-mono text-xl font-semibold ${latest == null || latest === 0 ? 'text-ink' : latest > 0 ? 'text-emerald-700' : 'text-rose-700'}`} data-nav-value>{latest == null ? '—' : `${latest > 0 ? '+' : ''}${money(latest)}`}</p>
+      </div>
+    </header>
+    <div className="relative">
+      <AccountNavChart account={account} entry={entry} />
+      {!hasPoints && <div className="absolute inset-0 flex items-center justify-center px-8 text-center text-xs text-muted" role="status">{notice ?? (loading ? '正在加载此账户历史' : '此账户暂无可用历史')}</div>}
+    </div>
+    <footer className="overview-nav-card-footer">
+      <div className="overview-nav-period"><span>起点 <time>{value?.start_ms ? fullTime.format(value.start_ms) : '—'}</time></span><span>截至 <time>{value?.end_ms ? fullTime.format(value.end_ms) : '—'}</time></span></div>
+      <div className="flex flex-wrap items-center gap-2"><Badge tone={entry?.stale || notice ? 'warning' : value?.complete ? 'success' : 'neutral'}>{status}</Badge><span>{valuation}{funding ? ` · ${funding}` : ''}</span></div>
+      {notice && hasPoints && <p className="text-amber-700" role="status">{notice}{entry?.stale ? '（保留上次结果）' : ''}</p>}
+    </footer>
+  </article>
+}
+
+function AccountNavChart({ account, entry }: { account: OverviewRow; entry?: Entry }) {
+  const node = useRef<HTMLDivElement>(null)
+  const chart = useRef<ReturnType<typeof echarts.init> | null>(null)
+  useEffect(() => {
+    if (!node.current) return
+    const instance = echarts.init(node.current)
+    chart.current = instance
+    const observer = new ResizeObserver(() => instance.resize())
+    observer.observe(node.current)
+    return () => { observer.disconnect(); instance.dispose(); chart.current = null }
+  }, [])
+  useEffect(() => {
+    if (!chart.current) return
+    chart.current.setOption({
+      animation: false,
+      useUTC: true,
+      grid: { left: 16, right: 20, top: 20, bottom: 60, containLabel: true },
+      tooltip: { trigger: 'axis', renderMode: 'richText', confine: true, valueFormatter: (v: unknown) => typeof v === 'number' ? money(v) : '—' },
+      xAxis: { type: 'time', axisLabel: { formatter: (v: number) => time.format(v), hideOverlap: true }, splitNumber: 3 },
+      yAxis: { type: 'value', scale: true, axisLabel: { formatter: (v: number) => money(v) }, splitNumber: 4 },
+      dataZoom: [{ type: 'inside' }, { type: 'slider', bottom: 10, height: 20, showDetail: false }],
+      series: [{
+        id: account.source_id, name: account.account, type: 'line', showSymbol: false, connectNulls: false,
+        lineStyle: { width: 1.8, color: '#4f46e5', type: entry?.stale ? 'dashed' : 'solid' },
+        itemStyle: { color: '#4f46e5' },
+        data: entry?.value?.points.map(p => [p.ts_ms, p.pnl_quote]) ?? [],
+        markLine: { silent: true, symbol: 'none', label: { show: false }, data: [{ yAxis: 0 }], lineStyle: { color: '#94a3b8', width: 1 } },
+      }],
+    }, { replaceMerge: ['series'] })
+  }, [account.source_id, account.account, entry?.value, entry?.stale])
+  return <div ref={node} className="overview-nav-chart" data-nav-chart={account.source_id} role="img" aria-label={`${account.account} 独立累计净值变化曲线，时间为上海时间`} />
 }
