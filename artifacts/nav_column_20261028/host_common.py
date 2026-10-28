@@ -39,6 +39,7 @@ def emit(name, body):
 
 
 def protected():
+    current_pid = subprocess.check_output(['systemctl', '--user', 'show', UNIT, '-p', 'MainPID', '--value'], text=True).strip()
     processes = {}
     names = ['trade_engine', 'exec-pre-trade', 'persist_manager', 'exec_config_server', 'viz_server',
              'account_monitor', 'nginx', 'cta_monitor', 'spread_pbs', 'redis-server', 'pre_trade',
@@ -75,7 +76,7 @@ def protected():
     return {'processes': processes, 'config_hashes': hashes, 'tables': tables,
             'binary_sha256': hashlib.sha256((ROOT / 'bin/cta_web').read_bytes()).hexdigest(),
             'webroot': str((ROOT / 'webroot').resolve()),
-            'manager_affinity': next(x for x in Path('/proc/' + pid + '/status').read_text().splitlines() if x.startswith('Cpus_allowed_list:'))}
+            'manager_affinity': next(x for x in Path('/proc/' + current_pid + '/status').read_text().splitlines() if x.startswith('Cpus_allowed_list:'))}
 
 
 @contextlib.contextmanager
