@@ -59,14 +59,14 @@ export function OverviewNavMonitor({ accounts, autoRefresh }: { accounts: Overvi
 
   return <section className="overview-nav-monitor mb-5" aria-labelledby="nav-monitor-title">
     <div className="overview-table-toolbar !px-0">
-      <div><h2 id="nav-monitor-title" className="font-semibold">分账户净值监控</h2><p className="mt-1 text-xs text-muted">每个账户独立展示监控以来的累计变化，每 4 小时一个点，保留起点与最新点。</p></div>
+      <div><h2 id="nav-monitor-title" className="font-semibold">分账户净值监控</h2><p className="mt-1 text-xs text-muted">每个账户独立展示监控以来的累计变化。上海时间 00、04、08、12、16、20 点计算并保存。</p></div>
       <Button type="button" onClick={() => setRevision(v => v + 1)} disabled={refreshing} aria-label="刷新净值"><RefreshCw size={14} />{refreshing ? '更新中' : '刷新净值'}</Button>
     </div>
     <div className="overview-nav-grid">
       {accounts.map(account => <AccountNavCard key={account.source_id} account={account} entry={entries[account.source_id]} />)}
     </div>
     {accounts.length === 0 && <div className="overview-panel overview-empty">没有匹配的账户</div>}
-    <p className="py-3 text-xs text-muted">各账户从自己的监控历史起点归零，时间均为上海时间。上方日期选择用于每日账户表，曲线始终展示运行以来的历史。</p>
+    <p className="py-3 text-xs text-muted">各账户从自己的监控历史起点归零。曲线读取已保存的四小时整点结果，截至最近一期；时间均为上海时间。</p>
   </section>
 }
 

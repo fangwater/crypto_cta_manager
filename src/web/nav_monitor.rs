@@ -18,14 +18,18 @@ pub(super) async fn report(
         if !visible.0.contains(&query.source_id) {
             return Ok(forbidden("account is not visible"));
         }
-        return local(state, query.source_id).await;
+        return Ok((
+            NO_STORE,
+            Json(state.nav_monitor.read(&query.source_id, unix_now_ms())),
+        )
+            .into_response());
     }
     for provider in &state.external_overviews {
         if !provider.owns(&query.source_id) {
             continue;
         }
         // Reuse every host-defined and database visibility constraint, including
-        // administrator exclusions, before making an upstream request.
+        // administrator exclusions, before reading the persisted snapshot.
         let mut overview = state
             .account_overview
             .report(&[], None, &Default::default())?;
@@ -39,15 +43,7 @@ pub(super) async fn report(
         {
             return Ok(forbidden("account is not visible"));
         }
-        let report = provider
-            .nav_monitor(&query.source_id)
-            .await
-            .unwrap_or_else(|_| {
-                let mut value =
-                    Monitor::pending(&query.source_id, "外部净值接口暂不可用，请稍后重试");
-                value.loading = false;
-                value
-            });
+        let report = state.nav_monitor.read(&query.source_id, unix_now_ms());
         return Ok((NO_STORE, Json(report)).into_response());
     }
     Ok(forbidden("account is not visible"))
@@ -68,27 +64,29 @@ pub(super) async fn export(
     if !state.overview_export.allows_source(&query.source_id) {
         return Ok(forbidden("account is not exported"));
     }
-    local(state, query.source_id).await
+    Ok((
+        NO_STORE,
+        Json(state.nav_monitor.read(&query.source_id, unix_now_ms())),
+    )
+        .into_response())
 }
 
-async fn local(state: WebState, id: String) -> Result<Response, ApiError> {
+async fn calculate(state: WebState, id: String, end: i64) -> Result<Monitor> {
     let allocation = !state.funding.settings(&id).enabled;
-    let end = {
+    {
         let cache = state.cache.read().await;
-        let end = cache.dashboard.generated_at_us / 1000;
-        if cache
-            .nav_timelines
-            .start_ts_us(&id, end * 1000, allocation)
-            .is_none()
-        {
-            return Ok((
-                NO_STORE,
-                Json(Monitor::pending(&id, "尚无可重建的监控历史")),
-            )
-                .into_response());
-        }
-        end
-    };
+        anyhow::ensure!(
+            cache.dashboard.generated_at_us / 1000 >= end,
+            "dashboard has not reached the four-hour boundary"
+        );
+        anyhow::ensure!(
+            cache
+                .nav_timelines
+                .start_ts_us(&id, end * 1000, allocation)
+                .is_some(),
+            "no reconstructable monitoring history"
+        );
+    }
     let snapshot = match rebuild_timeline_snapshot(
         state,
         TimelineQuery {
@@ -102,10 +100,11 @@ async fn local(state: WebState, id: String) -> Result<Response, ApiError> {
         allocation,
         BTreeSet::from([id.clone()]),
     )
-    .await?
+    .await
+    .map_err(|error| error.0)?
     {
         Ok(value) => value,
-        Err(response) => return Ok(response),
+        Err(_) => anyhow::bail!("four-hour NAV pricing is not ready"),
     };
     let actual = &snapshot.funding;
     let estimate = &snapshot.estimated_funding;
@@ -186,8 +185,6 @@ async fn local(state: WebState, id: String) -> Result<Response, ApiError> {
     });
     let reason = if !grid_complete {
         Some("历史点数超过上限，曲线已降采样".into())
-    } else if unix_now_ms() - snapshot.generated_at_us / 1000 > 180_000 {
-        Some("本地净值数据已过期，当前保留上次结果".into())
     } else {
         reason
     };
@@ -204,5 +201,76 @@ async fn local(state: WebState, id: String) -> Result<Response, ApiError> {
         unavailable_reason: reason,
         points,
     };
-    Ok((NO_STORE, Json(result)).into_response())
+    Ok(result)
+}
+
+/// Startup loads persisted snapshots; this single worker owns reconstruction.
+/// Browser and integration requests never replay fills or contact providers.
+pub(super) fn spawn(state: WebState) {
+    tokio::spawn(async move {
+        let mut attempts = BTreeMap::<String, (i64, String, std::time::Instant)>::new();
+        loop {
+            let cutoff = crate::account_overview::nav::grid_end(unix_now_ms());
+            let mut sources = state
+                .config
+                .sources
+                .iter()
+                .filter(|s| s.enabled)
+                .map(|s| {
+                    (
+                        s.id.clone(),
+                        format!("funding:{}", state.funding.settings(&s.id).enabled),
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (index, provider) in state.external_overviews.iter().enumerate() {
+                sources.extend(
+                    provider
+                        .monitor_sources()
+                        .into_iter()
+                        .map(|id| (id, String::new(), Some(index))),
+                );
+            }
+            for (id, input_key, provider) in sources {
+                if state.nav_monitor.is_current(&id, cutoff, &input_key) {
+                    continue;
+                }
+                if attempts.get(&id).is_some_and(|(at, key, retry)| {
+                    *at == cutoff && *key == input_key && std::time::Instant::now() < *retry
+                }) {
+                    continue;
+                }
+                let result = match provider {
+                    Some(index) => state.external_overviews[index].nav_monitor(&id).await,
+                    None => calculate(state.clone(), id.clone(), cutoff).await,
+                };
+                let result = match result {
+                    Ok(report) => {
+                        let store = state.nav_monitor.clone();
+                        let key = input_key.clone();
+                        tokio::task::spawn_blocking(move || store.save(report, key, cutoff))
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))
+                            .and_then(|r| r)
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = result {
+                    warn!(source_id=%id, %error, "four-hour NAV deferred; retaining saved history");
+                }
+                attempts.insert(
+                    id,
+                    (
+                        cutoff,
+                        input_key,
+                        std::time::Instant::now() + Duration::from_secs(30),
+                    ),
+                );
+            }
+            // Re-evaluate the UTC/Shanghai aligned boundary and discover new
+            // catalog entries. Failed/pending sources retry independently.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
 }

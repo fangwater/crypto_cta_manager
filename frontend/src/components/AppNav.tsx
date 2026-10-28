@@ -4,7 +4,7 @@ import { useAuth } from './AuthGate'
 import { cn } from '../lib/cn'
 import { readSourceId, routes } from '../lib/routes'
 
-export type AppNavId = 'workspace' | 'accounts' | 'manager' | 'acquisition-cost' | 'config' | 'virtual' | 'auto-earn' | 'docs' | 'admin'
+export type AppNavId = 'workspace' | 'nav-monitor' | 'accounts' | 'manager' | 'acquisition-cost' | 'config' | 'virtual' | 'auto-earn' | 'docs' | 'admin'
 
 const links: Array<{
   id: AppNavId
@@ -13,8 +13,9 @@ const links: Array<{
   icon: typeof LayoutDashboard
 }> = [
   { id: 'workspace', href: '/manager/workspace/', label: '总览', icon: LayoutDashboard },
+  { id: 'nav-monitor', href: routes.navMonitor, label: '净值', icon: Activity },
   { id: 'accounts', href: routes.accounts, label: '账户', icon: WalletCards },
-  { id: 'manager', href: '/manager/', label: '净值', icon: Activity },
+  { id: 'manager', href: '/manager/', label: 'CTA 分析', icon: Activity },
   { id: 'acquisition-cost', href: '/manager/acquisition-cost/', label: '成本', icon: Scale },
   { id: 'config', href: '/manager/config/position/', label: '策略', icon: Settings },
   { id: 'virtual', href: routes.virtualAccounts, label: '虚拟账户', icon: Layers3 },

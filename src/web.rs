@@ -224,6 +224,7 @@ struct WebState {
     account_overview: crate::account_overview::AccountOverview,
     external_overviews: Vec<crate::account_overview::external::ExternalOverview>,
     overview_export: crate::account_overview::export::OverviewExport,
+    nav_monitor: Arc<crate::account_overview::nav::Store>,
     position_archive: Arc<PositionArchive>,
     theoretical_targets: Arc<crate::theoretical_nav::TheoreticalTargetCache>,
     klines: Arc<KlineStore>,
@@ -537,6 +538,9 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let funding = crate::funding::FundingHub::new(&config);
     funding.load(&pool, &config).await?;
     let funding_rates = crate::funding_rates::FundingRateCache::new(config.funding_rates.clone())?;
+    let nav_monitor = Arc::new(crate::account_overview::nav::Store::open(
+        manager_db.clone(),
+    )?);
     let funding_daily = Arc::new(crate::funding_daily::FundingDailyStore::open(manager_db)?);
     funding_rates.spawn_refresh();
     let state = WebState {
@@ -554,6 +558,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         account_overview,
         external_overviews,
         overview_export,
+        nav_monitor,
         position_archive,
         theoretical_targets,
         klines,
@@ -569,6 +574,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     spawn_funding_collectors(&state);
     equity_history::spawn(state.clone());
     cumulative_funding::spawn(state.clone());
+    nav_monitor::spawn(state.clone());
 
     let app = Router::new()
         .route("/api/auth/status", get(auth_status))
@@ -5827,6 +5833,7 @@ mod tests {
             account_overview: crate::account_overview::AccountOverview::open(db.clone()).unwrap(),
             external_overviews: vec![],
             overview_export: Default::default(),
+            nav_monitor: Arc::new(crate::account_overview::nav::Store::open(db.clone()).unwrap()),
             theoretical_targets: crate::theoretical_nav::TheoreticalTargetCache::new(
                 config.clone(),
                 position_archive.clone(),

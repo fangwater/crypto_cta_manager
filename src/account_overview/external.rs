@@ -178,11 +178,17 @@ impl ExternalOverview {
         let mut report: super::nav::Monitor = serde_json::from_slice(&bytes)?;
         report.validate(upstream, now_ms())?;
         report.source_id = source.into();
-        if now_ms() - report.generated_at_ms > self.settings.stale_secs.max(600) as i64 * 1000 {
-            report.complete = false;
-            report.unavailable_reason = Some("外部净值历史已过期".into());
-        }
         Ok(report)
+    }
+    pub fn monitor_sources(&self) -> Vec<String> {
+        self.cache
+            .read()
+            .unwrap()
+            .catalog
+            .iter()
+            .filter(|row| !self.settings.excluded_source_ids.contains(&row.source_id))
+            .map(|row| self.settings.source_id(&row.source_id))
+            .collect()
     }
     pub fn user_allowed(&self, user: &AuthUser) -> bool {
         self.settings.viewer_usernames.is_empty()

@@ -8,6 +8,7 @@ export function readSourceId() {
 
 export const routes = {
   workspace: '/manager/workspace/',
+  navMonitor: '/manager/net-value/',
   accounts: '/manager/accounts/',
   account: (sourceId: string) =>
     `/manager/account/?source=${encodeURIComponent(sourceId)}`,

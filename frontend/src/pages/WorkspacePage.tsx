@@ -8,9 +8,8 @@ import { useAccountOverview } from '../hooks/useAccountOverview'
 import { money } from '../format'
 import { routes } from '../lib/routes'
 import { accountVenueLabel } from '../lib/workspace'
-import { overviewAlertCount, isExternalOverview, type OverviewRow } from '../lib/accountOverview'
+import { overviewAlertCount, overviewTotal, isExternalOverview, type OverviewRow } from '../lib/accountOverview'
 import './workspace.css'
-import { OverviewNavMonitor } from '../components/OverviewNavMonitor'
 
 type ValueKey = 'yesterday_equity' | 'equity' | 'today_profit' | 'profit_percent' | 'long_position' | 'short_position' | 'long_leverage' | 'short_leverage' | 'net_position' | 'max_drawdown_15d_percent' | 'margin' | 'margin_percent' | 'date_ms' | 'queried_at_ms'
 type SortKey = 'account' | ValueKey
@@ -31,6 +30,7 @@ const columns: { key: ValueKey; label: string; digits?: number; reason: string }
   { key: 'queried_at_ms', label: '查询时间', reason: '尚未查询' },
 ]
 const dateTime = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+const number = (value: number | null) => value === null ? '—' : money(value)
 const sideClass = (key: SortKey) => key === 'long_position' || key === 'long_leverage' ? 'overview-long' : key === 'short_position' || key === 'short_leverage' ? 'overview-short' : ''
 
 export function WorkspacePage() {
@@ -63,6 +63,7 @@ export function WorkspacePage() {
   }
   const leverageAlerts = data ? overviewAlertCount(rows, 'leverage_alert') : null
   const timeoutAlerts = data ? overviewAlertCount(rows, 'timeout_alert') : null
+  const externalPending = !accounts.some(isExternalOverview) && data?.external_status?.some(status => status.status !== 'live')
   const externalIssues = data?.external_status?.some(status => status.status !== 'live')
   return <AppShell active="workspace" title="CTA 管理平台" subtitle="账户监控总览" icon={LayoutDashboard} wide className="overview-page">
     <section className="overview-toolbar" aria-label="总览筛选与统计">
@@ -74,34 +75,28 @@ export function WorkspacePage() {
       </div>
       <div className="overview-stats" aria-live="polite">
         <Summary label="账户数" value={data ? String(rows.length) : '—'} />
+        <Summary label="总权益" value={number(data && !externalPending ? overviewTotal(rows, 'equity') : null)} title="当前筛选账户的权益合计；有账户缺失或过期数据时不显示不完整合计" />
+        <Summary label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；CTA 使用权益变化，FR/MM 使用已实现净收益" />
         <Summary label="杠杆告警" value={leverageAlerts == null ? '—' : String(leverageAlerts)} title={data?.alerts.long_leverage_limit == null || data?.alerts.short_leverage_limit == null ? '尚未提供原页面的杠杆告警阈值' : `多头 > ${data.alerts.long_leverage_limit}，空头 > ${data.alerts.short_leverage_limit}`} warn={!!leverageAlerts} />
         <Summary label="超时告警" value={timeoutAlerts == null ? '—' : String(timeoutAlerts)} title={data?.alerts.timeout_secs == null ? '尚未提供原页面的超时告警阈值' : `权益数据超过 ${data.alerts.timeout_secs} 秒未更新`} warn={!!timeoutAlerts} />
       </div>
     </section>
     {error && <Alert tone="error" className="mb-4">更新失败：{error}。{data ? '当前保留上次数据。' : '请刷新重试。'}</Alert>}
-    {externalIssues && <Alert tone="warning" className="mb-4">部分外部账户正在同步或数据已过期，已有账户数据继续展示。</Alert>}
+    {externalIssues && <Alert tone="warning" className="mb-4">外部账户正在同步或数据已过期。已有数据继续展示；含缺失或过期账户的汇总暂不显示。</Alert>}
     {rows.some(row => row.account_kind === 'fr' || row.account_kind === 'mm') && <p className="mb-4 text-sm text-muted">FR/MM 今日盈利 = 已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息，不含未平仓浮盈亏；约每 5 分钟更新。权益及权益回撤仍反映账户净值。</p>}
-    <section className="overview-panel mb-3" aria-label="选择展示的账户">
+    <section className="overview-panel" aria-labelledby="overview-table-title">
       <div className="overview-table-toolbar">
-        <div className="overview-table-title"><h2>账户筛选</h2><span>当前 {rows.length} 个账户</span></div>
+        <div className="overview-table-title"><h2 id="overview-table-title">账户监控</h2><span>{user.username}</span></div>
         <div className="overview-table-actions">
           <label className="overview-search"><Search size={16} /><input type="search" aria-label="搜索账户" placeholder="搜索账户" value={search} onChange={event => setSearch(event.target.value)} /></label>
           <Button type="button" onClick={() => setFilterOpen(value => !value)} aria-expanded={filterOpen} aria-controls="overview-account-filter"><Filter size={14} />账户筛选<ChevronDown size={13} /></Button>
+          <Button type="button" onClick={() => void refresh()} disabled={refreshing} aria-label="刷新数据"><RefreshCw size={14} /></Button>
         </div>
       </div>
       {filterOpen && <div id="overview-account-filter" className="overview-account-filter">
         <div><strong>选择展示的账户</strong><button type="button" onClick={() => setHidden(new Set())}>全选</button><button type="button" onClick={() => setHidden(new Set(accounts.map(account => account.source_id)))}>全不选</button><button type="button" aria-label="收起账户筛选" onClick={() => setFilterOpen(false)}><X size={16} /></button></div>
         <fieldset><legend className="sr-only">展示账户</legend>{accounts.map(account => <label key={account.source_id}><input type="checkbox" checked={!hidden.has(account.source_id)} onChange={() => setHidden(previous => { const next = new Set(previous); if (next.has(account.source_id)) next.delete(account.source_id); else next.add(account.source_id); return next })} />{account.account}</label>)}</fieldset>
       </div>}
-    </section>
-    <OverviewNavMonitor accounts={rows} autoRefresh={autoRefresh} />
-    <section className="overview-panel" aria-labelledby="overview-table-title">
-      <div className="overview-table-toolbar">
-        <div className="overview-table-title"><h2 id="overview-table-title">账户监控</h2><span>{user.username}</span></div>
-        <div className="overview-table-actions">
-          <Button type="button" onClick={() => void refresh()} disabled={refreshing} aria-label="刷新数据"><RefreshCw size={14} /></Button>
-        </div>
-      </div>
       <div className="overview-table-scroll" tabIndex={0} role="region" aria-label="账户监控数据表，可横向滚动" aria-busy={refreshing || data?.loading}>
         <table className="overview-table">
           <thead><tr><th scope="col" className="overview-index">#</th>{sortColumn('account', '账号')}{columns.map(column => sortColumn(column.key, column.label))}</tr></thead>
