@@ -82,6 +82,43 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
     Ok(())
 }
 
+/// Display overrides stay separate from TOML labels and immutable history.
+pub async fn load_source_aliases(pool: &PgPool) -> Result<BTreeMap<String, String>> {
+    sqlx::query_as(
+        "SELECT source_id, display_alias FROM cta_order_sources WHERE display_alias IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load account aliases")
+    .map(|rows: Vec<(String, String)>| rows.into_iter().collect())
+}
+
+pub fn normalize_source_alias(alias: Option<&str>) -> Result<Option<String>> {
+    let Some(alias) = alias.map(str::trim).filter(|alias| !alias.is_empty()) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(alias.chars().count() <= 200, "账户别名不能超过 200 个字符");
+    anyhow::ensure!(
+        !alias.chars().any(char::is_control),
+        "账户别名不能包含控制字符"
+    );
+    Ok(Some(alias.to_string()))
+}
+
+pub async fn save_source_alias(pool: &PgPool, source_id: &str, alias: Option<&str>) -> Result<()> {
+    let alias = normalize_source_alias(alias)?;
+    let result = sqlx::query(
+        "UPDATE cta_order_sources SET display_alias = $2, updated_at = now() WHERE source_id = $1",
+    )
+    .bind(source_id)
+    .bind(alias)
+    .execute(pool)
+    .await
+    .context("failed to save account alias")?;
+    anyhow::ensure!(result.rows_affected() == 1, "unknown source");
+    Ok(())
+}
+
 /// Read all fee settings from one catalog snapshot for a coherent analysis generation.
 pub async fn load_analysis_fee_rates(
     pool: &PgPool,
@@ -694,6 +731,20 @@ fn path_text(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_aliases_trim_reset_and_reject_invalid_display_text() {
+        assert_eq!(
+            normalize_source_alias(Some("  趋势账户  ")).unwrap(),
+            Some("趋势账户".into())
+        );
+        assert_eq!(normalize_source_alias(None).unwrap(), None);
+        assert_eq!(normalize_source_alias(Some(" \t ")).unwrap(), None);
+        assert!(normalize_source_alias(Some(&"币".repeat(200))).is_ok());
+        assert!(normalize_source_alias(Some(&"币".repeat(201))).is_err());
+        assert!(normalize_source_alias(Some("bad\nname")).is_err());
+        assert!(normalize_source_alias(Some("bad\0name")).is_err());
+    }
 
     fn event(
         symbol: &str,

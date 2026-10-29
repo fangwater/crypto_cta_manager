@@ -159,6 +159,13 @@ export function getDashboard(signal?: AbortSignal) {
   return requestJson<DashboardSnapshot>('/dashboard', { signal })
 }
 
+export function saveAccountAlias(sourceId: string, alias: string | null) {
+  return requestJson<{ source_id: string; account: string; display_alias: string | null }>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/alias`,
+    { method: 'PUT', body: { alias } },
+  )
+}
+
 export interface AutoEarnSettings {
   enabled: boolean
   interval_secs: number

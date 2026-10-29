@@ -1,5 +1,6 @@
 import { accountFeeSummary, fundingMoney } from '../format'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
+import { AccountAliasEditor } from '../components/AccountAliasEditor'
 import {
   Activity,
   ArrowRight,
@@ -114,6 +115,14 @@ export function AccountsPage() {
     (account) => account.enabled && reportsBySource.has(account.source_id),
   ).length
 
+  function updateAlias(update: { source_id: string; account: string; display_alias: string | null }) {
+    setDashboard(current => current ? {
+      ...current,
+      accounts: current.accounts?.map(account => account.source_id === update.source_id ? { ...account, ...update } : account),
+      report: { ...current.report, sources: current.report.sources.map(source => source.source_id === update.source_id ? { ...source, account: update.account } : source) },
+    } : current)
+  }
+
   return (
     <AppShell
       active="accounts"
@@ -207,6 +216,7 @@ export function AccountsPage() {
               account={account}
               report={reportsBySource.get(account.source_id)}
               health={health}
+              onAliasSaved={updateAlias}
             />
           ))}
           {accounts.length === 0 && (
@@ -224,10 +234,12 @@ function AccountCard({
   account,
   report,
   health,
+  onAliasSaved,
 }: {
   account: DashboardAccount
   report?: SourceNavReport
   health: HealthResponse | null
+  onAliasSaved: (update: { source_id: string; account: string; display_alias: string | null }) => void
 }) {
   const ready = account.enabled && report !== undefined
   const status = !account.enabled
@@ -257,12 +269,12 @@ function AccountCard({
   return (
     <Card className={cn(!ready && 'opacity-80')}>
       <CardHeader className="flex flex-row items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
+        <div className="flex min-w-0 items-start gap-3">
           <div className="grid h-10 w-10 place-items-center rounded-xl bg-canvas text-sm font-bold text-brand">
             {venueMark(account.venue)}
           </div>
-          <div>
-            <CardTitle className="text-base">{account.account}</CardTitle>
+          <div className="min-w-0">
+            <CardTitle className="text-base"><AccountAliasEditor account={account} onSaved={onAliasSaved} /></CardTitle>
             <CardDescription className="font-mono text-[11px]">{account.source_id}</CardDescription>
           </div>
         </div>

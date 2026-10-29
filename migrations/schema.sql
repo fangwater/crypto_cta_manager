@@ -68,6 +68,7 @@ CREATE TABLE cta_exec_order_config_audit (
 CREATE TABLE cta_order_sources (
     source_id text NOT NULL,
     account_label text NOT NULL,
+    display_alias text CHECK (display_alias IS NULL OR (char_length(btrim(display_alias)) BETWEEN 1 AND 200)),
     venue_label text NOT NULL,
     rocksdb_path text NOT NULL,
     enabled boolean DEFAULT true NOT NULL,

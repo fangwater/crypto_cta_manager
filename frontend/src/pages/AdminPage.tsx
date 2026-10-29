@@ -314,7 +314,7 @@ export function AdminPage() {
         eyebrow="Access Control"
         title={isAdmin ? '账户权限' : '授权管理'}
         description={isAdmin
-          ? '账户授权分三档：无权限（不显示）、仅查看（可读账户与绑定）、可配置（可编辑绑定、份数、执行参数、费率与杠杆）。策略授权独立于账户：可见即可在目录与已绑定账户中看到该策略，可配置才允许新建绑定并管理该策略的授权。已存在的绑定由账户可配置权限管理，不再重复校验策略权限。'
+          ? '账户授权分三档：无权限（不显示）、仅查看（可读账户与绑定，可修改账户别名）、可配置（可编辑绑定、份数、执行参数、费率与杠杆）。策略授权独立于账户：可见即可在目录与已绑定账户中看到该策略，可配置才允许新建绑定并管理该策略的授权。已存在的绑定由账户可配置权限管理，不再重复校验策略权限。'
           : '你创建的策略，以及持有可配置权限的账户和策略，都可以继续授权给其他用户。新建绑定还需要目标账户的配置权限。所有登录用户均可新建私有策略；全员可见、推送 token 和推送用户由管理员维护。'}
       />
       {error && <Alert tone="error" className="mb-4">{error}</Alert>}
@@ -357,11 +357,13 @@ export function AdminPage() {
                       return (
                         <div key={source.source_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-soft px-3 py-2">
                           <div className="text-xs text-muted"><span className="text-ink">{source.account}</span> <span className="font-mono text-[10px] text-subtle">{source.source_id}</span></div>
-                          <LevelPicker
-                            value={level}
-                            disabled={saving === target.user_id}
-                            onChange={(next) => void saveSourceLevel(target, source.source_id, next)}
-                          />
+                          <div className="flex flex-wrap items-center gap-3">
+                            <LevelPicker
+                              value={level}
+                              disabled={saving === target.user_id}
+                              onChange={(next) => void saveSourceLevel(target, source.source_id, next)}
+                            />
+                          </div>
                         </div>
                       )
                     })}
@@ -377,7 +379,7 @@ export function AdminPage() {
         <Card className="mt-5">
           <CardHeader><CardTitle>账户权限</CardTitle></CardHeader>
           <CardContent className="space-y-5">
-            <p className="text-xs text-muted">你持有以下账户的可配置权限，可以为其他用户分配查看或可配置权限。查看即可读取账户与绑定，可配置允许对方编辑绑定、份数、执行参数、费率与杠杆。</p>
+            <p className="text-xs text-muted">你持有以下账户的可配置权限，可以为其他用户分配查看或可配置权限。查看即可读取账户与绑定并修改别名，可配置允许对方编辑绑定、份数、执行参数、费率与杠杆。</p>
             {sources.filter((source) => source.access_level === 'configure').map((source) => (
               <div key={source.source_id} className="rounded-xl border border-border-soft p-4">
                 <p className="text-sm font-medium text-ink">{source.account} <span className="font-mono text-[10px] text-subtle">{source.source_id}</span></p>
@@ -387,11 +389,13 @@ export function AdminPage() {
                     return (
                       <div key={target.user_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-soft px-3 py-2">
                         <span className="text-xs text-ink">{target.username}</span>
-                        <LevelPicker
-                          value={level}
-                          disabled={savingAccount === source.source_id}
-                          onChange={(next) => void saveAccountGrantLevel(source.source_id, target, next)}
-                        />
+                        <div className="flex flex-wrap items-center gap-3">
+                          <LevelPicker
+                            value={level}
+                            disabled={savingAccount === source.source_id}
+                            onChange={(next) => void saveAccountGrantLevel(source.source_id, target, next)}
+                          />
+                        </div>
                       </div>
                     )
                   })}

@@ -815,7 +815,9 @@ mod tests {
         sqlx::raw_sql("CREATE TEMP TABLE cta_users(user_id bigint PRIMARY KEY, username text, role text, disabled boolean DEFAULT false);
             CREATE TEMP TABLE cta_user_source_permissions(user_id bigint, source_id text, access_level text, PRIMARY KEY(user_id,source_id));
             INSERT INTO cta_users VALUES(1,'prc','admin',false),(3,'lgq','user',false);
-            INSERT INTO cta_user_source_permissions VALUES(3,'public','view'),(3,'private','configure'),(1,'private','configure');")
+            INSERT INTO cta_user_source_permissions(user_id,source_id,access_level) VALUES(3,'public','view'),(3,'private','configure'),(1,'private','configure');
+            CREATE TEMP TABLE cta_order_sources(source_id text PRIMARY KEY, display_alias text, updated_at timestamptz DEFAULT now());
+            INSERT INTO cta_order_sources(source_id) VALUES('public'),('private'),('new-account');")
             .execute(&pool).await?;
         let configured = BTreeSet::from(["public".into(), "private".into()]);
         let viewers = BTreeMap::from([("private".into(), vec!["lgq".into()])]);
@@ -839,6 +841,20 @@ mod tests {
                 .iter()
                 .all(|grant| grant.access_level == "configure")
         );
+        let grants = set_source_grants(
+            &pool,
+            "public",
+            &[SourceGranteeInput {
+                user_id: 3,
+                access_level: "view".into(),
+            }],
+            &configured,
+        )
+        .await?;
+        assert_eq!(grants[0].access_level, "view");
+        let access = allowed_source_access(&pool, &lgq, &configured, &viewers).await?;
+        assert_eq!(access.configure, BTreeSet::from(["private".into()]));
+        assert_eq!(access.view, configured);
         let view = set_sources(&pool, 3, &[], &scope).await?;
         assert_eq!(view.source_grants.len(), 1);
         assert_eq!(view.source_grants[0].source_id, "private");
@@ -869,6 +885,17 @@ mod tests {
                 .await?
                 .view
                 .is_empty()
+        );
+        crate::postgres::save_source_alias(&pool, "public", Some("  新账户  ")).await?;
+        assert_eq!(
+            crate::postgres::load_source_aliases(&pool).await?["public"],
+            "新账户"
+        );
+        crate::postgres::save_source_alias(&pool, "public", None).await?;
+        assert!(
+            !crate::postgres::load_source_aliases(&pool)
+                .await?
+                .contains_key("public")
         );
         pool.close().await;
         Ok(())

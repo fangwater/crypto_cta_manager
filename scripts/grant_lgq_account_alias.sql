@@ -1,0 +1,2 @@
+-- No grant is needed: every logged-in user may rename visible accounts.
+-- In particular, do not add view grants merely to enable alias editing.

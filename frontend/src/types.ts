@@ -99,6 +99,8 @@ export interface DashboardAccount {
   target_proxy_enabled: boolean
   /** Current session's grant on this account. Undefined only in stale payloads. */
   access_level?: 'view' | 'configure' | null
+  can_edit_alias?: boolean
+  display_alias?: string | null
   account_pnl_start_ts_us?: number | null
   strategy_pnl_start_ts_us?: number | null
   live_equity_usdt?: number | null

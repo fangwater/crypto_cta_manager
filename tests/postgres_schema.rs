@@ -132,6 +132,71 @@ async fn initializes_current_schema_without_ingestion_or_migration_tables() -> R
 
 #[tokio::test]
 #[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn account_alias_maintenance_preserves_identity_and_configuration() -> Result<()> {
+    let database = TestDatabase::create().await?;
+    let pool = &database.pool;
+    postgres::initialize(pool).await?;
+    let snapshot = seed_business_data(pool).await?;
+    sqlx::raw_sql(
+        "ALTER TABLE cta_order_sources DROP COLUMN display_alias;
+        INSERT INTO cta_users(username,password_hash) VALUES('lgq','dummy-test-hash');
+        INSERT INTO cta_user_source_permissions(user_id,source_id,access_level)
+        SELECT user_id,'test-source','configure' FROM cta_users WHERE username='lgq';",
+    )
+    .execute(pool)
+    .await?;
+    for _ in 0..2 {
+        sqlx::raw_sql(include_str!("../scripts/apply_account_alias_schema.sql"))
+            .execute(pool)
+            .await?;
+    }
+    assert!(postgres::load_source_aliases(pool).await?.is_empty());
+    let source: crypto_cta_manager::config::SourceConfig = toml::from_str(
+        r#"
+        id = "test-source"
+        account = "new-config-label"
+        alias = "TOML display"
+        venue = "binance-futures"
+        rocksdb_path = "/unused/test-source"
+    "#,
+    )?;
+    postgres::save_source_alias(pool, &source.id, Some("  页面别名  ")).await?;
+    // Startup registration refreshes deployment metadata but keeps the override.
+    postgres::register_sources(pool, std::slice::from_ref(&source)).await?;
+    assert_eq!(
+        postgres::load_source_aliases(pool).await?[&source.id],
+        "页面别名"
+    );
+    assert!(
+        postgres::save_source_alias(pool, &source.id, Some("bad\nname"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        postgres::load_source_aliases(pool).await?[&source.id],
+        "页面别名"
+    );
+    let mut new_source = source.clone();
+    new_source.id = "new-source".into();
+    postgres::register_sources(pool, &[new_source]).await?;
+    let grants: Vec<(String, String)> = sqlx::query_as(
+        "SELECT source_id,access_level
+        FROM cta_user_source_permissions p JOIN cta_users u USING(user_id)
+        WHERE username='lgq' ORDER BY source_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(grants, vec![("test-source".into(), "configure".into())]);
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM cta_user_source_permissions p JOIN cta_users u USING(user_id) WHERE username='schema-test'").fetch_one(pool).await?, 0);
+    postgres::save_source_alias(pool, &source.id, None).await?;
+    postgres::register_sources(pool, &[source]).await?;
+    assert!(postgres::load_source_aliases(pool).await?.is_empty());
+    assert_business_data(pool, &snapshot).await?;
+    database.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
 async fn repeat_initialization_fails_and_preserves_business_data() -> Result<()> {
     let database = TestDatabase::create().await?;
     postgres::initialize(&database.pool).await?;

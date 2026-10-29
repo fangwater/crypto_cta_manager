@@ -127,6 +127,8 @@ pub struct DashboardAccount {
     /// Current session's grant on this account: "view" or "configure".
     /// Annotated per request after the shared snapshot is filtered.
     pub access_level: Option<&'static str>,
+    pub can_edit_alias: bool,
+    pub display_alias: Option<String>,
     /// Account-level PnL starts from the immutable account snapshot when present.
     pub account_pnl_start_ts_us: Option<i64>,
     /// Strategy PnL starts from a later immutable allocation anchor when present.
@@ -721,6 +723,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             get(list_account_grants).put(save_account_grants),
         )
         .route(
+            "/api/catalog/accounts/{source_id}/alias",
+            put(save_account_alias),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/estimated-fee-rate",
             put(save_account_estimated_fee_rate),
         )
@@ -894,6 +900,9 @@ fn request_permission_error(
         return None;
     }
     if let Some(source_id) = source_id {
+        if path == format!("/api/catalog/accounts/{source_id}/alias") {
+            return None;
+        }
         if !access.configure.contains(source_id) {
             return Some("you are not authorized to configure this account");
         }
@@ -1298,6 +1307,12 @@ async fn account_overview_report(
     let mut report = tokio::task::spawn_blocking(move || hub.report(&sources, date, &settings))
         .await
         .map_err(|error| anyhow::anyhow!("account overview task failed: {error}"))??;
+    let aliases = postgres::load_source_aliases(&state.pool).await?;
+    for account in &mut report.accounts {
+        if let Some(alias) = aliases.get(&account.source_id) {
+            account.account.clone_from(alias);
+        }
+    }
     for provider in &state.external_overviews {
         provider
             .merge(
@@ -1403,12 +1418,18 @@ async fn dashboard(
     State(state): State<WebState>,
     Extension(visible): Extension<VisibleSources>,
     Extension(configurable): Extension<ConfigurableSources>,
-) -> impl IntoResponse {
+) -> Result<Response, ApiError> {
+    let aliases = postgres::load_source_aliases(&state.pool).await?;
     let mut dashboard = state.cache.read().await.dashboard.clone();
     dashboard
         .accounts
         .retain(|account| visible.0.contains(&account.source_id));
     for account in &mut dashboard.accounts {
+        account.can_edit_alias = true;
+        account.display_alias = aliases.get(&account.source_id).cloned();
+        if let Some(alias) = &account.display_alias {
+            account.account.clone_from(alias);
+        }
         account.access_level = Some(if configurable.0.contains(&account.source_id) {
             "configure"
         } else {
@@ -1416,6 +1437,11 @@ async fn dashboard(
         });
     }
     dashboard.report = nav::restrict_report(&dashboard.report, &visible.0);
+    for source in &mut dashboard.report.sources {
+        if let Some(alias) = aliases.get(&source.source_id) {
+            source.account.clone_from(alias);
+        }
+    }
     let now_ms = unix_now_ms();
     let cumulative = state.cumulative_funding.read().await;
     for account in &mut dashboard.accounts {
@@ -1451,7 +1477,7 @@ async fn dashboard(
                 Some(report.totals.nav_change_after_fee_quote + account.funding.income_quote);
         }
     }
-    (NO_STORE, Json(dashboard))
+    Ok((NO_STORE, Json(dashboard)).into_response())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3222,6 +3248,51 @@ async fn get_account_studio(
         Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
         Err(error) => Ok(catalog_error(error)),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveAccountAliasRequest {
+    alias: Option<String>,
+}
+
+async fn save_account_alias(
+    State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
+    Extension(visible): Extension<VisibleSources>,
+    Path(source_id): Path<String>,
+    Json(request): Json<SaveAccountAliasRequest>,
+) -> Result<Response, ApiError> {
+    if !visible.0.contains(&source_id) {
+        return Ok(forbidden("you are not authorized to view this account"));
+    }
+    let Some(source) = state
+        .config
+        .sources
+        .iter()
+        .find(|source| source.id == source_id)
+    else {
+        return Ok(not_found("account was not found"));
+    };
+    let alias = match postgres::normalize_source_alias(request.alias.as_deref()) {
+        Ok(alias) => alias,
+        Err(error) => return Ok(bad_request(error.to_string())),
+    };
+    postgres::save_source_alias(&state.pool, &source_id, alias.as_deref()).await?;
+    info!(
+        source_id,
+        user_id = user.user_id,
+        "account display alias updated"
+    );
+    Ok((
+        NO_STORE,
+        Json(serde_json::json!({
+            "source_id": source_id,
+            "account": alias.as_deref().unwrap_or_else(|| source.display_name()),
+            "display_alias": alias,
+        })),
+    )
+        .into_response())
 }
 
 async fn get_account_exec_order_rate_limits(
@@ -5467,6 +5538,8 @@ async fn build_dashboard(
                 configurable: source.exec_config_url.is_some(),
                 target_proxy_enabled: source.target_proxy.is_some(),
                 access_level: None,
+                can_edit_alias: false,
+                display_alias: None,
                 account_pnl_start_ts_us,
                 strategy_pnl_start_ts_us,
                 live_equity_usdt: live.as_ref().map(|snapshot| snapshot.equity_usdt),
@@ -6468,6 +6541,50 @@ mod tests {
             None,
             protected.publish_token_hash.as_deref().unwrap()
         ));
+    }
+
+    #[test]
+    fn visible_accounts_allow_alias_edits_but_not_other_configuration() {
+        let access = auth::SourceAccess {
+            view: BTreeSet::from([
+                "alias-only".into(),
+                "view-only".into(),
+                "configure-only".into(),
+            ]),
+            configure: BTreeSet::from(["configure-only".into()]),
+        };
+        for (source, expected) in [
+            ("alias-only", None),
+            ("view-only", None),
+            ("configure-only", None),
+            (
+                "hidden",
+                Some("you are not authorized to view or configure this account"),
+            ),
+        ] {
+            let path = format!("/api/catalog/accounts/{source}/alias");
+            assert_eq!(
+                request_permission_error(false, false, source_id_from_path(&path), &path, &access),
+                expected
+            );
+            assert_eq!(
+                request_permission_error(true, false, source_id_from_path(&path), &path, &access),
+                if source == "hidden" { expected } else { None }
+            );
+        }
+        for suffix in [
+            "fee-rates",
+            "bindings",
+            "grants",
+            "funding",
+            "exec-order-rate-limits",
+        ] {
+            let path = format!("/api/catalog/accounts/alias-only/{suffix}");
+            assert_eq!(
+                request_permission_error(false, false, source_id_from_path(&path), &path, &access),
+                Some("you are not authorized to configure this account")
+            );
+        }
     }
 
     #[test]
