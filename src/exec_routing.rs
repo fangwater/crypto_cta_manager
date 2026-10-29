@@ -37,7 +37,7 @@ pub(crate) fn validate_grid_account(
     Ok(())
 }
 
-/// RapidX linear Execs own a perpetual market and its USDT cash market.
+/// RapidX linear and native OKX unified Execs also own their USDT cash market.
 pub(crate) fn markets(source: &SourceConfig) -> Result<Vec<String>> {
     let values = crate::market_rules::source_values(source)?;
     let backend = crate::market_rules::execution_backend(&source.venue, &values)?;
@@ -46,12 +46,10 @@ pub(crate) fn markets(source: &SourceConfig) -> Result<Vec<String>> {
         "COIN-M execution requires the native Binance backend"
     );
     let mut markets = vec![source.venue.clone()];
-    if backend == "ltp" {
-        match source.venue.as_str() {
-            "binance-futures" => markets.push("binance-margin".into()),
-            "okex-futures" => markets.push("okex-margin".into()),
-            _ => (),
-        }
+    match (source.venue.as_str(), backend) {
+        ("binance-futures", "ltp") => markets.push("binance-margin".into()),
+        ("okex-futures", _) => markets.push("okex-margin".into()),
+        _ => (),
     }
     Ok(markets)
 }
@@ -234,6 +232,25 @@ mod tests {
         assert!(for_symbol(&source, "BTCUSD").is_err());
         assert!(for_symbol(&source, "BTCUSDC").is_ok());
         assert!(markets(&coin_source).is_err());
+    }
+
+    #[test]
+    fn native_okx_unified_source_routes_cash_and_swaps_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let source: SourceConfig = toml::from_str(&format!("id='okx_native'\naccount='test'\nvenue='okex-futures'\nrocksdb_path='{}'\nipc_namespace='okx_native'\n", dir.path().join("data/persist_manager").display())).unwrap();
+        assert_eq!(
+            markets(&source).unwrap(),
+            vec!["okex-futures", "okex-margin"]
+        );
+        let cash = for_symbol(&source, "BTC").unwrap();
+        let swap = for_symbol(&source, "BTCUSDT").unwrap();
+        assert_eq!(cash.venue, "okex-margin");
+        assert_eq!(swap.venue, "okex-futures");
+        assert_eq!(cash.id, swap.id);
+        assert_eq!(cash.rocksdb_path, swap.rocksdb_path);
+        assert!(for_symbol(&source, "BTCUSD").is_err());
+        assert_eq!(target_symbol("BTCUSDT", 2), "BTC");
+        assert_eq!(target_symbol("BTCUSDT", 3), "BTCUSDT");
     }
 
     #[test]

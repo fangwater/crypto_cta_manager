@@ -309,6 +309,7 @@ async fn fetch_snapshot(client: &Client, venue: &str) -> Result<MarketRulesSnaps
         "binance-futures" => fetch_binance_futures(client).await?,
         "binance-coin-futures" => fetch_binance_coin_futures(client).await?,
         "okex-futures" => fetch_okx_futures(client).await?,
+        "okex-margin" => fetch_okx_spot(client).await?,
         "bybit-futures" => unified::fetch_bybit(client, "https://api.bybit.com").await?,
         "bitget-futures" => unified::fetch_bitget(client, "https://api.bitget.com").await?,
         _ => bail!("unsupported market-rules venue: {venue}"),
@@ -411,6 +412,52 @@ async fn fetch_okx_futures(client: &Client) -> Result<BTreeMap<String, MarketRul
     )
     .await?;
     parse_okx_futures(&value)
+}
+
+async fn fetch_okx_spot(client: &Client) -> Result<BTreeMap<String, MarketRule>> {
+    let value = get_json(
+        client,
+        "https://www.okx.com/api/v5/public/instruments?instType=SPOT",
+    )
+    .await?;
+    parse_okx_spot(&value)
+}
+
+fn parse_okx_spot(value: &Value) -> Result<BTreeMap<String, MarketRule>> {
+    if value.get("code").and_then(Value::as_str) != Some("0") {
+        bail!("OKX spot instruments request failed");
+    }
+    let rows = value
+        .get("data")
+        .and_then(Value::as_array)
+        .context("OKX spot instruments omitted data")?;
+    let mut symbols = BTreeMap::new();
+    for row in rows {
+        if row.get("quoteCcy").and_then(Value::as_str) != Some("USDT") {
+            continue;
+        }
+        let base = required_string(row, "baseCcy")?;
+        let inst_id = required_string(row, "instId")?;
+        anyhow::ensure!(
+            inst_id == format!("{base}-USDT"),
+            "invalid OKX spot identity: {inst_id}"
+        );
+        let symbol = format!("{base}USDT");
+        let rule = MarketRule {
+            status: required_string(row, "state")?.into(),
+            base_asset: base.into(),
+            quote_asset: "USDT".into(),
+            price_tick: required_string(row, "tickSz")?.into(),
+            qty_step: required_string(row, "lotSz")?.into(),
+            min_qty: required_string(row, "minSz")?.into(),
+            min_notional: None,
+            contract_multiplier: None,
+        };
+        if symbols.insert(symbol.clone(), rule).is_some() {
+            bail!("duplicate OKX spot symbol: {symbol}");
+        }
+    }
+    Ok(symbols)
 }
 
 fn parse_okx_futures(value: &Value) -> Result<BTreeMap<String, MarketRule>> {
@@ -516,6 +563,63 @@ fn now_us() -> i64 {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn okx_spot_rules_filter_quotes_and_preserve_base_precision_and_status() {
+        let value = serde_json::json!({"code":"0", "data":[
+            {"instId":"BTC-USDT", "baseCcy":"BTC", "quoteCcy":"USDT", "state":"live", "tickSz":"0.1", "lotSz":"0.00000001", "minSz":"0.00001"},
+            {"instId":"ETH-USDT", "baseCcy":"ETH", "quoteCcy":"USDT", "state":"suspend", "tickSz":"0.01", "lotSz":"0.000001", "minSz":"0.0001"},
+            {"instId":"BTC-USDC", "baseCcy":"BTC", "quoteCcy":"USDC", "state":"live"}
+        ]});
+        let rules = parse_okx_spot(&value).unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules["BTCUSDT"].qty_step, "0.00000001");
+        assert_eq!(rules["BTCUSDT"].min_qty, "0.00001");
+        assert_eq!(rules["ETHUSDT"].status, "suspend");
+        assert!(
+            rules
+                .values()
+                .all(|rule| rule.contract_multiplier.is_none())
+        );
+        MarketRulesSnapshot {
+            venue: "okex-margin".into(),
+            execution_backend: "native".into(),
+            portfolio_id: None,
+            fetched_at_us: 1,
+            symbols: rules,
+        }
+        .validate()
+        .unwrap();
+        let mut bad = value.clone();
+        bad["data"][0]["instId"] = "ETH-USDT".into();
+        assert!(parse_okx_spot(&bad).is_err());
+        bad = value.clone();
+        bad["data"][1] = bad["data"][0].clone();
+        assert!(parse_okx_spot(&bad).is_err());
+        assert!(parse_okx_spot(&serde_json::json!({"code":"50000","data":[]})).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "read-only public OKX API smoke test"]
+    async fn live_okx_unified_public_rules() {
+        // Public-only development smoke may use the developer's HTTP proxy.
+        // The production worker above retains its explicit source binding.
+        let client = Client::builder().timeout(REQUEST_TIMEOUT).build().unwrap();
+        for venue in ["okex-futures", "okex-margin"] {
+            let snapshot = fetch_snapshot(&client, venue).await.unwrap();
+            snapshot.validate().unwrap();
+            assert!(snapshot.symbols.contains_key("BTCUSDT"));
+            if venue == "okex-margin" {
+                assert!(
+                    snapshot
+                        .symbols
+                        .values()
+                        .all(|rule| rule.contract_multiplier.is_none())
+                );
+            }
+            eprintln!("{venue}: {} USDT rules", snapshot.symbols.len());
+        }
+    }
 
     #[tokio::test]
     #[ignore = "read-only public exchange API smoke test"]

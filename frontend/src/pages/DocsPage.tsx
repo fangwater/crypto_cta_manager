@@ -273,8 +273,9 @@ function buildChapters(gateway: string): Chapter[] {
         />
         <p className="text-sm text-subtle">
           不带后缀的 BTC、ETH 表示 USDT 现货交易对；BTCUSDT / BTCUSDC 表示对应本位的永续合约，BTCUSD 表示币本位永续。
-          RapidX 账户允许一次推送现货和合约目标，例如 BTC=1、BTCUSDT=-1。策略盈亏按市场分别 FIFO 后合计。
-          原生 U 本位和币本位仍使用独立 Exec 部署，币本位只接受 USD。现货沿用账户的 SPOT / MARGIN 设置，MARGIN 可以借币。
+          RapidX 账户和原生 OKX 统一账户允许一次推送现货和合约目标，例如 BTC=1、BTCUSDT=-1。策略盈亏按市场分别 FIFO 后合计。
+          原生 OKX 现货使用统一账户全仓模式，能否借币遵循账户自动借币设置；RapidX 现货沿用账户的 SPOT / MARGIN 设置。
+          其他原生 U 本位和币本位仍使用独立 Exec 部署，币本位只接受 USD。
           目标 qty 使用币数量，例如 BTCUSD 的 qty=0.01 表示 0.01 BTC；
           Exec 按标记价格和合约面值换算、按交易所步长取整。价格变化会改变持有合约对应的币数量。
         </p>

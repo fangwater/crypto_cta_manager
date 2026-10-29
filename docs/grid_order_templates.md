@@ -1,12 +1,16 @@
 # Grid order templates
 
 Manager supports Grid templates for RapidX, native Binance STANDARD USD-M,
-and supported native unified accounts. Updated 2026-10-22 UTC.
+and supported native unified accounts. Updated 2026-10-29 UTC.
 
 STANDARD USD-M uses the existing native order/cancel/account paths. Manager,
 Exec Config and Exec Redis reload validate the same account/market scope.
-STANDARD COIN-M and native cash Grid remain unsupported; a missing or invalid
-Binance account mode is rejected. The USD-M source keeps its independent
+Native OKX unified accounts now also support USDT cash Grid targets (`BTC`),
+independent of perpetual targets (`BTCUSDT`). Manager publishes separate
+`okex-margin` spot rules and complete targets, with base quantities and no
+contract multiplier. These code changes are not a production deployment.
+STANDARD COIN-M and Binance STANDARD cash Grid remain unsupported; a missing or invalid
+Binance account mode is rejected. The Binance USD-M source keeps its independent
 namespace, rules and ledger, with no cash or COIN-M targets.
 
 Japan RX02 now follows `virtual02` through `binance_exec_trade08` / `lgq_ltp_81857`
