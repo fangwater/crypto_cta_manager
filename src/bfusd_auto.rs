@@ -787,7 +787,8 @@ impl BinanceApi {
             .send()
             .await
             .map_err(|_| anyhow::anyhow!("Binance {path} request failed"))?;
-        self.limiter(futures).observe(path, &response)?;
+        self.limiter(futures)
+            .observe(&Method::GET, path, &response)?;
         if !response.status().is_success() {
             bail!("Binance {path} HTTP {}", response.status());
         }
@@ -841,11 +842,11 @@ impl BinanceApi {
         let signature = hex::encode(mac.finalize().into_bytes());
         let request = if method == Method::GET {
             url.query_pairs_mut().append_pair("signature", &signature);
-            self.client.request(method, url)
+            self.client.request(method.clone(), url)
         } else {
             url.set_query(None);
             self.client
-                .request(method, url)
+                .request(method.clone(), url)
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .body(format!("{payload}&signature={signature}"))
         };
@@ -856,7 +857,7 @@ impl BinanceApi {
             .map_err(|_| {
                 anyhow::anyhow!("Binance {path} transport failed; outcome may be ambiguous")
             })?;
-        self.limiter(futures).observe(path, &response)?;
+        self.limiter(futures).observe(&method, path, &response)?;
         let status = response.status();
         let body: Value = response
             .json()

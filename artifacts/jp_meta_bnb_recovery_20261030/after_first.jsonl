@@ -1,0 +1,9 @@
+{"name": "binance_exec_trade03", "body": {"http": 502, "error": "Gateway unavailable"}}
+{"name": "binance_exec_trade03_audit_tail", "body": []}
+{"name": "binance_exec_trade03_bfusd", "body": {"http": 502, "error": "Gateway unavailable"}}
+{"name": "binance_exec_trade04", "body": {"http": 502, "error": "Gateway unavailable"}}
+{"name": "binance_exec_trade04_audit_tail", "body": []}
+{"name": "binance_exec_trade04_bfusd", "body": {"http": 502, "error": "Gateway unavailable"}}
+{"name": "health", "body": {"http": 502, "error": "Gateway unavailable"}}
+{"name": "manager_service", "body": "MainPID=2905678\nExecMainStartTimestamp=Fri 2026-10-30 03:51:19 UTC\nCPUAffinity=24\nActiveState=active\n"}
+{"name": "diagnostic_session_removed", "body": true}

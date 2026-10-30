@@ -1,5 +1,7 @@
 //! Account BNB reserves. Financial writes are journaled before submission and
 //! serialized with BFUSD management; the existing Exec owns hedge execution.
+mod history;
+
 use crate::{
     bfusd_auto::{BinanceApi, TreasuryEgress, finite_number, number},
     config::{AppConfig, SourceConfig},
@@ -175,7 +177,7 @@ pub struct Pending {
     pub params: BTreeMap<String, String>,
     pub response: Option<Value>,
     before: Balances,
-    /// The receiving wallet must reflect the operation before any next write.
+    /// Confirm through the receiving balance or an exact final exchange record.
     receive_field: String,
     receive_amount: f64,
 }
@@ -391,9 +393,19 @@ impl BnbManager {
         let dry = preview || a.settings.dry_run;
         let result = self.execute(source, &mut state, &mut a, dry).await;
         if result.is_ok() && (a.pending.is_some() || a.refill_target.is_some()) {
-            state
-                .next_due
-                .insert(source.id.clone(), Instant::now() + Duration::from_secs(10));
+            let retry_secs = if a
+                .pending
+                .as_ref()
+                .is_some_and(|p| now_ms().saturating_sub(p.at_ms) >= 60_000)
+            {
+                a.settings.interval_secs.max(60)
+            } else {
+                10
+            };
+            state.next_due.insert(
+                source.id.clone(),
+                Instant::now() + Duration::from_secs(retry_secs),
+            );
         }
         let message = match &result {
             Ok(message) => message.clone(),
@@ -1042,8 +1054,28 @@ impl BnbManager {
             || b.field(&p.receive_field) + EPS
                 >= p.before.field(&p.receive_field) + p.receive_amount
                     - 0.001_f64.min(p.receive_amount * 0.01);
-        if !success || !seen {
+        if !success {
             return Ok(false);
+        }
+        if !seen {
+            // Trading fees or another wallet consumer can erase a receipt before
+            // our next observation. A final record for this exact operation is
+            // stronger evidence than a permanently unreachable balance floor.
+            let Some(resolution) = history::resolve(api, p).await? else {
+                return Ok(false);
+            };
+            let action = p.action.clone();
+            let evidence = serde_json::json!({
+                "confirmation": "exchange_history",
+                "operation_at_ms": p.at_ms,
+                "succeeded": resolution.succeeded,
+                "record": resolution.record,
+            });
+            a.pending = None;
+            add_audit(a, &action, &evidence.to_string());
+            self.commit(state, &source.id, a.clone())?;
+            tracing::info!(source_id=%source.id, action, succeeded=resolution.succeeded, "BNB pending operation reconciled from exchange history");
+            return Ok(resolution.succeeded);
         }
         let action = p.action.clone();
         if p.path.ends_with("/acceptQuote") {
@@ -1746,6 +1778,11 @@ mod tests {
         lose_response: bool,
         settle: bool,
         redeem_error: Option<(u16, i64)>,
+        history: Vec<Value>,
+        history_page_size: usize,
+        history_total: Option<u64>,
+        history_error: Option<u16>,
+        history_reads: Vec<String>,
     }
     impl Default for Exchange {
         fn default() -> Self {
@@ -1770,6 +1807,11 @@ mod tests {
                 lose_response: false,
                 settle: true,
                 redeem_error: None,
+                history: vec![],
+                history_page_size: 100,
+                history_total: None,
+                history_error: None,
+                history_reads: vec![],
             }
         }
     }
@@ -1797,7 +1839,21 @@ mod tests {
                 .map(|v| v.parse::<f64>().unwrap())
                 .unwrap_or(0.)
         };
-        let response = if path.ends_with("/exchangeInfo") {
+        let response = if method == reqwest::Method::GET
+            && (path.ends_with("/asset/transfer") || path.contains("/history/"))
+        {
+            e.history_reads.push(path.clone());
+            if let Some(status) = e.history_error {
+                return (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    Json(json!({"code":-1000})),
+                )
+                    .into_response();
+            }
+            assert!(params.contains_key("startTime") && params.contains_key("endTime"));
+            let start = (params["current"].parse::<usize>().unwrap() - 1) * e.history_page_size;
+            json!({"total":e.history_total.unwrap_or(e.history.len() as u64),"rows":e.history.iter().skip(start).take(e.history_page_size).collect::<Vec<_>>()})
+        } else if path.ends_with("/exchangeInfo") {
             let from = params["fromAsset"].clone();
             assert_eq!(from, "BFUSD");
             if (path.starts_with("/fapi") && e.futures_pair)
@@ -2154,6 +2210,259 @@ mod tests {
         );
         assert_eq!(f.exchange.lock().await.writes.len(), 1);
     }
+
+    #[tokio::test]
+    async fn spent_tiny_transfer_recovers_from_exact_history_after_restart() {
+        let f = Fixture::new(Exchange {
+            balances: Balances {
+                spot_bnb: 0.00000657,
+                spot_free_bnb: 0.00000657,
+                futures_bnb: 1.19991252,
+                earn_bnb: 24.19956518,
+                bnb_price_usdt: 750.,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+        let mut state = f.hub.state.lock().await;
+        let mut a = Fixture::account();
+        let before = f.balances().await;
+        f.hub
+            .transfer(
+                &f.api,
+                &f.source,
+                &mut state,
+                &mut a,
+                &before,
+                "BNB",
+                "MAIN_UMFUTURE",
+                0.00000657,
+                "futures_bnb",
+            )
+            .await
+            .unwrap();
+        let p = a.pending.as_mut().unwrap();
+        p.at_ms = now_ms() - 120_000;
+        let at = p.at_ms;
+        f.hub.commit(&mut state, &f.source.id, a).unwrap();
+        drop(state);
+        {
+            let mut exchange = f.exchange.lock().await;
+            exchange.balances.futures_bnb -= 0.1;
+            exchange.history = vec![json!({"tranId":"1234", "timestamp":at / 1000 * 1000,
+                "asset":"BNB", "amount":"0.0000065700", "type":"MAIN_UMFUTURE", "status":"CONFIRMED"})];
+        }
+        let restarted = BnbManager::new(
+            &f.config,
+            Arc::new(Mutex::new(())),
+            TreasuryEgress::new(f.config.treasury.clone()),
+            RedisRuntime::connect(f.config.redis.clone()).unwrap(),
+            ReloadNotifyHub::spawn(),
+        )
+        .unwrap();
+        let mut state = restarted.state.lock().await;
+        let mut a = state.disk.accounts[&f.source.id].clone();
+        assert!(
+            restarted
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &f.balances().await)
+                .await
+                .unwrap()
+        );
+        assert!(a.pending.is_none());
+        let evidence: Value = serde_json::from_str(&a.audit.last().unwrap().result).unwrap();
+        assert_eq!(evidence["confirmation"], "exchange_history");
+        assert_eq!(evidence["operation_at_ms"], at);
+        let disk: Disk = serde_json::from_slice(&fs::read(&restarted.path).unwrap()).unwrap();
+        assert!(disk.accounts[&f.source.id].pending.is_none());
+        assert_eq!(f.exchange.lock().await.writes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn transfer_history_never_clears_unproven_or_mismatched_operations() {
+        let f = Fixture::new(Exchange::default()).await;
+        let mut state = f.hub.state.lock().await;
+        let mut a = Fixture::account();
+        let before = f.balances().await;
+        f.hub
+            .transfer_bfusd(&f.api, &f.source, &mut state, &mut a, &before, 100.)
+            .await
+            .unwrap();
+        a.pending.as_mut().unwrap().at_ms = now_ms() - 120_000;
+        let at = a.pending.as_ref().unwrap().at_ms;
+        let good = json!({"tranId":1234,"timestamp":at,"asset":"BFUSD","amount":"100.0",
+            "type":"UMFUTURE_MAIN","status":"CONFIRMED"});
+        for (key, value) in [
+            ("tranId", json!(9999)),
+            ("asset", json!("BNB")),
+            ("amount", json!("100.00000001")),
+            ("type", json!("MAIN_UMFUTURE")),
+            ("timestamp", json!(at - 60_001)),
+            ("status", json!("PENDING")),
+            ("status", json!("UNKNOWN")),
+        ] {
+            let mut record = good.clone();
+            record[key] = value;
+            f.exchange.lock().await.history = vec![record];
+            let result = f
+                .hub
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &before)
+                .await;
+            assert!(!matches!(result, Ok(true)), "{key}");
+            assert!(a.pending.is_some() && a.audit.is_empty());
+        }
+        f.exchange.lock().await.history = vec![];
+        assert!(
+            !f.hub
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &before)
+                .await
+                .unwrap()
+        );
+        f.exchange.lock().await.history_error = Some(503);
+        assert!(
+            f.hub
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &before)
+                .await
+                .is_err()
+        );
+        assert!(a.pending.is_some());
+        a.pending.as_mut().unwrap().response = None;
+        let reads = f.exchange.lock().await.history_reads.len();
+        assert!(
+            f.hub
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &before)
+                .await
+                .is_err()
+        );
+        let e = f.exchange.lock().await;
+        assert_eq!(e.writes.len(), 1);
+        assert_eq!(e.history_reads.len(), reads);
+    }
+
+    #[tokio::test]
+    async fn transfer_history_requires_complete_unique_pages_and_records_failures() {
+        let f = Fixture::new(Exchange::default()).await;
+        let mut state = f.hub.state.lock().await;
+        let mut a = Fixture::account();
+        let before = f.balances().await;
+        f.hub
+            .transfer_bfusd(&f.api, &f.source, &mut state, &mut a, &before, 100.)
+            .await
+            .unwrap();
+        a.pending.as_mut().unwrap().at_ms = now_ms() - 120_000;
+        let at = a.pending.as_ref().unwrap().at_ms;
+        let good = json!({"tranId":1234,"timestamp":at,"asset":"BFUSD","amount":"100",
+            "type":"UMFUTURE_MAIN","status":"CONFIRMED"});
+        {
+            let mut e = f.exchange.lock().await;
+            e.history = vec![good.clone()];
+            e.history_total = Some(2);
+        }
+        assert!(
+            f.hub
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &before)
+                .await
+                .is_err()
+        );
+        {
+            let mut e = f.exchange.lock().await;
+            e.history_total = None;
+            e.history = vec![good.clone(), good.clone()];
+        }
+        assert!(
+            f.hub
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &before)
+                .await
+                .is_err()
+        );
+        assert!(a.pending.is_some());
+        {
+            let mut e = f.exchange.lock().await;
+            let mut failed = good;
+            failed["status"] = json!("FAILED");
+            e.history = vec![json!({"tranId":9999}), failed];
+            e.history_page_size = 1;
+        }
+        assert!(
+            !f.hub
+                .reconcile(&f.api, &mut state, &f.source, &mut a, &before)
+                .await
+                .unwrap()
+        );
+        assert!(a.pending.is_none());
+        let evidence: Value = serde_json::from_str(&a.audit.last().unwrap().result).unwrap();
+        assert_eq!(evidence["succeeded"], false);
+        assert_eq!(f.exchange.lock().await.writes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn spent_earn_receipts_recover_by_id_product_and_wallet() {
+        for (path, id_key, status, field, account_key) in [
+            ("redeem", "redeemId", "PAID", "spot_bnb", "destAccount"),
+            (
+                "subscribe",
+                "purchaseId",
+                "SUCCESS",
+                "earn_bnb",
+                "sourceAccount",
+            ),
+        ] {
+            let f = Fixture::new(Exchange::default()).await;
+            let mut state = f.hub.state.lock().await;
+            let mut a = Fixture::account();
+            let before = f.balances().await;
+            let at = now_ms() - 120_000;
+            a.pending = Some(Pending {
+                at_ms: at,
+                action: path.into(),
+                futures: false,
+                path: format!("/sapi/v1/simple-earn/flexible/{path}"),
+                params: BTreeMap::from([
+                    ("productId".into(), "BNB001".into()),
+                    ("amount".into(), "0.3".into()),
+                    (account_key.into(), "SPOT".into()),
+                ]),
+                response: Some(json!({"success":true,id_key:321})),
+                before: before.clone(),
+                receive_field: field.into(),
+                receive_amount: 0.3,
+            });
+            f.hub.commit(&mut state, &f.source.id, a.clone()).unwrap();
+            let product_key = if path == "redeem" {
+                "projectId"
+            } else {
+                "productId"
+            };
+            let good = json!({id_key:321,"time":at,"asset":"BNB","amount":"0.30000000",
+                product_key:"BNB001",account_key:"SPOT","status":status});
+            for (key, value) in [
+                (product_key, json!("BNB002")),
+                (account_key, json!("FUNDING")),
+                ("status", json!("CREATED")),
+                (id_key, json!(777)),
+            ] {
+                let mut record = good.clone();
+                record[key] = value;
+                f.exchange.lock().await.history = vec![record];
+                let result = f
+                    .hub
+                    .reconcile(&f.api, &mut state, &f.source, &mut a, &before)
+                    .await;
+                assert!(!matches!(result, Ok(true)), "{path} {key}");
+                assert!(a.pending.is_some());
+            }
+            f.exchange.lock().await.history = vec![good];
+            assert!(
+                f.hub
+                    .reconcile(&f.api, &mut state, &f.source, &mut a, &before)
+                    .await
+                    .unwrap()
+            );
+            assert!(a.pending.is_none());
+            assert!(f.exchange.lock().await.writes.is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn fee_wallet_refill_moves_existing_bnb_without_buying() {
         let f = Fixture::new(Exchange {

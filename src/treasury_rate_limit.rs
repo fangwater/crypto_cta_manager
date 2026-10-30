@@ -44,7 +44,7 @@ impl Pool {
     }
 }
 
-fn cost(path: &str) -> Result<(Pool, u32)> {
+fn cost(method: &Method, path: &str) -> Result<(Pool, u32)> {
     use Pool::*;
     Ok(match path {
         "/api/v3/account" => (Spot, 20),
@@ -58,11 +58,14 @@ fn cost(path: &str) -> Result<(Pool, u32)> {
         "/sapi/v1/convert/getQuote" => (SapiAccount, 200),
         "/sapi/v1/convert/acceptQuote" => (SapiAccount, 500),
         "/sapi/v1/convert/orderStatus" => (SapiAccount, 100),
+        "/sapi/v1/asset/transfer" if *method == Method::GET => (SapiIp, 1),
         "/sapi/v1/asset/transfer" => (SapiAccount, 900),
         "/sapi/v1/bfusd/quota" | "/sapi/v1/bfusd/subscribe" => (SapiIp, 150),
         "/sapi/v1/simple-earn/flexible/position"
         | "/sapi/v1/simple-earn/flexible/list"
         | "/sapi/v1/simple-earn/flexible/personalLeftQuota" => (SapiIp, 150),
+        "/sapi/v1/simple-earn/flexible/history/redemptionRecord"
+        | "/sapi/v1/simple-earn/flexible/history/subscriptionRecord" => (SapiIp, 150),
         "/sapi/v1/simple-earn/flexible/subscribe" | "/sapi/v1/simple-earn/flexible/redeem" => {
             (SapiIp, 1)
         }
@@ -117,7 +120,7 @@ impl State {
     }
     fn reserve(&mut self, method: &Method, path: &str, now: Instant) -> Result<()> {
         self.ready(now)?;
-        let (pool, weight) = cost(path)?;
+        let (pool, weight) = cost(method, path)?;
         let is_quote = path == "/fapi/v1/convert/getQuote";
         self.futures_quotes
             .retain(|at| now.duration_since(*at) < Duration::from_secs(86400));
@@ -168,12 +171,13 @@ impl State {
     }
     fn observe(
         &mut self,
+        method: &Method,
         path: &str,
         status: StatusCode,
         headers: &HeaderMap,
         now: Instant,
     ) -> Result<()> {
-        let (pool, _) = cost(path)?;
+        let (pool, _) = cost(method, path)?;
         if let Some(weight) = headers
             .get(pool.header())
             .and_then(|s| s.to_str().ok())
@@ -231,11 +235,17 @@ impl Limiter {
             .map_err(|_| anyhow::anyhow!("treasury rate limiter unavailable"))?
             .ready(Instant::now())
     }
-    pub fn observe(&self, path: &str, response: &reqwest::Response) -> Result<()> {
+    pub fn observe(&self, method: &Method, path: &str, response: &reqwest::Response) -> Result<()> {
         self.0
             .lock()
             .map_err(|_| anyhow::anyhow!("treasury rate limiter unavailable"))?
-            .observe(path, response.status(), response.headers(), Instant::now())
+            .observe(
+                method,
+                path,
+                response.status(),
+                response.headers(),
+                Instant::now(),
+            )
             .context("failed to observe Binance rate limits")
     }
 }
@@ -243,6 +253,42 @@ impl Limiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_history_uses_ip_read_budget_without_consuming_write_budget() {
+        let mut state = State::default();
+        let now = Instant::now();
+        state
+            .windows
+            .entry(Pool::SapiAccount)
+            .or_default()
+            .reservations
+            .push_back((now, 6000));
+        assert!(
+            state
+                .reserve(&Method::POST, "/sapi/v1/asset/transfer", now)
+                .is_err()
+        );
+        state
+            .reserve(&Method::GET, "/sapi/v1/asset/transfer", now)
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-sapi-used-ip-weight-1m", "4500".parse().unwrap());
+        state
+            .observe(
+                &Method::GET,
+                "/sapi/v1/asset/transfer",
+                StatusCode::OK,
+                &headers,
+                now,
+            )
+            .unwrap();
+        assert!(
+            state
+                .reserve(&Method::GET, "/sapi/v1/asset/transfer", now)
+                .is_err()
+        );
+    }
 
     #[test]
     fn heavy_discovery_has_a_shared_rolling_budget() {
@@ -281,6 +327,7 @@ mod tests {
         headers.insert("retry-after", "120".parse().unwrap());
         state
             .observe(
+                &Method::GET,
                 "/api/v3/account",
                 StatusCode::TOO_MANY_REQUESTS,
                 &headers,
@@ -305,7 +352,13 @@ mod tests {
             .unwrap();
         headers.insert("x-mbx-used-weight-1m", "4500".parse().unwrap());
         state
-            .observe("/api/v3/account", StatusCode::OK, &headers, now)
+            .observe(
+                &Method::GET,
+                "/api/v3/account",
+                StatusCode::OK,
+                &headers,
+                now,
+            )
             .unwrap();
         assert!(state.reserve(&Method::GET, "/api/v3/account", now).is_err());
         state

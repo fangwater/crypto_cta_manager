@@ -1,0 +1,2 @@
+{"name": "protected_checks", "body": {"bfusd_settings_hash": true, "bnb_settings": true, "config_hashes": true, "processes": true, "snapshots": true, "webroot": true}}
+{"name": "protected_counts", "body": {"processes": 85, "config_hashes": 30, "snapshots": 5}}

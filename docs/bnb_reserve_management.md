@@ -176,8 +176,20 @@ operations/operator acknowledgments. Each financial POST is journaled before
 submission. Pending actions survive restarts and block subsequent mutations.
 Convert results are queried by the persisted quote ID; successful acceptance
 alone is not considered final. The receiving balance must also be observed.
-An unknown non-Convert response requires operator reconciliation, not blind
-resubmission. A Flexible redemption explicitly rejected with HTTP 400 / `-6006`
+For wallet transfers and Flexible Earn redemption/subscription, a receipt that
+has already been spent can instead be confirmed from final exchange history
+after 30 seconds. Match the persisted exchange ID, exact decimal amount, asset,
+submission time, transfer direction or product and receiving/source wallet.
+Require complete, unique pagination; archive the matching final record in the
+operation audit before clearing pending. `CONFIRMED` transfers, `PAID`
+redemptions and `SUCCESS` subscriptions resume automatically; an exactly matched
+`FAILED` record clears pending for a later-round retry. Missing/non-final or
+inconsistent history retains pending, including after a restart. Pending rounds
+older than one minute poll no faster than the configured interval (at least 60
+seconds), avoiding a ten-second history-query loop.
+An unknown non-Convert response without a persisted exchange ID still requires
+operator reconciliation, not blind resubmission or a timeout-based reset.
+A Flexible redemption explicitly rejected with HTTP 400 / `-6006`
 (below the minimum redemption amount) is recorded in the audit and clears its
 pending action; other exchange errors and uncertain responses retain the pending
 journal. The UI acknowledgment requires a checkbox and the exact pending
@@ -225,6 +237,10 @@ The weight table includes high-cost Convert discovery (3000), transfers (900)
 and quote acceptance. USD-M quotes also respect 360/hour and 500/day rolling
 limits, and Simple Earn writes have a three-second cooldown. Quote requests
 require headroom for acceptance before requesting the ten-second quote.
+Transfer-history GET requests use their separate 1-weight IP pool; transfer
+POST reservations retain the existing conservative 900-weight account budget.
+Flexible Earn history reads use 150 IP weight and the same bound client and
+process-wide limiter as other asset-management requests.
 
 Response weight headers account for exchange-observed use by other clients.
 HTTP 429/418 applies the `Retry-After` cooldown to every asset-management pool
