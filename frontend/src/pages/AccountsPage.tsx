@@ -34,6 +34,7 @@ const UI_POLL_MS = 15_000
 // These signal publishers belong to jp-meta. Match source identities rather
 // than account labels or gateway slots, which can be reused after retirement.
 const JP_META_SIGNAL_CONFIG_PATHS: Readonly<Record<string, string>> = {
+  binance_exec_trade06: '/cta/binance-cta-perp-rx01/config/',
   binance_exec_trade08: '/cta/binance-cta-perp-rx02/config/',
   binance_exec_trade07: '/cta/binance-cta-perp-rx03/config/',
   binance_exec_rx04_5m05: '/cta/binance-cta-perp-rx04/config/',
