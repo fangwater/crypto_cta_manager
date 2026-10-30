@@ -18,7 +18,7 @@ impl std::fmt::Display for NotSent {
 }
 impl std::error::Error for NotSent {}
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Pool {
     Futures,
     Spot,
@@ -27,9 +27,9 @@ enum Pool {
 }
 impl Pool {
     fn limit(self) -> u32 {
-        // Leave capacity for other retrieval clients on the same dedicated IP.
+        // Include observed use by other clients and leave exchange headroom.
         match self {
-            Self::Futures => 1200,
+            Self::Futures => 1800,
             Self::Spot => 4500,
             Self::SapiIp => 4500,
             Self::SapiAccount => 6000,
@@ -76,30 +76,42 @@ fn cost(method: &Method, path: &str) -> Result<(Pool, u32)> {
 #[derive(Default)]
 struct Window {
     reservations: VecDeque<(Instant, u32)>,
-    observed: Option<(Instant, u32)>,
+    observations: VecDeque<(Instant, u32)>,
 }
 impl Window {
     fn used(&mut self, now: Instant) -> u32 {
         let minute = Duration::from_secs(60);
         self.reservations
             .retain(|(at, _)| now.duration_since(*at) < minute);
-        if self
-            .observed
-            .is_some_and(|(at, _)| now.duration_since(at) >= minute)
-        {
-            self.observed = None;
-        }
+        self.observations
+            .retain(|(at, _)| now.duration_since(*at) < minute);
         let local: u32 = self.reservations.iter().map(|(_, w)| w).sum();
-        let external = self.observed.map_or(0, |(at, used)| {
-            used.saturating_add(
-                self.reservations
-                    .iter()
-                    .filter(|(t, _)| *t > at)
-                    .map(|(_, w)| w)
-                    .sum(),
-            )
-        });
+        let external = self
+            .observations
+            .iter()
+            .map(|(at, used)| {
+                used.saturating_add(
+                    self.reservations
+                        .iter()
+                        .filter(|(t, _)| t > at)
+                        .map(|(_, w)| w)
+                        .sum(),
+                )
+            })
+            .max()
+            .unwrap_or(0);
         local.max(external)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Capacity {
+    pub remaining: u32,
+    pub limit: u32,
+}
+impl Capacity {
+    pub fn score(self) -> u32 {
+        self.remaining.saturating_mul(10_000) / self.limit
     }
 }
 #[derive(Default)]
@@ -150,15 +162,12 @@ impl State {
             _ => 0,
         };
         let window = self.windows.entry(pool).or_default();
-        if window
-            .used(now)
-            .saturating_add(weight)
-            .saturating_add(headroom)
-            > pool.limit()
-        {
-            return Err(
-                NotSent("Binance egress rolling-minute weight budget exhausted".into()).into(),
-            );
+        let used = window.used(now);
+        if used.saturating_add(weight).saturating_add(headroom) > pool.limit() {
+            return Err(NotSent(format!(
+                "Binance egress rolling-minute weight budget exhausted: {method} {path}, pool={pool:?}, used={used}, weight={weight}, headroom={headroom}, limit={}",
+                pool.limit()
+            )).into());
         }
         window.reservations.push_back((now, weight));
         if is_quote {
@@ -184,13 +193,12 @@ impl State {
             .and_then(|s| s.parse::<u32>().ok())
         {
             let window = self.windows.entry(pool).or_default();
-            // Out-of-order responses and exchange minute resets cannot reduce
-            // the observed usage before our conservative sixty-second expiry.
-            let old = window
-                .observed
-                .filter(|(at, _)| now.duration_since(*at) < Duration::from_secs(60))
-                .map_or(0, |(_, w)| w);
-            window.observed = Some((now, weight.max(old)));
+            // Each observation expires independently. Lower/out-of-order
+            // responses cannot refresh an older high-water mark indefinitely.
+            window
+                .observations
+                .retain(|(at, _)| now.duration_since(*at) < Duration::from_secs(60));
+            window.observations.push_back((now, weight));
         }
         if status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 418 {
             let default = if status.as_u16() == 418 { 180 } else { 60 };
@@ -229,6 +237,27 @@ impl Limiter {
             .map_err(|_| anyhow::anyhow!("treasury rate limiter unavailable"))?
             .reserve(method, path, Instant::now())
     }
+    /// Snapshot for round selection; the actual request must still reserve.
+    pub fn capacity(&self, method: &Method, path: &str) -> Result<Capacity> {
+        let now = Instant::now();
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("treasury rate limiter unavailable"))?;
+        state.ready(now)?;
+        let (pool, weight) = cost(method, path)?;
+        let used = state.windows.entry(pool).or_default().used(now);
+        if used.saturating_add(weight) > pool.limit() {
+            return Err(NotSent(format!(
+                "Binance egress has insufficient round capacity: pool={pool:?}, used={used}, limit={}",
+                pool.limit()
+            )).into());
+        }
+        Ok(Capacity {
+            remaining: pool.limit().saturating_sub(used),
+            limit: pool.limit(),
+        })
+    }
     pub fn ready(&self) -> Result<()> {
         self.0
             .lock()
@@ -253,6 +282,115 @@ impl Limiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn futures_budget_is_1800_per_ip_and_capacity_does_not_reserve() {
+        let first = Limiter::shared(
+            "127.0.0.10".parse().unwrap(),
+            "http://capacity-limit.fixture",
+        )
+        .unwrap();
+        let second = Limiter::shared(
+            "127.0.0.11".parse().unwrap(),
+            "http://capacity-limit.fixture",
+        )
+        .unwrap();
+        for _ in 0..20 {
+            assert_eq!(
+                first
+                    .capacity(&Method::GET, "/fapi/v2/account")
+                    .unwrap()
+                    .remaining,
+                1800
+            );
+        }
+        for _ in 0..9 {
+            first
+                .reserve(&Method::POST, "/fapi/v1/convert/acceptQuote")
+                .unwrap();
+        }
+        let error = first.reserve(&Method::GET, "/fapi/v2/account").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("pool=Futures"));
+        assert!(message.contains("limit=1800"));
+        assert!(first.capacity(&Method::GET, "/fapi/v2/account").is_err());
+        second.reserve(&Method::GET, "/fapi/v2/account").unwrap();
+    }
+
+    #[test]
+    fn lower_headers_cannot_extend_old_high_usage_past_its_own_expiry() {
+        let mut state = State::default();
+        let now = Instant::now();
+        let mut headers = HeaderMap::new();
+        for (seconds, used) in [(0, "1799"), (30, "10"), (59, "11")] {
+            headers.insert("x-mbx-used-weight-1m", used.parse().unwrap());
+            state
+                .observe(
+                    &Method::GET,
+                    "/fapi/v2/account",
+                    StatusCode::OK,
+                    &headers,
+                    now + Duration::from_secs(seconds),
+                )
+                .unwrap();
+        }
+        assert!(
+            state
+                .reserve(
+                    &Method::GET,
+                    "/fapi/v2/account",
+                    now + Duration::from_secs(59)
+                )
+                .is_err()
+        );
+        state
+            .reserve(
+                &Method::GET,
+                "/fapi/v2/account",
+                now + Duration::from_secs(60),
+            )
+            .unwrap();
+        let window = state.windows.get_mut(&Pool::Futures).unwrap();
+        assert_eq!(window.used(now + Duration::from_secs(60)), 16);
+    }
+
+    #[test]
+    fn observations_keep_local_reservations_after_the_response_in_the_total() {
+        let mut state = State::default();
+        let now = Instant::now();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-mbx-used-weight-1m", "1500".parse().unwrap());
+        state
+            .observe(
+                &Method::GET,
+                "/fapi/v2/account",
+                StatusCode::OK,
+                &headers,
+                now,
+            )
+            .unwrap();
+        state
+            .reserve(
+                &Method::POST,
+                "/fapi/v1/convert/acceptQuote",
+                now + Duration::from_secs(1),
+            )
+            .unwrap();
+        headers.insert("x-mbx-used-weight-1m", "10".parse().unwrap());
+        state
+            .observe(
+                &Method::GET,
+                "/fapi/v2/account",
+                StatusCode::OK,
+                &headers,
+                now + Duration::from_secs(2),
+            )
+            .unwrap();
+        let window = state.windows.get_mut(&Pool::Futures).unwrap();
+        assert_eq!(window.used(now + Duration::from_secs(3)), 1700);
+        assert_eq!(window.used(now + Duration::from_secs(60)), 200);
+        assert_eq!(window.used(now + Duration::from_secs(61)), 10);
+    }
 
     #[test]
     fn transfer_history_uses_ip_read_budget_without_consuming_write_budget() {
@@ -379,7 +517,7 @@ mod tests {
             .entry(Pool::Futures)
             .or_default()
             .reservations
-            .push_back((now, 1000));
+            .push_back((now, 1600));
         assert!(
             state
                 .reserve(&Method::POST, "/fapi/v1/convert/getQuote", now)

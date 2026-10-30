@@ -214,8 +214,15 @@ use_account_ip_rotation = true
 
 The two settings are mutually exclusive. Rotation reads only the source's
 `trade_engine.toml local_ips`; it does not modify that file or add any address.
-BNB and BFUSD share a per-source round cursor. Each complete round uses one
-explicit bound address, then the next round advances to the other address.
+BNB and BFUSD compare the process-wide remaining USD-M, Spot and SAPI-IP
+capacity on each configured address before starting a round. Prefer the address
+with the largest minimum remaining fraction across those independent pools;
+skip exhausted or cooling-down addresses and rotate ties with a shared
+per-source cursor. This uses already observed response headers and local
+reservations without extra exchange probes. Expired or previously unused
+addresses begin with no known usage; every request still reserves its actual
+weight and updates the shared state. Each complete round uses one explicit
+bound address. Selection logs include the candidate capacities and chosen IP.
 No ambiguous financial submission is retried on a different IP. An existing
 `0.0.0.0` / `::` trading binding is resolved through the kernel route without
 sending a packet, then the client explicitly binds the resulting local address.
@@ -231,7 +238,7 @@ operator on October 9. Kline retains its separate `154.197.32.10` binding.
 All BFUSD and BNB HTTP clients share process-wide rate-limit state by bound
 local IP and API origin, across accounts and repeated client creation. Rolling
 60-second reservations count unsuccessful requests too. Conservative budgets
-are 1200/min for USD-M, 4500/min for Spot and SAPI IP operations, and 6000/min for
+are 1800/min for USD-M, 4500/min for Spot and SAPI IP operations, and 6000/min for
 SAPI account operations (the latter also aggregated across accounts on the IP).
 The weight table includes high-cost Convert discovery (3000), transfers (900)
 and quote acceptance. USD-M quotes also respect 360/hour and 500/day rolling
@@ -242,7 +249,18 @@ POST reservations retain the existing conservative 900-weight account budget.
 Flexible Earn history reads use 150 IP weight and the same bound client and
 process-wide limiter as other asset-management requests.
 
+The USD-M threshold includes other clients' observed use on the same public
+egress; it is not an exclusive Manager allocation. Binance's live exchange-info
+response on 2026-10-30 reported 2400/min per public IP, leaving 600 below the
+exchange ceiling at the configured 1800 threshold. IP rotation does not increase
+account/UID limits or change the existing 6000 account-operation threshold.
+
 Response weight headers account for exchange-observed use by other clients.
+Keep each observation for its own sixty-second lifetime, together with local
+reservations made after that response. Lower or out-of-order responses cannot
+drop an unexpired high reading or extend that old reading indefinitely. Budget
+rejections identify the endpoint, pool, used weight, request weight, quote
+acceptance headroom and limit for diagnosis.
 HTTP 429/418 applies the `Retry-After` cooldown to every asset-management pool
 on that IP/origin; a missing header uses a conservative fallback. Exhaustion
 returns before sending and is retried in a later round without sleeping on the

@@ -1,0 +1,56 @@
+{
+  "settings": {
+    "enabled": true,
+    "dry_run": false,
+    "required_bnb": 25.0,
+    "refill_trigger_bnb": 25.2,
+    "refill_target_bnb": 26.0,
+    "futures_trigger_bnb": 1.2,
+    "futures_target_bnb": 1.5,
+    "futures_sweep_bnb": 1.8,
+    "earn_min_bnb": 0.1,
+    "hedge_tolerance_bnb": 0.5,
+    "hedge_min_interval_secs": 3600,
+    "interval_secs": 60,
+    "max_conversion_usdt": 10000.0,
+    "max_quote_deviation_bps": 100.0
+  },
+  "balances": {
+    "at_ms": 1793334305486,
+    "spot_bnb": 0.0,
+    "spot_free_bnb": 0.0,
+    "futures_bnb": 1.49694244,
+    "futures_available_bnb": 1.49694244,
+    "earn_bnb": 24.50000107,
+    "spot_bfusd": 3.14948224,
+    "futures_bfusd": 83638.44031871,
+    "futures_available_bfusd": 71192.04644783,
+    "margin_headroom_usdt": 83012.59574449,
+    "bnb_price_usdt": 717.75,
+    "bnbusdc_position_qty": -26.0
+  },
+  "pending": null,
+  "refill_target": null,
+  "last_result": "preview: total 25.99694351 BNB, trigger 25.20000000, target 26.00000000, buy 0.00000000; futures 1.49694244 \u2192 1.50000000; hedge target -25.99694351. No mutations or quote acceptance.",
+  "hedge_qty": null,
+  "hedge_error": null,
+  "hedge_symbol": "BNBUSDC",
+  "legacy_hedge_qty": null,
+  "audit": [
+    {
+      "at_ms": 1793332464230,
+      "action": "transfer BNB MAIN_UMFUTURE",
+      "result": "{\"tranId\":426390885831}"
+    },
+    {
+      "at_ms": 1793332464240,
+      "action": "hedge target",
+      "result": "{\"BNBUSDC\":-26.00000003,\"BNBUSDT\":0.0}"
+    },
+    {
+      "at_ms": 1793332596469,
+      "action": "subscribe surplus BNB",
+      "result": "{\"amount\":\"0.30031901\",\"purchaseId\":13091473717,\"success\":true}"
+    }
+  ]
+}

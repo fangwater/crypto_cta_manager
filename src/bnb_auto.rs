@@ -454,8 +454,8 @@ impl BnbManager {
             source.enabled && source.venue == "binance-futures",
             "BNB management requires an enabled Binance USD-M source"
         );
-        let ip = self.egress.select(source).await?;
         let env = parse_env_file(&source.env_path())?;
+        let ip = self.egress.select(source, &env).await?;
         ensure!(
             env.get("BINANCE_ACCOUNT_MODE").is_some_and(
                 |v| v.eq_ignore_ascii_case("standard") || v.eq_ignore_ascii_case("std")
@@ -2715,7 +2715,7 @@ mod tests {
     #[tokio::test]
     async fn local_budget_exhaustion_never_creates_an_unknown_transaction() {
         let f = Fixture::new(Exchange::default()).await;
-        for _ in 0..24 {
+        for _ in 0..36 {
             f.api
                 .get(
                     true,

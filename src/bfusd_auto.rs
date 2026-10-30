@@ -16,7 +16,7 @@ use tracing::{error, info};
 
 use crate::config::{AppConfig, SourceConfig, TreasuryConfig};
 use crate::exchange_leverage::parse_env_file;
-use crate::treasury_rate_limit::Limiter;
+use crate::treasury_rate_limit::{Limiter, NotSent};
 
 type HmacSha256 = Hmac<Sha256>;
 const MIN_SPOT_BFUSD_TRANSFER: f64 = 0.0001;
@@ -83,7 +83,7 @@ struct Runtime {
     running: Option<String>,
 }
 
-/// A shared round cursor; every request within a financial round keeps one IP.
+/// Prefer available egress capacity; rotate ties and pin each financial round.
 #[derive(Clone)]
 pub(crate) struct TreasuryEgress {
     settings: TreasuryConfig,
@@ -99,13 +99,64 @@ impl TreasuryEgress {
     pub(crate) fn configured(&self) -> bool {
         self.settings.use_account_ip_rotation || self.settings.local_ip.is_some()
     }
-    pub(crate) async fn select(&self, source: &SourceConfig) -> Result<IpAddr> {
+    pub(crate) async fn select(
+        &self,
+        source: &SourceConfig,
+        env: &BTreeMap<String, String>,
+    ) -> Result<IpAddr> {
         if self.settings.use_account_ip_rotation {
             let ips = load_rotation_ips(source)?;
+            let fapi = env
+                .get("BINANCE_FAPI_URL")
+                .map(String::as_str)
+                .unwrap_or("https://fapi.binance.com");
+            let sapi = env
+                .get("BINANCE_SAPI_URL")
+                .or_else(|| env.get("BINANCE_API_URL"))
+                .map(String::as_str)
+                .unwrap_or("https://api.binance.com");
             let mut rotation = self.rotation.lock().await;
             let next = rotation.entry(source.id.clone()).or_default();
-            let ip = ips[*next % ips.len()];
-            *next = next.wrapping_add(1);
+            let mut best = None;
+            let mut candidates = Vec::new();
+            for offset in 0..ips.len() {
+                let index = (*next % ips.len() + offset) % ips.len();
+                let ip = ips[index];
+                let capacity = (|| -> Result<_> {
+                    let futures =
+                        Limiter::shared(ip, fapi)?.capacity(&Method::GET, "/fapi/v2/account")?;
+                    let sapi = Limiter::shared(ip, sapi)?;
+                    let spot = sapi.capacity(&Method::GET, "/api/v3/account")?;
+                    let earn =
+                        sapi.capacity(&Method::GET, "/sapi/v1/simple-earn/flexible/position")?;
+                    Ok((futures, spot, earn))
+                })();
+                let (futures, spot, earn) = match capacity {
+                    Ok(capacity) => capacity,
+                    Err(error) if error.downcast_ref::<NotSent>().is_some() => {
+                        info!(source_id=%source.id, local_ip=%ip, error=%error,
+                            "treasury round skipped unavailable egress");
+                        candidates.push((ip, None));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let score = futures.score().min(spot.score()).min(earn.score());
+                candidates.push((
+                    ip,
+                    Some((futures.remaining, spot.remaining, earn.remaining)),
+                ));
+                if best.is_none_or(|(_, best_score)| score > best_score) {
+                    best = Some((index, score));
+                }
+            }
+            let (index, _) = best.ok_or_else(|| {
+                NotSent("Binance account egresses have no available round capacity".into())
+            })?;
+            let ip = ips[index];
+            *next = (index + 1) % ips.len();
+            info!(source_id=%source.id, local_ip=%ip, ?candidates,
+                "treasury round selected egress; capacities are USD-M, Spot, SAPI IP remaining weights");
             return Ok(ip);
         }
         let ip = self.settings.local_ip.context(
@@ -303,7 +354,7 @@ impl AutoEarnHub {
         if !mode.eq_ignore_ascii_case("standard") && !mode.eq_ignore_ascii_case("std") {
             bail!("automatic BFUSD requires a Binance STANDARD account");
         }
-        let ip = self.egress.select(source).await?;
+        let ip = self.egress.select(source, &env).await?;
         let api = BinanceApi::new(&env, ip)?;
         let account = api.get(true, "/fapi/v2/account", &[]).await?;
         if account.get("multiAssetsMargin").and_then(Value::as_bool) != Some(true) {
@@ -1266,9 +1317,13 @@ mod tests {
         let original = "local_ips = [\"172.31.35.228\", \"172.31.35.234\"]\nprimary_local_ip = \"172.31.35.229\"\n";
         fs::write(&path, original).unwrap();
         let source: SourceConfig = toml::from_str(&format!("id='trade03'\naccount='trade03'\nvenue='binance-futures'\nrocksdb_path='/tmp/data/persist_manager'\nenv_path='{}'",dir.path().join("env.sh").display())).unwrap();
+        let env = BTreeMap::from([
+            ("BINANCE_FAPI_URL".into(), "http://rotation.fixture".into()),
+            ("BINANCE_SAPI_URL".into(), "http://rotation.fixture".into()),
+        ]);
         assert!(
             TreasuryEgress::new(TreasuryConfig::default())
-                .select(&source)
+                .select(&source, &env)
                 .await
                 .is_err()
         );
@@ -1278,20 +1333,68 @@ mod tests {
         });
         let bnb = earn.clone();
         assert_eq!(
-            earn.select(&source).await.unwrap().to_string(),
+            earn.select(&source, &env).await.unwrap().to_string(),
             "172.31.35.228"
         );
         assert_eq!(
-            bnb.select(&source).await.unwrap().to_string(),
+            bnb.select(&source, &env).await.unwrap().to_string(),
             "172.31.35.234"
         );
         assert_eq!(
-            earn.select(&source).await.unwrap().to_string(),
+            earn.select(&source, &env).await.unwrap().to_string(),
             "172.31.35.228"
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
         fs::write(&path, "local_ips = []\n").unwrap();
-        assert!(bnb.select(&source).await.is_err());
+        assert!(bnb.select(&source, &env).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn treasury_prefers_capacity_shared_with_other_accounts_and_checks_every_ip_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trade_engine.toml");
+        let original = "local_ips = ['172.31.35.228', '172.31.35.234']\n";
+        fs::write(&path, original).unwrap();
+        let source: SourceConfig = toml::from_str(&format!(
+            "id='capacity-trade03'\naccount='trade03'\nvenue='binance-futures'\nrocksdb_path='/tmp/data/persist_manager'\nenv_path='{}'",
+            dir.path().join("env.sh").display()
+        )).unwrap();
+        let env = BTreeMap::from([
+            ("BINANCE_FAPI_URL".into(), "http://capacity.fixture".into()),
+            ("BINANCE_API_URL".into(), "http://capacity.fixture".into()),
+        ]);
+        let egress = TreasuryEgress::new(TreasuryConfig {
+            use_account_ip_rotation: true,
+            ..Default::default()
+        });
+        let busy_ip = "172.31.35.228".parse().unwrap();
+        let free_ip = "172.31.35.234".parse().unwrap();
+        let other_account = Limiter::shared(busy_ip, "http://capacity.fixture").unwrap();
+        for _ in 0..6 {
+            other_account
+                .reserve(&Method::POST, "/fapi/v1/convert/acceptQuote")
+                .unwrap();
+        }
+        assert_eq!(egress.select(&source, &env).await.unwrap(), free_ip);
+        assert_eq!(egress.clone().select(&source, &env).await.unwrap(), free_ip);
+
+        // Enough USD-M capacity does not make an exhausted SAPI pool usable.
+        let free = Limiter::shared(free_ip, "http://capacity.fixture").unwrap();
+        free.reserve(&Method::GET, "/sapi/v1/convert/exchangeInfo")
+            .unwrap();
+        for _ in 0..10 {
+            free.reserve(&Method::GET, "/sapi/v1/bfusd/quota").unwrap();
+        }
+        assert_eq!(egress.select(&source, &env).await.unwrap(), busy_ip);
+
+        for _ in 0..3 {
+            other_account
+                .reserve(&Method::POST, "/fapi/v1/convert/acceptQuote")
+                .unwrap();
+        }
+        let error = egress.select(&source, &env).await.unwrap_err();
+        assert!(error.downcast_ref::<NotSent>().is_some());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]
