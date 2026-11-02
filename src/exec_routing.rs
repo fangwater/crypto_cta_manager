@@ -80,6 +80,15 @@ pub(crate) fn symbol_market(configured_venue: &str, symbol: &str) -> Result<&'st
 /// Proxy inputs may include unsupported markets; the account projection filters
 /// them before runtime routing. Ordinary accounts retain strict venue checks.
 pub(crate) fn validate_target_symbol(source: &SourceConfig, symbol: &str) -> Result<()> {
+    if symbol.contains(':') {
+        crate::market_data::validate_target(symbol).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            source.target_proxy.is_none()
+                && matches!(source.venue.as_str(), "okex-futures" | "binance-futures"),
+            "cross spread requires an OKX or Binance linear Exec source"
+        );
+        return Ok(());
+    }
     if source.target_proxy.is_some() {
         crate::order_config::validate_exec_symbol(symbol).map_err(anyhow::Error::msg)
     } else {

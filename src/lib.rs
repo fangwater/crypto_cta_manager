@@ -15,6 +15,7 @@ pub mod funding_daily;
 pub mod funding_rates;
 pub mod kline;
 pub mod manager_db;
+pub mod market_data;
 pub mod market_rules;
 pub mod model;
 pub mod monitor;

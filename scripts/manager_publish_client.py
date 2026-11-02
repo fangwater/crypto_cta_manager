@@ -158,7 +158,7 @@ def normalize_position_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(targets_in, dict):
         raise ValueError("targets must be an object")
     targets = {
-        str(symbol).strip().upper(): normalize_target(target)
+        (str(symbol).strip().split(':', 1)[0].lower() + ':' + str(symbol).strip().split(':', 1)[1].upper() if ':' in str(symbol) else str(symbol).strip().upper()): normalize_target(target)
         for symbol, target in targets_in.items()
     }
     return {

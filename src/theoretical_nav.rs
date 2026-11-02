@@ -105,10 +105,17 @@ impl VirtualDelta {
         self.open_ts_us(0) + self.execution_model.sample_count() as i64 * MINUTE_US
     }
     pub fn prices(&self, store: &KlineStore) -> Result<Option<VirtualPrices>> {
-        if !matches!(self.venue.as_str(), "binance-futures" | "binance-margin") {
+        if !matches!(
+            self.venue.as_str(),
+            "binance-futures" | "binance-margin" | "okex-futures" | "okex-margin"
+        ) {
             return Ok(None);
         }
-        store.window_prices(&self.symbol, self.open_ts_us(0), self.execution_model)
+        store.window_prices(
+            &crate::market_data::market_key(&self.venue, &self.symbol)?,
+            self.open_ts_us(0),
+            self.execution_model,
+        )
     }
 }
 
@@ -520,10 +527,13 @@ pub async fn prepare_acquisition(
     // short cost queries must not copy the source's entire target history.
     let mut ranges = BTreeMap::new();
     for delta in &deltas {
-        if matches!(delta.venue.as_str(), "binance-futures" | "binance-margin") {
+        if matches!(
+            delta.venue.as_str(),
+            "binance-futures" | "binance-margin" | "okex-futures" | "okex-margin"
+        ) {
             add_range(
                 &mut ranges,
-                &delta.symbol,
+                &crate::market_data::market_key(&delta.venue, &delta.symbol)?,
                 if delta.execution_model == ExecutionModel::Twap5m {
                     delta.open_ts_us(0)
                 } else {
@@ -677,10 +687,13 @@ pub async fn load_timeline(
             let ts = delta.slice_ts_us(slice);
             if ts <= end {
                 fills.push((ts, index, slice));
-                if matches!(delta.venue.as_str(), "binance-futures" | "binance-margin") {
+                if matches!(
+                    delta.venue.as_str(),
+                    "binance-futures" | "binance-margin" | "okex-futures" | "okex-margin"
+                ) {
                     add_range(
                         &mut ranges,
-                        &delta.symbol,
+                        &crate::market_data::market_key(&delta.venue, &delta.symbol)?,
                         baseline_open.min(delta.open_ts_us(0)),
                         end.max(delta.pricing_end_ts_us()),
                     );
@@ -690,8 +703,16 @@ pub async fn load_timeline(
     }
     carry.retain(|_, qty| clean_zero(*qty) != 0.0);
     for ((_, symbol, venue), _) in &carry {
-        if matches!(venue.as_str(), "binance-futures" | "binance-margin") {
-            add_range(&mut ranges, symbol, baseline_open, end);
+        if matches!(
+            venue.as_str(),
+            "binance-futures" | "binance-margin" | "okex-futures" | "okex-margin"
+        ) {
+            add_range(
+                &mut ranges,
+                &crate::market_data::market_key(venue, symbol)?,
+                baseline_open,
+                end,
+            );
         }
     }
     let warm = warm_ranges(store, ranges).await;
@@ -829,12 +850,17 @@ fn rebuild_timeline(
     let mut markets = BTreeMap::new();
     let mut needed = carry
         .keys()
-        .map(|(_, symbol, _)| symbol.clone())
-        .collect::<BTreeSet<_>>();
+        .filter(|(_, _, venue)| crate::market_data::venue_code(venue).is_ok())
+        .map(|(_, symbol, venue)| crate::market_data::market_key(venue, symbol))
+        .collect::<Result<BTreeSet<_>>>()?;
     needed.extend(
         fills
             .iter()
-            .map(|(_, index, _)| deltas[*index].symbol.clone()),
+            .filter(|(_, index, _)| crate::market_data::venue_code(&deltas[*index].venue).is_ok())
+            .map(|(_, index, _)| {
+                crate::market_data::market_key(&deltas[*index].venue, &deltas[*index].symbol)
+            })
+            .collect::<Result<Vec<_>>>()?,
     );
     let symbols = needed.into_iter().collect::<Vec<_>>();
     let mark_scan_started = std::time::Instant::now();
@@ -862,8 +888,11 @@ fn rebuild_timeline(
         (ts - candle.end_ts_us() < MINUTE_US).then_some(candle.close)
     };
     for (key, quantity) in carry {
-        let price = if matches!(key.2.as_str(), "binance-futures" | "binance-margin") {
-            mark(&key.1, start)
+        let price = if matches!(
+            key.2.as_str(),
+            "binance-futures" | "binance-margin" | "okex-futures" | "okex-margin"
+        ) {
+            mark(&crate::market_data::market_key(&key.2, &key.1)?, start)
         } else {
             None
         };
@@ -939,10 +968,10 @@ fn rebuild_timeline(
             ts_us: ts,
             ..Default::default()
         };
-        for ((_, symbol, _), (state, lots)) in &states {
+        for ((_, symbol, venue), (state, lots)) in &states {
             let floating = if lots.is_empty() {
                 0.0
-            } else if let Some(price) = mark(symbol, ts) {
+            } else if let Some(price) = mark(&crate::market_data::market_key(venue, symbol)?, ts) {
                 floating_pnl_at_mark(lots, price)?
             } else {
                 output.missing_price_count += 1;
@@ -1688,6 +1717,62 @@ mod tests {
             .save_page("BTCUSDT", start - MINUTE_US, start + 5 * MINUTE_US, &bars)
             .unwrap();
         (dir, store, start, bars)
+    }
+
+    #[test]
+    fn cross_spread_theory_prices_and_marks_both_exchanges_independently() {
+        let (_dir, store, start, mut bars) = cached_market();
+        for bar in &mut bars {
+            bar.open *= 2.0;
+            bar.high *= 2.0;
+            bar.low *= 2.0;
+            bar.close *= 2.0;
+            bar.quote_volume *= 2.0;
+        }
+        store
+            .save_page(
+                "okex-futures:BTCUSDT",
+                start - MINUTE_US,
+                start + 5 * MINUTE_US,
+                &bars,
+            )
+            .unwrap();
+        let bn = delta(start);
+        let mut okx = bn.clone();
+        okx.venue = "okex-futures".into();
+        assert_eq!(
+            okx.prices(&store).unwrap().unwrap().average(),
+            bn.prices(&store)
+                .unwrap()
+                .unwrap()
+                .average()
+                .map(|p| 2.0 * p)
+        );
+        let carry = BTreeMap::from([
+            (
+                ("bn".into(), "BTCUSDT".into(), "binance-futures".into()),
+                2.0,
+            ),
+            (
+                ("okx".into(), "BTCUSDT".into(), "okex-futures".into()),
+                -2.0,
+            ),
+        ]);
+        let mut output = TheoreticalNavTimeline::default();
+        rebuild_timeline(
+            &[],
+            carry,
+            Vec::new(),
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            100,
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.unavailable_reason.is_none());
+        assert_eq!(output.points[0].nav_change_before_fee_quote, 0.0);
+        assert!((output.points.last().unwrap().nav_change_before_fee_quote + 10.0).abs() < 1e-10);
     }
 
     #[tokio::test]

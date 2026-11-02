@@ -25,6 +25,12 @@ const REQUEST_INTERVAL: Duration = Duration::from_secs(3);
 const WAF_COOLDOWN_SECS: u64 = 300;
 
 pub fn supported_symbol(symbol: &str) -> bool {
+    let Ok((venue, symbol)) = crate::market_data::split_cache_symbol(symbol) else {
+        return false;
+    };
+    if !matches!(venue, "binance-futures" | "okex-futures") {
+        return false;
+    }
     (symbol.ends_with("USDT") || symbol.ends_with("USDC"))
         && symbol.len() > 4
         && symbol.len() <= 80
@@ -34,10 +40,11 @@ pub fn supported_symbol(symbol: &str) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FundingRate {
+    pub venue_code: i16,
     pub symbol: String,
     pub ts_us: i64,
     pub rate: f64,
-    pub mark_price: f64,
+    pub mark_price: Option<f64>,
     pub rate_type: String,
 }
 
@@ -109,13 +116,14 @@ fn parse_page(
                 "invalid funding rate or settlement mark"
             );
             Ok(FundingRate {
+                venue_code: 1,
                 symbol: row.symbol,
                 ts_us: row
                     .funding_time
                     .checked_mul(1000)
                     .context("funding timestamp overflow")?,
                 rate,
-                mark_price,
+                mark_price: Some(mark_price),
                 rate_type: row.rate_type,
             })
         })
@@ -146,6 +154,8 @@ pub struct FundingRateCache {
     config: FundingRateConfig,
     client: reqwest::Client,
     endpoint: String,
+    okex_endpoint: String,
+    okex_marks_endpoint: String,
     symbols: Arc<RwLock<BTreeMap<String, SymbolCache>>>,
     budget: Arc<Mutex<Budget>>,
     concurrency: Arc<Semaphore>,
@@ -177,6 +187,9 @@ impl FundingRateCache {
                 .build()
                 .context("cannot build public funding client")?,
             endpoint: "https://fapi.binance.com/fapi/v1/fundingRate".into(),
+            okex_endpoint: "https://www.okx.com/api/v5/public/funding-rate-history".into(),
+            okex_marks_endpoint: "https://www.okx.com/api/v5/market/history-mark-price-candles"
+                .into(),
             symbols: Default::default(),
             budget: Default::default(),
             concurrency: Arc::new(Semaphore::new(8)),
@@ -246,7 +259,7 @@ impl FundingRateCache {
             }
             entry.loading = true;
             entry.attempted_us = now;
-            let from = if needs_earlier {
+            let mut from = if needs_earlier {
                 minimum
             } else {
                 entry
@@ -255,6 +268,17 @@ impl FundingRateCache {
             }
             .div_euclid(1000)
                 * 1000;
+            // A missing historical mark must remain retryable after the normal
+            // incremental overlap has moved past its settlement.
+            if let Some(missing) = entry
+                .rates
+                .iter()
+                .filter(|r| r.mark_price.is_none() && r.ts_us >= minimum)
+                .map(|r| r.ts_us)
+                .min()
+            {
+                from = from.min(missing);
+            }
             let cache = self.clone();
             let symbol = symbol.clone();
             tokio::spawn(async move {
@@ -338,6 +362,14 @@ impl FundingRateCache {
             {
                 view.unavailable_reason
                     .get_or_insert_with(|| "公开资金费历史覆盖不完整；仅汇总已加载部分".into());
+            } else if entry
+                .rates
+                .iter()
+                .any(|r| r.ts_us >= from && r.ts_us <= through && r.mark_price.is_none())
+            {
+                view.unavailable_reason.get_or_insert_with(|| {
+                    format!("{symbol} 部分结算缺少标记价格；仅计入可估算部分")
+                });
             } else if entry.error.is_none() {
                 view.complete_symbols.insert(symbol.clone());
             }
@@ -438,6 +470,10 @@ impl FundingRateCache {
 
     async fn fetch(&self, symbol: &str, from: i64, through: i64) -> Result<Vec<FundingRate>> {
         let _permit = self.concurrency.acquire().await?;
+        let (venue, asset) = crate::market_data::split_cache_symbol(symbol)?;
+        if venue == "okex-futures" {
+            return self.fetch_okex(asset, from, through).await;
+        }
         let mut from_ms = from.div_euclid(1000);
         let through_ms = through.div_euclid(1000);
         let mut rates = Vec::new();
@@ -488,10 +524,179 @@ impl FundingRateCache {
         }
         anyhow::bail!("public funding pagination incomplete")
     }
+
+    async fn okex_get(
+        &self,
+        endpoint: &str,
+        query: &[(&str, String)],
+    ) -> Result<serde_json::Value> {
+        self.reserve().await;
+        let response = self
+            .client
+            .get(endpoint)
+            .query(query)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        self.observe_response(
+            response.status(),
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok()),
+        )
+        .await;
+        ensure!(
+            response.status().is_success(),
+            "OKX public funding HTTP {}",
+            response.status().as_u16()
+        );
+        let body: serde_json::Value = response.json().await.map_err(reqwest::Error::without_url)?;
+        if body["code"].as_str() == Some("50011") {
+            self.observe_response(reqwest::StatusCode::TOO_MANY_REQUESTS, Some(60))
+                .await;
+        }
+        ensure!(
+            body["code"].as_str() == Some("0"),
+            "OKX public funding error: {}",
+            body["code"]
+        );
+        Ok(body)
+    }
+
+    async fn fetch_okex(&self, symbol: &str, from: i64, through: i64) -> Result<Vec<FundingRate>> {
+        let inst = crate::kline::okex_instrument("okex-futures", symbol)?;
+        let mut cursor = through / 1000 + 1;
+        let from_ms = from / 1000;
+        let mut settlements = BTreeMap::new();
+        let mut completed = false;
+        // OKX exposes up to three months. Never claim older query coverage.
+        ensure!(
+            from >= crate::kline::now_us() - 89 * DAY_US,
+            "OKX public funding history is limited to the recent three months"
+        );
+        for _ in 0..32 {
+            let body = self
+                .okex_get(
+                    &self.okex_endpoint,
+                    &[
+                        ("instId", inst.clone()),
+                        ("after", cursor.to_string()),
+                        ("before", (from_ms - 1).to_string()),
+                        ("limit", "100".into()),
+                    ],
+                )
+                .await?;
+            let rows = body["data"]
+                .as_array()
+                .context("missing OKX funding history")?;
+            ensure!(rows.len() <= 100, "oversized OKX funding page");
+            let mut oldest = cursor;
+            for row in rows {
+                ensure!(
+                    row["instId"].as_str() == Some(&inst),
+                    "OKX funding instrument mismatch"
+                );
+                let ts = row["fundingTime"]
+                    .as_str()
+                    .context("missing OKX funding time")?
+                    .parse::<i64>()?;
+                ensure!(
+                    ts < cursor && ts >= from_ms,
+                    "OKX funding timestamp outside requested range"
+                );
+                oldest = oldest.min(ts);
+                let rate = row["realizedRate"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| row["fundingRate"].as_str())
+                    .context("missing OKX funding rate")?
+                    .parse::<f64>()?;
+                ensure!(
+                    rate.is_finite() && settlements.insert(ts, rate).is_none(),
+                    "invalid or duplicate OKX funding settlement"
+                );
+            }
+            if rows.len() < 100 || oldest <= from_ms {
+                completed = true;
+                break;
+            }
+            ensure!(oldest < cursor, "OKX funding pagination made no progress");
+            cursor = oldest;
+        }
+        ensure!(completed, "OKX funding pagination incomplete");
+        let mut result = Vec::new();
+        for (ts, rate) in settlements {
+            let cached = self
+                .symbols
+                .read()
+                .unwrap()
+                .get(&format!("okex-futures:{symbol}"))
+                .and_then(|s| {
+                    s.rates
+                        .iter()
+                        .find(|r| r.ts_us == ts * 1000 && r.rate == rate && r.mark_price.is_some())
+                        .cloned()
+                });
+            if let Some(cached) = cached {
+                result.push(cached);
+                continue;
+            }
+            let body = self
+                .okex_get(
+                    &self.okex_marks_endpoint,
+                    &[
+                        ("instId", inst.clone()),
+                        ("bar", "1m".into()),
+                        ("after", ts.to_string()),
+                        ("before", (ts - 60_001).to_string()),
+                        ("limit", "1".into()),
+                    ],
+                )
+                .await?;
+            let mark_price = parse_okex_settlement_mark(&body, ts).ok();
+            result.push(FundingRate {
+                venue_code: 3,
+                symbol: symbol.into(),
+                ts_us: ts
+                    .checked_mul(1000)
+                    .context("OKX funding timestamp overflow")?,
+                rate,
+                mark_price,
+                rate_type: "OKX_closed_1m_mark_estimate".into(),
+            });
+        }
+        Ok(result)
+    }
+}
+
+fn parse_okex_settlement_mark(body: &serde_json::Value, ts_ms: i64) -> Result<f64> {
+    let rows = body["data"]
+        .as_array()
+        .context("missing OKX historical mark candles")?;
+    ensure!(rows.len() == 1, "missing OKX settlement mark minute");
+    let row = rows[0].as_array().context("invalid OKX mark candle")?;
+    ensure!(
+        row.len() == 6
+            && row[5].as_str() == Some("1")
+            && row[0].as_str().and_then(|s| s.parse::<i64>().ok()) == Some(ts_ms - 60_000),
+        "unconfirmed or misaligned OKX settlement mark minute"
+    );
+    let mark = row[4]
+        .as_str()
+        .context("missing OKX mark close")?
+        .parse::<f64>()?;
+    ensure!(
+        mark.is_finite() && mark > 0.0,
+        "invalid OKX historical mark"
+    );
+    Ok(mark)
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FundingEstimateRecord {
+    pub venue_code: i16,
     pub source_id: String,
     pub symbol: String,
     pub asset: String,
@@ -660,6 +865,54 @@ mod tests {
         routing::get,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn okex_rates_use_realized_rates_and_pre_settlement_closed_mark_minutes() {
+        let hour = crate::kline::now_us().div_euclid(3_600_000_000) * 3_600_000;
+        let marks = Arc::new(AtomicUsize::new(0));
+        let counter = marks.clone();
+        let app = Router::new()
+            .route("/rates", get(move |Query(q): Query<BTreeMap<String, String>>| async move {
+                assert_eq!(q["instId"], "BTC-USDT-SWAP");
+                Json(serde_json::json!({"code":"0", "data":[
+                    {"instId":"BTC-USDT-SWAP", "fundingTime":hour.to_string(), "fundingRate":"0.1", "realizedRate":"0.001"},
+                    {"instId":"BTC-USDT-SWAP", "fundingTime":(hour-3_600_000).to_string(), "fundingRate":"-0.002", "realizedRate":""}
+                ]}))
+            }))
+            .route("/marks", get(move |Query(q): Query<BTreeMap<String, String>>| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let ts = q["after"].parse::<i64>().unwrap();
+                    assert_eq!(q["before"].parse::<i64>().unwrap(), ts - 60_001);
+                    Json(serde_json::json!({"code":"0", "data":[[(ts-60_000).to_string(), "99", "102", "98", "100", "1"]]}))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut cache = FundingRateCache::new(FundingRateConfig::default()).unwrap();
+        cache.okex_endpoint = format!("http://{address}/rates");
+        cache.okex_marks_endpoint = format!("http://{address}/marks");
+        let rows = cache
+            .fetch(
+                "okex-futures:BTCUSDT",
+                (hour - 3_600_000) * 1000,
+                hour * 1000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].rate, -0.002);
+        assert_eq!(rows[1].rate, 0.001);
+        assert!(rows.iter().all(|r| r.venue_code == 3
+            && r.mark_price == Some(100.0)
+            && r.rate_type == "OKX_closed_1m_mark_estimate"));
+        assert_eq!(marks.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
 
     #[tokio::test]
     async fn concurrent_symbols_share_request_pacing() {
@@ -863,10 +1116,11 @@ mod tests {
                 through_us: Some(through),
                 attempted_us: now, // No REST is needed for this cached-coverage test.
                 rates: Arc::new(vec![FundingRate {
+                    venue_code: 1,
                     symbol: "BTCUSDT".into(),
                     ts_us: through,
                     rate: 0.001,
-                    mark_price: 100.0,
+                    mark_price: Some(100.0),
                     rate_type: "Regular".into(),
                 }]),
                 ..Default::default()
@@ -1008,6 +1262,7 @@ mod reconciliation_tests {
     #[test]
     fn reconciliation_separates_observation_gaps_posting_delays_and_source_identity() {
         let record = |source: &str, symbol: &str, income| FundingEstimateRecord {
+            venue_code: 1,
             source_id: source.into(),
             symbol: symbol.into(),
             asset: "USDT".into(),
@@ -1081,10 +1336,11 @@ mod reconciliation_tests {
         cache.endpoint = format!("http://{address}/rates");
         let now = crate::kline::now_us();
         let rate = FundingRate {
+            venue_code: 1,
             symbol: "BTCUSDT".into(),
             ts_us: now - 3_600_000_000,
             rate: 0.0001,
-            mark_price: 100.0,
+            mark_price: Some(100.0),
             rate_type: "Regular".into(),
         };
         cache.symbols.write().unwrap().insert(

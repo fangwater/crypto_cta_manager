@@ -587,7 +587,7 @@ pub async fn report_acquisition_cost(
                     execution_model: model,
                     price: klines
                         .window_prices(
-                            &delta.symbol,
+                            &crate::market_data::market_key(&delta.venue, &delta.symbol)?,
                             model.open_ts_us(delta.received_at_us),
                             model,
                         )?

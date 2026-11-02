@@ -169,8 +169,8 @@ impl Kline {
 
 fn prefix(symbol: &str) -> Result<Vec<u8>> {
     ensure!(
-        symbol.len() < 256 && crate::order_config::validate_exec_symbol(symbol).is_ok(),
-        "invalid Binance symbol"
+        symbol.len() < 256 && crate::market_data::split_cache_symbol(symbol).is_ok(),
+        "invalid market symbol"
     );
     let mut key = vec![symbol.len() as u8];
     key.extend_from_slice(symbol.as_bytes());
@@ -269,6 +269,7 @@ struct Inner {
     // Fixed official origins in production; overridden only by in-module tests.
     api_url: String,
     spot_api_url: String,
+    okex_api_url: String,
     ip_check_url: String,
 }
 #[derive(Clone)]
@@ -442,6 +443,7 @@ impl KlineStore {
                 status: Mutex::new(status),
                 api_url: "https://fapi.binance.com/fapi/v1/klines".into(),
                 spot_api_url: "https://api.binance.com/api/v3/klines".into(),
+                okex_api_url: "https://www.okx.com/api/v5/market/history-candles".into(),
                 ip_check_url: "https://api.ipify.org".into(),
             }),
         })
@@ -992,6 +994,10 @@ impl KlineStore {
     async fn fetch_page(&self, symbol: &str, start: i64, end: i64) -> Result<Vec<Kline>> {
         check_trading_ips(&self.inner.config)?;
         let client = self.client().await?;
+        let (venue, asset) = crate::market_data::split_cache_symbol(symbol)?;
+        if venue.starts_with("okex-") {
+            return self.fetch_okex_page(client, venue, asset, start, end).await;
+        }
         let count = ((end - start) / MINUTE_US) as usize;
         let spot = crate::exec_routing::is_spot_target(symbol);
         let wire_symbol = if spot {
@@ -1049,6 +1055,69 @@ impl KlineStore {
                 .windows(2)
                 .all(|pair| pair[0].open_ts_us < pair[1].open_ts_us),
             "duplicate Binance candle"
+        );
+        Ok(candles)
+    }
+
+    async fn fetch_okex_page(
+        &self,
+        client: &Client,
+        venue: &str,
+        symbol: &str,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<Kline>> {
+        let inst = okex_instrument(venue, symbol)?;
+        let mut candles = Vec::new();
+        let mut cursor = end;
+        while cursor > start {
+            let block = (cursor - 300 * MINUTE_US).max(start);
+            let _permit = self.request_permit(2, cursor).await;
+            self.inner.status.lock().unwrap().requests += 1;
+            let response = client
+                .get(&self.inner.okex_api_url)
+                .query(&[
+                    ("instId", inst.clone()),
+                    ("bar", "1m".into()),
+                    ("after", (cursor / 1000).to_string()),
+                    ("before", (block / 1000 - 1).to_string()),
+                    ("limit", "300".into()),
+                ])
+                .send()
+                .await?;
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                self.inner.weight.lock().await.blocked_until =
+                    tokio::time::Instant::now() + Duration::from_secs(60);
+                bail!("OKX Kline rate limited");
+            }
+            let body: serde_json::Value = response.error_for_status()?.json().await?;
+            if body["code"].as_str() == Some("50011") {
+                self.inner.weight.lock().await.blocked_until =
+                    tokio::time::Instant::now() + Duration::from_secs(60);
+            }
+            ensure!(
+                body["code"].as_str() == Some("0"),
+                "OKX Kline error: {}",
+                body["code"]
+            );
+            for row in body["data"].as_array().context("missing OKX candles")? {
+                let candle = parse_okex_candle(row, venue)?;
+                ensure!(
+                    candle.open_ts_us >= block
+                        && candle.end_ts_us() <= cursor
+                        && candle.end_ts_us() <= now_us(),
+                    "OKX candle outside closed requested range"
+                );
+                candles.push(candle);
+            }
+            cursor = block;
+        }
+        candles.sort_by_key(|c| c.open_ts_us);
+        ensure!(
+            candles
+                .windows(2)
+                .all(|p| p[0].open_ts_us < p[1].open_ts_us),
+            "duplicate OKX candle"
         );
         Ok(candles)
     }
@@ -1209,6 +1278,62 @@ fn parse_candle(raw: &serde_json::Value) -> Result<Kline> {
         row[6].as_i64() == Some(open_ms + 59_999),
         "Binance candle must span exactly one minute"
     );
+    Ok(candle)
+}
+
+pub(crate) fn okex_instrument(venue: &str, symbol: &str) -> Result<String> {
+    let quote = if symbol.ends_with("USDT") {
+        "USDT"
+    } else if symbol.ends_with("USDC") {
+        "USDC"
+    } else {
+        "USDT"
+    };
+    let base = if venue == "okex-futures" {
+        symbol
+            .strip_suffix(quote)
+            .context("OKX swap requires a linear symbol")?
+    } else {
+        symbol
+    };
+    crate::order_config::validate_exec_symbol(base).map_err(anyhow::Error::msg)?;
+    ensure!(!base.is_empty(), "empty OKX base asset");
+    Ok(format!(
+        "{base}-{quote}{}",
+        if venue == "okex-futures" { "-SWAP" } else { "" }
+    ))
+}
+
+fn parse_okex_candle(raw: &serde_json::Value, venue: &str) -> Result<Kline> {
+    let row = raw.as_array().context("invalid OKX candle row")?;
+    ensure!(
+        row.len() == 9 && row[8].as_str() == Some("1"),
+        "OKX candle is unconfirmed or malformed"
+    );
+    let number = |i: usize| -> Result<f64> {
+        row[i]
+            .as_str()
+            .context("invalid OKX candle field")?
+            .parse()
+            .context("invalid OKX candle number")
+    };
+    let open_ts_us = row[0]
+        .as_str()
+        .context("missing OKX candle time")?
+        .parse::<i64>()?
+        .checked_mul(1000)
+        .context("OKX candle time overflow")?;
+    let candle = Kline {
+        open_ts_us,
+        open: number(1)?,
+        high: number(2)?,
+        low: number(3)?,
+        close: number(4)?,
+        base_volume: number(if venue == "okex-futures" { 6 } else { 5 })?,
+        quote_volume: number(7)?,
+        trades: 0,
+    };
+    candle.validate()?;
     Ok(candle)
 }
 
@@ -1397,6 +1522,32 @@ mod tests {
         }
         Json(result)
     }
+    async fn mock_okex_candles(
+        Query(query): Query<BTreeMap<String, String>>,
+    ) -> Json<serde_json::Value> {
+        assert_eq!(query["instId"], "BTC-USDT-SWAP");
+        assert_eq!(query["bar"], "1m");
+        let end = query["after"].parse::<i64>().unwrap() * 1000;
+        let start = (query["before"].parse::<i64>().unwrap() + 1) * 1000;
+        let mut rows = Vec::new();
+        let mut ts = end - MINUTE_US;
+        while ts >= start {
+            rows.push(serde_json::json!([
+                (ts / 1000).to_string(),
+                "100",
+                "105",
+                "99",
+                "103",
+                "999",
+                "2",
+                "202",
+                "1"
+            ]));
+            ts -= MINUTE_US;
+        }
+        assert!(rows.len() <= 300);
+        Json(serde_json::json!({"code":"0", "data":rows}))
+    }
     async fn fixture(
         omit: Option<i64>,
     ) -> (TempDir, KlineStore, MockState, tokio::task::JoinHandle<()>) {
@@ -1422,6 +1573,7 @@ mod tests {
         let app = Router::new()
             .route("/klines", get(mock_candles))
             .route("/spot-klines", get(mock_candles))
+            .route("/okex-klines", get(mock_okex_candles))
             .route("/ip", get(|| async { "198.51.100.50" }))
             .with_state(state.clone());
         let server = tokio::spawn(async move {
@@ -1432,8 +1584,58 @@ mod tests {
         inner.config.enabled = true;
         inner.api_url = format!("http://{address}/klines");
         inner.spot_api_url = format!("http://{address}/spot-klines");
+        inner.okex_api_url = format!("http://{address}/okex-klines");
         inner.ip_check_url = format!("http://{address}/ip");
         (dir, store, state, server)
+    }
+
+    #[tokio::test]
+    async fn okex_history_paginates_in_base_units_and_does_not_reuse_binance_prices() {
+        let (_dir, store, _state, server) = fixture(None).await;
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US;
+        let start = end - 499 * MINUTE_US;
+        store
+            .ensure_range("okex-futures:BTCUSDT", start, end)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .scan("okex-futures:BTCUSDT", start, end)
+                .unwrap()
+                .len(),
+            499
+        );
+        let bar = store.get("okex-futures:BTCUSDT", start).unwrap().unwrap();
+        assert_eq!(bar.close, 103.0);
+        assert_eq!(bar.base_volume, 2.0);
+        assert_eq!(bar.vwap(), Some(101.0));
+        assert!(store.get("BTCUSDT", start).unwrap().is_none());
+        store
+            .ensure_range("BTCUSDT", start, start + MINUTE_US)
+            .await
+            .unwrap();
+        assert_eq!(store.get("BTCUSDT", start).unwrap().unwrap().close, 102.0);
+        let requests = store.status().requests;
+        store
+            .ensure_range("okex-futures:BTCUSDT", start, end)
+            .await
+            .unwrap();
+        assert_eq!(store.status().requests, requests);
+        assert!(
+            parse_okex_candle(
+                &serde_json::json!(["60000", "100", "105", "99", "103", "999", "2", "202", "0"]),
+                "okex-futures"
+            )
+            .is_err()
+        );
+        let spot = parse_okex_candle(
+            &serde_json::json!(["60000", "100", "105", "99", "103", "3", "303", "303", "1"]),
+            "okex-margin",
+        )
+        .unwrap();
+        assert_eq!(spot.base_volume, 3.0);
+        assert_eq!(spot.vwap(), Some(101.0));
+        server.abort();
     }
     #[tokio::test]
     async fn cash_candle_cache_is_separate_from_same_pair_perpetuals() {

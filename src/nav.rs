@@ -6486,10 +6486,11 @@ mod tests {
             let rates = BTreeMap::from([(
                 "BTCUSDT".into(),
                 Arc::new(vec![crate::funding_rates::FundingRate {
+                    venue_code: 1,
                     symbol: "BTCUSDT".into(),
                     ts_us: 120 * m,
                     rate: 0.001,
-                    mark_price: 100.0,
+                    mark_price: Some(100.0),
                     rate_type: "Regular".into(),
                 }]),
             )]);

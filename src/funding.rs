@@ -1344,6 +1344,7 @@ mod tests {
             }];
         }
         let estimate = crate::funding_rates::FundingEstimateRecord {
+            venue_code: 1,
             source_id: "a".into(),
             symbol: "BTCUSDT".into(),
             asset: "USDT".into(),

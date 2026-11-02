@@ -114,7 +114,7 @@ impl NavTimelineCache {
             .filter_map(|i| {
                 let fill = &fills[i];
                 let e = &fill.event;
-                (e.venue_code == 1 && e.symbol == symbol).then(|| serde_json::json!({
+                (matches!(e.venue_code, 1 | 3) && e.symbol == symbol).then(|| serde_json::json!({
                     "fill_ts_us": fill.fill_ts_us,
                     "receive_ts_us": e.event_ts_us,
                     "signed_qty": if fill.side == Side::Buy { e.amount_update } else { -e.amount_update },
@@ -135,31 +135,38 @@ impl NavTimelineCache {
                 continue;
             };
             for ((symbol, venue), _) in &source.prepared.initial_states {
-                if *venue == 1
+                if matches!(*venue, 1 | 3)
                     && supported_symbol(symbol)
                     && report.selected_symbols.contains(symbol)
                 {
-                    symbols.insert(symbol.clone());
+                    if let Ok(key) = crate::market_data::cache_symbol(symbol, *venue) {
+                        symbols.insert(key);
+                    }
                 }
             }
             // Offset strategy inventories can exist even when account net quantity is zero.
             for ((_, symbol, venue), _) in &source.prepared.initial_strategy_states {
-                if *venue == 1
+                if matches!(*venue, 1 | 3)
                     && supported_symbol(symbol)
                     && report.selected_symbols.contains(symbol)
                 {
-                    symbols.insert(symbol.clone());
+                    if let Ok(key) = crate::market_data::cache_symbol(symbol, *venue) {
+                        symbols.insert(key);
+                    }
                 }
             }
             for fill in &source.prepared.fill_events {
                 if fill.fill_ts_us > report.end_ts_us {
                     break;
                 }
-                if fill.event.venue_code == 1
+                if matches!(fill.event.venue_code, 1 | 3)
                     && supported_symbol(&fill.event.symbol)
                     && report.selected_symbols.contains(&fill.event.symbol)
                 {
-                    symbols.insert(fill.event.symbol.clone());
+                    symbols.insert(
+                        crate::market_data::cache_symbol(&fill.event.symbol, fill.event.venue_code)
+                            .expect("supported funding venue"),
+                    );
                 }
             }
         }
@@ -197,9 +204,16 @@ impl NavTimelineCache {
                 .iter()
                 .find(|s| &s.id == source_id)
                 .context("funding source configuration unavailable")?;
-            if config.venue != "binance-futures" {
-                continue;
-            }
+            let venue = match config.venue.as_str() {
+                "binance-futures" => 1,
+                "okex-futures" => 3,
+                _ => continue,
+            };
+            let settlements = settlements
+                .iter()
+                .copied()
+                .filter(|(_, r)| r.venue_code == venue)
+                .collect::<Vec<_>>();
             // A snapshot is an after-events anchor. Skip only settlements whose
             // pre-settlement holdings cannot be reconstructed, then initialize
             // at the first measurable settlement so opening lots are preserved.
@@ -222,7 +236,10 @@ impl NavTimelineCache {
             }) {
                 *measured
                     .skipped_by_symbol
-                    .entry(rate.symbol.clone())
+                    .entry(crate::market_data::cache_symbol(
+                        &rate.symbol,
+                        rate.venue_code,
+                    )?)
                     .or_default() += 1;
             }
             let Some(first) = measurable.first() else {
@@ -240,10 +257,11 @@ impl NavTimelineCache {
             state.activate_snapshot_at(first.0);
             // Quantities alone are sufficient for funding; seed them from NAV's
             // immutable checkpoint, then apply the remaining validated fills once.
+            let venue_code = venue;
             let mut quantities: BTreeMap<String, f64> = state
                 .states
                 .iter()
-                .filter(|((_, venue), _)| *venue == 1)
+                .filter(|((_, venue), _)| *venue == venue_code)
                 .map(|((symbol, _), s)| {
                     (
                         symbol.clone(),
@@ -254,7 +272,7 @@ impl NavTimelineCache {
             let mut strategies: BTreeMap<(String, String), f64> = state
                 .strategy_states
                 .iter()
-                .filter(|((_, _, venue), _)| *venue == 1)
+                .filter(|((_, _, venue), _)| *venue == venue_code)
                 .map(|((strategy, symbol, _), s)| {
                     (
                         (strategy.clone(), symbol.clone()),
@@ -274,9 +292,10 @@ impl NavTimelineCache {
                         allocations,
                         &mut allocation_index,
                         fill.fill_ts_us,
+                        venue,
                         &mut strategies,
                     );
-                    if fill.event.venue_code == 1 {
+                    if fill.event.venue_code == venue {
                         let signed = match fill.side {
                             Side::Buy => fill.event.amount_update,
                             Side::Sell => -fill.event.amount_update,
@@ -297,10 +316,22 @@ impl NavTimelineCache {
                     allocations,
                     &mut allocation_index,
                     settlement_ts_us,
+                    venue,
                     &mut strategies,
                 );
                 let quantity = quantities.get(&rate.symbol).copied().unwrap_or(0.0);
-                let factor = -rate.mark_price * rate.rate;
+                let Some(mark_price) = rate.mark_price else {
+                    measured.skipped_settlements += 1;
+                    *measured
+                        .skipped_by_symbol
+                        .entry(crate::market_data::cache_symbol(
+                            &rate.symbol,
+                            rate.venue_code,
+                        )?)
+                        .or_default() += 1;
+                    continue;
+                };
+                let factor = -mark_price * rate.rate;
                 let mut owners = BTreeMap::new();
                 let mut allocated = 0.0;
                 for ((strategy, symbol), qty) in &strategies {
@@ -320,7 +351,7 @@ impl NavTimelineCache {
                 let boundary_fill_count = (near_start..near_end)
                     .filter(|i| {
                         let event = &fills[*i].event;
-                        event.venue_code == 1
+                        event.venue_code == venue
                             && event.symbol == rate.symbol
                             && event.order_type_code != INTERNAL_CROSS_ORDER_TYPE_CODE
                     })
@@ -330,18 +361,22 @@ impl NavTimelineCache {
                     measured.skipped_settlements += 1;
                     *measured
                         .skipped_by_symbol
-                        .entry(rate.symbol.clone())
+                        .entry(crate::market_data::cache_symbol(
+                            &rate.symbol,
+                            rate.venue_code,
+                        )?)
                         .or_default() += 1;
                     continue;
                 }
                 measured.records.push(FundingEstimateRecord {
+                    venue_code: venue,
                     source_id: source_id.clone(),
                     symbol: rate.symbol.clone(),
                     asset: rate.symbol[rate.symbol.len() - 4..].to_string(),
                     ts_us: settlement_ts_us,
                     rate_type: rate.rate_type.clone(),
                     rate: rate.rate,
-                    mark_price: rate.mark_price,
+                    mark_price,
                     quantity,
                     income_quote: income,
                     strategies: owners,
@@ -365,6 +400,7 @@ fn apply_funding_allocations(
     snapshots: &[allocation::AllocationSnapshot],
     index: &mut usize,
     before_us: i64,
+    venue: i16,
     strategies: &mut BTreeMap<(String, String), f64>,
 ) {
     while let Some(snapshot) = snapshots.get(*index) {
@@ -372,7 +408,7 @@ fn apply_funding_allocations(
             break;
         }
         for p in &snapshot.positions {
-            if p.venue_code == 1 && p.strategy != UNALLOCATED_STRATEGY {
+            if p.venue_code == venue && p.strategy != UNALLOCATED_STRATEGY {
                 strategies.insert((p.strategy.clone(), p.symbol.clone()), p.after_qty);
             }
         }
@@ -410,23 +446,32 @@ mod tests {
         }];
         let mut owners = BTreeMap::from([(("alpha".into(), "BTCUSDT".into()), 2.0)]);
         let mut index = 0;
-        apply_funding_allocations(&corrections, &mut index, 100, &mut owners);
+        apply_funding_allocations(&corrections, &mut index, 100, 1, &mut owners);
         assert_eq!(owners[&("alpha".into(), "BTCUSDT".into())], 2.0);
-        apply_funding_allocations(&corrections, &mut index, 101, &mut owners);
+        apply_funding_allocations(&corrections, &mut index, 101, 1, &mut owners);
         assert_eq!(owners[&("alpha".into(), "BTCUSDT".into())], 0.0);
         assert!(!owners.keys().any(|(s, _)| s == UNALLOCATED_STRATEGY));
         owners.insert(("alpha".into(), "BTCUSDT".into()), 1.0);
-        apply_funding_allocations(&corrections, &mut index, 200, &mut owners);
+        apply_funding_allocations(&corrections, &mut index, 200, 1, &mut owners);
         assert_eq!(owners[&("alpha".into(), "BTCUSDT".into())], 1.0);
     }
 
     fn fixture() -> (NavTimelineCache, NavTimelineReport) {
+        fixture_for_venue(1)
+    }
+    fn fixture_for_venue(perp_venue: i16) -> (NavTimelineCache, NavTimelineReport) {
         let mut config: AppConfig =
             toml::from_str(include_str!("../../config/cta-manager.example.toml")).unwrap();
         config.sources.truncate(1);
         let source = &mut config.sources[0];
         source.id = "funding-fixture".into();
         source.enabled = true;
+        source.venue = if perp_venue == 3 {
+            "okex-futures"
+        } else {
+            "binance-futures"
+        }
+        .into();
         source.maker_fee_rate = Some(0.0);
         source.taker_fee_rate = Some(0.0);
         let id = source.id.clone();
@@ -441,10 +486,10 @@ mod tests {
             source_id: id.clone(),
             snapshot_ts_us: OFFSET + 100_000_000,
             positions: vec![
-                position("alpha", "BTCUSDT", 1, 3.0),
-                position("beta", "BTCUSDT", 1, -1.0),
-                position("alpha", "BTCUSDC", 1, -4.0),
-                position("alpha", "BTC", 0, 100.0),
+                position("alpha", "BTCUSDT", perp_venue, 3.0),
+                position("beta", "BTCUSDT", perp_venue, -1.0),
+                position("alpha", "BTCUSDC", perp_venue, -4.0),
+                position("alpha", "BTC", perp_venue - 1, 100.0),
             ],
         };
         let snapshot = strategy.account_snapshot().unwrap();
@@ -458,8 +503,8 @@ mod tests {
                 signal_ts_us: ts,
                 symbol: "BTCUSDT".into(),
                 client_order_id: ts,
-                venue_code: 1,
-                venue: "BinanceFutures".into(),
+                venue_code: perp_venue,
+                venue: crate::model::venue_name(perp_venue as u8),
                 order_type_code: kind,
                 side_code: side,
                 price: 100.0,
@@ -504,15 +549,70 @@ mod tests {
     }
 
     #[test]
+    fn okex_funding_uses_its_own_inventory_rates_and_strategy_ownership() {
+        let (cache, report) = fixture_for_venue(3);
+        assert_eq!(
+            cache.funding_symbols(&report, true),
+            vec!["okex-futures:BTCUSDC", "okex-futures:BTCUSDT"]
+        );
+        let okx = FundingRate {
+            venue_code: 3,
+            symbol: "BTCUSDT".into(),
+            ts_us: OFFSET + 200_000_000,
+            rate: 0.001,
+            mark_price: Some(200.0),
+            rate_type: "OKX_closed_1m_mark_estimate".into(),
+        };
+        let bn = FundingRate {
+            venue_code: 1,
+            rate: 0.9,
+            ..okx.clone()
+        };
+        let rates = BTreeMap::from([
+            ("okex-futures:BTCUSDT".into(), Arc::new(vec![okx])),
+            ("BTCUSDT".into(), Arc::new(vec![bn])),
+        ]);
+        let measured = cache
+            .estimate_funding_records(&report, true, &rates)
+            .unwrap();
+        assert_eq!(measured.records.len(), 1);
+        let r = &measured.records[0];
+        assert_eq!(r.venue_code, 3);
+        assert_eq!(r.quantity, 2.0);
+        assert!((r.income_quote + 0.4).abs() < 1e-12);
+        assert!((r.strategies.values().sum::<f64>() - r.income_quote).abs() < 1e-12);
+        let mut partial = rates.clone();
+        let mut rows = partial["okex-futures:BTCUSDT"].as_ref().clone();
+        rows.push(FundingRate {
+            ts_us: OFFSET + 210_000_000,
+            mark_price: None,
+            ..rows[0].clone()
+        });
+        partial.insert("okex-futures:BTCUSDT".into(), Arc::new(rows));
+        let measured = cache
+            .estimate_funding_records(&report, true, &partial)
+            .unwrap();
+        assert_eq!(measured.skipped_settlements, 1);
+        let view = crate::funding_rates::RateCoverage {
+            rates: partial,
+            ..Default::default()
+        };
+        let estimate = crate::funding_rates::estimate_timeline(&report, &view, &measured);
+        assert_eq!(estimate.income_quote, Some(-0.4));
+        assert!(estimate.unavailable_reason.is_some());
+    }
+
+    #[test]
     fn estimates_signed_strategy_inventory_residual_and_usdc_without_spot_contamination() {
         let (cache, report) = fixture();
         let symbols = cache.funding_symbols(&report, true);
         assert_eq!(symbols, vec!["BTCUSDC", "BTCUSDT"]);
         let rate = |symbol: &str, rate, mark| FundingRate {
+            venue_code: 1,
             symbol: symbol.into(),
             ts_us: OFFSET + 200_000_000,
             rate,
-            mark_price: mark,
+            mark_price: Some(mark),
             rate_type: "Regular".into(),
         };
         let rates = BTreeMap::from([
@@ -592,10 +692,11 @@ mod tests {
                 ]
                 .into_iter()
                 .map(|ts_us| FundingRate {
+                    venue_code: 1,
                     symbol: "BTCUSDT".into(),
                     ts_us,
                     rate: 0.001,
-                    mark_price: 100.0,
+                    mark_price: Some(100.0),
                     rate_type: "Special".into(),
                 })
                 .collect(),
@@ -654,10 +755,11 @@ mod tests {
             rates: BTreeMap::from([(
                 "BTCUSDT".into(),
                 Arc::new(vec![FundingRate {
+                    venue_code: 1,
                     symbol: "BTCUSDT".into(),
                     ts_us: OFFSET + 200_000_000,
                     rate: 0.001,
-                    mark_price: 100.0,
+                    mark_price: Some(100.0),
                     rate_type: "Regular".into(),
                 }]),
             )]),
@@ -703,10 +805,11 @@ mod tests {
         let anchor = OFFSET + 100_000_000;
         report.start_ts_us = anchor - 1;
         let rate = |ts_us, rate| FundingRate {
+            venue_code: 1,
             symbol: "BTCUSDT".into(),
             ts_us,
             rate,
-            mark_price: 100.0,
+            mark_price: Some(100.0),
             rate_type: "Special".into(),
         };
         let coverage = crate::funding_rates::RateCoverage {
@@ -754,10 +857,11 @@ mod tests {
         let hour = OFFSET + 200_000_000;
         report.end_ts_us = hour;
         let rate = FundingRate {
+            venue_code: 1,
             symbol: "BTCUSDT".into(),
             ts_us: hour + 6_000,
             rate: 0.001,
-            mark_price: 100.0,
+            mark_price: Some(100.0),
             rate_type: "Regular".into(),
         };
         let rates = BTreeMap::from([("BTCUSDT".into(), Arc::new(vec![rate.clone()]))]);
@@ -781,10 +885,11 @@ mod tests {
         let rates = BTreeMap::from([(
             "BTCUSDT".into(),
             Arc::new(vec![FundingRate {
+                venue_code: 1,
                 symbol: "BTCUSDT".into(),
                 ts_us: OFFSET + 200_000_000,
                 rate: 0.001,
-                mark_price: 100.0,
+                mark_price: Some(100.0),
                 rate_type: "Regular".into(),
             }]),
         )]);

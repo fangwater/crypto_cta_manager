@@ -118,6 +118,60 @@ fn validate_cache_time(fetched_at_us: i64, now_us: i64) -> Result<()> {
     Ok(())
 }
 
+/// Freeze each exchange leg before archive and publication. Runtime targets
+/// remain ordinary symbols within the destination's existing market scope.
+pub fn project_cross_spread(
+    source: &crate::config::SourceConfig,
+    targets: &BTreeMap<String, TargetPosition>,
+    shares: f64,
+    now_us: i64,
+) -> Result<TargetProjection> {
+    crate::strategy_catalog::validate_targets(targets).map_err(anyhow::Error::msg)?;
+    crate::strategy_catalog::validate_nonnegative_multiplier(shares, "shares")
+        .map_err(anyhow::Error::msg)?;
+    let mut result = TargetProjection {
+        rules_fetched_at_us: now_us,
+        targets: BTreeMap::new(),
+        matched: BTreeMap::new(),
+        filtered: BTreeMap::new(),
+    };
+    for (key, target) in targets {
+        crate::exec_routing::validate_target_symbol(source, key)?;
+        let (venue, symbol) = key
+            .split_once(':')
+            .context("cross spread requires qualified targets")?;
+        if venue != source.venue {
+            result
+                .filtered
+                .insert(key.clone(), "owned by the other exchange leg".into());
+            continue;
+        }
+        let qty = if target.clear || shares == 0.0 {
+            0.0
+        } else {
+            target.qty * shares
+        };
+        ensure!(qty.is_finite(), "cross spread target quantity overflow");
+        ensure!(
+            shares == 0.0 || target.qty == 0.0 || qty != 0.0,
+            "cross spread target quantity underflow"
+        );
+        result
+            .targets
+            .insert(symbol.into(), TargetPosition { qty, ..*target });
+        result.matched.insert(
+            key.clone(),
+            MatchedContract {
+                symbol: symbol.into(),
+                source_contract_multiplier: 1.0,
+                target_contract_multiplier: 1.0,
+                quantity_multiplier: 1.0,
+            },
+        );
+    }
+    Ok(result)
+}
+
 pub fn project(
     config: &TargetProxyConfig,
     snapshot: &MarketRulesSnapshot,
@@ -200,6 +254,55 @@ pub fn project(
 mod tests {
     use super::*;
     use crate::market_rules::MarketRule;
+
+    #[test]
+    fn cross_spread_freezes_each_venue_leg_and_zero_share_clear_independently() {
+        let config: crate::config::AppConfig =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        let mut source = config.sources[0].clone();
+        let targets = BTreeMap::from([
+            (
+                "okex-futures:ETHUSDT".into(),
+                TargetPosition::new(2.0, 0).unwrap(),
+            ),
+            (
+                "binance-futures:ETHUSDT".into(),
+                TargetPosition::new(-2.0, 1).unwrap(),
+            ),
+        ]);
+        for (venue, expected) in [("okex-futures", 6.0), ("binance-futures", -6.0)] {
+            source.venue = venue.into();
+            let projected = project_cross_spread(&source, &targets, 3.0, 100).unwrap();
+            assert_eq!(projected.targets.len(), 1);
+            assert_eq!(projected.targets["ETHUSDT"].qty, expected);
+            assert_eq!(projected.filtered.len(), 1);
+            let overrides = BTreeMap::from([
+                ("okex-futures:ETHUSDT".into(), "okx-template"),
+                ("binance-futures:ETHUSDT".into(), "bn-template"),
+            ]);
+            assert_eq!(
+                projected.remap(&overrides)["ETHUSDT"],
+                if expected > 0.0 {
+                    "okx-template"
+                } else {
+                    "bn-template"
+                }
+            );
+            assert_eq!(
+                project_cross_spread(&source, &targets, 0.0, 100)
+                    .unwrap()
+                    .targets["ETHUSDT"]
+                    .qty,
+                0.0
+            );
+        }
+        let mut incomplete = targets.clone();
+        incomplete.remove("okex-futures:ETHUSDT");
+        assert!(project_cross_spread(&source, &incomplete, 1.0, 100).is_err());
+        let mut mixed = targets.clone();
+        mixed.insert("BTCUSDT".into(), TargetPosition::new(1.0, 0).unwrap());
+        assert!(project_cross_spread(&source, &mixed, 1.0, 100).is_err());
+    }
 
     fn snapshot() -> MarketRulesSnapshot {
         MarketRulesSnapshot {

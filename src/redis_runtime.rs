@@ -888,6 +888,15 @@ impl RedisRuntime {
         targets: &BTreeMap<String, TargetPosition>,
         shares: f64,
     ) -> Result<Option<crate::target_proxy::TargetProjection>> {
+        if targets.keys().any(|s| s.contains(':')) {
+            return crate::target_proxy::project_cross_spread(
+                source,
+                targets,
+                shares,
+                next_updated_at_us(None),
+            )
+            .map(Some);
+        }
         let Some(config) = &source.target_proxy else {
             return Ok(None);
         };

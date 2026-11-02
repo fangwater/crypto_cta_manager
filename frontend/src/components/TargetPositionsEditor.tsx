@@ -15,6 +15,10 @@ import { Button } from './ui/Button'
 import { Input } from './ui/Field'
 
 function normalizeSymbol(raw: string) {
+  if (raw.includes(':')) {
+    const [venue, asset] = raw.trim().split(':')
+    return `${venue.toLowerCase()}:${asset.toUpperCase()}`
+  }
   const symbol = raw.trim().toUpperCase()
   return /^[A-Z0-9]+USD_?PERP$/.test(symbol)
     ? symbol.replace(/_?PERP$/, '')
@@ -289,7 +293,7 @@ export function TargetPositionsEditor({
             <Input
               value={newSymbol}
               onChange={(event) => setNewSymbol(event.target.value.toUpperCase())}
-              placeholder="例如 BTCUSDT / BTCUSDC / BTCUSD"
+              placeholder="BTCUSDT / okex-futures:BTCUSDT"
               className="font-mono"
             />
           </label>

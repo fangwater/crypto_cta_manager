@@ -1447,7 +1447,7 @@ async fn dashboard(
     for account in &mut dashboard.accounts {
         account.cumulative_funding = if state.config.funding_rates.daily_estimates_enabled
             && account.enabled
-            && account.venue == "binance-futures"
+            && matches!(account.venue.as_str(), "binance-futures" | "okex-futures")
         {
             Some(cumulative_funding::CumulativeFunding::for_dashboard(
                 cumulative.get(&account.source_id),
@@ -1988,13 +1988,12 @@ async fn rebuild_timeline_snapshot(
     }
     let estimate_report = report.clone();
     let public_rates = state.funding_rates.clone();
-    let supported = report.selected_source_ids.iter().all(|id| {
-        state
-            .config
-            .sources
-            .iter()
-            .any(|s| &s.id == id && s.venue == "binance-futures")
-    });
+    let supported =
+        report.selected_source_ids.iter().all(|id| {
+            state.config.sources.iter().any(|s| {
+                &s.id == id && matches!(s.venue.as_str(), "binance-futures" | "okex-futures")
+            })
+        });
     let estimated_funding = if supported {
         let (cache, estimate_report, symbols) = tokio::task::spawn_blocking(move || {
             let symbols =
@@ -4516,7 +4515,7 @@ async fn publish_binding_with_projection(
     })?;
     if let Some(projection) = projection {
         if !projection.filtered.is_empty() {
-            warn!(source_id, binding_name, filtered = ?projection.filtered, "target_proxy filtered unsupported Bybit targets");
+            tracing::debug!(source_id, binding_name, filtered = ?projection.filtered, "account target projection selected its owned markets");
         }
     }
     state

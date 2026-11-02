@@ -795,17 +795,19 @@ mod tests {
             "BTCUSDT".into(),
             Arc::new(vec![
                 crate::funding_rates::FundingRate {
+                    venue_code: 1,
                     symbol: "BTCUSDT".into(),
                     ts_us: HOUR,
                     rate: 0.001,
-                    mark_price: 120.0,
+                    mark_price: Some(120.0),
                     rate_type: "regular".into(),
                 },
                 crate::funding_rates::FundingRate {
+                    venue_code: 1,
                     symbol: "BTCUSDT".into(),
                     ts_us: 2 * HOUR,
                     rate: 0.001,
-                    mark_price: 150.0,
+                    mark_price: Some(150.0),
                     rate_type: "regular".into(),
                 },
             ]),
@@ -1204,10 +1206,11 @@ mod tests {
         let rates = BTreeMap::from([(
             "BTCUSDT".into(),
             Arc::new(vec![crate::funding_rates::FundingRate {
+                venue_code: 1,
                 symbol: "BTCUSDT".into(),
                 ts_us: HOUR,
                 rate: 0.001,
-                mark_price: 120.0,
+                mark_price: Some(120.0),
                 rate_type: "regular".into(),
             }]),
         )]);

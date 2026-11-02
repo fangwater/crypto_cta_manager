@@ -77,12 +77,11 @@ pub(super) fn spawn(state: WebState) {
             }
             last_generation = Some(generation);
             for id in sources {
-                let Some(source) = state
-                    .config
-                    .sources
-                    .iter()
-                    .find(|s| s.id == id && s.enabled && s.venue == "binance-futures")
-                else {
+                let Some(source) = state.config.sources.iter().find(|s| {
+                    s.id == id
+                        && s.enabled
+                        && matches!(s.venue.as_str(), "binance-futures" | "okex-futures")
+                }) else {
                     continue;
                 };
                 let timelines = timelines.clone();
@@ -208,7 +207,10 @@ fn daily_estimate(
                     continue;
                 }
                 let mut income = 0.0;
-                for record in measured.records.iter().filter(|r| r.symbol == symbol) {
+                for record in measured.records.iter().filter(|r| {
+                    crate::market_data::cache_symbol(&r.symbol, r.venue_code)
+                        .is_ok_and(|key| key == symbol)
+                }) {
                     income += record.income_quote;
                     for (strategy, v) in &record.strategies {
                         *value.strategies.entry(strategy.clone()).or_default() += v;

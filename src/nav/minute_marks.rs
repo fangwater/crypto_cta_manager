@@ -25,7 +25,7 @@ impl MinuteMarks {
         matches!(self, Self::Collect(_))
     }
     fn price(&self, market: &Market, ts: i64) -> Result<Option<f64>> {
-        anyhow::ensure!(matches!(market.1, 0 | 1), "该市场尚未接入分钟估值价");
+        anyhow::ensure!(matches!(market.1, 0..=3), "该市场尚未接入分钟估值价");
         let open = ts.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
         match self {
             Self::Collect(requests) => {
@@ -136,7 +136,10 @@ fn read_prices(
             .par_iter()
             .map(|(market, wanted)| {
                 let opens = wanted.iter().copied().collect::<Vec<_>>();
-                let values = store.read_minutes(&market.0, &opens)?;
+                let values = store.read_minutes(
+                    &crate::market_data::cache_symbol(&market.0, market.1)?,
+                    &opens,
+                )?;
                 let mut prices = BTreeMap::new();
                 let mut missing: Option<(i64, i64)> = None;
                 for (open, candle) in opens.into_iter().zip(values) {
@@ -155,7 +158,10 @@ fn read_prices(
     let mut missing = BTreeMap::new();
     for (market, bars, range) in read {
         if let Some(range) = range {
-            missing.insert(market.0.clone(), range);
+            missing.insert(
+                crate::market_data::cache_symbol(&market.0, market.1)?,
+                range,
+            );
         }
         prices.insert(market, bars);
     }
@@ -341,7 +347,12 @@ impl NavTimelineCache {
             .sources
             .iter()
             .filter(|s| s.enabled && (sources.is_empty() || sources.contains(&s.id)))
-            .all(|s| matches!(s.venue.as_str(), "binance-futures" | "binance-margin"))
+            .all(|s| {
+                matches!(
+                    s.venue.as_str(),
+                    "binance-futures" | "binance-margin" | "okex-futures" | "okex-margin"
+                )
+            })
     }
 
     /// Used by HTTP/Arrow and daily equity reconstruction. Old order-only

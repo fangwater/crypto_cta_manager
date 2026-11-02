@@ -47,7 +47,7 @@ pub(super) fn spawn(state: WebState) {
 
 async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::DailyEquity>> {
     anyhow::ensure!(
-        source.venue == "binance-futures",
+        matches!(source.venue.as_str(), "binance-futures" | "okex-futures"),
         "account NAV and equity currency must be compatible"
     );
     let (through_ms, timelines) = {

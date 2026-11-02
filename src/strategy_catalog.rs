@@ -7,8 +7,7 @@ use sqlx::postgres::PgPool;
 
 use crate::config::{FeeRates, QuoteFeeRates, validate_fee_rates};
 use crate::order_config::{
-    ExecutionAlgorithm, OrderParameters, TargetPosition, validate_exec_symbol,
-    validate_strategy_name,
+    ExecutionAlgorithm, OrderParameters, TargetPosition, validate_strategy_name,
 };
 
 pub const DEFAULT_CONTRACT_LEVERAGE: i32 = 5;
@@ -82,9 +81,8 @@ pub struct SavePositionStrategyRequest {
 
 impl SavePositionStrategyRequest {
     pub fn normalize_symbols(&mut self) -> Result<(), String> {
-        self.targets =
-            crate::order_config::normalize_symbol_map(std::mem::take(&mut self.targets))?;
-        self.symbol_order_strategy_overrides = crate::order_config::normalize_symbol_map(
+        self.targets = crate::market_data::normalize_targets(std::mem::take(&mut self.targets))?;
+        self.symbol_order_strategy_overrides = crate::market_data::normalize_targets(
             std::mem::take(&mut self.symbol_order_strategy_overrides),
         )?;
         Ok(())
@@ -145,8 +143,22 @@ pub fn scale_targets(
 }
 
 pub fn validate_targets(targets: &BTreeMap<String, TargetPosition>) -> Result<(), String> {
+    let cross = targets.keys().any(|s| s.contains(':'));
     for (symbol, target) in targets {
-        validate_exec_symbol(symbol)?;
+        crate::market_data::validate_target(symbol)?;
+        if cross {
+            let Some((venue, asset)) = symbol.split_once(':') else {
+                return Err("cross spread requires venue-qualified targets for both legs".into());
+            };
+            let other = if venue == "okex-futures" {
+                "binance-futures"
+            } else {
+                "okex-futures"
+            };
+            if !targets.contains_key(&format!("{other}:{asset}")) {
+                return Err(format!("cross spread is missing {other}:{asset}"));
+            }
+        }
         if target.clear && target.qty != 0.0 {
             return Err(format!("targets.{symbol}: clear requires zero quantity"));
         }
@@ -164,7 +176,7 @@ pub fn validate_symbol_order_strategy_overrides(
     overrides: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     for (symbol, order_strategy_name) in overrides {
-        validate_exec_symbol(symbol)?;
+        crate::market_data::validate_target(symbol)?;
         if !targets.contains_key(symbol) {
             return Err(format!(
                 "symbol_order_strategy_overrides.{symbol} has no matching target"
