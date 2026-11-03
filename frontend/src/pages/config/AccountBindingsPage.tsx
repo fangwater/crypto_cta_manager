@@ -28,6 +28,7 @@ import { FieldHint, Input, Label, Select } from '../../components/ui/Field'
 import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { readSourceId, routes } from '../../lib/routes'
+import { prepSignalConfigPath } from '../../lib/prepConfigLinks'
 import { executionMarketLabel, executionSymbolPlaceholder, symbolMatchesExecMarket } from '../../format'
 import type { AccountStudio, DashboardSnapshot, ExecOrderRateLimits } from '../../types'
 
@@ -457,6 +458,7 @@ export function AccountBindingsPage() {
                 const validShares =
                   shareDraft.trim() !== '' && Number.isFinite(parsedShares) && parsedShares >= 0
                 const sharesChanged = validShares && parsedShares !== binding.shares
+                const signalConfigPath = prepSignalConfigPath(sourceId, binding.position_strategy_name)
                 return <Card key={binding.binding_name}>
                   <CardContent className="space-y-4 pt-5">
                     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -541,6 +543,11 @@ export function AccountBindingsPage() {
                         </div>
                       </>}
                       <div className="flex flex-wrap gap-2">
+                        {signalConfigPath && (
+                          <a href={signalConfigPath} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium text-ink hover:bg-canvas">
+                            <SlidersHorizontal size={15} /> 信号配置
+                          </a>
+                        )}
                         <Button
                           type="button"
                           variant="primary"

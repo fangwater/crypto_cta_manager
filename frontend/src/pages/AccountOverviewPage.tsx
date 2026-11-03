@@ -34,6 +34,7 @@ import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
 import { executionMarketLabel, executionSymbolPlaceholder, formatUniMmr, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
 import { readSourceId, routes } from '../lib/routes'
+import { prepSignalConfigPath } from '../lib/prepConfigLinks'
 import { cn } from '../lib/cn'
 import { usesActualFunding } from '../lib/fundingPresentation'
 import type {
@@ -102,6 +103,7 @@ export function AccountOverviewPage() {
     [dashboard, sourceId],
   )
   const canConfigure = account?.access_level === 'configure'
+  const signalConfigPath = canConfigure ? prepSignalConfigPath(sourceId) : undefined
   const knownLiquidityVolume =
     (report?.maker_volume_quote ?? 0) + (report?.taker_volume_quote ?? 0)
   const makerRatio = knownLiquidityVolume > 0
@@ -176,6 +178,11 @@ export function AccountOverviewPage() {
                     icon={<PencilLine size={15} />}
                   >
                     编辑启用
+                  </ActionButton>
+                )}
+                {signalConfigPath && (
+                  <ActionButton href={signalConfigPath} icon={<SlidersHorizontal size={15} />}>
+                    信号配置
                   </ActionButton>
                 )}
               </div>
@@ -288,6 +295,9 @@ export function AccountOverviewPage() {
                 {(studio?.bindings ?? []).map((binding) => {
                   const position = positionByName.get(binding.position_strategy_name)
                   const order = orderByName.get(binding.order_strategy_name)
+                  const signalConfigPath = canConfigure
+                    ? prepSignalConfigPath(sourceId, binding.position_strategy_name)
+                    : undefined
                   return (
                     <Card
                       key={binding.binding_name}
@@ -307,6 +317,11 @@ export function AccountOverviewPage() {
                         </div>
                       </CardHeader>
                       <CardContent className="space-y-5 pt-5">
+                        {signalConfigPath && (
+                          <ActionButton href={signalConfigPath} icon={<SlidersHorizontal size={15} />}>
+                            信号配置
+                          </ActionButton>
+                        )}
                         <div className="grid gap-3 sm:grid-cols-2">
                           <MiniStat label="仓位策略" value={binding.position_strategy_name} mono />
                           <MiniStat label="执行算法" value={binding.order_strategy_name} mono />

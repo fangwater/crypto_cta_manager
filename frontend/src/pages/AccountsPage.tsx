@@ -22,6 +22,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { executionMarketLabel, formatUniMmr, integer, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
 import { cn } from '../lib/cn'
 import { routes } from '../lib/routes'
+import { prepSignalConfigPath } from '../lib/prepConfigLinks'
 import type {
   DashboardAccount,
   DashboardSnapshot,
@@ -30,15 +31,6 @@ import type {
 } from '../types'
 
 const UI_POLL_MS = 15_000
-
-// These signal publishers belong to jp-meta. Match source identities rather
-// than account labels or gateway slots, which can be reused after retirement.
-const JP_META_SIGNAL_CONFIG_PATHS: Readonly<Record<string, string>> = {
-  binance_exec_trade06: '/cta/binance-cta-perp-rx01/config/',
-  binance_exec_trade08: '/cta/binance-cta-perp-rx02/config/',
-  binance_exec_trade07: '/cta/binance-cta-perp-rx03/config/',
-  binance_exec_rx04_5m05: '/cta/binance-cta-perp-rx04/config/',
-}
 
 function fallbackAccounts(dashboard: DashboardSnapshot): DashboardAccount[] {
   return dashboard.report.sources.map((source) => ({
@@ -256,8 +248,8 @@ function AccountCard({
     ? report.nav_change_after_fee_quote + funding.income_quote : null
   const displayedNav = funding ? combinedNav : report?.nav_change_after_fee_quote
   const gatewayReady = ready && account.gateway_prefix !== null
-  const signalConfigPath = account.enabled && window.location.origin === 'http://13.115.227.29:4191'
-    ? JP_META_SIGNAL_CONFIG_PATHS[account.source_id]
+  const signalConfigPath = account.enabled && account.access_level === 'configure'
+    ? prepSignalConfigPath(account.source_id)
     : undefined
   const openPositions =
     report?.symbols.filter(
