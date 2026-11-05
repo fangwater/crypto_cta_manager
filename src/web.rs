@@ -46,9 +46,13 @@ use crate::strategy_catalog::{
 use crate::viz_snapshot::{SourceFactualPositions, VizSnapshotClient};
 use crate::{nav, postgres};
 
+mod account_mode;
 mod cumulative_funding;
 mod equity_history;
 mod nav_monitor;
+mod publication;
+#[cfg(test)]
+mod publication_tests;
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");
@@ -214,7 +218,9 @@ struct DashboardBuild {
 struct WebState {
     cache: Arc<RwLock<CacheState>>,
     dashboard_refresh: Arc<tokio::sync::Mutex<()>>,
-    configuration_lock: Arc<tokio::sync::Mutex<()>>,
+    configuration_lock: Arc<RwLock<()>>,
+    publication_locks: Arc<publication::PublicationLocks>,
+    account_modes: Arc<account_mode::AccountModes>,
     configuration_notify: Arc<tokio::sync::Notify>,
     nav_history_store: Arc<std::sync::Mutex<nav::NavHistoryStore>>,
     config: Arc<AppConfig>,
@@ -428,6 +434,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let database_url = config.database_url()?;
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
     postgres::register_sources(&pool, &config.sources).await?;
+    let account_modes = Arc::new(account_mode::AccountModes::initialize(&config.sources).await?);
     let exec_config = ExecConfigClient::new(config.order_config.request_timeout_secs)?;
     let redis_runtime = RedisRuntime::connect(config.redis.clone())?;
     redis_runtime.spawn_keepalive();
@@ -548,7 +555,9 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let state = WebState {
         cache,
         dashboard_refresh,
-        configuration_lock: Arc::new(tokio::sync::Mutex::new(())),
+        configuration_lock: Arc::new(RwLock::new(())),
+        publication_locks: Arc::default(),
+        account_modes,
         configuration_notify: Arc::new(tokio::sync::Notify::new()),
         nav_history_store,
         config: Arc::new(config),
@@ -2482,7 +2491,7 @@ async fn save_order_parameters(
     headers: HeaderMap,
     Json(request): Json<SaveOrderParametersRequest>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.lock().await;
+    let _guard = state.configuration_lock.write().await;
     if let Err(error) = virtual_accounts::require_independent(&state.pool, &source_id).await {
         return Ok((
             StatusCode::CONFLICT,
@@ -2680,10 +2689,48 @@ async fn save_position_strategy(
     headers: HeaderMap,
     Json(mut request): Json<SavePositionStrategyRequest>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.lock().await;
+    if let Err(message) = validate_strategy_name(&request.strategy_name) {
+        return Ok(bad_request(message));
+    }
     if let Err(message) = request.normalize_symbols() {
         return Ok(bad_request(message));
     }
+    let locks = state.publication_locks.clone();
+    let configuration = state.configuration_lock.clone();
+    let strategy_name = request.strategy_name.clone();
+    let started = Instant::now();
+    locks
+        .run(configuration, &strategy_name, async move {
+            let admitted = Instant::now();
+            let name = request.strategy_name.clone();
+            let result =
+                save_position_strategy_inner(state, peer_addr, user, headers, request).await;
+            let status = result
+                .as_ref()
+                .map_or(StatusCode::INTERNAL_SERVER_ERROR, |r| r.status());
+            info!(strategy_name = %name, peer = %peer_addr,
+                queue_ms = admitted.duration_since(started).as_millis() as u64,
+                processing_ms = admitted.elapsed().as_millis() as u64,
+                status = status.as_u16(), "position strategy request completed");
+            if let Err(error) = &result {
+                error!(strategy_name = %name, error = ?error.0, "position strategy request failed");
+            }
+            result
+        })
+        .await
+        .context("position strategy publish task failed")?
+}
+
+// Called only with the strategy lock and a shared configuration lease held.
+// Authorization is checked here, after admission, including same-name creation.
+async fn save_position_strategy_inner(
+    state: WebState,
+    peer_addr: SocketAddr,
+    user: Option<Extension<AuthUser>>,
+    headers: HeaderMap,
+    request: SavePositionStrategyRequest,
+) -> Result<Response, ApiError> {
+    let preparation_started = Instant::now();
     let session_user = user.as_ref().map(|Extension(user)| user);
     let publish_visibility = session_user.map(|user| {
         let configured = state
@@ -2771,7 +2818,11 @@ async fn save_position_strategy(
     .await
     {
         Ok(saved) => {
+            let preparation_ms = preparation_started.elapsed().as_millis() as u64;
+            let snapshot_started = Instant::now();
             let factual_positions = load_factual_positions(&state, &saved.strategy_name).await;
+            let snapshot_ms = snapshot_started.elapsed().as_millis() as u64;
+            let archive_started = Instant::now();
             if let Err(error) = state.position_archive.append(
                 saved.updated_at_us,
                 &saved,
@@ -2786,8 +2837,15 @@ async fn save_position_strategy(
                 );
                 return Err(error.into());
             }
+            let archive_ms = archive_started.elapsed().as_millis() as u64;
+            let publish_started = Instant::now();
             let mut publishes =
                 publish_bound_accounts(&state, &saved.strategy_name, &published_accounts).await;
+            info!(strategy_name = %saved.strategy_name, updated_at_us = saved.updated_at_us,
+                preparation_ms, snapshot_ms, archive_ms,
+                publish_ms = publish_started.elapsed().as_millis() as u64,
+                account_count = publishes.len(),
+                "position strategy publish stages completed");
             if let Some(failed) = publishes.iter().find(|item| item.error.is_some()) {
                 let source_id = failed.source_id.as_str();
                 let binding_name = failed.binding_name.as_str();
@@ -2831,7 +2889,7 @@ async fn delete_position_strategy(
     State(state): State<WebState>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.lock().await;
+    let _configuration_guard = state.configuration_lock.write().await;
     match strategy_catalog::delete_position_strategy(&state.pool, &name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("position strategy was not found")),
@@ -3086,7 +3144,7 @@ async fn save_order_strategy(
     headers: HeaderMap,
     Json(request): Json<SaveOrderStrategyRequest>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.lock().await;
+    let _configuration_guard = state.configuration_lock.write().await;
     let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
     if owners
         .get(&request.strategy_name)
@@ -3136,7 +3194,7 @@ async fn delete_order_strategy(
     Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.lock().await;
+    let _configuration_guard = state.configuration_lock.write().await;
     let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
     if owners
         .get(&name)
@@ -3197,7 +3255,7 @@ async fn save_account_funding(
     if !(60..=86400).contains(&request.refresh_secs) {
         return Ok(bad_request("funding 拉取间隔必须为 60–86400 秒".into()));
     }
-    let _configuration_guard = state.configuration_lock.lock().await;
+    let _configuration_guard = state.configuration_lock.write().await;
     let mut settings = state.funding.settings(&source_id);
     if request.enabled && !settings.enabled {
         let expected = std::env::var(&state.config.funding.enable_token_env).ok();
@@ -3965,7 +4023,7 @@ async fn save_account_binding(
     headers: HeaderMap,
     Json(request): Json<SaveBindingRequest>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.lock().await;
+    let _configuration_guard = state.configuration_lock.write().await;
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
         Err(response) => return Ok(response),
@@ -4090,7 +4148,7 @@ async fn save_account_binding_shares(
     headers: HeaderMap,
     Json(request): Json<SaveBindingSharesRequest>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.lock().await;
+    let _configuration_guard = state.configuration_lock.write().await;
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
         Err(response) => return Ok(response),
@@ -4155,7 +4213,7 @@ async fn delete_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.lock().await;
+    let _configuration_guard = state.configuration_lock.write().await;
     match strategy_catalog::delete_binding(&state.pool, &source_id, &binding_name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("binding was not found")),
@@ -4167,7 +4225,7 @@ async fn publish_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.lock().await;
+    let _configuration_guard = state.configuration_lock.write().await;
     if !virtual_accounts::pending(&state.pool, &source_id)
         .await?
         .is_empty()
@@ -4224,7 +4282,7 @@ async fn preview_account_binding_targets(
     Extension(user): Extension<AuthUser>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.lock().await;
+    let _guard = state.configuration_lock.read().await;
     let source = match resolve_publish_source(&state.config, &source_id) {
         Ok(source) => source,
         Err(error) => return Ok(publish_failure_response(error)),
@@ -4308,6 +4366,7 @@ async fn publish_bound_accounts(
         };
     let mut publishes = Vec::with_capacity(bindings.len());
     for binding in bindings {
+        let started = Instant::now();
         let projection = archived
             .iter()
             .find(|a| a.source_id == binding.source_id && a.binding_name == binding.binding_name)
@@ -4326,6 +4385,7 @@ async fn publish_bound_accounts(
                     source_id = %binding.source_id,
                     binding_name = %binding.binding_name,
                     shares = binding.shares,
+                    duration_ms = started.elapsed().as_millis() as u64,
                     "published bound account after position update"
                 );
                 publishes.push(BindingPublishResult {
@@ -4342,6 +4402,7 @@ async fn publish_bound_accounts(
                     source_id = %binding.source_id,
                     binding_name = %binding.binding_name,
                     error = %error.message,
+                    duration_ms = started.elapsed().as_millis() as u64,
                     "bound-account publish failed after position update"
                 );
                 publishes.push(BindingPublishResult {
@@ -4525,29 +4586,7 @@ async fn publish_binding_with_projection(
             status: StatusCode::BAD_REQUEST,
             message: error.to_string(),
         })?;
-    if targets_require_trading_account_mode(&targets) {
-        match crate::exchange_leverage::has_required_trading_account_mode(source).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(PublishFailure {
-                    status: StatusCode::CONFLICT,
-                    message: format!(
-                        "source {source_id} must use {} before a non-zero target can be published",
-                        crate::exchange_leverage::required_trading_account_mode(&source.venue)
-                    ),
-                });
-            }
-            Err(error) => {
-                return Err(PublishFailure {
-                    status: StatusCode::BAD_GATEWAY,
-                    message: format!(
-                        "failed to verify {} for source {source_id}: {error:#}",
-                        crate::exchange_leverage::required_trading_account_mode(&source.venue)
-                    ),
-                });
-            }
-        }
-    }
+    state.account_modes.check(source, &targets)?;
     if let Some(projection) = projection {
         projection
             .ensure_fresh(unix_now_us())
@@ -5810,7 +5849,9 @@ mod tests {
         assert_long_window_timeline_handlers(45).await;
     }
 
-    async fn assert_long_window_timeline_handlers(history_days: i64) {
+    pub(super) fn timeline_test_state(
+        history_days: i64,
+    ) -> (tempfile::TempDir, WebState, String, i64, i64) {
         let dir = tempfile::tempdir().unwrap();
         let day = crate::funding_rates::DAY_US;
         let end = (unix_now_us() / 1000 - 60_000) * 1000;
@@ -5894,7 +5935,9 @@ mod tests {
         let state = WebState {
             cache,
             dashboard_refresh: gate.clone(),
-            configuration_lock: gate.clone(),
+            configuration_lock: Arc::default(),
+            publication_locks: Arc::default(),
+            account_modes: Arc::default(),
             configuration_notify: Arc::default(),
             nav_history_store: Arc::default(),
             pool: sqlx::postgres::PgPoolOptions::new()
@@ -5936,6 +5979,12 @@ mod tests {
             redis_runtime,
             reload_notify,
         };
+        (dir, state, id, start, end)
+    }
+
+    async fn assert_long_window_timeline_handlers(history_days: i64) {
+        let (_dir, state, id, start, end) = timeline_test_state(history_days);
+        let day = crate::funding_rates::DAY_US;
         for days in [Some(60), Some(90), None] {
             for account in [false, true] {
                 for include_theoretical in [false, true] {
@@ -6787,7 +6836,7 @@ async fn list_virtual_accounts(
     Extension(user): Extension<AuthUser>,
     Extension(visible): Extension<VisibleSources>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.lock().await;
+    let _guard = state.configuration_lock.read().await;
     let mut accounts = virtual_accounts::list(&state.pool).await?;
     for account in &mut accounts {
         account.permissions_for(&user);
@@ -6876,7 +6925,7 @@ async fn save_virtual_account_response(
     virtual_id: Option<&str>,
     request: SaveVirtualAccount,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.lock().await;
+    let _guard = state.configuration_lock.write().await;
     if let Some(id) = virtual_id {
         let Some(account) = virtual_account_for_user(state, user, id).await? else {
             return Ok(not_found("virtual account was not found"));
@@ -6974,7 +7023,7 @@ async fn delete_virtual_account(
     Extension(user): Extension<AuthUser>,
     Path(virtual_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.lock().await;
+    let _guard = state.configuration_lock.write().await;
     let Some(account) = virtual_account_for_user(&state, &user, &virtual_id).await? else {
         return Ok(not_found("virtual account was not found"));
     };
@@ -7025,7 +7074,7 @@ async fn save_virtual_grants(
     Path(virtual_id): Path<String>,
     Json(request): Json<SaveVirtualGrants>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.lock().await;
+    let _guard = state.configuration_lock.write().await;
     let Some(account) = virtual_account_for_user(&state, &user, &virtual_id).await? else {
         return Ok(not_found("virtual account was not found"));
     };
@@ -7054,7 +7103,7 @@ async fn save_account_configuration(
     Path(source_id): Path<String>,
     Json(request): Json<AccountConfiguration>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.lock().await;
+    let _guard = state.configuration_lock.write().await;
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
@@ -7106,7 +7155,19 @@ fn spawn_configuration_publisher(state: WebState) {
                 _ = interval.tick() => {},
                 _ = state.configuration_notify.notified() => {},
             }
-            let _guard = state.configuration_lock.lock().await;
+            let pending: Result<bool, sqlx::Error> =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cta_follow_publish_queue)")
+                    .fetch_one(&state.pool)
+                    .await;
+            match pending {
+                Ok(false) => continue,
+                Err(error) => {
+                    warn!(error = %error, "failed to check pending configuration publications");
+                    continue;
+                }
+                Ok(true) => {}
+            }
+            let _guard = state.configuration_lock.write().await;
             if let Err(error) = publish_pending_configurations(&state).await {
                 warn!(error = %error, "virtual account synchronization failed; pending changes retained");
             }

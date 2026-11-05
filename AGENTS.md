@@ -365,6 +365,17 @@ be retried. Do not route this normal stop through `SYSTEM_POSITION_CLOSE`;
 attributed close fills must remain `batch_exec:<strategy_name>`. PostgreSQL
 remains the current catalog. Deleting an account binding is allowed only after
 its shares are zero and does not remove the zero-target strategy from Exec.
+
+By operator instruction on 2026-11-05, verify trading account mode once per
+enabled publishable source during Manager startup, before accepting target
+requests. Keep the result in memory for that process lifetime; normal target
+publishes and periodic workers must not repeat exchange account-mode queries.
+A rejected, failed or absent check blocks only that source's nonzero targets;
+all-zero clears remain allowed. Reload added sources, credentials and account
+mode changes by correcting configuration and restarting Manager to revalidate.
+Account-mode HTTP requests must explicitly bind the account's configured trading
+IP and disable proxies. Keep these checks separate from periodic market rules.
+
 Manager is the sole owner of pulling venue order-rule metadata used by Exec,
 including price tick, quantity step, minimum quantity, minimum notional, symbol
 status, and contract multiplier. It refreshes that metadata every 60 seconds,

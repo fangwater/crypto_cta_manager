@@ -256,6 +256,7 @@ async fn has_binance_multi_assets_mode(source: &SourceConfig) -> Result<bool> {
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
         .no_proxy()
+        .local_address(crate::bfusd_auto::account_fixed_ip(source)?)
         .build()
         .context("failed to build Binance account-mode HTTP client")?;
     // accountConfig exposes the same authoritative flag with one-sixth of the
@@ -285,6 +286,7 @@ async fn has_okx_unified_account_mode(source: &SourceConfig) -> Result<bool> {
     let client = Client::builder()
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
         .no_proxy()
+        .local_address(crate::bfusd_auto::account_fixed_ip(source)?)
         .build()
         .context("failed to build OKX account-mode HTTP client")?;
     let path = "/api/v5/account/config";
