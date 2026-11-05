@@ -13,6 +13,17 @@ Binance 永续对冲腿的 1min Spread。OKX 使用结算前闭合标记价格 1
 
 这是净值差口径。自 2026-10-21 操作员确认后，Binance 线性合约/现货实际与理论持仓均使用已完成分钟收盘价，包括区间起点、采样点和终点；实际成交仍使用真实成交价格、数量与手续费。目标执行进度可能不同，因此差值仍包含持仓差异。缺少必要分钟价时返回补齐中或不可用，不能退回旧成交价拼接曲线。该估值受 Kline 保留范围约束；其他尚未接入标价的市场与离线订单诊断保留明确标识的原估值方式。成本分析的同成交量滑点使用现有的 factual fill 数量、方向和理论 VWAP；`price_shortfall_bps` 和新增 `after_fee_shortfall_bps` 都以**可比理论成交额**为分母。费后差 = 价格差 + 实际估算费用 − 同量理论费用；Maker rebate 保持负号。总计、分组及目标行使用相同口径。
 
+RapidX 的成交角色使用交易所原始 `execType=MAKER/TAKER`。旧
+`rapidx_executions` 未保留该字段时，Manager 只读扫描同一 Exec 数据目录的
+`rapidx_account/rapidx_<exchange>_<portfolio>/*.jsonl`，按字节增量读取完整行。
+角色必须与 RocksDB 成交的 portfolio、exchange、transaction ID、order ID、
+client order ID、市场、方向、价格、数量及时间全部相符，才参与费用估算。
+同一订单的角色不能覆盖证据不完整的剩余成交；混合角色需要逐笔对应。
+已有已定价成交保留价格、数量、时间及策略归属；内部交叉仍为零手续费。
+缺少日志或缺少明确角色继续显示未知并沿用 taker 估费，不根据费用正负、
+LIMIT 类型或账户名称猜测。晚到角色触发同源报表重算，重复读取不重复计费。
+日志、Exec RocksDB、历史持仓快照和既有日权益审核记录均不由此路径改写。
+
 ## 默认关闭与固定 IP
 
 每个账户在 Manager「账户配置」和「策略启用」页独立开启，开关和拉取间隔保存到 PostgreSQL，默认关闭。支持原生 Binance USD-M 的 STANDARD / Portfolio Margin，以及显式授权的 RapidX Binance USD-M；COIN-M 和 OKX funding 尚未接入。身份始终是 `source_id`。

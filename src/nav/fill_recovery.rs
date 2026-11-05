@@ -11,7 +11,11 @@ use tracing::info;
 
 use super::NavEvent;
 use crate::config::SourceConfig;
+use crate::model::FillLiquidity;
 use crate::rocks_source::{self, RawRocksRecord};
+
+mod liquidity_journal;
+pub(super) use liquidity_journal::LiquidityJournal;
 
 const EXECUTIONS_CF: &str = "rapidx_executions";
 type OrderKey = (String, i16, i64);
@@ -35,7 +39,7 @@ struct StoredExecution {
     execution: Execution,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct Execution {
     transaction_id: String,
     order_id: String,
@@ -56,6 +60,7 @@ struct Fill {
     quantity: f64,
     price: f64,
     timestamp_us: i64,
+    liquidity: Option<FillLiquidity>,
 }
 
 /// Join only executions with an order already recorded by this Exec source.
@@ -63,6 +68,7 @@ struct Fill {
 pub(super) fn resolve(
     source: &SourceConfig,
     events: &im::Vector<Arc<NavEvent>>,
+    journal: &mut LiquidityJournal,
 ) -> Result<Option<im::Vector<Arc<NavEvent>>>> {
     if events.is_empty() {
         return Ok(None);
@@ -123,7 +129,17 @@ pub(super) fn resolve(
         );
         return Ok(None);
     };
-    let fills = decode_fills(&records, portfolio, exchange, &wanted)
+    let journal_dir = source
+        .rocksdb_path
+        .parent()
+        .context("missing Exec data directory")?
+        .join("rapidx_account")
+        .join(format!(
+            "rapidx_{}_{portfolio}",
+            exchange.to_ascii_lowercase()
+        ));
+    let roles = journal.refresh(&journal_dir, portfolio, exchange)?;
+    let fills = decode_fills_with_roles(&records, portfolio, exchange, &wanted, roles)
         .with_context(|| format!("source {} execution price evidence is invalid", source.id))?;
     let resolved = replace_orders(events, &wanted, &fills).with_context(|| {
         format!(
@@ -147,11 +163,22 @@ pub(super) fn resolve(
     Ok(Some(resolved))
 }
 
+#[cfg(test)]
 fn decode_fills(
     records: &[RawRocksRecord],
     portfolio: &str,
     exchange: &str,
     wanted: &BTreeSet<OrderKey>,
+) -> Result<BTreeMap<OrderKey, BTreeMap<String, Fill>>> {
+    decode_fills_with_roles(records, portfolio, exchange, wanted, &BTreeMap::new())
+}
+
+fn decode_fills_with_roles(
+    records: &[RawRocksRecord],
+    portfolio: &str,
+    exchange: &str,
+    wanted: &BTreeSet<OrderKey>,
+    roles: &BTreeMap<String, liquidity_journal::RoleEvidence>,
 ) -> Result<BTreeMap<OrderKey, BTreeMap<String, Fill>>> {
     let mut result = BTreeMap::<OrderKey, BTreeMap<String, Fill>>::new();
     let wanted_clients = wanted.iter().map(|key| key.2).collect::<BTreeSet<_>>();
@@ -228,6 +255,10 @@ fn decode_fills(
             "SELL" => 2,
             _ => anyhow::bail!("invalid execution side"),
         };
+        let liquidity = roles
+            .get(&e.transaction_id)
+            .map(|role| role.validate(&e))
+            .transpose()?;
         let fill = Fill {
             transaction_id: e.transaction_id,
             order_id: e.order_id,
@@ -235,6 +266,7 @@ fn decode_fills(
             quantity,
             price,
             timestamp_us,
+            liquidity,
         };
         let order = result.entry(key).or_default();
         if let Some(old) = order.get(&fill.transaction_id) {
@@ -251,7 +283,7 @@ fn decode_fills(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn event(price: f64, quantity: f64, receive_us: i64) -> Arc<NavEvent> {
@@ -274,7 +306,7 @@ mod tests {
         })
     }
 
-    pub(super) fn record(
+    pub(in crate::nav) fn record(
         portfolio: &str,
         market: &str,
         tx: &str,
@@ -475,6 +507,108 @@ mod tests {
         .unwrap();
         assert!(replace_orders(&im::vector![Arc::new(lifecycle)], &wanted, &fills).is_err());
     }
+
+    #[test]
+    fn factual_roles_enrich_priced_fills_without_changing_fifo_inputs() {
+        let events = im::vector![event(100.0, 3.0, 200_000)];
+        let wanted = BTreeSet::from([("FIL".into(), 0, 7)]);
+        let mut fills = decode_fills(
+            &[record("123", "MARGIN", "a", 3.0, 100.0, false)],
+            "123",
+            "BINANCE",
+            &wanted,
+        )
+        .unwrap();
+        let order = fills.get_mut(&("FIL".into(), 0, 7)).unwrap();
+        order.get_mut("a").unwrap().liquidity = Some(FillLiquidity::Maker);
+        let result = replace_orders(&events, &wanted, &fills).unwrap();
+        let mut expected = (*events[0]).clone();
+        expected.fill_liquidity = Some(FillLiquidity::Maker);
+        assert_eq!(result, im::vector![Arc::new(expected)]);
+        assert_eq!(replace_orders(&result, &wanted, &fills).unwrap(), result);
+        // A partial observation is not proof that the unobserved remainder was Maker.
+        fills
+            .get_mut(&("FIL".into(), 0, 7))
+            .unwrap()
+            .get_mut("a")
+            .unwrap()
+            .quantity = 2.0;
+        assert_eq!(replace_orders(&events, &wanted, &fills).unwrap(), events);
+    }
+
+    #[test]
+    fn mixed_roles_require_fill_level_matches_and_never_change_notional() {
+        let wanted = BTreeSet::from([("FIL".into(), 0, 7)]);
+        let mut fills = decode_fills(
+            &[
+                record("123", "MARGIN", "a", 1.0, 100.0, false),
+                record("123", "MARGIN", "b", 2.0, 100.0, false),
+            ],
+            "123",
+            "BINANCE",
+            &wanted,
+        )
+        .unwrap();
+        let order = fills.get_mut(&("FIL".into(), 0, 7)).unwrap();
+        order.get_mut("a").unwrap().liquidity = Some(FillLiquidity::Maker);
+        order.get_mut("b").unwrap().liquidity = Some(FillLiquidity::Taker);
+        let events = im::vector![event(100.0, 1.0, 100_000), event(100.0, 2.0, 110_000)];
+        let result = replace_orders(&events, &wanted, &fills).unwrap();
+        assert_eq!(result[0].fill_liquidity, Some(FillLiquidity::Maker));
+        assert_eq!(result[1].fill_liquidity, Some(FillLiquidity::Taker));
+        // One aggregate lifecycle delta can be split only when both factual
+        // executions share its price and timestamp.
+        fills
+            .get_mut(&("FIL".into(), 0, 7))
+            .unwrap()
+            .get_mut("b")
+            .unwrap()
+            .timestamp_us = 100_000;
+        let combined = im::vector![event(100.0, 3.0, 100_000)];
+        let result = replace_orders(&combined, &wanted, &fills).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result
+                .iter()
+                .map(|e| e.amount_update * e.price)
+                .sum::<f64>(),
+            300.0
+        );
+        assert_eq!(result[0].fill_liquidity, Some(FillLiquidity::Maker));
+        assert_eq!(result[1].fill_liquidity, Some(FillLiquidity::Taker));
+        assert!(result.iter().all(|e| e.update_ts_us == 100_000));
+        let ambiguous = im::vector![event(100.0, 3.0, 200_000)];
+        assert_eq!(
+            replace_orders(&ambiguous, &wanted, &fills).unwrap(),
+            ambiguous
+        );
+    }
+
+    #[test]
+    fn recovered_fill_does_not_inherit_another_fills_role() {
+        let mut old = (*event(0.0, 3.0, 200_000)).clone();
+        old.fill_liquidity = Some(FillLiquidity::Maker);
+        let wanted = BTreeSet::from([("FIL".into(), 0, 7)]);
+        let mut fills = decode_fills(
+            &[
+                record("123", "MARGIN", "a", 1.0, 100.0, false),
+                record("123", "MARGIN", "b", 2.0, 103.0, false),
+            ],
+            "123",
+            "BINANCE",
+            &wanted,
+        )
+        .unwrap();
+        fills
+            .get_mut(&("FIL".into(), 0, 7))
+            .unwrap()
+            .get_mut("b")
+            .unwrap()
+            .liquidity = Some(FillLiquidity::Taker);
+        let result = replace_orders(&im::vector![Arc::new(old)], &wanted, &fills).unwrap();
+        assert_eq!(result[0].fill_liquidity, Some(FillLiquidity::Unknown));
+        assert_eq!(result[1].fill_liquidity, Some(FillLiquidity::Taker));
+    }
 }
 
 fn replace_orders(
@@ -524,9 +658,7 @@ fn replace_orders(
         // A priced lifecycle can arrive before its complete execution ledger.
         // Keep that factual lifecycle until the evidence catches up. Unpriced
         // deltas still require complete evidence before advancing the reader.
-        if actual + tolerance < expected && !unpriced
-            || (actual - expected).abs() <= tolerance && !unpriced
-        {
+        if actual + tolerance < expected && !unpriced {
             result.extend(original.into_iter().cloned());
             continue;
         }
@@ -553,6 +685,14 @@ fn replace_orders(
                 "execution order side/identity conflict for {}",
                 key.2
             );
+        }
+        if (actual - expected).abs() <= tolerance && !unpriced {
+            // Enrich existing priced lifecycle rows without changing factual
+            // price, quantity, timestamp, attribution or FIFO ordering.
+            result.extend(apply_roles(&original, order)?);
+            continue;
+        }
+        for fill in order.values() {
             let mut event = (**template).clone();
             event.record_key = format!(
                 "{:020}:execution:{}",
@@ -561,6 +701,9 @@ fn replace_orders(
             event.update_ts_us = fill.timestamp_us;
             event.price = fill.price;
             event.amount_update = fill.quantity;
+            // Never inherit an earlier lifecycle delta's role on a different
+            // recovered execution of the same order.
+            event.fill_liquidity = Some(fill.liquidity.unwrap_or(FillLiquidity::Unknown));
             result.push_back(Arc::new(event));
         }
         result.extend(
@@ -571,5 +714,94 @@ fn replace_orders(
         );
     }
     result.sort_by(|a, b| a.record_key.cmp(&b.record_key));
+    Ok(result)
+}
+
+fn with_role(event: &NavEvent, role: Option<FillLiquidity>) -> Result<NavEvent> {
+    let mut result = event.clone();
+    if let Some(role) = role {
+        ensure!(
+            event
+                .fill_liquidity
+                .is_none_or(|old| old == FillLiquidity::Unknown || old == role),
+            "RapidX lifecycle and execution fill roles conflict for order {}",
+            event.client_order_id
+        );
+        result.fill_liquidity = Some(role);
+    }
+    Ok(result)
+}
+
+fn apply_roles(
+    original: &[&Arc<NavEvent>],
+    order: &BTreeMap<String, Fill>,
+) -> Result<Vec<Arc<NavEvent>>> {
+    let first_role = order.values().next().and_then(|f| f.liquidity);
+    if first_role.is_some() && order.values().all(|f| f.liquidity == first_role) {
+        return original
+            .iter()
+            .map(|e| {
+                if e.amount_update > 0.0 {
+                    Ok(Arc::new(with_role(e, first_role)?))
+                } else {
+                    Ok((*e).clone())
+                }
+            })
+            .collect();
+    }
+    // Mixed-role orders need fill-level evidence. Match the same millisecond
+    // and price, consuming each execution quantity at most once. An aggregate
+    // lifecycle row with ambiguous prices/times remains explicitly unknown.
+    let mut remaining = order.values().map(|f| (f, f.quantity)).collect::<Vec<_>>();
+    let mut result = Vec::new();
+    for event in original {
+        if event.amount_update <= 0.0 {
+            result.push((*event).clone());
+            continue;
+        }
+        let tolerance = event.amount_update.abs() * 1e-12;
+        let mut needed = event.amount_update;
+        let mut parts = Vec::new();
+        for (index, (fill, quantity)) in remaining.iter().enumerate() {
+            if *quantity <= 0.0
+                || fill.timestamp_us / 1_000 != event.update_ts_us / 1_000
+                || (fill.price - event.price).abs() > event.price.abs() * 1e-12
+            {
+                continue;
+            }
+            let quantity = needed.min(*quantity);
+            parts.push((index, quantity, fill.liquidity));
+            needed -= quantity;
+            if needed <= tolerance {
+                break;
+            }
+        }
+        if needed > tolerance {
+            result.push((*event).clone());
+            continue;
+        }
+        for (index, quantity, _) in &parts {
+            remaining[*index].1 -= quantity;
+        }
+        // Coalesce identical roles so ordinary lifecycle fill counts stay
+        // unchanged. Only an actually mixed Maker/Taker delta needs splitting.
+        let role = parts.first().and_then(|p| p.2);
+        if parts.iter().all(|p| p.2 == role) {
+            result.push(Arc::new(with_role(event, role)?));
+        } else {
+            let mut used = 0.0;
+            for (i, (_, quantity, role)) in parts.iter().enumerate() {
+                let mut part = with_role(event, *role)?;
+                part.amount_update = if i + 1 == parts.len() {
+                    event.amount_update - used
+                } else {
+                    *quantity
+                };
+                used += part.amount_update;
+                part.record_key = format!("{}:liquidity:{i:08}", event.record_key);
+                result.push(Arc::new(part));
+            }
+        }
+    }
     Ok(result)
 }

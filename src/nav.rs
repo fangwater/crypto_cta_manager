@@ -2044,7 +2044,7 @@ fn load_source_history(source: &SourceConfig) -> Result<NavSourceHistory> {
         ));
     }
     let events = events.into_iter().collect();
-    let events = fill_recovery::resolve(source, &events)?.unwrap_or(events);
+    let events = fill_recovery::resolve(source, &events, &mut Default::default())?.unwrap_or(events);
     let liquidity_by_order = decode_liquidity_by_order(source, records)?;
     let decode_ms = decode_started.elapsed().as_millis();
     info!(
@@ -2119,6 +2119,7 @@ struct IncrementalSourceHistory {
     /// Keep original lifecycle events after evidence first changes the analysis
     /// projection, so a later real fill cannot duplicate a recovered execution.
     raw_events: Option<im::Vector<Arc<NavEvent>>>,
+    rapidx_liquidity: fill_recovery::LiquidityJournal,
     legacy_fill_times: im::OrdMap<LiquidityOrderKey, i64>,
 }
 
@@ -2247,7 +2248,7 @@ impl IncrementalSourceHistory {
             .unwrap_or(&self.history.events)
             .clone();
         combined.extend(new_events.iter().cloned());
-        let recovered = fill_recovery::resolve(source, &combined)?;
+        let recovered = fill_recovery::resolve(source, &combined, &mut self.rapidx_liquidity)?;
         let recovery_active = recovered.is_some() || self.raw_events.is_some();
         let recovered_events = if recovery_active {
             let mut appended = self.history.events.clone();
@@ -4368,6 +4369,78 @@ mod tests {
         assert_eq!(
             load_nav_source_histories(&config, &[]).unwrap()["rx01"].events(),
             after["rx01"].events()
+        );
+    }
+
+    #[test]
+    fn late_rapidx_journal_role_reprices_fees_without_new_orders_or_fifo_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("persist_manager");
+        let env_path = temp.path().join("exec.env");
+        std::fs::write(
+            &env_path,
+            "TRADE_ENGINE_EXEC_BACKEND=rapidx\nLTP_PORTFOLIO_ID=123\n",
+        )
+        .unwrap();
+        let mut source = source_at("rx01", &path, 0.0);
+        source.venue = "binance-futures".into();
+        source.env_path = Some(env_path);
+        source.maker_fee_rate = Some(-0.00002);
+        source.taker_fee_rate = Some(0.000175);
+        let config = app_config(vec![source.clone()]);
+        let mut fill = strategy_event_at(100_000, 100_000, "FILUSDT", 1, 2, 100.0, 3.0, "alpha");
+        fill.create_ts_us = 1;
+        fill.client_order_id = 7;
+        fill.fill_liquidity = Some(crate::model::FillLiquidity::Unknown);
+        write_events(&path, &[fill]);
+        {
+            let mut db = open_uniform_orders_db(&path);
+            db.create_cf("rapidx_executions", &Options::default())
+                .unwrap();
+            let record = fill_recovery::tests::record("123", "PERP", "a", 3.0, 100.0, false);
+            db.put_cf(
+                db.cf_handle("rapidx_executions").unwrap(),
+                record.key,
+                record.value,
+            )
+            .unwrap();
+        }
+        let mut store = NavHistoryStore::default();
+        let before = store.refresh(&config).unwrap();
+        let event = &before["rx01"].events()[0];
+        assert_close(
+            before["rx01"].estimated_fee_quote(&source, event).unwrap(),
+            0.0525,
+        );
+        let dir = temp.path().join("rapidx_account/rapidx_binance_123");
+        std::fs::create_dir_all(&dir).unwrap();
+        let role = serde_json::json!({"message":{"channel":"Trades","data":{
+            "portfolioId":"123","exchangeType":"BINANCE","transactionId":"a",
+            "orderId":"88","clientOrderId":"7","sym":"BINANCE_PERP_FIL_USDT",
+            "side":"SELL","quantity":"3","price":"100","createAt":"100","execType":"MAKER"
+        }}});
+        std::fs::write(dir.join("one.jsonl"), format!("{role}\n")).unwrap();
+        let after = store.refresh(&config).unwrap();
+        let history = &after["rx01"];
+        assert_ne!(history.revision, before["rx01"].revision);
+        assert!(history.change.is_none());
+        assert_eq!(history.liquidity_role_name(&history.events()[0]), "maker");
+        assert_close(
+            history
+                .estimated_fee_quote(&source, &history.events()[0])
+                .unwrap(),
+            -0.006,
+        );
+        let mut expected = (**event).clone();
+        expected.fill_liquidity = Some(crate::model::FillLiquidity::Maker);
+        assert_eq!(history.events(), &im::vector![Arc::new(expected)]);
+        assert_eq!(
+            store.refresh(&config).unwrap()["rx01"].revision,
+            history.revision
+        );
+        assert_eq!(
+            load_nav_source_histories(&config, &[]).unwrap()["rx01"].events(),
+            history.events()
         );
     }
 
