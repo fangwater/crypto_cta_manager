@@ -324,7 +324,7 @@ fn new_session_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn token_hash(token: &str) -> Vec<u8> {
+pub(crate) fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 

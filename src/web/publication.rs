@@ -14,6 +14,40 @@ pub(super) struct PublicationLocks {
 }
 
 impl PublicationLocks {
+    /// Configuration writes close admission instead of making real-time requests
+    /// wait behind a PostgreSQL operation on the configuration path.
+    pub(super) async fn run_available<T: Send + 'static>(
+        &self,
+        configuration: Arc<RwLock<()>>,
+        strategy: &str,
+        work: impl Future<Output = T> + Send + 'static,
+    ) -> Option<Result<T, tokio::task::JoinError>> {
+        let lock = {
+            let mut strategies = self.strategies.lock().unwrap_or_else(|e| e.into_inner());
+            strategies.retain(|_, lock| lock.strong_count() > 0);
+            strategies
+                .entry(strategy.to_owned())
+                .or_default()
+                .upgrade()
+                .unwrap_or_else(|| {
+                    let lock = Arc::new(AsyncMutex::new(()));
+                    strategies.insert(strategy.to_owned(), Arc::downgrade(&lock));
+                    lock
+                })
+        };
+        let strategy_guard = lock.lock_owned().await;
+        let configuration_guard = configuration.try_read_owned().ok()?;
+        Some(
+            tokio::spawn(async move {
+                let _strategy_guard = strategy_guard;
+                let _configuration_guard = configuration_guard;
+                work.await
+            })
+            .await,
+        )
+    }
+
+    #[cfg(test)]
     pub(super) async fn run<T: Send + 'static>(
         &self,
         configuration: Arc<RwLock<()>>,

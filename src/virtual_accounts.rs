@@ -573,8 +573,8 @@ pub async fn validate_source_bindings(
     pool: &PgPool,
     source: &crate::config::SourceConfig,
     bindings: &[VirtualBinding],
+    positions: &[crate::strategy_catalog::PositionStrategy],
 ) -> Result<()> {
-    let positions = crate::strategy_catalog::list_position_strategies(pool).await?;
     let orders = crate::strategy_catalog::list_order_strategies(pool).await?;
     for binding in bindings {
         let position = positions

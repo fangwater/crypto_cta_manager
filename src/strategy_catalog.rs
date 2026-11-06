@@ -890,6 +890,21 @@ pub async fn upsert_position_strategy(
     })
 }
 
+/// Cold configuration creation must never overwrite a name absent from a stale
+/// memory snapshot. The caller checks authorization again after catalog reload.
+pub(crate) async fn create_position_strategy(
+    pool: &PgPool,
+    request: &SavePositionStrategyRequest,
+    created_by_user_id: i64,
+    updated_at_us: i64,
+) -> Result<()> {
+    sqlx::query("INSERT INTO cta_position_strategies(strategy_name,targets,symbol_order_strategy_overrides,created_by_user_id,updated_at_us) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(strategy_name) DO NOTHING")
+        .bind(&request.strategy_name).bind(serde_json::to_value(&request.targets)?)
+        .bind(serde_json::to_value(&request.symbol_order_strategy_overrides)?)
+        .bind(created_by_user_id).bind(updated_at_us).execute(pool).await?;
+    Ok(())
+}
+
 pub async fn delete_position_strategy(pool: &PgPool, strategy_name: &str) -> Result<bool> {
     let result = sqlx::query("DELETE FROM cta_position_strategies WHERE strategy_name = $1")
         .bind(strategy_name)
@@ -1316,7 +1331,7 @@ pub async fn load_binding_parts(
     )))
 }
 
-async fn load_symbol_order_parameters(
+pub(crate) async fn load_symbol_order_parameters(
     pool: &PgPool,
     overrides: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, OrderParameters>> {

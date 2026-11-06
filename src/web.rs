@@ -53,6 +53,7 @@ mod nav_monitor;
 mod publication;
 #[cfg(test)]
 mod publication_tests;
+mod target_state;
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");
@@ -220,6 +221,8 @@ struct WebState {
     dashboard_refresh: Arc<tokio::sync::Mutex<()>>,
     configuration_lock: Arc<RwLock<()>>,
     publication_locks: Arc<publication::PublicationLocks>,
+    targets: Arc<target_state::Targets>,
+    factual_jobs: Arc<tokio::sync::Semaphore>,
     account_modes: Arc<account_mode::AccountModes>,
     configuration_notify: Arc<tokio::sync::Notify>,
     nav_history_store: Arc<std::sync::Mutex<nav::NavHistoryStore>>,
@@ -359,6 +362,7 @@ const MAX_PUBLISH_BODY_BYTES: usize = 1 << 20;
 #[derive(Clone)]
 struct AuthMiddlewareState {
     pool: PgPool,
+    targets: Arc<target_state::Targets>,
     configured_source_ids: BTreeSet<String>,
     source_viewers: BTreeMap<String, Vec<String>>,
 }
@@ -485,6 +489,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         viz_snapshot.clone(),
     );
     let position_archive = Arc::new(PositionArchive::open(manager_db.clone())?);
+    let targets = Arc::new(target_state::Targets::default());
+    targets.load(&pool, &position_archive).await?;
     let klines = Arc::new(KlineStore::from_db(
         manager_db.clone(),
         config.kline.clone(),
@@ -557,6 +563,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         dashboard_refresh,
         configuration_lock: Arc::new(RwLock::new(())),
         publication_locks: Arc::default(),
+        targets,
+        factual_jobs: Arc::new(tokio::sync::Semaphore::new(4)),
         account_modes,
         configuration_notify: Arc::new(tokio::sync::Notify::new()),
         nav_history_store,
@@ -582,6 +590,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         funding_daily,
         cumulative_funding: Arc::default(),
     };
+    target_state::spawn(&state);
     spawn_funding_collectors(&state);
     equity_history::spawn(state.clone());
     cumulative_funding::spawn(state.clone());
@@ -795,6 +804,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .layer(middleware::from_fn_with_state(
             AuthMiddlewareState {
                 pool: pool.clone(),
+                targets: state.targets.clone(),
                 configured_source_ids,
                 source_viewers: state.config.dashboard.source_viewers.clone(),
             },
@@ -964,11 +974,16 @@ async fn prepare_position_publish(
             .get(header::COOKIE)
             .and_then(|value| value.to_str().ok()),
     ) {
-        match auth::load_session(&auth_state.pool, &token).await {
+        match auth_state.targets.session(&token) {
             Ok(user) => session_user = user,
             Err(error) => {
-                error!(error = ?error, "failed to load authentication session");
-                return internal_error();
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: error.to_string(),
+                    }),
+                )
+                    .into_response();
             }
         }
     }
@@ -997,30 +1012,6 @@ fn position_publish_allowed(
     }) || token_matches
         // Existing tokenless strategies retain their machine-publish contract.
         || (user.is_none() && !access.token_required())
-}
-
-async fn authorize_position_publish(
-    pool: &PgPool,
-    user: Option<&AuthUser>,
-    access: Option<&strategy_catalog::PositionAccess>,
-    headers: &HeaderMap,
-) -> Result<bool> {
-    if position_publish_allowed(user, access, false) {
-        return Ok(true);
-    }
-    let Some(access) = access else {
-        return Ok(false);
-    };
-    let provided = headers
-        .get(PUBLISH_TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok());
-    let token_matches = access
-        .publish_token_hash
-        .as_deref()
-        .filter(|hash| !hash.is_empty())
-        .is_some_and(|hash| auth::publish_token_matches(provided, hash))
-        || auth::publish_fallback_token_matches(pool, provided).await?;
-    Ok(position_publish_allowed(user, Some(access), token_matches))
 }
 
 fn source_id_from_path(path: &str) -> Option<&str> {
@@ -1085,6 +1076,7 @@ async fn auth_register(
     headers: HeaderMap,
     Json(request): Json<auth::RegisterRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     if auth::has_users(&state.pool).await? {
         let user = load_request_user(&state.pool, &headers).await?;
         if !user.as_ref().is_some_and(AuthUser::is_admin) {
@@ -1114,6 +1106,7 @@ async fn auth_login(
     State(state): State<WebState>,
     Json(request): Json<auth::LoginRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     let user = match auth::login(&state.pool, request).await {
         Ok(user) => user,
         Err(_) => return Ok(unauthorized("invalid username or password")),
@@ -1135,6 +1128,7 @@ async fn auth_logout(
     State(state): State<WebState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     if let Some(token) = auth::extract_session_cookie(
         headers
             .get(header::COOKIE)
@@ -1211,6 +1205,7 @@ async fn auth_create_user(
     Extension(user): Extension<AuthUser>,
     Json(request): Json<auth::CreateUserRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     if !user.is_admin() {
         return Ok(forbidden("administrator permission required"));
     }
@@ -1254,6 +1249,7 @@ async fn auth_user_role(
     Path(user_id): Path<i64>,
     Json(request): Json<auth::SetRoleRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     if !user.is_admin() {
         return Ok(forbidden("administrator permission required"));
     }
@@ -2464,11 +2460,10 @@ async fn order_config_strategy(
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
-    let algorithm =
-        match strategy_catalog::load_binding_parts(&state.pool, &source_id, &query.name).await? {
-            Some((_, order, _, _)) => order.order_parameters.algorithm,
-            None => return Ok(not_found("strategy binding was not found")),
-        };
+    let algorithm = match load_current_binding_parts(&state, &source_id, &query.name).await? {
+        Some((_, order, _, _)) => order.order_parameters.algorithm,
+        None => return Ok(not_found("strategy binding was not found")),
+    };
     match state
         .exec_config
         .load_strategy(
@@ -2491,7 +2486,7 @@ async fn save_order_parameters(
     headers: HeaderMap,
     Json(request): Json<SaveOrderParametersRequest>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.write().await;
+    let _guard = state.targets.edit(&state.configuration_lock).await;
     if let Err(error) = virtual_accounts::require_independent(&state.pool, &source_id).await {
         return Ok((
             StatusCode::CONFLICT,
@@ -2526,9 +2521,7 @@ async fn save_order_parameters(
     // Execution parameters may only be written for a strategy that is already
     // bound on this account; binding it in the first place is the gated step.
     let bound_algorithm =
-        match strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.strategy_name)
-            .await?
-        {
+        match load_current_binding_parts(&state, &source_id, &request.strategy_name).await? {
             Some((_, order, _, _)) => order.order_parameters.algorithm,
             None => {
                 return Ok(bad_request(
@@ -2660,7 +2653,7 @@ async fn list_position_strategies(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
 ) -> Result<Response, ApiError> {
-    let strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
+    let strategies = current_position_strategies(&state).await?;
     let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
     let strategies: Vec<_> = strategies
         .into_iter()
@@ -2682,6 +2675,52 @@ async fn list_position_strategies(
     Ok((NO_STORE, Json(strategies)).into_response())
 }
 
+async fn current_position_strategies(
+    state: &WebState,
+) -> Result<Vec<strategy_catalog::PositionStrategy>> {
+    let mut strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
+    for strategy in &mut strategies {
+        if let Some(current) = state.targets.current(&strategy.strategy_name) {
+            if current.updated_at_us > strategy.updated_at_us {
+                *strategy = current;
+            }
+        }
+    }
+    Ok(strategies)
+}
+
+async fn load_current_binding_parts(
+    state: &WebState,
+    source: &str,
+    binding: &str,
+) -> Result<
+    Option<(
+        strategy_catalog::PositionStrategy,
+        strategy_catalog::OrderStrategy,
+        BTreeMap<String, crate::order_config::OrderParameters>,
+        f64,
+    )>,
+> {
+    let Some((mut position, order, mut overrides, shares)) =
+        strategy_catalog::load_binding_parts(&state.pool, source, binding).await?
+    else {
+        return Ok(None);
+    };
+    if let Some(current) = state.targets.current(&position.strategy_name) {
+        if current.updated_at_us > position.updated_at_us {
+            if current.symbol_order_strategy_overrides != position.symbol_order_strategy_overrides {
+                overrides = strategy_catalog::load_symbol_order_parameters(
+                    &state.pool,
+                    &current.symbol_order_strategy_overrides,
+                )
+                .await?;
+            }
+            position = current;
+        }
+    }
+    Ok(Some((position, order, overrides, shares)))
+}
+
 async fn save_position_strategy(
     State(state): State<WebState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -2700,7 +2739,7 @@ async fn save_position_strategy(
     let strategy_name = request.strategy_name.clone();
     let started = Instant::now();
     locks
-        .run(configuration, &strategy_name, async move {
+        .run_available(configuration, &strategy_name, async move {
             let admitted = Instant::now();
             let name = request.strategy_name.clone();
             let result =
@@ -2718,6 +2757,15 @@ async fn save_position_strategy(
             result
         })
         .await
+        .unwrap_or_else(|| {
+            Ok(Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "configuration is changing; retry the target update".into(),
+                }),
+            )
+                .into_response()))
+        })
         .context("position strategy publish task failed")?
 }
 
@@ -2725,171 +2773,19 @@ async fn save_position_strategy(
 // Authorization is checked here, after admission, including same-name creation.
 async fn save_position_strategy_inner(
     state: WebState,
-    peer_addr: SocketAddr,
+    _peer_addr: SocketAddr,
     user: Option<Extension<AuthUser>>,
     headers: HeaderMap,
     request: SavePositionStrategyRequest,
 ) -> Result<Response, ApiError> {
-    let preparation_started = Instant::now();
-    let session_user = user.as_ref().map(|Extension(user)| user);
-    let publish_visibility = session_user.map(|user| {
-        let configured = state
-            .config
-            .sources
-            .iter()
-            .map(|source| source.id.clone())
-            .collect();
-        auth::visible_source_boundary(
-            &configured,
-            &state.config.dashboard.source_viewers,
-            Some(&user.username),
-        )
-    });
-    let access =
-        strategy_catalog::load_position_access(&state.pool, &request.strategy_name).await?;
-    if !authorize_position_publish(&state.pool, session_user, access.as_ref(), &headers).await? {
-        warn!(peer = %peer_addr, strategy = %request.strategy_name, "rejected position strategy publish");
-        return Ok(forbidden(if access.is_none() {
-            "login required to create a position strategy"
-        } else {
-            "position publish requires an admin or authorized session, or the strategy publish token"
-        }));
-    }
-    let position_strategies = strategy_catalog::list_position_strategies(&state.pool).await?;
-    let previous = position_strategies
-        .iter()
-        .find(|strategy| strategy.strategy_name == request.strategy_name);
-    let order_strategies = strategy_catalog::list_order_strategies(&state.pool).await?;
-    if let Err(message) = require_experimental_algorithm_token(
-        &headers,
-        changed_override_uses_experimental_algorithm(&request, previous, &order_strategies),
-    ) {
-        return Ok(forbidden(message));
-    }
-    let created_by = session_user.map(|user| user.user_id);
-    for source_id in strategy_catalog::list_active_binding_source_ids_for_position(
-        &state.pool,
-        &request.strategy_name,
-    )
-    .await?
-    {
-        if let Some(source) = state
-            .config
-            .sources
-            .iter()
-            .find(|source| source.id == source_id)
-        {
-            for symbol in request.targets.keys() {
-                if let Err(error) = crate::exec_routing::validate_target_symbol(source, symbol) {
-                    if publish_visibility
-                        .as_ref()
-                        .is_some_and(|visible| !visible.contains(&source_id))
-                    {
-                        return Ok(bad_request(
-                            "a bound account rejected the target".to_string(),
-                        ));
-                    }
-                    return Ok(bad_request(format!("source {source_id}: {error}")));
-                }
-            }
-        }
-    }
-    // Freeze the same account projection for both archive and runtime publish.
-    // A cold/stale proxy cache rejects the request before changing the catalog.
-    let published_accounts =
-        match load_published_accounts(&state, &request.strategy_name, &request.targets).await {
-            Ok(accounts) => accounts,
-            Err(error) => {
-                return Ok((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(ErrorResponse {
-                        error: error.to_string(),
-                    }),
-                )
-                    .into_response());
-            }
-        };
-    match strategy_catalog::upsert_position_strategy(
-        &state.pool,
-        &request,
-        created_by,
-        unix_now_us(),
-    )
-    .await
-    {
-        Ok(saved) => {
-            let preparation_ms = preparation_started.elapsed().as_millis() as u64;
-            let snapshot_started = Instant::now();
-            let factual_positions = load_factual_positions(&state, &saved.strategy_name).await;
-            let snapshot_ms = snapshot_started.elapsed().as_millis() as u64;
-            let archive_started = Instant::now();
-            if let Err(error) = state.position_archive.append(
-                saved.updated_at_us,
-                &saved,
-                factual_positions,
-                published_accounts.clone(),
-            ) {
-                error!(
-                    strategy_name = %saved.strategy_name,
-                    updated_at_us = saved.updated_at_us,
-                    error = %error,
-                    "position strategy saved but RocksDB archive write failed"
-                );
-                return Err(error.into());
-            }
-            let archive_ms = archive_started.elapsed().as_millis() as u64;
-            let publish_started = Instant::now();
-            let mut publishes =
-                publish_bound_accounts(&state, &saved.strategy_name, &published_accounts).await;
-            info!(strategy_name = %saved.strategy_name, updated_at_us = saved.updated_at_us,
-                preparation_ms, snapshot_ms, archive_ms,
-                publish_ms = publish_started.elapsed().as_millis() as u64,
-                account_count = publishes.len(),
-                "position strategy publish stages completed");
-            if let Some(failed) = publishes.iter().find(|item| item.error.is_some()) {
-                let source_id = failed.source_id.as_str();
-                let binding_name = failed.binding_name.as_str();
-                let error = failed.error.as_deref().unwrap_or("publish failed");
-                error!(
-                    strategy_name = %saved.strategy_name,
-                    source_id,
-                    binding_name,
-                    error,
-                    "position strategy saved but bound-account publish failed"
-                );
-                return Ok((
-                    StatusCode::BAD_GATEWAY,
-                    Json(ErrorResponse {
-                        error: if publish_visibility.as_ref().is_some_and(|visible| !visible.contains(source_id)) {
-                            "position strategy saved, but a bound-account publish failed".to_string()
-                        } else { format!(
-                            "position strategy saved, but publish failed for {source_id}/{binding_name}: {error}"
-                        ) },
-                    }),
-                )
-                    .into_response());
-            }
-            if let Some(visible) = &publish_visibility {
-                publishes.retain(|publish| visible.contains(&publish.source_id));
-            }
-            Ok((
-                NO_STORE,
-                Json(SavedPositionStrategyResponse {
-                    strategy: saved,
-                    publishes,
-                }),
-            )
-                .into_response())
-        }
-        Err(error) => Ok(catalog_error(error)),
-    }
+    target_state::publish(state, user, headers, request).await
 }
 
 async fn delete_position_strategy(
     State(state): State<WebState>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.write().await;
+    let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     match strategy_catalog::delete_position_strategy(&state.pool, &name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("position strategy was not found")),
@@ -2921,6 +2817,7 @@ async fn save_position_publish_token(
     Path(name): Path<String>,
     Json(request): Json<strategy_catalog::SavePositionPublishTokenRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     let token = request.publish_token.trim();
     if !token.is_empty()
         && let Err(message) = strategy_catalog::validate_publish_token(token)
@@ -2951,6 +2848,7 @@ async fn reset_position_publish_token(
     State(state): State<WebState>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     let token = auth::generate_publish_token();
     let hash = auth::publish_token_hash(&token);
     match strategy_catalog::set_position_publish_token(&state.pool, &name, Some(hash)).await {
@@ -2977,6 +2875,7 @@ async fn save_position_managers(
     Path(name): Path<String>,
     Json(request): Json<strategy_catalog::SavePositionManagersRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     match strategy_catalog::set_position_managers(&state.pool, &name, &request.user_ids).await {
         Ok(true) => {}
         Ok(false) => return Ok(not_found("position strategy was not found")),
@@ -2999,6 +2898,7 @@ async fn save_position_grants(
     Path(name): Path<String>,
     Json(request): Json<strategy_catalog::SavePositionGrantsRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     let access = match strategy_catalog::load_position_access(&state.pool, &name).await? {
         Some(access) => access,
         None => return Ok(not_found("position strategy was not found")),
@@ -3067,6 +2967,7 @@ async fn add_fallback_token(
     State(state): State<WebState>,
     Json(request): Json<auth::AddPublishTokenRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     let token = match request
         .publish_token
         .as_deref()
@@ -3104,6 +3005,7 @@ async fn delete_fallback_token(
     State(state): State<WebState>,
     Path(token_id): Path<i64>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     match auth::delete_publish_token(&state.pool, token_id).await? {
         true => Ok(StatusCode::NO_CONTENT.into_response()),
         false => Ok(not_found("publish token was not found")),
@@ -3144,7 +3046,7 @@ async fn save_order_strategy(
     headers: HeaderMap,
     Json(request): Json<SaveOrderStrategyRequest>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.write().await;
+    let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
     if owners
         .get(&request.strategy_name)
@@ -3194,7 +3096,7 @@ async fn delete_order_strategy(
     Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.write().await;
+    let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
     if owners
         .get(&name)
@@ -3202,6 +3104,15 @@ async fn delete_order_strategy(
     {
         return Ok(forbidden(
             "only the order strategy owner or an admin may delete this template",
+        ));
+    }
+    if current_position_strategies(&state).await?.iter().any(|p| {
+        p.symbol_order_strategy_overrides
+            .values()
+            .any(|order| order == &name)
+    }) {
+        return Ok(bad_request(
+            "order strategy is referenced by a current position target".into(),
         ));
     }
     match strategy_catalog::delete_order_strategy(&state.pool, &name).await {
@@ -3255,7 +3166,7 @@ async fn save_account_funding(
     if !(60..=86400).contains(&request.refresh_secs) {
         return Ok(bad_request("funding 拉取间隔必须为 60–86400 秒".into()));
     }
-    let _configuration_guard = state.configuration_lock.write().await;
+    let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     let mut settings = state.funding.settings(&source_id);
     if request.enabled && !settings.enabled {
         let expected = std::env::var(&state.config.funding.enable_token_env).ok();
@@ -3477,6 +3388,7 @@ async fn save_account_estimated_fee_rate(
     Path(source_id): Path<String>,
     Json(request): Json<SaveEstimatedFeeRateRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
@@ -3518,6 +3430,7 @@ async fn save_account_fee_rates(
     Path(source_id): Path<String>,
     Json(request): Json<SaveFeeRatesRequest>,
 ) -> Result<Response, ApiError> {
+    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
@@ -4023,14 +3936,12 @@ async fn save_account_binding(
     headers: HeaderMap,
     Json(request): Json<SaveBindingRequest>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.write().await;
+    let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
-    let existing =
-        strategy_catalog::load_binding_parts(&state.pool, &source_id, &request.binding_name)
-            .await?;
+    let existing = load_current_binding_parts(&state, &source_id, &request.binding_name).await?;
     let order_strategies = strategy_catalog::list_order_strategies(&state.pool).await?;
     let selected_order = order_strategies
         .iter()
@@ -4080,7 +3991,7 @@ async fn save_account_binding(
             "strategy configure permission required to bind this position strategy",
         ));
     }
-    if let Some(position) = strategy_catalog::list_position_strategies(&state.pool)
+    if let Some(position) = current_position_strategies(&state)
         .await?
         .into_iter()
         .find(|position| position.strategy_name == request.position_strategy_name)
@@ -4148,13 +4059,12 @@ async fn save_account_binding_shares(
     headers: HeaderMap,
     Json(request): Json<SaveBindingSharesRequest>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.write().await;
+    let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
         Err(response) => return Ok(response),
     };
-    let existing =
-        strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name).await?;
+    let existing = load_current_binding_parts(&state, &source_id, &binding_name).await?;
     if request.shares > 0.0
         && let Some((position, _, _, _)) = &existing
     {
@@ -4213,7 +4123,7 @@ async fn delete_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.write().await;
+    let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     match strategy_catalog::delete_binding(&state.pool, &source_id, &binding_name).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
         Ok(false) => Ok(not_found("binding was not found")),
@@ -4225,7 +4135,7 @@ async fn publish_account_binding(
     State(state): State<WebState>,
     Path((source_id, binding_name)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let _configuration_guard = state.configuration_lock.write().await;
+    let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     if !virtual_accounts::pending(&state.pool, &source_id)
         .await?
         .is_empty()
@@ -4240,7 +4150,7 @@ async fn publish_account_binding(
         )
             .into_response());
     }
-    let shares = strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name)
+    let shares = load_current_binding_parts(&state, &source_id, &binding_name)
         .await?
         .map(|loaded| loaded.3);
     if shares == Some(0.0) {
@@ -4288,7 +4198,7 @@ async fn preview_account_binding_targets(
         Err(error) => return Ok(publish_failure_response(error)),
     };
     let Some((position, order, overrides, shares)) =
-        strategy_catalog::load_binding_parts(&state.pool, &source_id, &binding_name).await?
+        load_current_binding_parts(&state, &source_id, &binding_name).await?
     else {
         return Ok(not_found("binding was not found"));
     };
@@ -4340,84 +4250,6 @@ async fn preview_account_binding_targets(
     }))).into_response())
 }
 
-async fn publish_bound_accounts(
-    state: &WebState,
-    strategy_name: &str,
-    archived: &[crate::position_archive::ArchivedPublishedAccount],
-) -> Vec<BindingPublishResult> {
-    let bindings =
-        match strategy_catalog::list_active_bindings_for_position(&state.pool, strategy_name).await
-        {
-            Ok(bindings) => bindings,
-            Err(error) => {
-                warn!(
-                    strategy_name,
-                    error = %error,
-                    "failed to list bound accounts for position publish"
-                );
-                return vec![BindingPublishResult {
-                    source_id: String::new(),
-                    binding_name: strategy_name.to_string(),
-                    shares: 0.0,
-                    published: None,
-                    error: Some("failed to list bound accounts".to_string()),
-                }];
-            }
-        };
-    let mut publishes = Vec::with_capacity(bindings.len());
-    for binding in bindings {
-        let started = Instant::now();
-        let projection = archived
-            .iter()
-            .find(|a| a.source_id == binding.source_id && a.binding_name == binding.binding_name)
-            .and_then(|a| a.target_projection.as_ref());
-        match publish_binding_with_projection(
-            state,
-            &binding.source_id,
-            &binding.binding_name,
-            projection,
-        )
-        .await
-        {
-            Ok(published) => {
-                info!(
-                    strategy_name,
-                    source_id = %binding.source_id,
-                    binding_name = %binding.binding_name,
-                    shares = binding.shares,
-                    duration_ms = started.elapsed().as_millis() as u64,
-                    "published bound account after position update"
-                );
-                publishes.push(BindingPublishResult {
-                    source_id: binding.source_id,
-                    binding_name: binding.binding_name,
-                    shares: binding.shares,
-                    published: Some(published),
-                    error: None,
-                });
-            }
-            Err(error) => {
-                warn!(
-                    strategy_name,
-                    source_id = %binding.source_id,
-                    binding_name = %binding.binding_name,
-                    error = %error.message,
-                    duration_ms = started.elapsed().as_millis() as u64,
-                    "bound-account publish failed after position update"
-                );
-                publishes.push(BindingPublishResult {
-                    source_id: binding.source_id,
-                    binding_name: binding.binding_name,
-                    shares: binding.shares,
-                    published: None,
-                    error: Some(error.message),
-                });
-            }
-        }
-    }
-    publishes
-}
-
 /// A user may newly bind a position strategy only when they hold its
 /// configure grant (or publish-manage it); existing bindings stay editable
 /// with just the account-level configure grant checked by the middleware.
@@ -4445,7 +4277,7 @@ async fn stop_binding(
 ) -> std::result::Result<OrderStrategyView, PublishFailure> {
     // Keep the strategy in Exec and publish zero under its original name so
     // close fills remain attributable instead of becoming SYSTEM_POSITION_CLOSE.
-    let loaded = strategy_catalog::load_binding_parts(&state.pool, source_id, binding_name)
+    let loaded = load_current_binding_parts(&state, source_id, binding_name)
         .await
         .map_err(|error| PublishFailure {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -4526,7 +4358,7 @@ async fn publish_binding_with_projection(
         Ok(source) => source,
         Err(error) => return Err(error),
     };
-    let loaded = strategy_catalog::load_binding_parts(&state.pool, source_id, binding_name)
+    let loaded = load_current_binding_parts(&state, source_id, binding_name)
         .await
         .map_err(|error| PublishFailure {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -4673,72 +4505,6 @@ fn publish_failure_response(error: PublishFailure) -> Response {
         }),
     )
         .into_response()
-}
-
-async fn load_published_accounts(
-    state: &WebState,
-    strategy_name: &str,
-    targets: &BTreeMap<String, crate::order_config::TargetPosition>,
-) -> Result<Vec<crate::position_archive::ArchivedPublishedAccount>> {
-    let snapshots =
-        strategy_catalog::list_publish_snapshots_for_position(&state.pool, strategy_name).await?;
-    let fees = postgres::load_theoretical_twap_fee_rates(&state.pool).await?;
-    snapshots
-        .into_iter()
-        .map(|snapshot| {
-            let fee = fees
-                .get(&snapshot.source_id)
-                .cloned()
-                .context("missing theoretical fee for archived account")?;
-            let mut account = crate::position_archive::published_account(
-                snapshot.source_id,
-                snapshot.binding_name,
-                snapshot.shares,
-            );
-            if let Some(source) = state
-                .config
-                .sources
-                .iter()
-                .find(|s| s.id == account.source_id)
-            {
-                account.target_projection =
-                    state
-                        .redis_runtime
-                        .project_targets(source, targets, account.shares)?;
-            }
-            account.set_theoretical_fees(Some(fee));
-            Ok(account)
-        })
-        .collect()
-}
-
-async fn load_factual_positions(
-    state: &WebState,
-    strategy_name: &str,
-) -> Vec<SourceFactualPositions> {
-    let source_ids = match strategy_catalog::list_active_binding_source_ids_for_position(
-        &state.pool,
-        strategy_name,
-    )
-    .await
-    {
-        Ok(source_ids) => source_ids,
-        Err(error) => {
-            warn!(
-                strategy_name,
-                error = %error,
-                "failed to list bound sources for position update archive"
-            );
-            return Vec::new();
-        }
-    };
-    let mut out = Vec::new();
-    for source_id in source_ids {
-        if let Some(positions) = load_factual_position(state, &source_id, strategy_name).await {
-            out.push(positions);
-        }
-    }
-    out
 }
 
 async fn load_factual_position(
@@ -5937,6 +5703,8 @@ mod tests {
             dashboard_refresh: gate.clone(),
             configuration_lock: Arc::default(),
             publication_locks: Arc::default(),
+            targets: Arc::default(),
+            factual_jobs: Arc::new(tokio::sync::Semaphore::new(4)),
             account_modes: Arc::default(),
             configuration_notify: Arc::default(),
             nav_history_store: Arc::default(),
@@ -6868,12 +6636,15 @@ async fn validate_virtual_activation(
     multiplier: f64,
 ) -> Result<(), String> {
     let source = resolve_publish_source(&state.config, source_id).map_err(|e| e.message)?;
-    virtual_accounts::validate_source_bindings(&state.pool, source, bindings)
+    let current_positions = current_position_strategies(&state)
+        .await
+        .map_err(|e| e.to_string())?;
+    virtual_accounts::validate_source_bindings(&state.pool, source, bindings, &current_positions)
         .await
         .map_err(|e| e.to_string())?;
     let effective =
         virtual_accounts::effective_bindings(bindings, multiplier).map_err(|e| e.to_string())?;
-    let positions = strategy_catalog::list_position_strategies(&state.pool)
+    let positions = current_position_strategies(&state)
         .await
         .map_err(|e| e.to_string())?;
     for b in effective {
@@ -6925,7 +6696,7 @@ async fn save_virtual_account_response(
     virtual_id: Option<&str>,
     request: SaveVirtualAccount,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.write().await;
+    let _guard = state.targets.edit(&state.configuration_lock).await;
     if let Some(id) = virtual_id {
         let Some(account) = virtual_account_for_user(state, user, id).await? else {
             return Ok(not_found("virtual account was not found"));
@@ -6937,7 +6708,7 @@ async fn save_virtual_account_response(
         }
     }
     // Also validate catalogs when the virtual account has no real followers.
-    let positions = strategy_catalog::list_position_strategies(&state.pool).await?;
+    let positions = current_position_strategies(&state).await?;
     let orders = strategy_catalog::list_order_strategies(&state.pool).await?;
     if !user.is_admin() {
         let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
@@ -7023,7 +6794,7 @@ async fn delete_virtual_account(
     Extension(user): Extension<AuthUser>,
     Path(virtual_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.write().await;
+    let _guard = state.targets.edit(&state.configuration_lock).await;
     let Some(account) = virtual_account_for_user(&state, &user, &virtual_id).await? else {
         return Ok(not_found("virtual account was not found"));
     };
@@ -7074,7 +6845,7 @@ async fn save_virtual_grants(
     Path(virtual_id): Path<String>,
     Json(request): Json<SaveVirtualGrants>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.write().await;
+    let _guard = state.targets.edit(&state.configuration_lock).await;
     let Some(account) = virtual_account_for_user(&state, &user, &virtual_id).await? else {
         return Ok(not_found("virtual account was not found"));
     };
@@ -7103,7 +6874,7 @@ async fn save_account_configuration(
     Path(source_id): Path<String>,
     Json(request): Json<AccountConfiguration>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.configuration_lock.write().await;
+    let _guard = state.targets.edit(&state.configuration_lock).await;
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
@@ -7167,7 +6938,7 @@ fn spawn_configuration_publisher(state: WebState) {
                 }
                 Ok(true) => {}
             }
-            let _guard = state.configuration_lock.write().await;
+            let _guard = state.targets.edit(&state.configuration_lock).await;
             if let Err(error) = publish_pending_configurations(&state).await {
                 warn!(error = %error, "virtual account synchronization failed; pending changes retained");
             }
@@ -7240,10 +7011,9 @@ async fn archive_configuration_binding(
     binding: &str,
 ) -> Result<Option<crate::target_proxy::TargetProjection>> {
     // Both positive changes and stops need a frozen account-specific archive event.
-    let (position, _, _, shares) =
-        strategy_catalog::load_binding_parts(&state.pool, source, binding)
-            .await?
-            .context("pending binding disappeared")?;
+    let (position, _, _, shares) = load_current_binding_parts(&state, source, binding)
+        .await?
+        .context("pending binding disappeared")?;
     let mut account = crate::position_archive::published_account(source, binding, shares);
     let source_config =
         resolve_publish_source(&state.config, source).map_err(|e| anyhow::anyhow!(e.message))?;

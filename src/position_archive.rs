@@ -185,6 +185,76 @@ impl PositionArchive {
         factual_positions: Vec<SourceFactualPositions>,
         published_accounts: Vec<ArchivedPublishedAccount>,
     ) -> Result<PositionUpdateMsg> {
+        self.append_inner(
+            received_at_us,
+            strategy,
+            factual_positions,
+            published_accounts,
+            None,
+        )
+    }
+
+    /// Keep the recoverable current target and its immutable history in one WAL write.
+    pub fn append_target(
+        &self,
+        strategy: &PositionStrategy,
+        created_at_us: i64,
+        published_accounts: Vec<ArchivedPublishedAccount>,
+    ) -> Result<PositionUpdateMsg> {
+        self.append_inner(
+            strategy.updated_at_us,
+            strategy,
+            Vec::new(),
+            published_accounts,
+            Some(created_at_us),
+        )
+    }
+
+    pub fn current_target(
+        &self,
+        name: &str,
+        created_at_us: i64,
+    ) -> Result<Option<PositionStrategy>> {
+        let Some(value) = self.db.db().get(format!("position_current:{name}"))? else {
+            return Ok(None);
+        };
+        let (identity, strategy): (i64, PositionStrategy) = serde_json::from_slice(&value)?;
+        anyhow::ensure!(
+            strategy.strategy_name == name,
+            "current target strategy identity mismatch"
+        );
+        strategy.validate().map_err(anyhow::Error::msg)?;
+        Ok((identity == created_at_us).then_some(strategy))
+    }
+
+    /// Enrichment never changes the received target, shares, fees or target index revision.
+    pub fn enrich_factual_positions(
+        &self,
+        mut message: PositionUpdateMsg,
+        positions: Vec<SourceFactualPositions>,
+    ) -> Result<()> {
+        message.factual_positions = positions.into_iter().map(archive_source).collect();
+        let handle = self
+            .db
+            .db()
+            .cf_handle(POSITION_UPDATES_CF)
+            .context("position_updates column family disappeared")?;
+        self.db.db().put_cf(
+            &handle,
+            manager_db::encode_seq_key(message.received_at_us, message.seq)?,
+            serde_json::to_vec(&message)?,
+        )?;
+        Ok(())
+    }
+
+    fn append_inner(
+        &self,
+        received_at_us: i64,
+        strategy: &PositionStrategy,
+        factual_positions: Vec<SourceFactualPositions>,
+        published_accounts: Vec<ArchivedPublishedAccount>,
+        current_identity: Option<i64>,
+    ) -> Result<PositionUpdateMsg> {
         if received_at_us <= 0 {
             bail!("position update received_at_us must be positive");
         }
@@ -235,7 +305,17 @@ impl PositionArchive {
         );
         let key = manager_db::encode_seq_key(received_at_us, seq)?;
         let value = serde_json::to_vec(&msg).context("failed to encode position update message")?;
-        self.db.db().put_cf(&handle, key, value).with_context(|| {
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(&handle, key, value);
+        if let Some(identity) = current_identity {
+            batch.put(
+                format!("position_current:{}", strategy.strategy_name),
+                serde_json::to_vec(&(identity, strategy))?,
+            );
+        }
+        let mut options = rocksdb::WriteOptions::default();
+        options.set_sync(current_identity.is_some());
+        self.db.db().write_opt(batch, &options).with_context(|| {
             format!(
                 "failed to append position update {} seq {seq}",
                 strategy.strategy_name
@@ -514,6 +594,25 @@ mod tests {
     use std::collections::BTreeMap;
 
     use tempfile::TempDir;
+
+    #[test]
+    fn durable_current_target_survives_reopen_without_configuration_events_rewinding_it() {
+        let dir = TempDir::new().unwrap();
+        {
+            let archive = PositionArchive::open(ManagerDb::open(dir.path()).unwrap()).unwrap();
+            let first = strategy("live", 1.0, 0, 100);
+            let latest = strategy("live", 2.0, 1, 200);
+            archive.append_target(&first, 7, vec![]).unwrap();
+            archive.append_target(&latest, 7, vec![]).unwrap();
+            archive.append(300, &first, vec![], vec![]).unwrap();
+        }
+        let archive = PositionArchive::open(ManagerDb::open(dir.path()).unwrap()).unwrap();
+        let latest = archive.current_target("live", 7).unwrap().unwrap();
+        assert_eq!(latest.targets["BTCUSDT"].qty, 2.0);
+        assert_eq!(latest.targets["BTCUSDT"].signal, 1);
+        assert!(archive.current_target("live", 8).unwrap().is_none());
+        assert_eq!(archive.scan_from(0).unwrap().len(), 3);
+    }
 
     use super::*;
     use crate::order_config::TargetPosition;

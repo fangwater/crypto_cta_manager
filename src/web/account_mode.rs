@@ -28,6 +28,12 @@ pub(super) struct AccountModes {
 }
 
 impl AccountModes {
+    #[cfg(test)]
+    pub(super) fn verified_fixture(source: &str) -> Self {
+        Self {
+            sources: BTreeMap::from([(source.into(), CheckedMode::Verified)]),
+        }
+    }
     /// Finish every enabled publisher's check before opening the API. An
     /// account failure is retained locally and does not disable other sources.
     pub(super) async fn initialize(sources: &[SourceConfig]) -> Result<Self> {

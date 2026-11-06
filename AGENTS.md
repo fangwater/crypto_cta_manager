@@ -354,8 +354,9 @@ administrator, and afterwards admins create users through
 accepted
 `POST /api/catalog/position-strategies` is appended as one JSON message in
 column family `position_updates`. The message includes the POST body, each
-active bound account's then-current `shares`, and factual positions read from each
-source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty`. Published qty
+active bound account's then-current `shares`. Factual positions from each
+source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty` are enriched
+asynchronously after Exec publication, with their own observation timestamps. Published qty
 is reconstructed later as template qty × shares. Later changes to shares must
 not rewrite older messages. A binding with `shares = 0` is stopped: Manager
 archives and publishes one complete zero target vector under the original
@@ -363,8 +364,21 @@ strategy name when zero is saved, then excludes the binding from later
 automatic position publishes. Keep the zero-share binding so a failed clear can
 be retried. Do not route this normal stop through `SYSTEM_POSITION_CLOSE`;
 attributed close fills must remain `batch_exec:<strategy_name>`. PostgreSQL
-remains the current catalog. Deleting an account binding is allowed only after
+remains the configuration catalog and an asynchronous latest-target mirror. Deleting an account binding is allowed only after
 its shares are zero and does not remove the zero-target strategy from Exec.
+
+By operator instruction on 2026-11-06, PostgreSQL must not block normal target
+publication. Existing strategies use the in-memory permission, session, order,
+binding and fee snapshot. Persist the current target and immutable history in
+one small Manager RocksDB WAL write, then publish the received target directly
+to Redis/IPC without SQL or account snapshot HTTP. Background PG writes coalesce
+to one latest target per strategy and retry independently of HTTP acknowledgements.
+Cold readers overlay the in-memory target while PG is behind; restart restores
+it from RocksDB. Configuration mutations invalidate the prepared snapshot under
+the existing publication barrier; admission fails closed until reload completes.
+Creating a new strategy remains a session-authorized configuration operation;
+tokens cannot create strategies or overwrite a conflicting creator. See
+`docs/target_publication.md` for ordering, recovery and failure semantics.
 
 By operator instruction on 2026-11-05, verify trading account mode once per
 enabled publishable source during Manager startup, before accepting target
