@@ -103,3 +103,49 @@ Remote backup: `~/crypto_cta_manager/backups/target-pg-async-20261106T152335Z/`.
 Operational evidence: `~/crypto_cta_manager/run/target-pg-async-20261106T152335Z/`
 and local `../artifacts/manager_async_targets_20261106/deploy/`. A rollback is
 binary-only and must preserve current host configuration, Redis and RocksDB.
+
+## el01 production deployment
+
+Published the same target-publication patch `b8eb962` to `cta_exec` on
+2026-11-06 as `target-pg-async-20261106T231853Z`. Built locally in the existing
+checkout with `cargo build --locked --release --bin cta_web`, retaining el01's
+default `daily-fifo` feature and JSON float-roundtrip parser. The complete
+default-feature suite passed 520 tests with 27 existing environment skips;
+formatting and the read-only allocation preflight passed. No schema maintenance
+was needed. el01 currently has no allocation-anchor rows.
+
+The previous el01 release's Cargo hashes and backend sources were compared with
+the build manifest. Besides the publication patch, the three differing NAV files
+contain the committed RapidX liquidity classification change `60ccb08` and its
+daily-FIFO call signature. Reversing those changes reproduces all three previous
+production hashes. All 14 enabled el01 sources use native Binance Futures, for
+which that RapidX branch is inactive; the existing daily-FIFO implementation and
+seven-day memory window were retained. No unrelated worktree edits were reset.
+
+Uploaded to an explicit temporary binary path, verified SHA-256, backed up the
+previous artifact and atomically installed only `bin/cta_web`. Restarted only
+`crypto-cta-manager-web.service`; frontend, account bindings, source configuration
+and trading processes were preserved. New binary SHA-256:
+`aaedb4e930d96f3dcd72a4fce91c898348de9108dcfa3bbe3ae7d20b690da124`.
+
+Manager PID `1440148` retained CPU0–7 on all 41 observed threads, with
+`NRestarts=0`. All 14 enabled sources passed startup account-mode checks. The
+API became ready at 23:26:33 UTC after its initial history load. Anonymous health
+returns401 and the unchanged frontend returns200. The 36 non-binary runtime
+file hashes, frontend contents and target, all 11 metadata/immutable-snapshot
+digests (including 113 bindings), and 76 other process identities/surviving
+thread affinities matched the pre-deployment baseline; 16 auxiliary threads
+had ended between samples.
+
+Through 23:31:35 UTC, 310 natural target requests, including the 23:30 five-minute
+batch, returned HTTP200. Median/P95/max processing was 3/7/193ms. No application
+errors, bound-account publish failures or delayed-mirror warnings were observed;
+the PG mirror caught up to all 15 observed active strategies. Stable-revision
+readback of 67 active Batch runtime bindings across 12 sources matched all 1,495
+target quantities and execution signals, with no mismatches or read races.
+No old signal was replayed or test target injected.
+
+Remote backup: `~/crypto_cta_manager/backups/target-pg-async-20261106T231853Z/`.
+Evidence: `~/crypto_cta_manager/run/target-pg-async-20261106T231853Z/` and local
+`../artifacts/el01_async_targets_20261106/`. Rollback is binary-only and must
+preserve current host configuration, Redis and RocksDB.
