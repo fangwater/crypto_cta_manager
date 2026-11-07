@@ -170,6 +170,9 @@ pub struct HealthResponse {
     pub last_attempt_at_us: i64,
     pub refresh_interval_secs: u64,
     pub last_refresh_error: Option<String>,
+    pub pending_target_archives: usize,
+    pub pending_target_mirrors: usize,
+    pub target_persistence_error: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -815,18 +818,33 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         .await
         .with_context(|| format!("failed to bind CTA web API to {bind}"))?;
     // Do not start financial automation until all initialization and binding succeed.
+    let persistence = state.targets.clone();
+    let shutdown_persistence = persistence.clone();
     spawn_configuration_publisher(state);
     bnb.spawn(treasury_sources.clone());
     auto_earn.spawn(treasury_sources);
     info!(%bind, refresh_interval_secs, "CTA web API started");
 
-    axum::serve(
+    let result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        shutdown_persistence.close();
+    })
     .await
-    .context("CTA web API stopped unexpectedly")
+    .context("CTA web API stopped unexpectedly");
+    if tokio::time::timeout(Duration::from_secs(10), persistence.drain_archive())
+        .await
+        .is_err()
+    {
+        warn!(
+            pending = persistence.persistence_status().0,
+            "shutdown archive drain timed out; unpersisted targets may be lost"
+        );
+    }
+    result
 }
 
 async fn auth_middleware(
@@ -1670,8 +1688,10 @@ async fn health(
     Extension(visible): Extension<VisibleSources>,
 ) -> impl IntoResponse {
     let cache = state.cache.read().await;
+    let (pending_target_archives, pending_target_mirrors, target_persistence_error) =
+        state.targets.persistence_status();
     let response = HealthResponse {
-        status: if cache.last_refresh_error.is_some() {
+        status: if cache.last_refresh_error.is_some() || target_persistence_error {
             "degraded"
         } else {
             "ok"
@@ -1687,6 +1707,9 @@ async fn health(
         last_attempt_at_us: cache.last_attempt_at_us,
         refresh_interval_secs: cache.dashboard.refresh_interval_secs,
         last_refresh_error: cache.last_refresh_error.clone(),
+        pending_target_archives,
+        pending_target_mirrors,
+        target_persistence_error,
     };
     (NO_STORE, Json(response))
 }
@@ -4312,14 +4335,11 @@ async fn stop_binding(
         .await
         .into_iter()
         .collect();
-    state
-        .position_archive
-        .append(
-            updated_at_us,
-            &position,
-            factual_positions,
-            vec![archived_account],
-        )
+    let archive = state.position_archive.clone();
+    tokio::task::spawn_blocking(move || archive.append(updated_at_us, &position, factual_positions, vec![archived_account]))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|result| result)
         .map_err(|error| {
             error!(
                 source_id,
@@ -7028,8 +7048,11 @@ async fn archive_configuration_binding(
         .await
         .into_iter()
         .collect();
-    state
-        .position_archive
-        .append(unix_now_us(), &position, factual, vec![account])?;
+    let archive = state.position_archive.clone();
+    let received_at_us = unix_now_us();
+    tokio::task::spawn_blocking(move || {
+        archive.append(received_at_us, &position, factual, vec![account])
+    })
+    .await??;
     Ok(projection)
 }

@@ -150,6 +150,11 @@ async fn locked_pg_mirror_does_not_block_existing_targets_and_creator_race() {
     .await
     .unwrap();
     assert_eq!(targets["BTCUSDT"]["qty"], 2.0);
+    state
+        .targets
+        .flush_archive(&state.position_archive)
+        .await
+        .unwrap();
     assert_eq!(state.position_archive.scan_from(0).unwrap().len(), 3);
 
     // Simultaneous same-name creation must recheck authorization after the
@@ -172,6 +177,11 @@ async fn locked_pg_mirror_does_not_block_existing_targets_and_creator_race() {
     };
     assert_eq!(row.0, winner.0);
     assert_eq!(row.1["BTCUSDT"]["qty"], winner.1);
+    state
+        .targets
+        .flush_archive(&state.position_archive)
+        .await
+        .unwrap();
     assert_eq!(state.position_archive.scan_from(0).unwrap().len(), 4);
 
     // A name created outside this process after its last metadata snapshot is
@@ -207,7 +217,7 @@ async fn locked_pg_mirror_does_not_block_existing_targets_and_creator_race() {
     .execute(&pool)
     .await
     .unwrap();
-    let stale = target_state::Targets::default();
+    let stale = Arc::new(target_state::Targets::default());
     stale.load(&pool, &state.position_archive).await.unwrap();
     let mut old = stale.catalog().unwrap().entries["recreated"].clone();
     old.strategy.updated_at_us = unix_now_us();

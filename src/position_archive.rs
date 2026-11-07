@@ -161,6 +161,12 @@ pub struct PositionArchive {
 }
 
 impl PositionArchive {
+    #[cfg(test)]
+    pub(crate) fn hold_writes(&self, blocked: impl FnOnce()) {
+        let _guard = self.last_key.lock().unwrap();
+        blocked();
+    }
+
     pub fn open(db: ManagerDb) -> Result<Self> {
         db.ensure_column_family(POSITION_UPDATES_CF)?;
         let last_key = latest_key(&db)?.unwrap_or((0, 0));
@@ -272,6 +278,40 @@ impl PositionArchive {
             .db()
             .cf_handle(POSITION_UPDATES_CF)
             .context("position_updates column family disappeared")?;
+        // A WAL sync error may be reported after its atomic batch was committed.
+        // The ordered background writer retries that exact target, never a new event.
+        if let Some(identity) = current_identity
+            && self
+                .db
+                .db()
+                .get(format!("position_current:{}", strategy.strategy_name))?
+                .as_deref()
+                == Some(serde_json::to_vec(&(identity, strategy))?.as_slice())
+        {
+            let start = manager_db::encode_seq_key(received_at_us, 0)?;
+            for item in self
+                .db
+                .db()
+                .iterator_cf(&handle, IteratorMode::From(&start, Direction::Forward))
+            {
+                let (key, value) = item?;
+                let cursor =
+                    manager_db::decode_seq_key(&key).context("invalid archived target key")?;
+                if cursor.0 != received_at_us {
+                    break;
+                }
+                let message = decode_msg(&value)?;
+                if message.strategy.strategy_name == strategy.strategy_name
+                    && message.strategy.updated_at_us == strategy.updated_at_us
+                {
+                    // Visibility alone does not prove that the failed sync was durable.
+                    self.db.db().flush_wal(true)?;
+                    self.record_append(&mut last, cursor)?;
+                    return Ok(message);
+                }
+            }
+            bail!("current target has no matching atomic archive event");
+        }
         let seq = if received_at_us > last.0 {
             0
         } else if received_at_us == last.0 {
@@ -321,7 +361,11 @@ impl PositionArchive {
                 strategy.strategy_name
             )
         })?;
-        let key = (received_at_us, seq);
+        self.record_append(&mut last, (received_at_us, seq))?;
+        Ok(msg)
+    }
+
+    fn record_append(&self, last: &mut (i64, u32), key: (i64, u32)) -> Result<()> {
         let mut writes = self.target_writes.lock().unwrap();
         writes.revision = writes
             .revision
@@ -335,7 +379,7 @@ impl PositionArchive {
             }
         }
         *last = (*last).max(key);
-        Ok(msg)
+        Ok(())
     }
 
     pub fn target_changes_since(
@@ -611,6 +655,26 @@ mod tests {
         assert_eq!(latest.targets["BTCUSDT"].qty, 2.0);
         assert_eq!(latest.targets["BTCUSDT"].signal, 1);
         assert!(archive.current_target("live", 8).unwrap().is_none());
+        assert_eq!(archive.scan_from(0).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn retrying_committed_target_does_not_duplicate_history_or_rewind_head() {
+        let dir = TempDir::new().unwrap();
+        let archive = PositionArchive::open(ManagerDb::open(dir.path()).unwrap()).unwrap();
+        let target = strategy("live", 2.0, 1, 200);
+        let first = archive.append_target(&target, 7, vec![]).unwrap();
+        archive.append(300, &target, vec![], vec![]).unwrap();
+        assert_eq!(archive.append_target(&target, 7, vec![]).unwrap(), first);
+        assert_eq!(archive.latest_cursor(), (300, 0));
+        assert_eq!(archive.scan_from(0).unwrap().len(), 2);
+        let fractional = strategy("fractional", 4.768371585604782e-8, 0, 400);
+        let recorded = archive.append_target(&fractional, 8, vec![]).unwrap();
+        let retried = archive.append_target(&fractional, 8, vec![]).unwrap();
+        assert_eq!(
+            (retried.received_at_us, retried.seq),
+            (recorded.received_at_us, recorded.seq)
+        );
         assert_eq!(archive.scan_from(0).unwrap().len(), 3);
     }
 

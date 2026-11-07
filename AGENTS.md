@@ -367,12 +367,18 @@ attributed close fills must remain `batch_exec:<strategy_name>`. PostgreSQL
 remains the configuration catalog and an asynchronous latest-target mirror. Deleting an account binding is allowed only after
 its shares are zero and does not remove the zero-target strategy from Exec.
 
-By operator instruction on 2026-11-06, PostgreSQL must not block normal target
-publication. Existing strategies use the in-memory permission, session, order,
-binding and fee snapshot. Persist the current target and immutable history in
-one small Manager RocksDB WAL write, then publish the received target directly
-to Redis/IPC without SQL or account snapshot HTTP. Background PG writes coalesce
-to one latest target per strategy and retry independently of HTTP acknowledgements.
+By the operator's latest instruction on 2026-11-06, neither PostgreSQL nor
+Manager RocksDB may delay normal target publication. Existing strategies use
+the in-memory permission, session, order, binding and fee snapshot. Submit frozen
+targets to bounded memory queues, then publish directly to Redis/IPC without
+waiting for SQL, disk writes or account snapshot HTTP. Both stores use the same
+independent background wake/flush/retry pattern: RocksDB preserves every signal
+in order, while PG coalesces to one latest target per strategy. RocksDB writes
+current target and immutable history in one synchronized WAL batch on a blocking
+worker. Queue saturation rejects promptly before publication; it never silently
+discards history. Acknowledgement confirms Exec publication, not durable archive
+completion. Abnormal process termination can lose unflushed records; graceful
+shutdown drains the archive within its timeout. Expose backlog/errors in health.
 Cold readers overlay the in-memory target while PG is behind; restart restores
 it from RocksDB. Configuration mutations invalidate the prepared snapshot under
 the existing publication barrier; admission fails closed until reload completes.

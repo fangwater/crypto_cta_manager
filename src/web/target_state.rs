@@ -1,6 +1,6 @@
-//! The live publisher reads a prepared catalog. PostgreSQL is a coalesced mirror,
-//! never a dependency of an existing strategy's target update.
+//! Live targets use memory; both durable stores are independent write-behind workers.
 use super::*;
+use std::collections::VecDeque;
 use std::sync::{
     Mutex, RwLock as SyncRwLock,
     atomic::{AtomicBool, Ordering},
@@ -29,9 +29,30 @@ pub(super) struct Targets {
     current: SyncRwLock<BTreeMap<String, Entry>>,
     ready: AtomicBool,
     pending: Mutex<BTreeMap<String, Entry>>,
+    archive_pending: Mutex<VecDeque<ArchiveWrite>>,
+    archive_changed: tokio::sync::Notify,
+    archive_drained: tokio::sync::Notify,
+    archive_failed: AtomicBool,
+    mirror_failed: AtomicBool,
+    closing: AtomicBool,
     creation: tokio::sync::Mutex<()>,
     pub changed: tokio::sync::Notify,
     pub reload: tokio::sync::Notify,
+}
+
+const MAX_PENDING_ARCHIVES: usize = 512;
+
+struct ArchiveWrite {
+    strategy: strategy_catalog::PositionStrategy,
+    created_at_us: i64,
+    accounts: Vec<crate::position_archive::ArchivedPublishedAccount>,
+    written: tokio::sync::oneshot::Sender<crate::position_archive::PositionUpdateMsg>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Store {
+    RocksDb,
+    Postgres,
 }
 
 pub(super) struct Edit {
@@ -90,14 +111,94 @@ impl Targets {
         self.changed.notify_one();
     }
 
-    pub fn remember(&self, entry: Entry) {
-        self.current
-            .write()
-            .unwrap()
-            .insert(entry.strategy.strategy_name.clone(), entry);
+    fn enqueue(
+        &self,
+        entry: Entry,
+        accounts: Vec<crate::position_archive::ArchivedPublishedAccount>,
+    ) -> Result<tokio::sync::oneshot::Receiver<crate::position_archive::PositionUpdateMsg>> {
+        let mut queue = self.archive_pending.lock().unwrap();
+        anyhow::ensure!(
+            !self.closing.load(Ordering::Acquire) && queue.len() < MAX_PENDING_ARCHIVES,
+            "target persistence queue is full or stopping; retry the target update"
+        );
+        let (written, completed) = tokio::sync::oneshot::channel();
+        queue.push_back(ArchiveWrite {
+            strategy: entry.strategy.clone(),
+            created_at_us: entry.created_at_us,
+            accounts,
+            written,
+        });
+        self.accept(entry);
+        drop(queue);
+        self.archive_changed.notify_one();
+        Ok(completed)
+    }
+
+    pub fn persistence_status(&self) -> (usize, usize, bool) {
+        (
+            self.archive_pending.lock().unwrap().len(),
+            self.pending.lock().unwrap().len(),
+            self.archive_failed.load(Ordering::Acquire)
+                || self.mirror_failed.load(Ordering::Acquire),
+        )
+    }
+
+    pub fn close(&self) {
+        let _queue = self.archive_pending.lock().unwrap();
+        self.closing.store(true, Ordering::Release);
+    }
+
+    pub async fn drain_archive(&self) {
+        loop {
+            let changed = self.archive_drained.notified();
+            if self.archive_pending.lock().unwrap().is_empty() {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub(super) async fn flush_archive(&self, archive: &Arc<PositionArchive>) -> Result<()> {
+        // A single worker preserves every admitted event. Only PG coalesces.
+        // Keep the front until its atomic write succeeds, including ambiguous retries.
+        for _ in 0..64 {
+            let Some((strategy, identity, accounts)) =
+                self.archive_pending.lock().unwrap().front().map(|job| {
+                    (
+                        job.strategy.clone(),
+                        job.created_at_us,
+                        job.accounts.clone(),
+                    )
+                })
+            else {
+                return Ok(());
+            };
+            let archive = archive.clone();
+            let message = tokio::task::spawn_blocking(move || {
+                archive.append_target(&strategy, identity, accounts)
+            })
+            .await??;
+            let job = self.archive_pending.lock().unwrap().pop_front().unwrap();
+            let _ = job.written.send(message);
+            self.archive_drained.notify_one();
+        }
+        self.archive_changed.notify_one();
+        Ok(())
     }
 
     pub fn install(&self, mut catalog: Catalog, archive: &PositionArchive) -> Result<()> {
+        // Read storage before acquiring memory locks used by live publications.
+        let recovered = catalog
+            .entries
+            .iter()
+            .map(|(name, entry)| {
+                Ok((
+                    name.clone(),
+                    archive.current_target(name, entry.created_at_us)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let mut recovered = recovered;
         // A cold strategy creation may reload metadata alongside other live
         // strategies. Never replace a target accepted while PG was being read.
         let mut current = self.current.write().unwrap();
@@ -110,7 +211,7 @@ impl Targets {
         });
         for (name, entry) in &mut catalog.entries {
             let mirrored_at = entry.strategy.updated_at_us;
-            if let Some(current) = archive.current_target(name, entry.created_at_us)? {
+            if let Some(Some(current)) = recovered.remove(name) {
                 if current.updated_at_us > entry.strategy.updated_at_us {
                     entry.strategy = current;
                     pending.insert(name.clone(), entry.clone());
@@ -136,7 +237,11 @@ impl Targets {
         Ok(())
     }
 
-    pub async fn load(&self, pool: &PgPool, archive: &PositionArchive) -> Result<()> {
+    pub async fn load(
+        self: &Arc<Self>,
+        pool: &PgPool,
+        archive: &Arc<PositionArchive>,
+    ) -> Result<()> {
         let mut catalog = Catalog::default();
         let identities = sqlx::query("SELECT strategy_name, (extract(epoch FROM created_at)*1000000)::bigint AS created_at_us FROM cta_position_strategies")
             .fetch_all(pool).await?.into_iter().map(|r| Ok((r.try_get::<String,_>("strategy_name")?, r.try_get::<i64,_>("created_at_us")?)))
@@ -168,7 +273,9 @@ impl Targets {
             .fetch_all(pool).await? {
             catalog.sessions.insert(row.try_get("token_hash")?, (AuthUser { user_id: row.try_get("user_id")?, username: row.try_get("username")?, role: row.try_get("role")? }, row.try_get("expires_at_us")?));
         }
-        self.install(catalog, archive)
+        let archive = archive.clone();
+        let targets = self.clone();
+        tokio::task::spawn_blocking(move || targets.install(catalog, &archive)).await?
     }
 
     pub async fn flush(&self, pool: &PgPool) -> Result<()> {
@@ -413,18 +520,22 @@ pub(super) async fn publish(
         ));
     }
     let prepare_ms = started.elapsed().as_millis() as u64;
-    let archive = state.position_archive.clone();
-    let strategy = saved.clone();
-    let identity = entry.created_at_us;
-    let archived_accounts = accounts.clone();
-    let message = tokio::task::spawn_blocking(move || {
-        archive.append_target(&strategy, identity, archived_accounts)
-    })
-    .await??;
-    let archive_ms = started.elapsed().as_millis() as u64 - prepare_ms;
     entry.strategy = saved.clone();
-    state.targets.remember(entry.clone());
-    // No SQL, account snapshot HTTP, or catalog reread can precede these writes.
+    let archived = match state.targets.enqueue(entry, accounts.clone()) {
+        Ok(archived) => archived,
+        Err(error) => {
+            warn!(strategy_name = %saved.strategy_name, %error, "target admission rejected");
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+                .into_response());
+        }
+    };
+    let enqueue_ms = started.elapsed().as_millis() as u64 - prepare_ms;
+    // No disk write, SQL or account snapshot HTTP is awaited before Exec writes.
     let mut jobs = tokio::task::JoinSet::new();
     for (binding, order, overrides, targets, frozen) in plans {
         let state = state.clone();
@@ -484,25 +595,24 @@ pub(super) async fn publish(
         }
     }
     publishes.sort_by(|a, b| (&a.source_id, &a.binding_name).cmp(&(&b.source_id, &b.binding_name)));
-    state.targets.accept(entry);
-    if !message.published_accounts.is_empty()
+    if !accounts.is_empty()
         && let Ok(permit) = state.factual_jobs.clone().try_acquire_owned()
     {
         let state = state.clone();
+        let strategy_name = saved.strategy_name.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let mut positions = Vec::new();
-            for account in &message.published_accounts {
-                if let Some(position) = load_factual_position(
-                    &state,
-                    &account.source_id,
-                    &message.strategy.strategy_name,
-                )
-                .await
+            for account in &accounts {
+                if let Some(position) =
+                    load_factual_position(&state, &account.source_id, &strategy_name).await
                 {
                     positions.push(position);
                 }
             }
+            let Ok(message) = archived.await else {
+                return;
+            };
             let archive = state.position_archive.clone();
             let result = tokio::task::spawn_blocking(move || {
                 archive.enrich_factual_positions(message, positions)
@@ -514,10 +624,10 @@ pub(super) async fn publish(
         });
     }
     info!(strategy_name = %saved.strategy_name, updated_at_us = saved.updated_at_us,
-        preparation_ms = prepare_ms, snapshot_ms = 0u64, archive_ms, publish_ms = started.elapsed().as_millis() as u64 - prepare_ms - archive_ms,
+        preparation_ms = prepare_ms, enqueue_ms, publish_ms = started.elapsed().as_millis() as u64 - prepare_ms - enqueue_ms,
         account_count = publishes.len(), "position strategy publish stages completed");
     if task_failed || publishes.iter().any(|p| p.error.is_some()) {
-        return Ok((StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: "target retained in RocksDB; at least one Exec publication failed; retry the target update".into() })).into_response());
+        return Ok((StatusCode::BAD_GATEWAY, Json(ErrorResponse { error: "target queued for persistence; at least one Exec publication failed; retry the target update".into() })).into_response());
     }
     if let Some(user) = session_user {
         let configured = state.config.sources.iter().map(|s| s.id.clone()).collect();
@@ -560,17 +670,36 @@ pub(super) fn spawn(state: &WebState) {
             }
         }
     });
-    let mirror_state = state.clone();
+    // Both stores follow the same wake / flush / retry loop, independently.
+    for store in [Store::RocksDb, Store::Postgres] {
+        spawn_store(state, store);
+    }
+}
+
+fn spawn_store(state: &WebState, store: Store) -> tokio::task::JoinHandle<()> {
+    let state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
-            tokio::select! { _ = interval.tick() => {}, _ = mirror_state.targets.changed.notified() => {} }
-            if let Err(error) = mirror_state.targets.flush(&mirror_state.pool).await {
-                warn!(%error, "current target PG mirror delayed; durable targets retained for retry");
+            let (changed, failed) = match store {
+                Store::RocksDb => (
+                    &state.targets.archive_changed,
+                    &state.targets.archive_failed,
+                ),
+                Store::Postgres => (&state.targets.changed, &state.targets.mirror_failed),
+            };
+            tokio::select! { _ = interval.tick() => {}, _ = changed.notified() => {} }
+            let result = match store {
+                Store::RocksDb => state.targets.flush_archive(&state.position_archive).await,
+                Store::Postgres => state.targets.flush(&state.pool).await,
+            };
+            failed.store(result.is_err(), Ordering::Release);
+            if let Err(error) = result {
+                warn!(?store, %error, "target persistence delayed; queued writes retained for retry");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
-    });
+    })
 }
 
 #[cfg(test)]
@@ -622,7 +751,7 @@ mod tests {
             ),
         )
         .await
-        .expect("live target must not wait for PostgreSQL")
+        .expect("live target must not wait for either durable store")
         .unwrap_or_else(|e| panic!("{}", e.0))
     }
 
@@ -654,6 +783,11 @@ mod tests {
             state.targets.current("live").unwrap().targets["BTCUSDT"].qty,
             2.0
         );
+        state
+            .targets
+            .flush_archive(&state.position_archive)
+            .await
+            .unwrap();
         assert_eq!(state.position_archive.scan_from(0).unwrap().len(), 2);
         let recovered = Targets::default();
         recovered
@@ -746,12 +880,130 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
+        state
+            .targets
+            .flush_archive(&state.position_archive)
+            .await
+            .unwrap();
         assert_eq!(state.position_archive.scan_from(0).unwrap().len(), 2);
     }
 
     #[tokio::test]
+    async fn failed_archive_retries_every_event_while_memory_and_pg_queue_keep_latest() {
+        let (dir, mut state, _, _, _) = super::super::tests::timeline_test_state(90);
+        state.pool.close().await;
+        let db = ManagerDb::open(&dir.path().join("retry-store")).unwrap();
+        state.position_archive = Arc::new(PositionArchive::open(db.clone()).unwrap());
+        let mut catalog = Catalog::default();
+        catalog.entries.insert("live".into(), entry("live", 0.0, 1));
+        state
+            .targets
+            .install(catalog, &state.position_archive)
+            .unwrap();
+        assert_eq!(
+            send(&state, "live", 1.0, None).await.status(),
+            StatusCode::OK
+        );
+        // Force an archive error in the isolated queue to exercise retry retention.
+        let received_at = {
+            let mut queue = state.targets.archive_pending.lock().unwrap();
+            let job = queue.front_mut().unwrap();
+            let received_at = job.strategy.updated_at_us;
+            job.strategy.updated_at_us = 0;
+            received_at
+        };
+        assert!(
+            state
+                .targets
+                .flush_archive(&state.position_archive)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            send(&state, "live", 2.0, None).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(state.targets.persistence_status().0, 2);
+        assert_eq!(state.targets.pending.lock().unwrap().len(), 1);
+        assert_eq!(
+            state.targets.current("live").unwrap().targets["BTCUSDT"].qty,
+            2.0
+        );
+        state
+            .targets
+            .archive_pending
+            .lock()
+            .unwrap()
+            .front_mut()
+            .unwrap()
+            .strategy
+            .updated_at_us = received_at;
+        state
+            .targets
+            .flush_archive(&state.position_archive)
+            .await
+            .unwrap();
+        state.targets.drain_archive().await;
+        let messages = state.position_archive.scan_from(0).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.strategy.targets["BTCUSDT"].qty)
+                .collect::<Vec<_>>(),
+            vec![1.0, 2.0]
+        );
+        assert_eq!(
+            state
+                .position_archive
+                .current_target("live", 7)
+                .unwrap()
+                .unwrap()
+                .targets["BTCUSDT"]
+                .qty,
+            2.0
+        );
+    }
+
+    #[tokio::test]
+    async fn full_or_closing_queue_rejects_before_changing_current_target() {
+        let (_dir, state, _, _, _) = super::super::tests::timeline_test_state(90);
+        state.pool.close().await;
+        let mut catalog = Catalog::default();
+        catalog.entries.insert("live".into(), entry("live", 0.0, 1));
+        state
+            .targets
+            .install(catalog, &state.position_archive)
+            .unwrap();
+        state.targets.close();
+        assert_eq!(
+            send(&state, "live", 1.0, None).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            state.targets.current("live").unwrap().targets["BTCUSDT"].qty,
+            0.0
+        );
+        state.targets.closing.store(false, Ordering::Release);
+        for index in 0..MAX_PENDING_ARCHIVES {
+            let _ = state
+                .targets
+                .enqueue(entry("live", index as f64, index as i64 + 2), vec![])
+                .unwrap();
+        }
+        assert_eq!(
+            send(&state, "live", 999.0, None).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(state.targets.persistence_status().0, MAX_PENDING_ARCHIVES);
+        assert_eq!(
+            state.targets.current("live").unwrap().targets["BTCUSDT"].qty,
+            (MAX_PENDING_ARCHIVES - 1) as f64
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires EXEC_REDIS_TEST_SERVER_BIN pointing to an isolated redis-server binary"]
-    async fn exec_receives_latest_scaled_targets_with_pg_closed_and_snapshot_stalled() {
+    async fn exec_receives_latest_targets_with_pg_closed_and_archive_and_snapshot_stalled() {
         use redis::AsyncCommands;
         use std::process::{Command, Stdio};
         struct Server(std::process::Child);
@@ -836,6 +1088,28 @@ mod tests {
         );
         assert!(state.position_archive.scan_from(0).unwrap().is_empty());
         state.account_modes = Arc::new(account_mode::AccountModes::verified_fixture(&source_id));
+        // Hold the real archive sequence lock on a blocking thread. Both target
+        // versions must still reach Redis before storage is allowed to proceed.
+        struct Release(Option<std::sync::mpsc::Sender<()>>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let (release, blocked) = std::sync::mpsc::channel();
+        let release = Release(Some(release));
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let archive = state.position_archive.clone();
+        let blocker = tokio::task::spawn_blocking(move || {
+            archive.hold_writes(|| {
+                let _ = entered.send(());
+                let _ = blocked.recv();
+            })
+        });
+        waiting.await.unwrap();
+        let writer = spawn_store(&state, Store::RocksDb);
         for qty in [1.0, 2.0] {
             assert_eq!(
                 send(&state, "live", qty, None).await.status(),
@@ -848,10 +1122,8 @@ mod tests {
             let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
             assert_eq!(value["targets"]["BTCUSDT"]["qty"], qty * 2.0);
         }
-        let messages = state.position_archive.scan_from(0).unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1].published_accounts[0].shares, 2.0);
-        assert_eq!(messages[1].strategy.targets["BTCUSDT"].qty, 2.0);
+        assert_eq!(state.targets.persistence_status().0, 2);
+        assert!(state.position_archive.scan_from(0).unwrap().is_empty());
         // Removing the binding from the prepared catalog cannot publish its old shares.
         catalog.bindings.clear();
         state
@@ -870,6 +1142,17 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&raw).unwrap()["targets"]["BTCUSDT"]["qty"],
             4.0
         );
+        drop(release);
+        blocker.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), state.targets.drain_archive())
+            .await
+            .unwrap();
+        writer.abort();
+        let messages = state.position_archive.scan_from(0).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].published_accounts[0].shares, 2.0);
+        assert_eq!(messages[1].strategy.targets["BTCUSDT"].qty, 2.0);
+        assert!(messages[2].published_accounts.is_empty());
         drop(stalled);
     }
 }
