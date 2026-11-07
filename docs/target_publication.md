@@ -1,8 +1,8 @@
 # Target publication
 
 Last updated: 2026-11-07. The archive write-behind implementation below is deployed
-to jp-meta. el01 retains the previous implementation, which awaits the RocksDB
-WAL before Exec writes. The deployment records distinguish the two rollouts.
+to jp-meta and el01. The earlier PG-only rollout records describe the previous
+implementation, which awaited the RocksDB WAL before Exec writes.
 
 An existing strategy's `POST /api/catalog/position-strategies` does not query or
 write PostgreSQL. Manager checks the prepared in-memory session/publish-token
@@ -223,3 +223,59 @@ Remote backup: `~/crypto_cta_manager/backups/target-pg-async-20261106T231853Z/`.
 Evidence: `~/crypto_cta_manager/run/target-pg-async-20261106T231853Z/` and local
 `../artifacts/el01_async_targets_20261106/`. Rollback is binary-only and must
 preserve current host configuration, Redis and RocksDB.
+
+
+## el01 archive write-behind deployment
+
+Deployed `target-archive-async-20261107T002609Z` on 2026-11-07. The implementation and
+JP rollout record were committed and pushed as `3a47365`. Built with
+`cargo build --locked --release --bin cta_web`, retaining el01's default
+`daily-fifo` and JSON float-roundtrip features. The current source hashes differ
+from the previous el01 release only in `position_archive.rs`, `web.rs`,
+`web/target_state.rs` and publication regression tests. The already-published
+worktree baseline was retained; its unrelated pending edits were not committed.
+The default suite passed 523 tests with 27 existing environment skips; all 39
+specialized Web tests passed with fixtures during implementation.
+
+Binary SHA-256:
+`2fd571938e145529d7ad458007a9e13b0b908670f01c66b2d392f3b5d16827df`.
+The staged checksum and read-only allocation preflight passed. Backed up the old
+binary, atomically replaced only `bin/cta_web` and restarted only the Manager
+unit. The old process exceeded its existing 15-second stop timeout and systemd
+killed it. Startup reopened the archive with head
+`1794011389135258`, matching the old process's last completed target timestamp.
+The store was not reset or rewritten to recover. Manager PID2523095 is active,
+NRestarts=0; all 42 checked threads retain CPU0–7. All 14 enabled publishable
+sources passed startup account-mode checks exactly once. API ready:
+`2026-11-07T00:34:21.266798Z`. The target index finished at
+`2026-11-07T00:35:07.442923Z`, with 5566625 processed messages, ready and no error.
+The existing daily-FIFO seven-day retention behavior was preserved.
+
+Through `2026-11-07T00:39:43.760346+00:00`, 328 natural target requests returned200,
+including the 00:35 five-minute batch. Median/P95/max processing was
+2/5/30ms, with no admission, persistence or bound-account publication errors.
+The PG mirror caught up to all 15 observed strategies. Independently the gateway
+recorded 310 target POSTs, all200, from 00:34:22 through
+`2026-11-07T00:39:25.375148+00:00`; the samples have different ending times.
+The original sender logged success at 00:34:24, 00:35:02 and 00:38:22.
+
+Health was ok with both persistence queues empty and no persistence error.
+Post-restart archive events were readable. Stable-revision Redis readback matched
+all 1497 quantities/signals across 67 active bindings in 12 sources, with no
+mismatches or revision races. All 90 protected processes (including Config
+servers), 36 runtime file hashes, frontend target/contents and 11 catalog/
+immutable-snapshot digests were preserved. Temporary diagnostic sessions were
+deleted and verified absent. The explicit temporary binary path no longer exists.
+No manual target was injected, and trading, Viz, Config, Nginx, monitor and Redis
+services were not restarted or reconfigured. No schema maintenance was performed.
+
+Rollback: `~/crypto_cta_manager/backups/target-archive-async-20261107T002609Z/`.
+Evidence: the same release under `~/crypto_cta_manager/run/` and local
+`../artifacts/el01_async_archive_20261107/`. Rollback is binary-only and must
+retain the live Manager RocksDB, Redis and host configuration.
+
+The requested local cache cleanup removed 26,410,557,440 allocated bytes from
+this project's Cargo `debug/incremental`, the downloaded test Redis fixture and
+the stopped isolated PostgreSQL test directory. Dependency/release caches,
+durable market/signal data and rollback artifacts were retained. No live Manager
+or Exec database was pruned as part of that cleanup.
