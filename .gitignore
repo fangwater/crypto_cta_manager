@@ -1,7 +1,40 @@
+# Build outputs and local tool configuration
 /target
+/.cache/
+/.cargo/config.toml
 /frontend/dist
 /frontend/node_modules
-/postgresql-*-linux-x86_64-user.tar.gz*
-/config/cta-manager.toml
+/frontend/*.tsbuildinfo
 __pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Host-only configuration and credentials (keep templates tracked)
+/config/cta-manager.toml
+.env
+.env.*
+!.env.example
+!.env.*.example
+env.sh
+
+# Local runtime data, deployment outputs and diagnostic evidence
+/db/
+/logs/
+/run/
+/diagnostics/
 /artifacts/
+/backups/
+/maintenance-backups/
+/releases/
+/web-releases/
+*.log
+*.log.*
+/postgresql-*-linux-x86_64-user.tar.gz*
+
+# One-off account research and recovery previews; retain locally
+/scripts/analyze_cc_sk_twap5m_pnl.py
+/scripts/attribute_cc_sk_twap5m_gap.py
+/scripts/export_cc_sk_minute_windows.py
+/scripts/summarize_cc_sk_execution_windows.py
+/src/bin/nav_rx01_anchor_preview.rs
+/src/bin/nav_rx01_price_preview.rs
