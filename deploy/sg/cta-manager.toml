@@ -1,5 +1,5 @@
-# SG sources use independent Exec stores. Bybit is prepared with trading stopped;
-# Bitget remains reserved. Never point these paths at intra history.
+# Bybit Exec was retired and removed from management on 2026-10-29.
+# Bitget remains reserved. Never point this source at intra history.
 [database]
 url_env = "CRYPTO_CTA_LOCAL_DATABASE_URL"
 max_connections = 8
@@ -17,22 +17,6 @@ enabled = false
 [monitor]
 enabled = false
 host_tag = "sg"
-
-[[sources]]
-id = "bybit_exec_trade01"
-account = "trade01"
-alias = "bybit-01"
-venue = "bybit-futures"
-rocksdb_path = "/home/ubuntu/bybit_exec_trade01/data/persist_manager"
-enabled = true
-monitor_enabled = true
-ipc_namespace = "bybit_exec_trade01"
-account_ipc_service = "account_pubs/bybit_pm"
-gateway_prefix = "/exec_trade01"
-exec_config_url = "http://127.0.0.1:18161"
-exec_viz_url = "http://127.0.0.1:10041"
-
-[sources.target_proxy]
 
 [[sources]]
 id = "bitget_exec_trade01"

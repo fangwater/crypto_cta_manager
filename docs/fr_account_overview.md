@@ -1,5 +1,28 @@
 # FR 账户首页聚合
 
+2026-11-04，修复 `gate_fr_arb04` 已进入总览但未加入 NAV 自动历史采集的问题。
+此前成交和资金费源表为空，四小时曲线虽然完整却错误地全为零。已从该账户
+登记起点完整补采，取得 7,921 条成交及 101 条资金费，利息和强平各为零；
+NAV 提交 `3565c67` 将该账户加入每 15 分钟的自动采集。部署后上游重放返回
+48 点完整曲线，2026-11-04 08:00 上海时间的累计已实现净收益为
+36.14904685 报价币。主面板保留的旧四小时缓存将在下一整期刷新；这次只重启
+NAV 服务，没有修改交易配置或重启交易进程。
+
+2026-11-03，恢复 `gate_fr_arb04` 到 JP 主面板：仅从
+`dashboard.nav_overview.excluded_source_ids` 移除该项，并补齐 `lgq` 的外部账户查看授权；
+`gate_fr_arb05` 继续排除。上游 NAV 中 `okex_mm_alpha` 已设置 `enabled=false`，
+退出账户目录及对外总览，历史数据保留。`bybit_fr_arb01` 原接入正常，已复核
+SG 来源的事实权益和完整四小时净值曲线；EUR/HFT 缺价仍按原规则显示部分估值。
+权限继续仅限 `lgq`，管理员 `prc` 不绕过。未启动或停止 FR/MM 交易进程，
+未重启 NAV、SG 服务或修改任何交易参数。
+审计 `artifacts/fr_overview_and_funding_20261103/`。
+
+2026-10-29，SG Bybit CTA与MM已退役并从管理移除：NAV停用
+`bybit_mm_alpha`及旧CTA登记`bybit-intra-arb02`；jp-meta移除`sg-cta`
+provider，并停用两项对应的外部目录记录。SG配置移除`bybit_exec_trade01`，
+历史数据与订单归档保留；Bybit FR及其他账户保持原登记。
+下文的Bybit MM与SG Exec接入描述保留为历史设计记录。
+
 CTA Manager 主动轮询 NAV Manager 的只读接口，将全部已启用的
 `funding_rate` 账户加入首页。当前接入目标仅为 jp-meta；账户数量由 NAV
 目录决定，不固定为 9 个。两个项目只通过 HTTP 通信，各自保留自己的

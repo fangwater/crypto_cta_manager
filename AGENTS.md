@@ -467,6 +467,20 @@ Clients performing these operations must explicitly bind one of these addresses.
 Never use either address for normal trading order submission or include it in
 normal trade-engine egress bindings (`local_ips`, primary/secondary addresses).
 
+By operator instruction on 2026-11-04, el01 is an explicit exception to the
+preceding Kline and reserved-address trading restrictions: `154.197.32.6`,
+`.9`, and `.10` may be used for normal trading and public market data. Kline
+and public funding-rate queries may share a trading IP; retain explicit local
+binding, public-IP verification, proxy exclusion, the rolling request budget,
+and monitoring of the exchange-reported IP weight. Enable this only on el01
+with `kline.allow_trading_ip = true`; the default and other hosts retain their
+dedicated-egress checks. Signed factual funding collection still requires its
+separate non-trading egress and is disabled for all el01 accounts by operator
+request; retain existing statements. On 2026-11-04 all 13 enabled accounts
+except p1prcp1/trade03 were switched to four UM connections on `.6`, `.9`,
+`.10`, `.6`; the operator explicitly excluded p1prcp1 and retired prc. See
+`docs/el01_shared_ip_20261104.md`.
+
 By operator instruction on 2026-10-10, authenticated account, collateral,
 balance, and position queries must explicitly bind the account's configured
 trading IP and keep that binding fixed. This requirement takes precedence over

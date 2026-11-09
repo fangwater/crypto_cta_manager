@@ -1,6 +1,19 @@
 # SG Manager deployment
 
-Last verified: 2026-10-20 02:22 UTC.
+Last verified: 2026-10-29 UTC.
+
+On October 29, Bybit Exec `bybit_exec_trade01` and `bybit_mm_alpha` were
+retired, all positions closed with taker orders, and both runtime directories
+deleted after order archives were verified. The Bybit source has been removed
+from SG Manager's runtime config and deployment template. Its follow, account
+bindings and source permissions were removed; its disabled PostgreSQL catalog
+and immutable history remain for audit. Bitget remains reserved and disabled.
+SG Manager continues to accept virtual strategy publication without a Bybit
+follower. jp-meta's `sg-cta` overview provider was removed. NAV also disabled
+the older `bybit-intra-arb02` catalog entry (alias `bybit cta`) and Bybit MM.
+Management backups on each host are under
+`~/crypto_cta_manager/maintenance-backups/bybit_management_remove_20261029T073240Z/`.
+The deployment records below describe the earlier live environment.
 
 At 02:21 UTC on October 20, Manager alone was replaced as release
 **`20261020T022047Z`**, PID **4092353**, retaining CPUs 0–7. The running
