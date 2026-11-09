@@ -880,6 +880,9 @@ fn validate_funding_egress(config: &AppConfig, source: &SourceConfig) -> Result<
         .context("funding IP conflicts with account trading configuration")?;
     let mut egress = config.clone();
     egress.kline.enabled = true;
+    // Public market-data sharing never authorizes signed funding collection to
+    // use a trading address.
+    egress.kline.allow_trading_ip = false;
     egress.kline.local_ip = Some(local);
     egress.kline.public_ip = Some(public);
     egress.kline.trade_engine_configs = config.funding.trade_engine_configs.clone();
@@ -1187,6 +1190,7 @@ mod tests {
         }
         config.funding.local_ip = Some("198.18.0.3".parse().unwrap());
         config.funding.public_ip = Some("198.18.0.2".parse().unwrap());
+        config.kline.allow_trading_ip = true;
         assert!(validate_funding_egress(&config, &source).is_err());
         config.funding.public_ip = config.funding.local_ip;
         config.funding.forbidden_public_ips = vec![config.funding.public_ip.unwrap()];

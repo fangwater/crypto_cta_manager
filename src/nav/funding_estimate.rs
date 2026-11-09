@@ -12,6 +12,17 @@ impl NavTimelineCache {
         source_id: &str,
         cutoffs: &[i64],
     ) -> Result<BTreeMap<i64, String>> {
+        if let Some(known) = self.funding_fingerprints.get(source_id) {
+            if cutoffs.iter().all(|t| known.contains_key(t)) {
+                return Ok(cutoffs.iter().map(|t| (*t, known[t].clone())).collect());
+            }
+        }
+        if self.needs_history(&[source_id.to_owned()], None) {
+            let _budget = daily::replay_lock();
+            return self
+                .restore_window(&[source_id.to_owned()], None)?
+                .funding_daily_fingerprints(source_id, cutoffs);
+        }
         use sha2::{Digest, Sha256};
         let source = self
             .sources
@@ -144,6 +155,21 @@ impl NavTimelineCache {
                     }
                 }
             }
+            for symbol in &source.report.symbols {
+                if supported_symbol(&symbol.symbol)
+                    && report.selected_symbols.contains(&symbol.symbol)
+                    && symbol.venues.iter().any(|v| matches!(v.venue_code, 1 | 3))
+                {
+                    for v in &symbol.venues {
+                        if matches!(v.venue_code, 1 | 3) {
+                            symbols.insert(
+                                crate::market_data::cache_symbol(&symbol.symbol, v.venue_code)
+                                    .expect("supported funding venue"),
+                            );
+                        }
+                    }
+                }
+            }
             // Offset strategy inventories can exist even when account net quantity is zero.
             for ((_, symbol, venue), _) in &source.prepared.initial_strategy_states {
                 if matches!(*venue, 1 | 3)
@@ -179,6 +205,20 @@ impl NavTimelineCache {
         allocation: bool,
         rates: &BTreeMap<String, Arc<Vec<FundingRate>>>,
     ) -> Result<FundingEstimateRecords> {
+        let earliest = rates
+            .values()
+            .flat_map(|v| v.iter())
+            .map(|r| r.estimate_ts_us())
+            .filter(|ts| *ts >= report.start_ts_us && *ts <= report.end_ts_us)
+            .min();
+        if let Some(earliest) = earliest {
+            if self.needs_history(&report.selected_source_ids, Some(earliest)) {
+                let _budget = daily::replay_lock();
+                return self
+                    .restore_window(&report.selected_source_ids, Some(earliest))?
+                    .estimate_funding_records(report, allocation, rates);
+            }
+        }
         let mut settlements: Vec<_> = rates
             .values()
             .flat_map(|rows| rows.iter())

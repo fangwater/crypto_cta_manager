@@ -490,6 +490,10 @@ export function getAccountStudio(sourceId: string, signal?: AbortSignal) {
   })
 }
 
+export function getMultiMarketAccountStudio(accountId: string, signal?: AbortSignal) {
+  return requestJson<{ source_id: string; execution_sources: AccountStudio[] }>(`/catalog/accounts/${encodeURIComponent(accountId)}`, { signal })
+}
+
 export function saveAccountEstimatedFeeRate(sourceId: string, estimatedFeeRate: number) {
   return requestJson<AccountStudio>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/estimated-fee-rate`,

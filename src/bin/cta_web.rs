@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use crypto_cta_manager::config::AppConfig;
 use crypto_cta_manager::{postgres, web};
@@ -27,6 +27,10 @@ struct Args {
     #[arg(long)]
     init_db: bool,
 
+    /// Validate immutable allocation fingerprints and exit without starting services.
+    #[arg(long, conflicts_with_all = ["init_db", "bnb_preview_source"])]
+    check_allocations: bool,
+
     /// Read-only BNB balance/settings preview; does not start Manager or trading.
     #[arg(long, conflicts_with = "init_db")]
     bnb_preview_source: Option<String>,
@@ -43,6 +47,20 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let config = AppConfig::load(&args.config)?;
+    if args.check_allocations {
+        let pool =
+            postgres::connect(&config.database_url()?, config.database.max_connections).await?;
+        let allocations = crypto_cta_manager::nav::allocation::load(&pool).await?;
+        for (source, snapshots) in &allocations {
+            crypto_cta_manager::nav::allocation::resolve(snapshots)
+                .with_context(|| format!("validate allocation fingerprints for {source}"))?;
+        }
+        println!(
+            "validated immutable allocation fingerprints for {} sources",
+            allocations.len()
+        );
+        return Ok(());
+    }
     if let Some(source_id) = &args.bnb_preview_source {
         let status = crypto_cta_manager::bnb_auto::preview_source(&config, source_id).await?;
         println!("{}", serde_json::to_string_pretty(&status)?);

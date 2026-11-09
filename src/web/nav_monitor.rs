@@ -72,7 +72,9 @@ pub(super) async fn export(
 }
 
 async fn calculate(state: WebState, id: String, end: i64) -> Result<Monitor> {
-    let allocation = !state.funding.settings(&id).enabled;
+    let ids = crate::managed_accounts::expand(&state.config, std::slice::from_ref(&id))
+        .map_err(anyhow::Error::msg)?;
+    let allocation = ids.iter().all(|id| !state.funding.settings(id).enabled);
     {
         let cache = state.cache.read().await;
         anyhow::ensure!(
@@ -80,10 +82,15 @@ async fn calculate(state: WebState, id: String, end: i64) -> Result<Monitor> {
             "dashboard has not reached the four-hour boundary"
         );
         anyhow::ensure!(
-            cache
+            ids.iter().any(|id| cache
                 .nav_timelines
-                .start_ts_us(&id, end * 1000, allocation)
-                .is_some(),
+                .start_ts_us(id, end * 1000, allocation)
+                .is_some())
+                || state
+                    .config
+                    .accounts
+                    .get(&id)
+                    .is_some_and(|a| a.created_at_us <= end * 1000),
             "no reconstructable monitoring history"
         );
     }
@@ -98,7 +105,7 @@ async fn calculate(state: WebState, id: String, end: i64) -> Result<Monitor> {
             ..Default::default()
         },
         allocation,
-        BTreeSet::from([id.clone()]),
+        ids.iter().cloned().chain([id.clone()]).collect(),
     )
     .await
     .map_err(|error| error.0)?
@@ -215,7 +222,9 @@ pub(super) fn spawn(state: WebState) {
                 .config
                 .sources
                 .iter()
-                .filter(|s| s.enabled)
+                .filter(|s| {
+                    s.enabled && crate::managed_accounts::parent_id(&state.config, &s.id).is_none()
+                })
                 .map(|s| {
                     (
                         s.id.clone(),
@@ -224,6 +233,32 @@ pub(super) fn spawn(state: WebState) {
                     )
                 })
                 .collect::<Vec<_>>();
+            sources.extend(
+                state
+                    .config
+                    .accounts
+                    .iter()
+                    .filter(|(_, a)| {
+                        a.source_ids.iter().all(|id| {
+                            state
+                                .config
+                                .sources
+                                .iter()
+                                .any(|s| &s.id == id && s.enabled)
+                        })
+                    })
+                    .map(|(id, a)| {
+                        (
+                            id.clone(),
+                            a.source_ids
+                                .iter()
+                                .map(|s| format!("{s}:{}", state.funding.settings(s).enabled))
+                                .collect::<Vec<_>>()
+                                .join(","),
+                            None,
+                        )
+                    }),
+            );
             for (index, provider) in state.external_overviews.iter().enumerate() {
                 sources.extend(
                     provider

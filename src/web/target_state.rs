@@ -20,12 +20,15 @@ pub(super) struct Catalog {
     pub bindings: Vec<strategy_catalog::AccountBinding>,
     pub fees: BTreeMap<String, TheoreticalFeeRates>,
     pub fallback_hashes: Vec<String>,
-    pub sessions: BTreeMap<Vec<u8>, (AuthUser, i64)>,
 }
 
 #[derive(Default)]
 pub(super) struct Targets {
     catalog: SyncRwLock<Arc<Catalog>>,
+    sessions: SyncRwLock<BTreeMap<Vec<u8>, (AuthUser, i64)>>,
+    // Serialize session SQL/cache mutations with session reloads. Publications
+    // only read the memory map and never acquire this asynchronous lock.
+    pub session_mutations: tokio::sync::Mutex<()>,
     current: SyncRwLock<BTreeMap<String, Entry>>,
     ready: AtomicBool,
     pending: Mutex<BTreeMap<String, Entry>>,
@@ -67,6 +70,8 @@ impl Drop for Edit {
 }
 
 impl Targets {
+    /// Only publication configuration/authorization changes invalidate the
+    /// catalog. Session creation/deletion uses session_mutations instead.
     pub async fn edit(self: &Arc<Self>, lock: &Arc<RwLock<()>>) -> Edit {
         let guard = lock.clone().write_owned().await;
         self.ready.store(false, Ordering::Release);
@@ -92,13 +97,27 @@ impl Targets {
             .map(|e| e.strategy.clone())
     }
 
-    pub fn session(&self, token: &str) -> Result<Option<AuthUser>> {
-        let catalog = self.catalog()?;
-        Ok(catalog
-            .sessions
+    pub fn session(&self, token: &str) -> Option<AuthUser> {
+        self.sessions
+            .read()
+            .unwrap()
             .get(&auth::token_hash(token))
             .filter(|(_, expires)| *expires > unix_now_us())
-            .map(|(user, _)| user.clone()))
+            .map(|(user, _)| user.clone())
+    }
+
+    // Call with session_mutations held, after the corresponding SQL succeeds.
+    pub fn insert_session(&self, token: &str, user: AuthUser, expires_at_us: i64) {
+        let mut sessions = self.sessions.write().unwrap();
+        sessions.retain(|_, (_, expires)| *expires > unix_now_us());
+        sessions.insert(auth::token_hash(token), (user, expires_at_us));
+    }
+
+    pub fn remove_session(&self, token: &str) {
+        self.sessions
+            .write()
+            .unwrap()
+            .remove(&auth::token_hash(token));
     }
 
     pub fn accept(&self, entry: Entry) {
@@ -269,10 +288,15 @@ impl Targets {
             sqlx::query_scalar("SELECT token_hash FROM cta_publish_fallback_tokens")
                 .fetch_all(pool)
                 .await?;
+        // A configuration reload must not overwrite a concurrent login/logout
+        // with a stale SQL snapshot (or resurrect a revoked session).
+        let _sessions = self.session_mutations.lock().await;
+        let mut sessions = BTreeMap::new();
         for row in sqlx::query("SELECT s.token_hash, (extract(epoch FROM s.expires_at)*1000000)::bigint AS expires_at_us, u.user_id,u.username,u.role FROM cta_auth_sessions s JOIN cta_users u ON u.user_id=s.user_id WHERE s.expires_at>now() AND NOT u.disabled")
             .fetch_all(pool).await? {
-            catalog.sessions.insert(row.try_get("token_hash")?, (AuthUser { user_id: row.try_get("user_id")?, username: row.try_get("username")?, role: row.try_get("role")? }, row.try_get("expires_at_us")?));
+            sessions.insert(row.try_get("token_hash")?, (AuthUser { user_id: row.try_get("user_id")?, username: row.try_get("username")?, role: row.try_get("role")? }, row.try_get("expires_at_us")?));
         }
+        *self.sessions.write().unwrap() = sessions;
         let archive = archive.clone();
         let targets = self.clone();
         tokio::task::spawn_blocking(move || targets.install(catalog, &archive)).await?
@@ -756,6 +780,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_auth_sql_and_cancelled_auth_requests_leave_target_admission_open() {
+        use std::future::{Future, poll_fn};
+        use std::pin::Pin;
+        use std::task::Poll;
+
+        let (_dir, mut state, _, _, _) = super::super::tests::timeline_test_state(90);
+        // A local listener deliberately never answers PostgreSQL handshakes.
+        // Poll each real handler into its SQL wait before attempting a publish.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        state.pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(
+                sqlx::postgres::PgConnectOptions::new()
+                    .host("127.0.0.1")
+                    .port(listener.local_addr().unwrap().port())
+                    .ssl_mode(sqlx::postgres::PgSslMode::Disable),
+            );
+        let mut catalog = Catalog::default();
+        catalog.entries.insert("live".into(), entry("live", 0.0, 1));
+        state
+            .targets
+            .install(catalog, &state.position_archive)
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, "cta_session=logout-token".parse().unwrap());
+        type AuthRequest = Pin<Box<dyn Future<Output = Result<Response, ApiError>>>>;
+        let requests: Vec<AuthRequest> = vec![
+            Box::pin(auth_login(
+                State(state.clone()),
+                Json(auth::LoginRequest {
+                    username: "test".into(),
+                    password: "test-password".into(),
+                }),
+            )),
+            Box::pin(auth_logout(State(state.clone()), headers)),
+            Box::pin(auth_register(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(auth::RegisterRequest {
+                    username: "test".into(),
+                    password: "test-password".into(),
+                }),
+            )),
+            Box::pin(auth_create_user(
+                State(state.clone()),
+                Extension(AuthUser {
+                    user_id: 1,
+                    username: "admin".into(),
+                    role: "admin".into(),
+                }),
+                Json(auth::CreateUserRequest {
+                    username: "test".into(),
+                    password: "test-password".into(),
+                    role: None,
+                }),
+            )),
+        ];
+        for mut request in requests {
+            assert!(
+                poll_fn(|cx| Poll::Ready(request.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            assert!(state.configuration_lock.try_write().is_ok());
+            assert_eq!(
+                send(&state, "live", 1.0, None).await.status(),
+                StatusCode::OK
+            );
+            drop(request);
+            assert_eq!(
+                send(&state, "live", 2.0, None).await.status(),
+                StatusCode::OK
+            );
+        }
+        state.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn session_updates_do_not_invalidate_or_depend_on_the_catalog() {
+        let (_dir, state, _, _, _) = super::super::tests::timeline_test_state(90);
+        state.pool.close().await;
+        let mut catalog = Catalog::default();
+        catalog.entries.insert("live".into(), entry("live", 0.0, 1));
+        state
+            .targets
+            .install(catalog.clone(), &state.position_archive)
+            .unwrap();
+        let user = AuthUser {
+            user_id: 1,
+            username: "test".into(),
+            role: "user".into(),
+        };
+        let mutation = state.targets.session_mutations.lock().await;
+        state
+            .targets
+            .insert_session("new-session", user, unix_now_us() + 60_000_000);
+        assert_eq!(state.targets.session("new-session").unwrap().user_id, 1);
+        assert_eq!(
+            send(&state, "live", 1.0, None).await.status(),
+            StatusCode::OK
+        );
+        state
+            .targets
+            .install(catalog, &state.position_archive)
+            .unwrap();
+        assert!(state.targets.session("new-session").is_some());
+        state.targets.remove_session("new-session");
+        assert!(state.targets.session("new-session").is_none());
+        drop(mutation);
+        assert_eq!(
+            send(&state, "live", 2.0, None).await.status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
     async fn closed_postgres_does_not_block_targets_and_recovery_uses_rocksdb() {
         let (_dir, state, _, _, _) = super::super::tests::timeline_test_state(90);
         state.pool.close().await;
@@ -816,22 +956,20 @@ mod tests {
         let mut protected = entry("protected", 0.0, 1);
         protected.access.publish_token_hash = Some(auth::publish_token_hash("old-token"));
         catalog.entries.insert("protected".into(), protected);
-        catalog.sessions.insert(
-            auth::token_hash("expired"),
-            (
-                AuthUser {
-                    user_id: 1,
-                    username: "test".into(),
-                    role: "user".into(),
-                },
-                1,
-            ),
+        state.targets.insert_session(
+            "expired",
+            AuthUser {
+                user_id: 1,
+                username: "test".into(),
+                role: "user".into(),
+            },
+            1,
         );
         state
             .targets
             .install(catalog.clone(), &state.position_archive)
             .unwrap();
-        assert!(state.targets.session("expired").unwrap().is_none());
+        assert!(state.targets.session("expired").is_none());
         assert_eq!(
             send(&state, "protected", 1.0, Some("wrong-token"))
                 .await

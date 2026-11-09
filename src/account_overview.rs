@@ -36,6 +36,9 @@ pub struct AccountObservation {
     pub short_position: Option<f64>,
     pub position_at_ms: Option<i64>,
     pub initial_margin: Option<f64>,
+    /// RapidX's factual locked collateral, distinct from native initial margin.
+    #[serde(default)]
+    pub frozen_margin: Option<f64>,
     pub margin_at_ms: Option<i64>,
 }
 
@@ -50,9 +53,18 @@ impl AccountObservation {
             "invalid observation timestamps"
         );
         ensure!(self.equity.is_finite(), "non-finite account equity");
-        for value in [self.long_position, self.short_position, self.initial_margin]
-            .into_iter()
-            .flatten()
+        ensure!(
+            self.initial_margin.is_none() || self.frozen_margin.is_none(),
+            "ambiguous margin observation"
+        );
+        for value in [
+            self.long_position,
+            self.short_position,
+            self.initial_margin,
+            self.frozen_margin,
+        ]
+        .into_iter()
+        .flatten()
         {
             ensure!(
                 value.is_finite() && value >= 0.0,
@@ -90,6 +102,7 @@ pub struct OverviewRow {
     pub position_unpriced_assets: Vec<String>,
     pub max_drawdown_15d_percent: Option<f64>,
     pub margin: Option<f64>,
+    pub margin_kind: Option<String>,
     pub margin_percent: Option<f64>,
     pub date_ms: Option<i64>,
     pub queried_at_ms: i64,
@@ -354,10 +367,10 @@ impl AccountOverview {
                                 .filter(|ts| (0..=SAMPLE_FRESH_MS).contains(&now.saturating_sub(*ts)))
                                 .zip(reading.initial_margin_usd);
                             let margin = if let Some(value) = ipc_margin {
-                                Some(value)
+                                Some((value.0, Some(value.1), None))
                             } else {
                                 match margin_reader.get(&source).await {
-                                    Ok(value) => value.map(|row| (row.ts_ms, row.initial_margin)),
+                                    Ok(value) => value.map(|row| (row.ts_ms, row.initial_margin, row.frozen_margin)),
                                     Err(_) => { warn!(source_id = %source.id, "read-only account margin query unavailable"); None }
                                 }
                             };
@@ -373,8 +386,9 @@ impl AccountOverview {
                                 long_position: fresh_risk.as_ref().map(|r| r.long_notional_usdt),
                                 short_position: fresh_risk.as_ref().map(|r| r.short_notional_usdt),
                                 position_at_ms: fresh_risk.map(|r| r.ts_ms),
-                                initial_margin: margin.map(|(_, value)| value),
-                                margin_at_ms: margin.map(|(ts, _)| ts),
+                                initial_margin: margin.and_then(|(_, initial, _)| initial),
+                                frozen_margin: margin.and_then(|(_, _, frozen)| frozen),
+                                margin_at_ms: margin.map(|(ts, _, _)| ts),
                             })
                         });
                     }
@@ -524,13 +538,21 @@ fn make_row(
     let short = fresh_position.and_then(|row| row.short_position);
     let long_leverage = ratio(long, fresh_equity);
     let short_leverage = ratio(short, fresh_equity);
-    let margin = current
-        .filter(|row| {
-            row.margin_at_ms.is_some_and(|ts| {
-                (0..=SAMPLE_FRESH_MS).contains(&row.observed_at_ms.saturating_sub(ts))
-            })
+    let fresh_margin = current.filter(|row| {
+        row.margin_at_ms.is_some_and(|ts| {
+            (0..=SAMPLE_FRESH_MS).contains(&row.observed_at_ms.saturating_sub(ts))
         })
-        .and_then(|row| row.initial_margin);
+    });
+    let margin = fresh_margin.and_then(|row| row.initial_margin.or(row.frozen_margin));
+    let margin_kind = fresh_margin.and_then(|row| {
+        if row.initial_margin.is_some() {
+            Some("initial".into())
+        } else if row.frozen_margin.is_some() {
+            Some("ltp_frozen".into())
+        } else {
+            None
+        }
+    });
     let leverage_alert = long_leverage
         .zip(alerts.long_leverage_limit)
         .zip(short_leverage.zip(alerts.short_leverage_limit))
@@ -582,6 +604,7 @@ fn make_row(
         position_unpriced_assets: vec![],
         max_drawdown_15d_percent: max_drawdown.map(|value| value * 100.0),
         margin,
+        margin_kind,
         margin_percent: ratio(margin, fresh_equity).map(|value| value * 100.0),
         date_ms: current.map(|row| row.equity_at_ms),
         queried_at_ms: queried_at,
@@ -615,6 +638,7 @@ fn apply_daily(
             row.short_position = None;
             row.net_position = None;
             row.margin = None;
+            row.margin_kind = None;
         }
         row.equity = Some(closing.equity);
         row.yesterday_equity = closing.previous_equity;
@@ -698,9 +722,66 @@ rocksdb_path = "/unused"
             short_position: Some(5750.30),
             position_at_ms: Some(ts),
             initial_margin: Some(83613.10),
+            frozen_margin: None,
             margin_at_ms: Some(ts),
         }
     }
+    #[test]
+    fn frozen_margin_stays_distinct_and_uses_fresh_equity_for_its_ratio() {
+        let now = now_ms();
+        let mut current = observation(now, 1000.0);
+        current.initial_margin = None;
+        for value in [25.0, 0.0] {
+            current.frozen_margin = Some(value);
+            current.validate().unwrap();
+            let row = make_row(
+                &source(),
+                Some(&current),
+                &[],
+                now,
+                now,
+                &OverviewAlertSettings::default(),
+            );
+            assert_eq!(row.margin, Some(value));
+            assert_eq!(row.margin_kind.as_deref(), Some("ltp_frozen"));
+            assert_eq!(row.margin_percent, Some(value / 1000.0 * 100.0));
+        }
+        current.margin_at_ms = Some(now - SAMPLE_FRESH_MS - 1);
+        let row = make_row(
+            &source(),
+            Some(&current),
+            &[],
+            now,
+            now,
+            &OverviewAlertSettings::default(),
+        );
+        assert_eq!(row.margin, None);
+        assert_eq!(row.margin_kind, None);
+        assert_eq!(row.margin_percent, None);
+        current.initial_margin = Some(10.0);
+        assert!(current.validate().is_err());
+    }
+
+    #[test]
+    fn existing_initial_margin_observations_keep_their_original_meaning() {
+        let now = now_ms();
+        let original = observation(now, 1000.0);
+        let mut json = serde_json::to_value(&original).unwrap();
+        json.as_object_mut().unwrap().remove("frozen_margin");
+        let restored: AccountObservation = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, original);
+        let row = make_row(
+            &source(),
+            Some(&restored),
+            &[],
+            now,
+            now,
+            &OverviewAlertSettings::default(),
+        );
+        assert_eq!(row.margin, original.initial_margin);
+        assert_eq!(row.margin_kind.as_deref(), Some("initial"));
+    }
+
     #[test]
     fn daily_reconstruction_populates_history_without_inventing_risk_or_exposing_sources() {
         let now = now_ms();
@@ -974,6 +1055,7 @@ rocksdb_path = "/unused"
             short_position: Some(2.0),
             position_at_ms: Some(100),
             initial_margin: Some(5.0),
+            frozen_margin: None,
             margin_at_ms: Some(100),
         };
         hub.append(&row).unwrap();

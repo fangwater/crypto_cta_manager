@@ -65,6 +65,12 @@ CREATE TABLE cta_exec_order_config_audit (
     CONSTRAINT cta_exec_order_config_audit_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'applied'::text, 'failed'::text])))
 );
 
+CREATE TABLE cta_managed_account_aliases (
+    account_id text PRIMARY KEY,
+    display_alias text NOT NULL CHECK (char_length(btrim(display_alias)) BETWEEN 1 AND 200),
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
 CREATE TABLE cta_order_sources (
     source_id text NOT NULL,
     account_label text NOT NULL,

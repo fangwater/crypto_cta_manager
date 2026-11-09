@@ -283,7 +283,13 @@ pub(crate) struct KlineWarmResult {
     pub pending: bool,
 }
 
-type WarmCompletion = Option<std::result::Result<(), String>>;
+// A successful pass can still await the exchange's candle confirmation.
+type WarmCompletion = Option<std::result::Result<bool, String>>;
+
+struct CandlePage {
+    candles: Vec<Kline>,
+    confirmation_pending: bool,
+}
 
 struct WarmJob {
     range: Mutex<(i64, i64)>,
@@ -313,7 +319,7 @@ impl Drop for WarmJobGuard {
     }
 }
 
-async fn wait_for_warm(mut completion: watch::Receiver<WarmCompletion>) -> Result<()> {
+async fn wait_for_warm(mut completion: watch::Receiver<WarmCompletion>) -> Result<bool> {
     loop {
         if let Some(result) = completion.borrow_and_update().clone() {
             return result.map_err(anyhow::Error::msg);
@@ -345,7 +351,7 @@ pub(crate) async fn warm_ranges(
                     == ((end - start) / MINUTE_US) as usize
             {
                 store.inner.status.lock().unwrap().cache_hits += 1;
-                return Ok(());
+                return Ok(false);
             }
             wait_for_warm(store.warm_symbol(symbol, (start, end))).await
         });
@@ -353,8 +359,9 @@ pub(crate) async fn warm_ranges(
     let mut result = KlineWarmResult::default();
     let wait = async {
         while let Some(joined) = jobs.join_next().await {
-            if let Err(error) = joined.unwrap_or_else(|e| Err(e.into())) {
-                result.errors.push(error.to_string());
+            match joined.unwrap_or_else(|e| Err(e.into())) {
+                Ok(pending) => result.pending |= pending,
+                Err(error) => result.errors.push(error.to_string()),
             }
         }
     };
@@ -493,7 +500,7 @@ impl KlineStore {
                 // historical request. Cancel that pass and resume newest-first
                 // with the merged range; already saved candles remain cached.
                 let result = tokio::select! {
-                    result = store.ensure_range(&symbol, range.0, range.1) =>
+                    result = store.ensure_range_confirmation(&symbol, range.0, range.1) =>
                         result.map_err(|error| error.to_string()),
                     _ = job.changed.notified() => continue,
                 };
@@ -917,15 +924,20 @@ impl KlineStore {
     }
 
     pub async fn ensure_range(&self, symbol: &str, start: i64, end: i64) -> Result<()> {
+        self.ensure_range_confirmation(symbol, start, end).await?;
+        Ok(())
+    }
+
+    async fn ensure_range_confirmation(&self, symbol: &str, start: i64, end: i64) -> Result<bool> {
         let (start, end) = self.closed_range(symbol, start, end)?;
         if start >= end {
-            return Ok(());
+            return Ok(false);
         }
         // Cached queries must not wait behind a larger historical backfill.
         if self.scan_async(symbol, start, end).await?.len() == ((end - start) / MINUTE_US) as usize
         {
             self.inner.status.lock().unwrap().cache_hits += 1;
-            return Ok(());
+            return Ok(false);
         }
         let lock = self
             .inner
@@ -942,18 +954,19 @@ impl KlineStore {
         if self.scan_async(symbol, start, end).await?.len() == ((end - start) / MINUTE_US) as usize
         {
             self.inner.status.lock().unwrap().cache_hits += 1;
-            return Ok(());
+            return Ok(false);
         }
         let mut block_end = end;
+        let mut confirmation_pending = false;
         while block_end > start {
             let block_start =
                 first_complete_open((block_end - DAY_US).max(self.cutoff_us(now_us())));
-            self.fill_missing(symbol, block_start, block_end).await?;
+            confirmation_pending |= self.fill_missing(symbol, block_start, block_end).await?;
             block_end = block_start;
         }
-        Ok(())
+        Ok(confirmation_pending)
     }
-    async fn fill_missing(&self, symbol: &str, start: i64, end: i64) -> Result<()> {
+    async fn fill_missing(&self, symbol: &str, start: i64, end: i64) -> Result<bool> {
         let existing = self
             .scan_async(symbol, start, end)
             .await?
@@ -964,6 +977,7 @@ impl KlineStore {
         // within each 24-hour block. This also makes a resumed warm job useful
         // immediately to live NAV while its historical range is still loading.
         let mut cursor = end;
+        let mut confirmation_pending = false;
         while cursor > start {
             if existing.contains(&(cursor - MINUTE_US)) {
                 cursor -= MINUTE_US;
@@ -979,8 +993,9 @@ impl KlineStore {
             }
             let result = self.fetch_page(symbol, cursor, last).await;
             match result {
-                Ok(candles) => {
-                    self.save_page(symbol, cursor, last, &candles)?;
+                Ok(page) => {
+                    self.save_page(symbol, cursor, last, &page.candles)?;
+                    confirmation_pending |= page.confirmation_pending;
                     self.inner.status.lock().unwrap().last_error = None;
                 }
                 Err(error) => {
@@ -989,9 +1004,9 @@ impl KlineStore {
                 }
             }
         }
-        Ok(())
+        Ok(confirmation_pending)
     }
-    async fn fetch_page(&self, symbol: &str, start: i64, end: i64) -> Result<Vec<Kline>> {
+    async fn fetch_page(&self, symbol: &str, start: i64, end: i64) -> Result<CandlePage> {
         check_trading_ips(&self.inner.config)?;
         let client = self.client().await?;
         let (venue, asset) = crate::market_data::split_cache_symbol(symbol)?;
@@ -1056,7 +1071,10 @@ impl KlineStore {
                 .all(|pair| pair[0].open_ts_us < pair[1].open_ts_us),
             "duplicate Binance candle"
         );
-        Ok(candles)
+        Ok(CandlePage {
+            candles,
+            confirmation_pending: false,
+        })
     }
 
     async fn fetch_okex_page(
@@ -1066,9 +1084,10 @@ impl KlineStore {
         symbol: &str,
         start: i64,
         end: i64,
-    ) -> Result<Vec<Kline>> {
+    ) -> Result<CandlePage> {
         let inst = okex_instrument(venue, symbol)?;
         let mut candles = Vec::new();
+        let mut confirmation_pending = false;
         let mut cursor = end;
         while cursor > start {
             let block = (cursor - 300 * MINUTE_US).max(start);
@@ -1101,7 +1120,12 @@ impl KlineStore {
                 body["code"]
             );
             for row in body["data"].as_array().context("missing OKX candles")? {
-                let candle = parse_okex_candle(row, venue)?;
+                let Some(candle) = parse_okex_candle(row, venue)
+                    .with_context(|| format!("parse OKX {inst} minute candle"))?
+                else {
+                    confirmation_pending = true;
+                    continue;
+                };
                 ensure!(
                     candle.open_ts_us >= block
                         && candle.end_ts_us() <= cursor
@@ -1119,7 +1143,10 @@ impl KlineStore {
                 .all(|p| p[0].open_ts_us < p[1].open_ts_us),
             "duplicate OKX candle"
         );
-        Ok(candles)
+        Ok(CandlePage {
+            candles,
+            confirmation_pending,
+        })
     }
     pub(crate) fn save_page(
         &self,
@@ -1304,11 +1331,11 @@ pub(crate) fn okex_instrument(venue: &str, symbol: &str) -> Result<String> {
     ))
 }
 
-fn parse_okex_candle(raw: &serde_json::Value, venue: &str) -> Result<Kline> {
+fn parse_okex_candle(raw: &serde_json::Value, venue: &str) -> Result<Option<Kline>> {
     let row = raw.as_array().context("invalid OKX candle row")?;
     ensure!(
-        row.len() == 9 && row[8].as_str() == Some("1"),
-        "OKX candle is unconfirmed or malformed"
+        row.len() == 9 && matches!(row[8].as_str(), Some("0" | "1")),
+        "OKX candle is malformed"
     );
     let number = |i: usize| -> Result<f64> {
         row[i]
@@ -1334,7 +1361,7 @@ fn parse_okex_candle(raw: &serde_json::Value, venue: &str) -> Result<Kline> {
         trades: 0,
     };
     candle.validate()?;
-    Ok(candle)
+    Ok((row[8].as_str() == Some("1")).then_some(candle))
 }
 
 fn check_trading_ips(config: &KlineConfig) -> Result<()> {
@@ -1422,12 +1449,12 @@ fn check_trading_ips_with_route(
             );
         }
         ensure!(
-            !ips.contains(&local) && !ips.contains(&public),
+            config.allow_trading_ip || (!ips.contains(&local) && !ips.contains(&public)),
             "Kline 出口与 trade engine 下单 IP 冲突，停止行情请求"
         );
     }
     ensure!(
-        !config.forbidden_public_ips.contains(&public),
+        config.allow_trading_ip || !config.forbidden_public_ips.contains(&public),
         "Kline uses a trading public IP"
     );
     Ok(())
@@ -1476,6 +1503,7 @@ mod tests {
         calls: Arc<Mutex<Vec<(i64, i64)>>>,
         symbols: Arc<Mutex<Vec<String>>>,
         omit: Option<i64>,
+        okex_unconfirmed: Arc<Mutex<Option<i64>>>,
         stall_before: Arc<Mutex<Option<i64>>>,
         stalled: Arc<Notify>,
         release: Arc<Notify>,
@@ -1523,12 +1551,14 @@ mod tests {
         Json(result)
     }
     async fn mock_okex_candles(
+        State(state): State<MockState>,
         Query(query): Query<BTreeMap<String, String>>,
     ) -> Json<serde_json::Value> {
         assert_eq!(query["instId"], "BTC-USDT-SWAP");
         assert_eq!(query["bar"], "1m");
         let end = query["after"].parse::<i64>().unwrap() * 1000;
         let start = (query["before"].parse::<i64>().unwrap() + 1) * 1000;
+        state.calls.lock().unwrap().push((start, end));
         let mut rows = Vec::new();
         let mut ts = end - MINUTE_US;
         while ts >= start {
@@ -1541,7 +1571,11 @@ mod tests {
                 "999",
                 "2",
                 "202",
-                "1"
+                if *state.okex_unconfirmed.lock().unwrap() == Some(ts) {
+                    "0"
+                } else {
+                    "1"
+                }
             ]));
             ts -= MINUTE_US;
         }
@@ -1626,16 +1660,80 @@ mod tests {
                 &serde_json::json!(["60000", "100", "105", "99", "103", "999", "2", "202", "0"]),
                 "okex-futures"
             )
-            .is_err()
+            .unwrap()
+            .is_none()
         );
         let spot = parse_okex_candle(
             &serde_json::json!(["60000", "100", "105", "99", "103", "3", "303", "303", "1"]),
             "okex-margin",
         )
+        .unwrap()
         .unwrap();
         assert_eq!(spot.base_volume, 3.0);
         assert_eq!(spot.vwap(), Some(101.0));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn okex_unconfirmed_minute_keeps_confirmed_cache_and_retries_only_the_gap() {
+        let (_dir, store, state, server) = fixture(None).await;
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US;
+        let start = end - 5 * MINUTE_US;
+        let pending = end - 2 * MINUTE_US;
+        *state.okex_unconfirmed.lock().unwrap() = Some(pending);
+        let ranges = BTreeMap::from([("okex-futures:BTCUSDT".into(), (start, end))]);
+        let warm = warm_ranges(&store, ranges.clone()).await;
+        assert!(warm.pending && warm.errors.is_empty());
+        assert!(
+            store
+                .get("okex-futures:BTCUSDT", pending)
+                .unwrap()
+                .is_none()
+        );
+        for ts in [pending - MINUTE_US, pending + MINUTE_US] {
+            assert_eq!(
+                store
+                    .get("okex-futures:BTCUSDT", ts)
+                    .unwrap()
+                    .unwrap()
+                    .close,
+                103.0
+            );
+        }
+        assert!(store.status().last_error.is_none());
+
+        let calls = state.calls.lock().unwrap().len();
+        *state.okex_unconfirmed.lock().unwrap() = None;
+        let warm = warm_ranges(&store, ranges).await;
+        assert!(!warm.pending && warm.errors.is_empty());
+        assert_eq!(
+            store
+                .get("okex-futures:BTCUSDT", pending)
+                .unwrap()
+                .unwrap()
+                .close,
+            103.0
+        );
+        assert_eq!(
+            &state.calls.lock().unwrap()[calls..],
+            &[(pending, pending + MINUTE_US)]
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn malformed_okex_candles_are_not_pending_confirmations() {
+        let valid = serde_json::json!(["60000", "100", "105", "99", "103", "999", "2", "202", "1"]);
+        let mut short = valid.clone();
+        short.as_array_mut().unwrap().pop();
+        assert!(parse_okex_candle(&short, "okex-futures").is_err());
+        let mut invalid_confirmation = valid.clone();
+        invalid_confirmation[8] = "2".into();
+        assert!(parse_okex_candle(&invalid_confirmation, "okex-futures").is_err());
+        let mut invalid_pending = valid;
+        invalid_pending[8] = "0".into();
+        invalid_pending[4] = "bad".into();
+        assert!(parse_okex_candle(&invalid_pending, "okex-futures").is_err());
     }
     #[tokio::test]
     async fn cash_candle_cache_is_separate_from_same_pair_perpetuals() {
@@ -1880,10 +1978,15 @@ mod tests {
             ..Default::default()
         };
         assert!(check_trading_ips(&config).is_err());
+        config.allow_trading_ip = true;
+        assert!(check_trading_ips(&config).is_ok());
+        config.allow_trading_ip = false;
         config.local_ip = Some("10.1.1.3".parse().unwrap());
         assert!(check_trading_ips(&config).is_ok());
         config.forbidden_public_ips.push(config.public_ip.unwrap());
         assert!(check_trading_ips(&config).is_err());
+        config.allow_trading_ip = true;
+        assert!(check_trading_ips(&config).is_ok());
     }
     #[test]
     fn unbound_trading_ips_exclude_the_resolved_route_and_require_public_exclusions() {

@@ -357,22 +357,22 @@ pub fn publish_token_matches(provided: Option<&str>, expected_hash: &str) -> boo
             == 0
 }
 
-pub async fn create_session(pool: &PgPool, user_id: i64) -> Result<String> {
+pub async fn create_session(pool: &PgPool, user_id: i64) -> Result<(String, i64)> {
     let token = new_session_token();
-    sqlx::query(
-        "INSERT INTO cta_auth_sessions (user_id, token_hash, expires_at) VALUES ($1, $2, now() + ($3 * interval '1 second'))",
+    let expires_at_us = sqlx::query_scalar(
+        "INSERT INTO cta_auth_sessions (user_id, token_hash, expires_at) VALUES ($1, $2, now() + ($3 * interval '1 second')) RETURNING (extract(epoch FROM expires_at)*1000000)::bigint",
     )
     .bind(user_id)
     .bind(token_hash(&token))
     .bind(SESSION_TTL_SECS)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .context("failed to create authentication session")?;
     // Expired sessions are disposable and should not accumulate forever.
     let _ = sqlx::query("DELETE FROM cta_auth_sessions WHERE expires_at < now()")
         .execute(pool)
         .await;
-    Ok(token)
+    Ok((token, expires_at_us))
 }
 
 pub async fn load_session(pool: &PgPool, token: &str) -> Result<Option<AuthUser>> {
@@ -606,7 +606,27 @@ pub async fn set_source_grants(
     grants: &[SourceGranteeInput],
     configured_source_ids: &BTreeSet<String>,
 ) -> Result<Vec<SourceGranteeView>> {
-    if !configured_source_ids.contains(source_id) {
+    set_account_source_grants(
+        pool,
+        &[source_id.to_string()],
+        grants,
+        configured_source_ids,
+    )
+    .await?;
+    list_source_grants(pool, source_id).await
+}
+
+pub async fn set_account_source_grants(
+    pool: &PgPool,
+    source_ids: &[String],
+    grants: &[SourceGranteeInput],
+    configured_source_ids: &BTreeSet<String>,
+) -> Result<()> {
+    if source_ids.is_empty()
+        || source_ids
+            .iter()
+            .any(|id| !configured_source_ids.contains(id))
+    {
         bail!("unknown source");
     }
     let unique = grants
@@ -635,13 +655,14 @@ pub async fn set_source_grants(
             bail!("grants contains an unknown user: {user_id}");
         }
     }
-    sqlx::query("DELETE FROM cta_user_source_permissions WHERE source_id = $1")
-        .bind(source_id)
+    sqlx::query("DELETE FROM cta_user_source_permissions WHERE source_id = ANY($1)")
+        .bind(source_ids)
         .execute(&mut *tx)
         .await
         .context("failed to clear account grants")?;
-    for (user_id, access_level) in unique {
-        sqlx::query(
+    for source_id in source_ids {
+        for (user_id, access_level) in &unique {
+            sqlx::query(
             "INSERT INTO cta_user_source_permissions (user_id, source_id, access_level) VALUES ($1, $2, $3)",
         )
         .bind(user_id)
@@ -650,11 +671,12 @@ pub async fn set_source_grants(
         .execute(&mut *tx)
         .await
         .context("failed to save account grant")?;
+        }
     }
     tx.commit()
         .await
         .context("failed to commit account grant update")?;
-    list_source_grants(pool, source_id).await
+    Ok(())
 }
 
 /// Fallback publish tokens accepted for every position strategy in addition to

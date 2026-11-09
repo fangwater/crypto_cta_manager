@@ -85,7 +85,8 @@ pub async fn register_sources(pool: &PgPool, sources: &[SourceConfig]) -> Result
 /// Display overrides stay separate from TOML labels and immutable history.
 pub async fn load_source_aliases(pool: &PgPool) -> Result<BTreeMap<String, String>> {
     sqlx::query_as(
-        "SELECT source_id, display_alias FROM cta_order_sources WHERE display_alias IS NOT NULL",
+        "SELECT source_id, display_alias FROM cta_order_sources WHERE display_alias IS NOT NULL
+         UNION ALL SELECT account_id, display_alias FROM cta_managed_account_aliases",
     )
     .fetch_all(pool)
     .await
@@ -116,6 +117,26 @@ pub async fn save_source_alias(pool: &PgPool, source_id: &str, alias: Option<&st
     .await
     .context("failed to save account alias")?;
     anyhow::ensure!(result.rows_affected() == 1, "unknown source");
+    Ok(())
+}
+
+/// Logical accounts have no order-source row. Alias writes never create one.
+pub async fn save_managed_account_alias(
+    pool: &PgPool,
+    account_id: &str,
+    alias: Option<&str>,
+) -> Result<()> {
+    let alias = normalize_source_alias(alias)?;
+    if let Some(alias) = alias {
+        sqlx::query("INSERT INTO cta_managed_account_aliases (account_id, display_alias) VALUES ($1, $2) ON CONFLICT (account_id) DO UPDATE SET display_alias = EXCLUDED.display_alias, updated_at = now()")
+            .bind(account_id).bind(alias).execute(pool).await.context("failed to save managed account alias")?;
+    } else {
+        sqlx::query("DELETE FROM cta_managed_account_aliases WHERE account_id = $1")
+            .bind(account_id)
+            .execute(pool)
+            .await
+            .context("failed to clear managed account alias")?;
+    }
     Ok(())
 }
 
@@ -645,12 +666,7 @@ pub async fn refresh_source_symbol_index(
         .await
         .context("failed to begin symbol index transaction")?;
     for (source_id, history) in histories {
-        upsert_symbol_index(
-            &mut transaction,
-            source_id,
-            history.events().iter().map(AsRef::as_ref),
-        )
-        .await?;
+        upsert_symbol_index(&mut transaction, source_id, history.symbol_index_events()).await?;
     }
     transaction
         .commit()

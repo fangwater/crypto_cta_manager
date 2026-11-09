@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeeRates {
     pub maker: f64,
     pub taker: f64,
@@ -97,6 +97,9 @@ pub fn validate_quote_fee_rates(rates: &BTreeMap<String, QuoteFeeRates>) -> Resu
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub database: DatabaseConfig,
+    /// One business account may own several independent Exec sources.
+    #[serde(default)]
+    pub accounts: BTreeMap<String, crate::managed_accounts::AccountConfig>,
     #[serde(default)]
     pub dashboard: DashboardConfig,
     #[serde(default)]
@@ -177,6 +180,8 @@ pub struct KlineConfig {
     pub local_ip: Option<IpAddr>,
     /// Expected public address after NAT. Verified before accessing Binance.
     pub public_ip: Option<IpAddr>,
+    /// Explicitly permit public market-data requests to share trading egress.
+    pub allow_trading_ip: bool,
     /// All live trade engine TOMLs on this host; only their IP fields are read.
     pub trade_engine_configs: Vec<PathBuf>,
     /// Additional public trading addresses when local_ips are behind NAT.
@@ -258,7 +263,8 @@ pub struct SourceConfig {
     pub rocksdb_path: PathBuf,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Skip Exec health checks and live account IPC until this account's runtime starts.
+    /// Skip standalone Exec health checks and live account IPC. Managed-account
+    /// members still subscribe to account IPC to supply the combined equity.
     #[serde(default = "default_true")]
     pub monitor_enabled: bool,
     /// Effective fee rate used to estimate fees from fill notional, for example 0.0004.
@@ -396,6 +402,7 @@ impl Default for KlineConfig {
                 .collect(),
             local_ip: None,
             public_ip: None,
+            allow_trading_ip: false,
             trade_engine_configs: Vec::new(),
             forbidden_public_ips: Vec::new(),
             request_timeout_secs: 15,
@@ -481,7 +488,7 @@ impl KlineConfig {
             {
                 bail!("kline.trade_engine_configs paths must be absolute");
             }
-            if self.forbidden_public_ips.contains(&public) {
+            if !self.allow_trading_ip && self.forbidden_public_ips.contains(&public) {
                 bail!("kline.public_ip must not use a trading public IP");
             }
         }
@@ -516,6 +523,7 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        crate::managed_accounts::validate(self)?;
         if !(60..=86400).contains(&self.funding_rates.refresh_secs)
             || self
                 .funding_rates
@@ -1121,6 +1129,7 @@ mod tests {
 
     fn config_with_sources(sources: Vec<SourceConfig>) -> AppConfig {
         AppConfig {
+            accounts: Default::default(),
             database: DatabaseConfig {
                 url_env: default_database_url_env(),
                 max_connections: 4,

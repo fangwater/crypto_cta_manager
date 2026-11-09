@@ -264,3 +264,35 @@ mod tests {
         assert_eq!(records[1].value, b"b");
     }
 }
+
+/// Visit records without retaining raw payloads for an entire account in RAM.
+/// All column families share one read-only DB handle for this scan.
+pub fn visit_column_families_from(
+    path: &Path,
+    requests: &[(String, Option<Vec<u8>>)],
+    mut visit: impl FnMut(&str, &[u8], &[u8]) -> Result<()>,
+) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
+    let options = read_only_options();
+    let names = DB::list_cf(&options, path)?;
+    let db = DB::open_cf_for_read_only(&options, path, names.clone(), false)?;
+    let mut heads = BTreeMap::new();
+    for (name, start) in requests {
+        if !names.contains(name) {
+            continue;
+        }
+        let cf = db
+            .cf_handle(name)
+            .context("source column family disappeared")?;
+        let mode = start.as_ref().map_or(IteratorMode::Start, |key| {
+            IteratorMode::From(key, Direction::Forward)
+        });
+        let mut head = None;
+        for item in db.iterator_cf(cf, mode) {
+            let (key, value) = item?;
+            visit(name, &key, &value)?;
+            head = Some(key.to_vec());
+        }
+        heads.insert(name.clone(), head);
+    }
+    Ok(heads)
+}

@@ -130,13 +130,14 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
       const side = sideClass(column.key)
       const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)
       const reconstructed = row.history_rebuilt_at_ms != null && ['yesterday_equity', 'today_profit', 'profit_percent', 'max_drawdown_15d_percent'].includes(column.key)
+      const ltpMargin = row.margin_kind === 'ltp_frozen' && ['margin', 'margin_percent'].includes(column.key)
       const updated = row.history_rebuilt_at_ms == null ? '' : `；更新时间 ${dateTime.format(row.history_rebuilt_at_ms)} 上海时间`
-      const title = partialPosition ? positionNotice : (row.account_kind === 'fr' || row.account_kind === 'mm') && profit
+      const title = ltpMargin ? 'LTP 实际冻结／占用保证金；占比 = 占用保证金 ÷ 实时权益 × 100%' : partialPosition ? positionNotice : (row.account_kind === 'fr' || row.account_kind === 'mm') && profit
         ? value == null ? 'FR/MM 已实现收益历史尚不可用，或缺少正的零点权益以计算收益率' : `FR/MM 按当日已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息计算，不含未平仓浮盈亏；盈亏比例以零点权益为分母${updated}`
         : value == null ? column.reason : time ? '上海时间' : reconstructed
           ? row.account_kind === 'fr' || row.account_kind === 'mm' ? `按事实权益与 NAV 总盈亏重建，包含浮盈亏${updated}` : `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算${updated}`
           : undefined
-      return <td key={column.key} className={className} title={title}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}{partialPosition && value != null && <sup aria-label="仅已定价持仓">*</sup>}</td>
+      return <td key={column.key} className={className} title={title}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}{ltpMargin && column.key === 'margin' && value != null && <span className="block text-[10px] text-muted">LTP 占用</span>}{partialPosition && value != null && <sup aria-label="仅已定价持仓">*</sup>}</td>
     })}
   </tr>
 }

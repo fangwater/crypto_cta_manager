@@ -1,3 +1,4 @@
+import { ExecVizPage } from './pages/ExecVizPage'
 import { theoreticalExecutionLabel } from './lib/theoreticalExecution'
 import { accountFeeSummary } from './format'
 import { serverClock } from './lib/serverClock'
@@ -33,6 +34,7 @@ import { AutoEarnPage } from './pages/AutoEarnPage'
 import { AuthGate } from './components/AuthGate'
 import { normalizePath, readSourceId, routes } from './lib/routes'
 import { retainedQuickRangeStartMs } from './lib/navRange'
+import { activeNavStrategies } from './lib/navStrategies'
 import { displayedFunding, usesActualFunding } from './lib/fundingPresentation'
 import {
   NavTimelineChart,
@@ -195,6 +197,7 @@ function AuthenticatedApp() {
   if (path === '/' || path === '/manager/workspace') return <WorkspacePage />
   if (path === '/manager/net-value') return <NavMonitorPage />
   if (path === '/manager/accounts') return <AccountsPage />
+  if (path === '/manager/exec') return <ExecVizPage />
   if (path === '/manager/account') return <AccountOverviewPage />
   if (path === '/manager/config') {
     const source = readSourceId()
@@ -347,8 +350,7 @@ function NavPage() {
     setTimelineError(null)
     setTimeline((previous) => previous?.report.start_ts_us === startMs * 1_000
       && previous.report.end_ts_us === endMs * 1_000
-      && previous.report.selected_source_ids.length === 1
-      && previous.report.selected_source_ids[0] === scope
+      && previous.report.selected_source_ids.slice().sort().join(',') === ((dashboard?.accounts?.find(a => a.source_id === scope)?.execution_sources ?? []).map(a => a.source_id).sort().join(',') || scope)
       && (selectedSymbols === null
         ? previous.report.selected_symbols.length === previous.report.available_symbols.length
         : [...previous.report.selected_symbols].sort().join(',') === [...selectedSymbols].sort().join(','))
@@ -418,7 +420,7 @@ function NavPage() {
     [dashboard, scope],
   )
   const availableSymbols = timeline?.report.available_symbols ?? []
-  const availableStrategies = timeline?.report.available_strategies ?? []
+  const availableStrategies = useMemo(() => activeNavStrategies(timeline), [timeline])
   const selectedSet = useMemo(
     () =>
       new Set(
@@ -444,7 +446,7 @@ function NavPage() {
     )
   }, [query, timeline])
   const selectedStrategySet = useMemo(
-    () => new Set(selectedStrategies ?? availableStrategies),
+    () => new Set(availableStrategies.filter(name => selectedStrategies === null || selectedStrategies.includes(name))),
     [availableStrategies, selectedStrategies],
   )
   const estimate = timeline?.estimated_funding
@@ -467,7 +469,7 @@ function NavPage() {
     [selectedStrategySet, timeline, strategyFunding, chartMode, feeMode],
   )
   const noSymbolsSelected = selectedSymbols?.length === 0
-  const noStrategiesSelected = selectedStrategies?.length === 0
+  const noStrategiesSelected = selectedStrategySet.size === 0
   const displayed = displayedFunding(pnlMode, timeline?.funding, estimate)
   const usesEstimatedFunding = displayed.kind === 'estimated'
   const fundingValue = displayed.value
@@ -494,7 +496,7 @@ function NavPage() {
       (account) =>
         account.enabled &&
         account.source_id === scope &&
-        (timeline?.report.selected_source_ids ?? []).includes(account.source_id),
+        (account.execution_sources?.length ? account.execution_sources.every(leg => (timeline?.report.selected_source_ids ?? []).includes(leg.source_id)) : (timeline?.report.selected_source_ids ?? []).includes(account.source_id)),
     )
     if (
       accounts.length === 0 ||
@@ -627,9 +629,10 @@ function NavPage() {
       setSelectedStrategies(availableStrategies.filter((item) => item !== strategy))
       return
     }
-    const next = selectedStrategies.includes(strategy)
-      ? selectedStrategies.filter((item) => item !== strategy)
-      : [...selectedStrategies, strategy].sort()
+    const current = [...selectedStrategySet]
+    const next = current.includes(strategy)
+      ? current.filter((item) => item !== strategy)
+      : [...current, strategy].sort()
     setSelectedStrategies(next.length === availableStrategies.length ? null : next)
   }
 

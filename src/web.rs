@@ -1,3 +1,4 @@
+mod managed_accounts;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -126,6 +127,8 @@ pub struct DashboardAccount {
     pub account: String,
     pub venue: String,
     pub enabled: bool,
+    /// Execution legs inside this business account; native accounts have none.
+    pub execution_sources: Vec<DashboardAccount>,
     pub gateway_prefix: Option<String>,
     pub configurable: bool,
     pub target_proxy_enabled: bool,
@@ -183,6 +186,7 @@ struct ExchangeNavResponse {
 
 #[derive(Clone, Debug, Serialize)]
 struct ExchangeNavAccount {
+    execution_sources: Vec<ExchangeNavAccount>,
     source_id: String,
     account: String,
     venue: String,
@@ -368,6 +372,7 @@ struct AuthMiddlewareState {
     targets: Arc<target_state::Targets>,
     configured_source_ids: BTreeSet<String>,
     source_viewers: BTreeMap<String, Vec<String>>,
+    config: Arc<AppConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -467,7 +472,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         "dashboard.compute_threads must be between 1 and 256"
     );
     crate::analysis::initialize(config.dashboard.compute_threads)?;
-    let live_equity = LiveEquityHub::spawn(&config.sources);
+    let live_equity = LiveEquityHub::spawn(&config);
     let viz_snapshot = VizSnapshotClient::new(config.order_config.request_timeout_secs)?;
     crate::kline::validate_host_configs(&config)?;
     let manager_db = ManagerDb::open(&config.kline.rocksdb_path)?;
@@ -506,7 +511,17 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     if klines.enabled() {
         theoretical_targets.refresh();
     }
-    let nav_history_store = Arc::new(std::sync::Mutex::new(nav::NavHistoryStore::default()));
+    let history_store = {
+        #[cfg(feature = "daily-fifo")]
+        {
+            nav::NavHistoryStore::with_daily(nav::daily::DailyFifoStore::open(manager_db.clone())?)
+        }
+        #[cfg(not(feature = "daily-fifo"))]
+        {
+            nav::NavHistoryStore::default()
+        }
+    };
+    let nav_history_store = Arc::new(std::sync::Mutex::new(history_store));
     let first_build = build_dashboard(
         &config,
         &pool,
@@ -810,6 +825,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
                 targets: state.targets.clone(),
                 configured_source_ids,
                 source_viewers: state.config.dashboard.source_viewers.clone(),
+                config: state.config.clone(),
             },
             auth_middleware,
         ))
@@ -893,7 +909,7 @@ async fn auth_middleware(
     // Account grants are tiered: 'view' reads the account, 'configure' also
     // writes it. Global catalog/access mutations remain admin-only, except
     // order templates, owned/delegated Virtual accounts and strategy grant edits.
-    let access = match auth::allowed_source_access(
+    let mut access = match auth::allowed_source_access(
         &auth_state.pool,
         &user,
         &auth_state.configured_source_ids,
@@ -907,6 +923,8 @@ async fn auth_middleware(
             return internal_error();
         }
     };
+    crate::managed_accounts::scope_access(&auth_state.config, &mut access.view);
+    crate::managed_accounts::scope_access(&auth_state.config, &mut access.configure);
     if let Some(message) =
         request_permission_error(user.is_admin(), read_only, source_id, path, &access)
     {
@@ -992,18 +1010,7 @@ async fn prepare_position_publish(
             .get(header::COOKIE)
             .and_then(|value| value.to_str().ok()),
     ) {
-        match auth_state.targets.session(&token) {
-            Ok(user) => session_user = user,
-            Err(error) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(ErrorResponse {
-                        error: error.to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-        }
+        session_user = auth_state.targets.session(&token);
     }
 
     let mut request = Request::from_parts(parts, axum::body::Body::from(bytes));
@@ -1094,7 +1101,7 @@ async fn auth_register(
     headers: HeaderMap,
     Json(request): Json<auth::RegisterRequest>,
 ) -> Result<Response, ApiError> {
-    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
+    let _sessions = state.targets.session_mutations.lock().await;
     if auth::has_users(&state.pool).await? {
         let user = load_request_user(&state.pool, &headers).await?;
         if !user.as_ref().is_some_and(AuthUser::is_admin) {
@@ -1107,7 +1114,10 @@ async fn auth_register(
         Ok(user) => user,
         Err(error) => return Ok(bad_request(error.to_string())),
     };
-    let token = auth::create_session(&state.pool, user.user_id).await?;
+    let (token, expires_at_us) = auth::create_session(&state.pool, user.user_id).await?;
+    state
+        .targets
+        .insert_session(&token, user.clone(), expires_at_us);
     let view = session_user_view(&state, &user).await?;
     Ok((
         [(
@@ -1124,12 +1134,15 @@ async fn auth_login(
     State(state): State<WebState>,
     Json(request): Json<auth::LoginRequest>,
 ) -> Result<Response, ApiError> {
-    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
+    let _sessions = state.targets.session_mutations.lock().await;
     let user = match auth::login(&state.pool, request).await {
         Ok(user) => user,
         Err(_) => return Ok(unauthorized("invalid username or password")),
     };
-    let token = auth::create_session(&state.pool, user.user_id).await?;
+    let (token, expires_at_us) = auth::create_session(&state.pool, user.user_id).await?;
+    state
+        .targets
+        .insert_session(&token, user.clone(), expires_at_us);
     let view = session_user_view(&state, &user).await?;
     Ok((
         [(
@@ -1146,13 +1159,14 @@ async fn auth_logout(
     State(state): State<WebState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
+    let _sessions = state.targets.session_mutations.lock().await;
     if let Some(token) = auth::extract_session_cookie(
         headers
             .get(header::COOKIE)
             .and_then(|value| value.to_str().ok()),
     ) {
         auth::delete_session(&state.pool, &token).await?;
+        state.targets.remove_session(&token);
     }
     Ok((
         [(
@@ -1167,6 +1181,9 @@ async fn auth_logout(
 /// Used by the gateway's auth_request for direct Exec Viz/Config links.
 /// The source ID is injected by the per-source Nginx location and is never
 /// trusted from the browser.
+#[path = "web/cta_config_access.rs"]
+mod cta_config_access;
+
 async fn auth_verify(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1184,17 +1201,48 @@ async fn auth_verify(
         .iter()
         .map(|source| source.id.clone())
         .collect();
-    let access = auth::allowed_source_access(
+    let mut access = auth::allowed_source_access(
         &state.pool,
         &user,
         &configured,
         &state.config.dashboard.source_viewers,
     )
     .await?;
-    if !access.view.contains(source_id) {
-        return Ok(forbidden("you are not authorized to view this account"));
+    crate::managed_accounts::scope_access(&state.config, &mut access.view);
+    crate::managed_accounts::scope_access(&state.config, &mut access.configure);
+    let configure = headers
+        .get("x-cta-access")
+        .and_then(|value| value.to_str().ok())
+        == Some("configure");
+    if !cta_config_access::permitted(&access, source_id, configure) {
+        return Ok(forbidden(
+            "you are not authorized for every account in this scope",
+        ));
     }
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+fn project_user_grants(config: &AppConfig, grants: &mut Vec<auth::SourceGrantView>) {
+    let original = grants.clone();
+    grants.retain(|g| crate::managed_accounts::parent_id(config, &g.source_id).is_none());
+    for (id, account) in &config.accounts {
+        if let Some(legs) = account
+            .source_ids
+            .iter()
+            .map(|id| original.iter().find(|g| &g.source_id == id))
+            .collect::<Option<Vec<_>>>()
+        {
+            grants.push(auth::SourceGrantView {
+                source_id: id.clone(),
+                access_level: if legs.iter().all(|g| g.access_level == "configure") {
+                    "configure"
+                } else {
+                    "view"
+                }
+                .into(),
+            });
+        }
+    }
 }
 
 async fn auth_users(
@@ -1214,6 +1262,7 @@ async fn auth_users(
         target
             .source_grants
             .retain(|grant| visible.0.contains(&grant.source_id));
+        project_user_grants(&state.config, &mut target.source_grants);
     }
     Ok((NO_STORE, Json(users)).into_response())
 }
@@ -1223,7 +1272,6 @@ async fn auth_create_user(
     Extension(user): Extension<AuthUser>,
     Json(request): Json<auth::CreateUserRequest>,
 ) -> Result<Response, ApiError> {
-    let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     if !user.is_admin() {
         return Ok(forbidden("administrator permission required"));
     }
@@ -1250,10 +1298,25 @@ async fn auth_user_sources(
     {
         return Ok(forbidden("you are not authorized to manage this account"));
     }
-    match auth::set_sources(&state.pool, user_id, &request.grants, &visible.0).await {
+    let mut grants = Vec::new();
+    for grant in &request.grants {
+        let ids = match crate::managed_accounts::expand(
+            &state.config,
+            &[grant.source_id.trim().to_string()],
+        ) {
+            Ok(ids) => ids,
+            Err(error) => return Ok(bad_request(error)),
+        };
+        grants.extend(ids.into_iter().map(|source_id| auth::SourceGrantInput {
+            source_id,
+            access_level: grant.access_level.clone(),
+        }));
+    }
+    match auth::set_sources(&state.pool, user_id, &grants, &visible.0).await {
         Ok(mut view) => {
             view.source_grants
                 .retain(|grant| visible.0.contains(&grant.source_id));
+            project_user_grants(&state.config, &mut view.source_grants);
             Ok((NO_STORE, Json(view)).into_response())
         }
         Err(error) => Ok(bad_request(error.to_string())),
@@ -1267,6 +1330,8 @@ async fn auth_user_role(
     Path(user_id): Path<i64>,
     Json(request): Json<auth::SetRoleRequest>,
 ) -> Result<Response, ApiError> {
+    // Roles change publication authorization for every cached session. Keep
+    // admission closed until the catalog/session reload observes the new role.
     let _publication_edit = state.targets.edit(&state.configuration_lock).await;
     if !user.is_admin() {
         return Ok(forbidden("administrator permission required"));
@@ -1331,6 +1396,12 @@ async fn account_overview_report(
         .await
         .map_err(|error| anyhow::anyhow!("account overview task failed: {error}"))??;
     let aliases = postgres::load_source_aliases(&state.pool).await?;
+    for account in &mut report.accounts {
+        if let Some(alias) = aliases.get(&account.source_id) {
+            account.account.clone_from(alias);
+        }
+    }
+    crate::managed_accounts::project_overview(&state.config, &mut report);
     for account in &mut report.accounts {
         if let Some(alias) = aliases.get(&account.source_id) {
             account.account.clone_from(alias);
@@ -1500,6 +1571,8 @@ async fn dashboard(
                 Some(report.totals.nav_change_after_fee_quote + account.funding.income_quote);
         }
     }
+    managed_accounts::project(&state.config, &mut dashboard, &visible.0);
+    managed_accounts::apply_aliases(&mut dashboard, &aliases);
     Ok((NO_STORE, Json(dashboard)).into_response())
 }
 
@@ -1541,7 +1614,7 @@ async fn list_symbols(
         .iter()
         .map(|source| source.id.clone())
         .collect();
-    let visible = match user {
+    let mut visible = match user {
         Some(user) => match auth::allowed_source_access(
             &state.pool,
             &user,
@@ -1557,6 +1630,7 @@ async fn list_symbols(
             auth::visible_source_boundary(&configured, &state.config.dashboard.source_viewers, None)
         }
     };
+    crate::managed_accounts::scope_access(&state.config, &mut visible);
     if selected_source_ids.iter().any(|id| !visible.contains(id)) {
         return forbidden("you are not authorized to view this account");
     }
@@ -1696,13 +1770,7 @@ async fn health(
         } else {
             "ok"
         },
-        source_count: cache
-            .dashboard
-            .report
-            .sources
-            .iter()
-            .filter(|source| visible.0.contains(&source.source_id))
-            .count(),
+        source_count: crate::managed_accounts::public_ids(&state.config, &visible.0).len(),
         generated_at_us: cache.dashboard.generated_at_us,
         last_attempt_at_us: cache.last_attempt_at_us,
         refresh_interval_secs: cache.dashboard.refresh_interval_secs,
@@ -1723,10 +1791,61 @@ async fn exchange_nav(
         Err(message) => return Ok(bad_request(message)),
     };
     let now_ms = unix_now_ms();
-    let accounts = selected
+    let raw = selected
         .into_iter()
         .map(|source| exchange_nav_account(source, state.live_equity.get(&source.id), now_ms))
-        .collect();
+        .collect::<Vec<_>>();
+    let mut accounts = raw
+        .iter()
+        .filter(|a| crate::managed_accounts::parent_id(&state.config, &a.source_id).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    for (id, spec) in &state.config.accounts {
+        if !visible.0.contains(id) {
+            continue;
+        }
+        let Some(legs) = spec
+            .source_ids
+            .iter()
+            .map(|id| raw.iter().find(|a| &a.source_id == id).cloned())
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let sum = |field: fn(&ExchangeNavAccount) -> Option<f64>| {
+            legs.iter()
+                .map(field)
+                .collect::<Option<Vec<_>>>()
+                .map(|v| v.iter().sum())
+        };
+        accounts.push(ExchangeNavAccount {
+            source_id: id.clone(),
+            account: spec.name.clone(),
+            venue: "spread".into(),
+            feed: Some("execution_sources".into()),
+            equity_usdt: sum(|a| a.equity_usdt),
+            wallet_balance_usdt: sum(|a| a.wallet_balance_usdt),
+            unrealized_pnl_usdt: sum(|a| a.unrealized_pnl_usdt),
+            available_balance_usdt: sum(|a| a.available_balance_usdt),
+            exchange_ts_ms: legs
+                .iter()
+                .map(|a| a.exchange_ts_ms)
+                .collect::<Option<Vec<_>>>()
+                .and_then(|v| v.into_iter().min()),
+            status: if legs.iter().all(|a| a.status == "ok") {
+                "ok"
+            } else {
+                "unavailable"
+            },
+            execution_sources: legs,
+        });
+    }
+    let aliases = postgres::load_source_aliases(&state.pool).await?;
+    for account in &mut accounts {
+        if let Some(alias) = aliases.get(&account.source_id) {
+            account.account.clone_from(alias);
+        }
+    }
     Ok((
         NO_STORE,
         Json(ExchangeNavResponse {
@@ -1767,6 +1886,7 @@ fn exchange_nav_account(
         .map(|snapshot| live_equity_status(snapshot.ts_ms, now_ms))
         .unwrap_or("unavailable");
     ExchangeNavAccount {
+        execution_sources: Vec::new(),
         source_id: source.id.clone(),
         account: source.display_name().to_string(),
         venue: source.venue.clone(),
@@ -1856,7 +1976,7 @@ async fn timeline_arrow_response(
 
 async fn rebuild_timeline_snapshot(
     state: WebState,
-    query: TimelineQuery,
+    mut query: TimelineQuery,
     use_strategy_allocation: bool,
     visible_source_ids: BTreeSet<String>,
 ) -> Result<std::result::Result<TimelineSnapshot, Response>, ApiError> {
@@ -1869,14 +1989,32 @@ async fn rebuild_timeline_snapshot(
             "you are not authorized to view one or more accounts",
         )));
     }
+    if query.start_ms.is_none() && requested_source_ids.len() == 1 {
+        query.start_ms = state
+            .config
+            .accounts
+            .get(&requested_source_ids[0])
+            .map(|a| a.created_at_us / 1000);
+    }
     let selected_source_ids = if requested_source_ids.is_empty() {
-        visible_source_ids.into_iter().collect::<Vec<_>>()
+        state
+            .config
+            .sources
+            .iter()
+            .filter(|s| s.enabled && visible_source_ids.contains(&s.id))
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>()
     } else {
         requested_source_ids
     };
     if selected_source_ids.is_empty() {
         return Ok(Err(forbidden("you are not authorized to view any account")));
     }
+    let selected_source_ids =
+        match crate::managed_accounts::expand(&state.config, &selected_source_ids) {
+            Ok(ids) => ids,
+            Err(message) => return Ok(Err(bad_request(message))),
+        };
     if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
         return Ok(Err(bad_request(message)));
     }
@@ -2030,7 +2168,15 @@ async fn rebuild_timeline_snapshot(
         })
         .await
         .context("funding symbol projection failed")?;
-        let coverage = public_rates.request(&symbols, report.start_ts_us, report.end_ts_us);
+        let managed = report
+            .selected_source_ids
+            .iter()
+            .any(|id| crate::managed_accounts::parent_id(&state.config, id).is_some());
+        let coverage = if managed {
+            public_rates.request_priority(&symbols, report.start_ts_us, report.end_ts_us)
+        } else {
+            public_rates.request(&symbols, report.start_ts_us, report.end_ts_us)
+        };
         let factual_funding = state.funding.clone();
         tokio::task::spawn_blocking(move || {
             // An incomplete window/symbol must not discard other available rates.
@@ -2245,13 +2391,24 @@ async fn acquisition_cost(
         ));
     }
     let selected_source_ids = if requested_source_ids.is_empty() {
-        visible.0.iter().cloned().collect::<Vec<_>>()
+        state
+            .config
+            .sources
+            .iter()
+            .filter(|s| s.enabled && visible.0.contains(&s.id))
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>()
     } else {
         requested_source_ids
     };
     if selected_source_ids.is_empty() {
         return Ok(forbidden("you are not authorized to view any account"));
     }
+    let selected_source_ids =
+        match crate::managed_accounts::expand(&state.config, &selected_source_ids) {
+            Ok(ids) => ids,
+            Err(message) => return Ok(bad_request(message)),
+        };
     if let Err(message) = resolve_sources(&state.config, &selected_source_ids) {
         return Ok(bad_request(message));
     }
@@ -2336,6 +2493,24 @@ async fn acquisition_cost(
         .as_ref()
         .clone()
         .with_fee_rates(&fee_rates);
+    let history_config = config.clone();
+    let history_ids = selected_source_ids.clone();
+    let histories = tokio::task::spawn_blocking(move || -> Result<nav::NavSourceHistories> {
+        history_config
+            .sources
+            .iter()
+            .filter(|s| s.enabled && history_ids.contains(&s.id))
+            .map(|s| {
+                let h = histories.get(&s.id).context("source history unavailable")?;
+                Ok((
+                    s.id.clone(),
+                    h.complete_for_window(s, start_received_at_us)?,
+                ))
+            })
+            .collect()
+    })
+    .await
+    .context("acquisition history load failed")??;
     let mut reports = Vec::new();
     for reference_model in crate::theoretical_execution::references(&config, &selected_source_ids)?
     {
@@ -3189,7 +3364,6 @@ async fn save_account_funding(
     if !(60..=86400).contains(&request.refresh_secs) {
         return Ok(bad_request("funding 拉取间隔必须为 60–86400 秒".into()));
     }
-    let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     let mut settings = state.funding.settings(&source_id);
     if request.enabled && !settings.enabled {
         let expected = std::env::var(&state.config.funding.enable_token_env).ok();
@@ -3232,6 +3406,19 @@ async fn get_account_studio(
     State(state): State<WebState>,
     Path(source_id): Path<String>,
 ) -> Result<Response, ApiError> {
+    if let Some(account) = state.config.accounts.get(&source_id) {
+        let mut execution_sources = Vec::new();
+        for id in &account.source_ids {
+            execution_sources.push(strategy_catalog::load_account_studio(&state.pool, id).await?);
+        }
+        return Ok((
+            NO_STORE,
+            Json(
+                serde_json::json!({"source_id": source_id, "execution_sources": execution_sources}),
+            ),
+        )
+            .into_response());
+    }
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
     }
@@ -3257,19 +3444,22 @@ async fn save_account_alias(
     if !visible.0.contains(&source_id) {
         return Ok(forbidden("you are not authorized to view this account"));
     }
-    let Some(source) = state
-        .config
-        .sources
-        .iter()
-        .find(|source| source.id == source_id)
-    else {
+    let default_name = if let Some(account) = state.config.accounts.get(&source_id) {
+        account.name.as_str()
+    } else if let Some(source) = state.config.sources.iter().find(|s| s.id == source_id) {
+        source.display_name()
+    } else {
         return Ok(not_found("account was not found"));
     };
     let alias = match postgres::normalize_source_alias(request.alias.as_deref()) {
         Ok(alias) => alias,
         Err(error) => return Ok(bad_request(error.to_string())),
     };
-    postgres::save_source_alias(&state.pool, &source_id, alias.as_deref()).await?;
+    if state.config.accounts.contains_key(&source_id) {
+        postgres::save_managed_account_alias(&state.pool, &source_id, alias.as_deref()).await?;
+    } else {
+        postgres::save_source_alias(&state.pool, &source_id, alias.as_deref()).await?;
+    }
     info!(
         source_id,
         user_id = user.user_id,
@@ -3279,7 +3469,7 @@ async fn save_account_alias(
         NO_STORE,
         Json(serde_json::json!({
             "source_id": source_id,
-            "account": alias.as_deref().unwrap_or_else(|| source.display_name()),
+            "account": alias.as_deref().unwrap_or_else(|| default_name),
             "display_alias": alias,
         })),
     )
@@ -3372,7 +3562,26 @@ async fn list_account_grants(
             "account configure permission required to view grants",
         ));
     }
-    let grants = auth::list_source_grants(&state.pool, &source_id).await?;
+    let ids = state
+        .config
+        .accounts
+        .get(&source_id)
+        .map(|a| a.source_ids.clone())
+        .unwrap_or_else(|| vec![source_id.clone()]);
+    let mut grants = auth::list_source_grants(&state.pool, &ids[0]).await?;
+    for id in ids.iter().skip(1) {
+        let next = auth::list_source_grants(&state.pool, id).await?;
+        grants.retain_mut(|grant| {
+            if let Some(other) = next.iter().find(|g| g.user_id == grant.user_id) {
+                if other.access_level != "configure" {
+                    grant.access_level = "view".into();
+                }
+                true
+            } else {
+                false
+            }
+        });
+    }
     Ok((NO_STORE, Json(grants)).into_response())
 }
 
@@ -3400,6 +3609,27 @@ async fn save_account_grants(
         .iter()
         .map(|source| source.id.clone())
         .collect();
+    if let Some(account) = state.config.accounts.get(&source_id) {
+        match auth::set_account_source_grants(
+            &state.pool,
+            &account.source_ids,
+            &request.grants,
+            &configured,
+        )
+        .await
+        {
+            Ok(()) => {
+                return list_account_grants(
+                    State(state),
+                    Extension(user),
+                    Extension(ConfigurableSources(BTreeSet::from([source_id.clone()]))),
+                    Path(source_id),
+                )
+                .await;
+            }
+            Err(error) => return Ok(bad_request(error.to_string())),
+        }
+    }
     match auth::set_source_grants(&state.pool, &source_id, &request.grants, &configured).await {
         Ok(grants) => Ok((NO_STORE, Json(grants)).into_response()),
         Err(error) => Ok(bad_request(error.to_string())),
@@ -3672,6 +3902,12 @@ fn bfusd_source<'a>(
     config: &'a AppConfig,
     source_id: &str,
 ) -> std::result::Result<&'a SourceConfig, Response> {
+    if config.accounts.contains_key(source_id) {
+        return Err(bad_request(
+            "select an execution source within this account to configure risk, fees or routing"
+                .into(),
+        ));
+    }
     let Some(source) = config.sources.iter().find(|source| source.id == source_id) else {
         return Err(not_found("account not found"));
     };
@@ -4693,11 +4929,12 @@ fn resolve_sources<'a>(
     config: &'a AppConfig,
     selected_source_ids: &[String],
 ) -> std::result::Result<Vec<&'a SourceConfig>, String> {
-    let requested = selected_source_ids
+    let expanded = crate::managed_accounts::expand(config, selected_source_ids)?;
+    let requested = expanded
         .iter()
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
-    if requested.len() != selected_source_ids.len() {
+    if requested.len() != expanded.len() {
         return Err("sourceIds must not contain duplicates".to_string());
     }
     for source_id in &requested {
@@ -5160,10 +5397,15 @@ fn strategy_pnl_record_batch(
     rows: &[nav::StrategyPnlRow],
 ) -> Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(vec![
-            report.source_id.as_str();
-            rows.len()
-        ])),
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| {
+                    row.execution_source_id
+                        .as_deref()
+                        .unwrap_or(&report.source_id)
+                })
+                .collect::<Vec<_>>(),
+        )),
         Arc::new(StringArray::from(vec![report.account.as_str(); rows.len()])),
         Arc::new(StringArray::from(vec![
             report.strategy_name.as_str();
@@ -5358,6 +5600,7 @@ async fn build_dashboard(
                 account: source.display_name().to_string(),
                 venue: source.venue.clone(),
                 enabled: source.enabled,
+                execution_sources: Vec::new(),
                 gateway_prefix: source.gateway_prefix.clone(),
                 configurable: source.exec_config_url.is_some(),
                 target_proxy_enabled: source.target_proxy.is_some(),
@@ -5389,23 +5632,32 @@ async fn build_dashboard(
     let nav_history_store = Arc::clone(nav_history_store);
     let (report, histories, snapshots, strategy_snapshots, nav_timelines) =
         tokio::task::spawn_blocking(move || {
-            let mut histories = {
-                let mut store = nav_history_store
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                store.refresh(&nav_config)?
-            };
-            nav::allocation::attach(&mut histories, &allocation_snapshots);
-            let histories = Arc::new(histories);
             let snapshots = Arc::new(snapshots);
             let strategy_snapshots = Arc::new(strategy_snapshots);
-            let nav_timelines = Arc::new(nav::NavTimelineCache::refresh(
-                nav_config,
-                snapshots.clone(),
-                strategy_snapshots.clone(),
-                histories.clone(),
-                previous.as_deref(),
-            )?);
+            let mut store = nav_history_store.lock().unwrap_or_else(|p| p.into_inner());
+            let nav_timelines = if let Some(daily) = store.daily.clone() {
+                Arc::new(nav::NavTimelineCache::refresh_daily(
+                    nav_config,
+                    snapshots.clone(),
+                    strategy_snapshots.clone(),
+                    &allocation_snapshots,
+                    &mut store,
+                    previous.as_deref(),
+                    daily,
+                    unix_now_us(),
+                )?)
+            } else {
+                let mut histories = store.refresh(&nav_config)?;
+                nav::allocation::attach(&mut histories, &allocation_snapshots);
+                Arc::new(nav::NavTimelineCache::refresh(
+                    nav_config,
+                    snapshots.clone(),
+                    strategy_snapshots.clone(),
+                    Arc::new(histories),
+                    previous.as_deref(),
+                )?)
+            };
+            let histories = nav_timelines.histories();
             let report = nav_timelines.dashboard_report();
             anyhow::Ok((
                 report,
@@ -6003,6 +6255,7 @@ mod tests {
             end_ts_us: 2_000,
             rows: vec![
                 nav::StrategyPnlRow {
+                    execution_source_id: None,
                     row_kind: nav::StrategyPnlRowKind::WindowStart,
                     ts_us: 1_000,
                     record_key: None,
@@ -6011,6 +6264,7 @@ mod tests {
                     totals: nav::NavTotals::default(),
                 },
                 nav::StrategyPnlRow {
+                    execution_source_id: None,
                     row_kind: nav::StrategyPnlRowKind::WindowEnd,
                     ts_us: 2_000,
                     record_key: None,
@@ -6065,6 +6319,7 @@ mod tests {
             end_ts_us: 2_000,
             rows: vec![
                 nav::StrategyPnlRow {
+                    execution_source_id: None,
                     row_kind: nav::StrategyPnlRowKind::WindowStart,
                     ts_us: 1_000,
                     record_key: None,
@@ -6073,6 +6328,7 @@ mod tests {
                     totals: nav::NavTotals::default(),
                 },
                 nav::StrategyPnlRow {
+                    execution_source_id: None,
                     row_kind: nav::StrategyPnlRowKind::WindowEnd,
                     ts_us: 2_000,
                     record_key: None,
@@ -6092,6 +6348,7 @@ mod tests {
     #[test]
     fn resolve_publish_source_requires_enabled_exec_config() {
         let mut config = crate::config::AppConfig {
+            accounts: Default::default(),
             database: crate::config::DatabaseConfig {
                 url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),
                 max_connections: 1,
@@ -6182,6 +6439,7 @@ mod tests {
             target_proxy: None,
         };
         let config = crate::config::AppConfig {
+            accounts: Default::default(),
             database: crate::config::DatabaseConfig {
                 url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),
                 max_connections: 1,
@@ -6865,7 +7123,6 @@ async fn save_virtual_grants(
     Path(virtual_id): Path<String>,
     Json(request): Json<SaveVirtualGrants>,
 ) -> Result<Response, ApiError> {
-    let _guard = state.targets.edit(&state.configuration_lock).await;
     let Some(account) = virtual_account_for_user(&state, &user, &virtual_id).await? else {
         return Ok(not_found("virtual account was not found"));
     };

@@ -1,3 +1,7 @@
+import { accountExecutionGroup, estimatedFundingOnly } from '../lib/executionGroups'
+import { accountBindings } from '../lib/accountBindings'
+import { accountScope } from '../lib/accountScope'
+import { accountVenueLabel } from '../lib/workspace'
 import { AccountFeeEditor } from '../components/AccountFeeEditor'
 import { FundingSettingsPanel } from '../components/FundingSettingsPanel'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
@@ -12,10 +16,11 @@ import {
   SlidersHorizontal,
   WalletCards,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   getAccountContractLeverage,
   getAccountStudio,
+  getMultiMarketAccountStudio,
   getDashboard,
   saveAccountContractLeverage,
   saveAccountFeeRates,
@@ -29,6 +34,7 @@ import { OrderParametersView } from '../components/OrderParametersView'
 import { TargetPositionsView } from '../components/TargetPositionsView'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
+import { Select } from '../components/ui/Field'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
@@ -58,11 +64,14 @@ function venueMark(venue: string) {
 }
 
 export function AccountOverviewPage() {
-  const sourceId = readSourceId()
+  const accountId = readSourceId()
+  const selectedMarket = useRef('')
+  const [sourceId, setSourceId] = useState(accountId)
   const { positions, orders, loading: catalogLoading } = useStrategyCatalog()
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
   const [dashboard, setDashboard] = useState<DashboardSnapshot | null>(null)
   const [studio, setStudio] = useState<AccountStudio | null>(null)
+  const [accountStudios, setAccountStudios] = useState<AccountStudio[]>([])
   const [contractSymbol, setContractSymbol] = useState('')
   const [contractLeverage, setContractLeverage] = useState('5')
   const [queriedContractLeverage, setQueriedContractLeverage] = useState<string | null>(null)
@@ -70,15 +79,26 @@ export function AccountOverviewPage() {
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
-    if (!sourceId) return
+    if (!accountId) return
     const snapshot = await getDashboard(signal)
-    const nextStudio = await getAccountStudio(sourceId, signal)
+    const scope = accountScope(snapshot.accounts ?? [], accountId)
+    if (!scope) throw new Error('账户不可见或不存在')
+    const markets = scope.account.execution_sources ?? []
+    const nativeId = markets.find(s => s.source_id === selectedMarket.current)?.source_id
+      ?? scope.execution?.source_id ?? markets[0]?.source_id ?? scope.account.source_id
+    const studios = markets.length
+      ? (await getMultiMarketAccountStudio(scope.account.source_id, signal)).execution_sources
+      : [await getAccountStudio(nativeId, signal)]
+    selectedMarket.current = nativeId
+    setSourceId(nativeId)
     setDashboard(snapshot)
-    setStudio(nextStudio)
-  }, [sourceId])
+    setAccountStudios(studios)
+    setStudio(studios.find(s => s.source_id === nativeId) ?? null)
+    window.history.replaceState({}, '', routes.account(scope.account.source_id))
+  }, [accountId])
 
   useEffect(() => {
-    if (!sourceId) {
+    if (!accountId) {
       setLoading(false)
       return
     }
@@ -91,23 +111,23 @@ export function AccountOverviewPage() {
       })
       .finally(() => setLoading(false))
     return () => controller.abort()
-  }, [refresh, sourceId])
+  }, [refresh, accountId])
 
-  const account = useMemo(() => {
-    const accounts = dashboard?.accounts ?? []
-    return accounts.find((entry) => entry.source_id === sourceId)
-  }, [dashboard, sourceId])
-
-  const report = useMemo(
-    () => dashboard?.report.sources.find((source) => source.source_id === sourceId),
-    [dashboard, sourceId],
-  )
-  const canConfigure = account?.access_level === 'configure'
+  const account = useMemo(() => (dashboard?.accounts ?? []).find(a => a.source_id === accountId || a.execution_sources?.some(s => s.source_id === sourceId)), [dashboard, accountId, sourceId])
+  const publicId = account?.source_id ?? accountId
+  const executionGroup = account ? accountExecutionGroup(account) : null
+  const executionUrl = executionGroup ? routes.execViz(executionGroup.id) : account?.gateway_prefix ? `${account.gateway_prefix}/` : null
+  const markets = account?.execution_sources ?? []
+  const marketAccount = markets.find(a => a.source_id === sourceId) ?? account
+  const report = dashboard?.report.sources.find(s => s.source_id === publicId)
+  const bindings = useMemo(() => accountBindings(accountStudios), [accountStudios])
+  const liquidityReport = report?.execution_sources?.find(s => s.source_id === sourceId) ?? report
+  const canConfigure = marketAccount?.access_level === 'configure'
   const signalConfigPath = canConfigure ? prepSignalConfigPath(sourceId) : undefined
   const knownLiquidityVolume =
-    (report?.maker_volume_quote ?? 0) + (report?.taker_volume_quote ?? 0)
+    (liquidityReport?.maker_volume_quote ?? 0) + (liquidityReport?.taker_volume_quote ?? 0)
   const makerRatio = knownLiquidityVolume > 0
-    ? (report?.maker_volume_quote ?? 0) / knownLiquidityVolume
+    ? (liquidityReport?.maker_volume_quote ?? 0) / knownLiquidityVolume
     : 0
   const takerRatio = knownLiquidityVolume > 0 ? 1 - makerRatio : 0
 
@@ -119,6 +139,7 @@ export function AccountOverviewPage() {
     () => new Map(orders.map((item) => [item.strategy_name, item])),
     [orders],
   )
+
 
   if (!sourceId) {
     return (
@@ -134,7 +155,7 @@ export function AccountOverviewPage() {
   return (
     <AppShell
       active="accounts"
-      title={account?.account ?? sourceId}
+      title={account?.account ?? accountId}
       subtitle="账户配置概览"
       icon={WalletCards}
       actions={
@@ -156,25 +177,26 @@ export function AccountOverviewPage() {
 
           <PageIntro
             eyebrow="Account Overview"
-            title={account?.account ?? sourceId}
+            title={account?.account ?? accountId}
             description={
-              isUnifiedVenue(account?.venue ?? '')
+              markets.length ? '在同一账户中查看整体盈亏与策略，按交易市场设置费率和执行参数。' : isUnifiedVenue(account?.venue ?? '')
                 ? '统一账户权益包含账户全部抵押资产。UniMMR 为保证金覆盖倍数，数值越大越安全；无可用比率时显示 --。'
                 : '这里只展示当前组合配置与运行摘要。修改请进入右侧独立的策略配置分区。'
             }
             actions={
-              <div className="flex flex-wrap gap-2">
-                <ActionButton href={routes.nav(sourceId)} primary icon={<Activity size={15} />}>
+              <div className="flex flex-wrap items-center gap-2">
+                {(markets.length > 0 || estimatedFundingOnly(sourceId)) && <Badge tone="neutral">Funding：预估</Badge>}
+                <ActionButton href={routes.nav(publicId)} primary icon={<Activity size={15} />}>
                   净值
                 </ActionButton>
-                {account?.gateway_prefix && (
-                  <ActionButton href={`${account.gateway_prefix}/`} icon={<ExternalLink size={15} />}>
+                {executionUrl && (
+                  <ActionButton href={executionUrl} icon={<ExternalLink size={15} />}>
                     Exec Viz
                   </ActionButton>
                 )}
                 {canConfigure && (
                   <ActionButton
-                    href={routes.configBindings(sourceId)}
+                    href={routes.configBindings(publicId)}
                     icon={<PencilLine size={15} />}
                   >
                     编辑启用
@@ -190,7 +212,19 @@ export function AccountOverviewPage() {
           />
 
           <div className="mb-8 space-y-4">
-            {account?.venue === 'binance-futures' && <FundingSettingsPanel key={sourceId} sourceId={sourceId} canConfigure={canConfigure} />}
+            {markets.length > 0 && <Card><CardContent className="flex flex-wrap items-center gap-3 pt-5">
+              <label className="text-sm font-medium text-ink" htmlFor="account-market">交易市场</label>
+              <Select id="account-market" aria-label="交易市场" value={sourceId} disabled={saving} className="max-w-xs" onChange={event => {
+                const next = event.target.value
+                if (!markets.some(m => m.source_id === next)) return
+                selectedMarket.current = next
+                setSourceId(next)
+                setStudio(accountStudios.find(s => s.source_id === next) ?? null)
+                setContractSymbol('')
+                setQueriedContractLeverage(null)
+              }}>{markets.map(m => <option key={m.source_id} value={m.source_id}>{accountVenueLabel(m.venue)}</option>)}</Select>
+            </CardContent></Card>}
+            {markets.length === 0 && !estimatedFundingOnly(sourceId) && marketAccount?.venue === 'binance-futures' && <FundingSettingsPanel key={sourceId} sourceId={sourceId} canConfigure={canConfigure} />}
             <Card>
               <CardHeader className="border-b border-border-soft/80">
                 <div>
@@ -220,10 +254,10 @@ export function AccountOverviewPage() {
                     <div className="bg-amber-500" style={{ width: `${takerRatio * 100}%` }} />
                   </div>
                   <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-                    <span>Maker {money(report?.maker_volume_quote ?? 0)} 报价币 / {report?.maker_fill_count ?? 0} 笔</span>
-                    <span>Taker {money(report?.taker_volume_quote ?? 0)} 报价币 / {report?.taker_fill_count ?? 0} 笔</span>
-                    {(report?.unknown_liquidity_fill_count ?? 0) > 0 && (
-                      <span>Unknown {money(report?.unknown_liquidity_volume_quote ?? 0)} 报价币 / {report?.unknown_liquidity_fill_count ?? 0} 笔</span>
+                    <span>Maker {money(liquidityReport?.maker_volume_quote ?? 0)} 报价币 / {liquidityReport?.maker_fill_count ?? 0} 笔</span>
+                    <span>Taker {money(liquidityReport?.taker_volume_quote ?? 0)} 报价币 / {liquidityReport?.taker_fill_count ?? 0} 笔</span>
+                    {(liquidityReport?.unknown_liquidity_fill_count ?? 0) > 0 && (
+                      <span>Unknown {money(liquidityReport?.unknown_liquidity_volume_quote ?? 0)} 报价币 / {liquidityReport?.unknown_liquidity_fill_count ?? 0} 笔</span>
                     )}
                   </div>
                 </div>
@@ -233,7 +267,7 @@ export function AccountOverviewPage() {
             <ContractLeveragePanel
               toolbar={
                 <ContractLeverageToolbar
-                  symbolPlaceholder={executionSymbolPlaceholder(account?.venue ?? '')}
+                  symbolPlaceholder={executionSymbolPlaceholder(marketAccount?.venue ?? '')}
                   symbol={contractSymbol}
                   contractLeverage={contractLeverage}
                   queriedLeverage={queriedContractLeverage}
@@ -279,20 +313,20 @@ export function AccountOverviewPage() {
             <SectionHeading
               icon={Layers3}
               title="策略启用"
-              description={`${studio?.bindings.length ?? 0} 条策略 · 每条策略绑定一个执行算法`}
+              description={`${bindings.length} 条策略 · 管理账户内各市场的执行参数`}
             />
-            {(studio?.bindings ?? []).length === 0 ? (
+            {bindings.length === 0 ? (
               <Card>
                 <CardContent className="py-12 text-center text-sm text-muted">
                   尚未绑定策略组合。
-                  <a href={routes.configBindings(sourceId)} className="ml-1 font-medium text-brand">
+                  <a href={routes.configBindings(publicId)} className="ml-1 font-medium text-brand">
                     去配置
                   </a>
                 </CardContent>
               </Card>
             ) : (
               <div className="grid gap-4 xl:grid-cols-2">
-                {(studio?.bindings ?? []).map((binding) => {
+                {bindings.map((binding) => {
                   const position = positionByName.get(binding.position_strategy_name)
                   const order = orderByName.get(binding.order_strategy_name)
                   const signalConfigPath = canConfigure
@@ -300,7 +334,7 @@ export function AccountOverviewPage() {
                     : undefined
                   return (
                     <Card
-                      key={binding.binding_name}
+                      key={`${binding.binding_name}:${binding.position_strategy_name}`}
                       className="overflow-hidden border-border-soft bg-gradient-to-br from-surface to-canvas/40"
                     >
                       <CardHeader className="border-b border-border-soft/80">
@@ -308,11 +342,11 @@ export function AccountOverviewPage() {
                           <div>
                             <CardTitle className="text-base">{binding.binding_name}</CardTitle>
                             <CardDescription className="mt-1 font-mono text-[11px]">
-                              Exec 策略名
+                              策略名
                             </CardDescription>
                           </div>
                           <Badge tone={binding.shares === 0 ? 'neutral' : 'brand'}>
-                            {binding.shares === 0 ? '已停止' : `${binding.shares} 份`}
+                            {binding.shares === 0 ? '已停止' : binding.shares == null ? '按市场配置' : `${binding.shares} 份`}
                           </Badge>
                         </div>
                       </CardHeader>
@@ -325,8 +359,12 @@ export function AccountOverviewPage() {
                         <div className="grid gap-3 sm:grid-cols-2">
                           <MiniStat label="仓位策略" value={binding.position_strategy_name} mono />
                           <MiniStat label="执行算法" value={binding.order_strategy_name} mono />
-                          <MiniStat label="份数" value={String(binding.shares)} />
+                          <MiniStat label="份数" value={binding.shares == null ? '按市场配置' : String(binding.shares)} />
                         </div>
+                        {markets.length > 0 && <div className="space-y-2 text-sm">{binding.markets.map(item => <div key={item.source_id} className="flex flex-wrap gap-x-4 gap-y-1 text-muted">
+                          <span>{accountVenueLabel(markets.find(m => m.source_id === item.source_id)?.venue ?? '')}</span>
+                          <span>{item.order_strategy_name}</span><span>{item.shares} 份</span>
+                        </div>)}</div>}
                         {position && (
                           <div>
                             <p className="mb-2 text-xs font-medium uppercase tracking-[0.12em] text-subtle">
@@ -369,7 +407,7 @@ export function AccountOverviewPage() {
                 description="编辑 default 执行参数模板"
               />
               <ConfigEntry
-                href={routes.configBindings(sourceId)}
+                href={routes.configBindings(publicId)}
                 title="策略启用"
                 description="为本账户启用策略并发布"
               />
@@ -377,7 +415,7 @@ export function AccountOverviewPage() {
           </section>
 
           {account && report && (
-            <AccountMeta account={account} report={report} sourceId={sourceId} />
+            <AccountMeta account={account} report={report} sourceId={publicId} />
           )}
         </>
       )}
@@ -496,10 +534,10 @@ function AccountMeta({
         </span>
         <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
           {account.venue === 'binance-futures' && <FundingStatusBadge value={account.funding} />}
-        {isUnifiedVenue(account.venue) && (
+        {(account.unified_account || isUnifiedVenue(account.venue)) && (
           <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
         )}
-        {isUnifiedVenue(account.venue) && (
+        {(account.unified_account || isUnifiedVenue(account.venue)) && (
           <span className={uniMmrTone(account.uni_mmr, account.uni_mmr_status)}>
             UniMMR{' '}
             {account.uni_mmr_status === 'stale'

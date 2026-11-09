@@ -60,13 +60,22 @@ missing enrichment stays unknown and cannot delay a live target. The theoretical
 target reader already excludes these factual observations.
 
 Configuration remains durable in PostgreSQL. Startup must load a complete
-permission/order/binding/fee/session snapshot before opening target admission.
-Normal configuration APIs invalidate that snapshot under the configuration
+permission/order/binding/fee snapshot and session cache before opening target admission.
+Publication configuration and authorization APIs invalidate that snapshot under the configuration
 write lease, and a worker reloads it before reopening admission. Targets return
 503 promptly while configuration is being edited or reloaded, rather than
 waiting behind its SQL. In-flight admitted publications finish before the edit;
 subsequent requests cannot use revoked access or stopped bindings. Correcting
 configuration by external SQL requires a Manager restart to reload the snapshot.
+
+Login, logout, registration and user creation do not take the configuration
+lease or invalidate the publication catalog. Sessions have a separate memory
+map: successful creation/deletion updates it directly, using the SQL expiration
+time. An independent session-mutation mutex serializes those SQL/cache updates
+with session reloads; publishers only read the memory map and never wait for that
+mutex. Role changes and strategy/fallback-token permissions still use the
+configuration lease and reload, so revoked publication access is not retained.
+Funding settings and Virtual grant edits do not change the publication catalog.
 
 Session-authorized creation of a previously unknown strategy is a cold
 configuration operation and still needs PG. It inserts only an absent name and
@@ -279,3 +288,28 @@ this project's Cargo `debug/incremental`, the downloaded test Redis fixture and
 the stopped isolated PostgreSQL test directory. Dependency/release caches,
 durable market/signal data and rollback artifacts were retained. No live Manager
 or Exec database was pruned as part of that cleanup.
+
+## JP auth/session admission fix, 2026-11-07
+
+Deployed with `scripts/deploy_host.sh --target jp-meta --manager-only` as
+`web-releases/20261107T075004Z`. All 84 files in the previous backend source
+manifest matched the build inputs except the four auth/publication files changed
+for this fix. The no-default-features library suite passed 505 tests (10 skips),
+both isolated PostgreSQL publication tests passed, and formatting, `cargo check`,
+release binaries and the frontend build passed. The running `cta_web` SHA-256 is
+`0d7f1b82ffba257690c66766d4352257fdb0dc500fde531501e5872cf6c5e90f`.
+
+Only Manager restarted, at 07:50:38 UTC; the API became ready after its initial
+history rebuild at 07:52:44 UTC. Auth status/frontend returned 200, protected
+health returned 401, and three invalid-login/anonymous-logout probes returned
+401/204. Through 07:54:02 UTC, the gateway recorded 143 natural target POSTs
+after readiness, all 200, with no related journal errors. CPU 24 and the host
+TOML were preserved. Of 163 other recorded process identities, 162 survived;
+one `sync_history` batch process exited. Trading/Viz/Config/Nginx/Redis/monitor
+process identities were unchanged.
+
+Backup: `~/crypto_cta_manager/backups/auth-session-lock-20261107T074845Z/`.
+Source hashes, copies of the four changed backend files and verification results
+are under `~/crypto_cta_manager/run/auth-session-lock-20261107T074845Z/` and
+local `../artifacts/auth-session-lock-20261107T074845Z/`. The isolated test
+PostgreSQL cluster was stopped and its exact data/socket directories removed.

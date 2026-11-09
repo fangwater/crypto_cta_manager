@@ -298,6 +298,15 @@ impl NavTimelineCache {
         request: StrategyPnlRequest,
         prices: Option<&MinuteMarks>,
     ) -> Result<StrategyPnlReport> {
+        let ids =
+            crate::managed_accounts::expand(&self.config, std::slice::from_ref(&request.source_id))
+                .map_err(anyhow::Error::msg)?;
+        if self.needs_history(&ids, None) {
+            let _budget = daily::replay_lock();
+            return self
+                .restore_window(&ids, None)?
+                .strategy_with_prices(request, prices);
+        }
         rebuild_strategy_pnl_with_prices(
             &self.config,
             request,
@@ -400,14 +409,19 @@ impl NavTimelineCache {
                 minute_marks_revision: None,
                 ..key
             };
-            cache.mark_plans.get_or_compute(plan_key, || {
-                let collector = MinuteMarks::Collect(Mutex::new(Requests::new()));
-                cache.rebuild_with_prices(plan_request, allocation, Some(&collector))?;
-                let MinuteMarks::Collect(requests) = collector else {
-                    unreachable!()
-                };
-                Ok(requests.into_inner().unwrap())
-            })
+            let recent = cache.daily.is_none() || request_cacheable(&plan_key);
+            cache.mark_plans.get_or_compute_if(
+                plan_key,
+                || {
+                    let collector = MinuteMarks::Collect(Mutex::new(Requests::new()));
+                    cache.rebuild_with_prices(plan_request, allocation, Some(&collector))?;
+                    let MinuteMarks::Collect(requests) = collector else {
+                        unreachable!()
+                    };
+                    Ok(requests.into_inner().unwrap())
+                },
+                |_| recent,
+            )
         })
         .await??;
         let prices = load_prices(store, requests, start, request.end_ts_us).await?;

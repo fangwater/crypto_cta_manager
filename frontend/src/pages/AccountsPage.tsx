@@ -1,3 +1,4 @@
+import { accountExecutionGroup } from '../lib/executionGroups'
 import { accountFeeSummary, fundingMoney } from '../format'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import { AccountAliasEditor } from '../components/AccountAliasEditor'
@@ -23,6 +24,7 @@ import { executionMarketLabel, formatUniMmr, integer, isUnifiedVenue, money, sig
 import { cn } from '../lib/cn'
 import { routes } from '../lib/routes'
 import { prepSignalConfigPath } from '../lib/prepConfigLinks'
+import { accountVenueLabel } from '../lib/workspace'
 import type {
   DashboardAccount,
   DashboardSnapshot,
@@ -144,9 +146,8 @@ export function AccountsPage() {
         title="账户入口"
         description="从这里进入各账户配置概览、净值曲线与 Exec Viz。"
         actions={
-          <div className="flex items-center gap-2 text-xs text-muted">
-            <Clock3 size={14} />
-            {timestampUs(dashboard?.generated_at_us ?? null)}
+          <div className="flex flex-wrap items-center gap-3 text-xs text-muted">
+            <Clock3 size={14} />{timestampUs(dashboard?.generated_at_us ?? null)}
           </div>
         }
       />
@@ -246,8 +247,9 @@ function AccountCard({
   const funding = account.cumulative_funding
   const combinedNav = report && funding?.income_quote != null
     ? report.nav_change_after_fee_quote + funding.income_quote : null
-  const displayedNav = funding ? combinedNav : report?.nav_change_after_fee_quote
-  const gatewayReady = ready && account.gateway_prefix !== null
+  const displayedNav = funding ? combinedNav ?? (account.execution_sources?.length ? report?.nav_change_after_fee_quote : null) : report?.nav_change_after_fee_quote
+  const executionGroup = accountExecutionGroup(account)
+  const executionUrl = !ready ? null : executionGroup ? routes.execViz(executionGroup.id) : account.gateway_prefix ? `${account.gateway_prefix}/` : null
   const signalConfigPath = account.enabled && account.access_level === 'configure'
     ? prepSignalConfigPath(account.source_id)
     : undefined
@@ -267,22 +269,23 @@ function AccountCard({
           </div>
           <div className="min-w-0">
             <CardTitle className="text-base"><AccountAliasEditor account={account} onSaved={onAliasSaved} /></CardTitle>
-            <CardDescription className="font-mono text-[11px]">{account.source_id}</CardDescription>
+            {!account.execution_sources?.length && <CardDescription className="font-mono text-[11px]">{account.source_id}</CardDescription>}
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
           {account.venue === 'binance-futures' && <FundingStatusBadge value={account.funding} />}
-          {isUnifiedVenue(account.venue) && (
+          {(account.unified_account || isUnifiedVenue(account.venue)) && (
             <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
           )}
           <Badge tone={ready && health ? health.status === 'ok' ? 'success' : 'warning' : 'neutral'}>{status}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4 pt-0">
+        {!!account.execution_sources?.length && <p className="text-sm text-muted">{account.execution_sources.map(leg => accountVenueLabel(leg.venue)).join(' / ')}</p>}
         <div className="grid grid-cols-2 gap-3 text-sm">
           <Metric
-            label={funding ? '累计费后净值（含 Funding）' : '累计费后净值'}
+            label={funding?.income_quote != null ? '累计费后净值（含 Funding）' : '累计费后净值'}
             value={displayedNav != null ? `${money(displayedNav)} 报价币` : '--'}
             tone={displayedNav != null ? signedClass(displayedNav) : ''}
           />
@@ -294,7 +297,7 @@ function AccountCard({
                 : '--'
             }
           />
-          {isUnifiedVenue(account.venue) && (
+          {(account.unified_account || isUnifiedVenue(account.venue)) && (
             <Metric
               label="UniMMR"
               value={
@@ -349,9 +352,9 @@ function AccountCard({
               <ActionDisabled icon={<Scale size={15} />} label="成本" />
             </>
           )}
-          {gatewayReady ? (
+          {executionUrl ? (
             <ActionLink
-              href={`${account.gateway_prefix}/`}
+              href={executionUrl}
               icon={<ExternalLink size={15} />}
               label="执行监控"
             />

@@ -10,6 +10,7 @@ export const routes = {
   workspace: '/manager/workspace/',
   navMonitor: '/manager/net-value/',
   accounts: '/manager/accounts/',
+  execViz: (groupId?: string) => groupId ? `/manager/exec/?group=${encodeURIComponent(groupId)}` : '/manager/exec/',
   account: (sourceId: string) =>
     `/manager/account/?source=${encodeURIComponent(sourceId)}`,
   nav: (sourceId?: string) =>

@@ -1,3 +1,5 @@
+import { estimatedFundingOnly } from '../../lib/executionGroups'
+import { accountVenueLabel } from '../../lib/workspace'
 import { CheckCircle2, Gauge, Layers3, LoaderCircle, Plus, Power, Save, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -63,13 +65,10 @@ export function AccountBindingsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const accounts = useMemo(
-    () =>
-      (dashboard?.accounts ?? []).filter(
-        (account) => account.enabled && account.configurable && account.access_level === 'configure',
-      ),
-    [dashboard],
-  )
+  const publicAccounts = useMemo(() => (dashboard?.accounts ?? []).filter(a => a.enabled && a.configurable && a.access_level === 'configure'), [dashboard])
+  const accounts = useMemo(() => publicAccounts.flatMap(a => a.execution_sources?.length ? a.execution_sources : [a]), [publicAccounts])
+  const selectedPublicAccount = publicAccounts.find(a => a.source_id === sourceId || a.execution_sources?.some(leg => leg.source_id === sourceId))
+
 
   const boundNames = useMemo(
     () => new Set((studio?.bindings ?? []).map((binding) => binding.position_strategy_name)),
@@ -121,9 +120,14 @@ export function AccountBindingsPage() {
   useEffect(() => {
     if (!accounts.length) return
     if (!accounts.some((account) => account.source_id === sourceId)) {
-      setSourceId(initialSource || accounts[0].source_id)
+      setSourceId(accounts.find(a => a.source_id === initialSource)?.source_id || dashboard?.accounts?.find(a => a.source_id === initialSource)?.execution_sources?.[0]?.source_id || accounts[0].source_id)
     }
-  }, [accounts, initialSource, sourceId])
+  }, [accounts, dashboard, initialSource, sourceId])
+
+  useEffect(() => {
+    if (!selectedPublicAccount || !accounts.some(a => a.source_id === sourceId)) return
+    window.history.replaceState({}, '', routes.configBindings(selectedPublicAccount.source_id))
+  }, [accounts, selectedPublicAccount, sourceId])
 
   useEffect(() => {
     if (newPosition) return
@@ -163,6 +167,7 @@ export function AccountBindingsPage() {
       setQueriedContractLeverage(null)
       return
     }
+    if (!accounts.some(account => account.source_id === sourceId)) return
     setStudio(null)
     setExecOrderRateLimits(null)
     setQueriedContractLeverage(null)
@@ -180,7 +185,7 @@ export function AccountBindingsPage() {
         setError(reason instanceof Error ? reason.message : String(reason))
       })
     return () => controller.abort()
-  }, [applyExecOrderRateLimits, loadStudio, sourceId])
+  }, [accounts, applyExecOrderRateLimits, loadStudio, sourceId])
 
   async function bindExecution(
     positionStrategyName: string,
@@ -203,7 +208,7 @@ export function AccountBindingsPage() {
     <ConfigShell
       section="bindings"
       title="策略启用"
-      description="把仓位策略挂到本账户，指定执行算法后发布。Exec 策略名与仓位策略名相同。"
+      description="把仓位策略挂到本账户，指定执行算法后发布。策略名与仓位策略名相同。"
       saving={saving}
       error={error ?? catalogError ?? writeError}
       notice={notice}
@@ -225,7 +230,7 @@ export function AccountBindingsPage() {
           </CardContent>
         </Card>
       ) : accounts.length === 0 ? (
-        <Alert tone="warning">当前没有可配置的 Exec 账户。</Alert>
+        <Alert tone="warning">当前没有可配置的账户。</Alert>
       ) : (
         <div className="space-y-6">
           <Card>
@@ -233,20 +238,20 @@ export function AccountBindingsPage() {
               <Label className="max-w-xl">
                 账户
                 <Select
-                  value={sourceId}
-                  onChange={(event) => {
-                    const next = event.target.value
-                    setSourceId(next)
-                    window.history.replaceState({}, '', routes.configBindings(next))
+                  value={selectedPublicAccount?.source_id ?? ''}
+                  onChange={event => {
+                    const next = publicAccounts.find(a => a.source_id === event.target.value)
+                    if (next) setSourceId(next.execution_sources?.[0]?.source_id ?? next.source_id)
                   }}
                 >
-                  {accounts.map((entry) => (
-                    <option key={entry.source_id} value={entry.source_id}>
-                      {entry.account} / {entry.source_id}
-                    </option>
-                  ))}
+                  {publicAccounts.map(entry => <option key={entry.source_id} value={entry.source_id}>{entry.account}</option>)}
                 </Select>
               </Label>
+              {!!selectedPublicAccount?.execution_sources?.length && <Label>交易市场
+                <Select aria-label="交易市场" value={sourceId} onChange={event => setSourceId(event.target.value)}>
+                  {selectedPublicAccount.execution_sources.map(leg => <option key={leg.source_id} value={leg.source_id}>{accountVenueLabel(leg.venue)}</option>)}
+                </Select>
+              </Label>}
               {studio?.configuration?.mode !== 'follow' && <Label className="max-w-xl">
                 实验算法 Token
                 <Input
@@ -259,7 +264,7 @@ export function AccountBindingsPage() {
               </Label>}
             </CardContent>
           </Card>
-          <FundingSettingsPanel key={sourceId} sourceId={sourceId} />
+          {!selectedPublicAccount?.execution_sources?.length && !estimatedFundingOnly(sourceId) && <FundingSettingsPanel key={sourceId} sourceId={sourceId} />}
           <AccountFollowPanel sourceId={sourceId} studio={studio} onChange={applyStudio} />
           <Card>
             <CardHeader>
@@ -405,7 +410,7 @@ export function AccountBindingsPage() {
                         </option>
                       ))}
                     </Select>
-                    <FieldHint>即 Exec 上的 CTA 策略名；仓位更新后按这个名字自动写入 Redis。</FieldHint>
+                    <FieldHint>策略的执行名称；仓位更新后按这个名字自动同步。</FieldHint>
                   </Label>
                   <Label>
                     执行算法
@@ -559,7 +564,7 @@ export function AccountBindingsPage() {
                           }
                         >
                           <CheckCircle2 size={15} />
-                          {binding.shares === 0 ? '重推清仓目标' : '重推到 Exec'}
+                          {binding.shares === 0 ? '重推清仓目标' : '重新发布'}
                         </Button>
                         {!bindingEditsDisabled && binding.shares > 0 && parsedShares !== 0 && (
                           <Button
@@ -587,7 +592,7 @@ export function AccountBindingsPage() {
                                 await deleteAccountBinding(sourceId, binding.binding_name)
                                 const next = await getAccountStudio(sourceId)
                                 applyStudio(next)
-                                return `已删除 ${binding.binding_name} 的本地绑定；Exec 零目标保持不变`
+                                return `已删除 ${binding.binding_name} 的策略绑定；当前清仓目标保持不变`
                               })
                             }
                           >

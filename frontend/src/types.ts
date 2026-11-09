@@ -67,9 +67,9 @@ export interface SourceNavReport extends NavTotals {
   source_id: string
   account: string
   configured_venue: string
-  estimated_fee_rate: number
-  maker_fee_rate: number
-  taker_fee_rate: number
+  estimated_fee_rate: number | null
+  maker_fee_rate: number | null
+  taker_fee_rate: number | null
   quote_fee_rates: Record<string, QuoteFeeRates>
   initial_position_snapshot_ts_us: number | null
   initial_position_count: number
@@ -79,6 +79,7 @@ export interface SourceNavReport extends NavTotals {
   first_fill_ts_us: number | null
   last_fill_ts_us: number | null
   symbols: SymbolNavReport[]
+  execution_sources?: SourceNavReport[]
 }
 
 export interface NavReport {
@@ -89,6 +90,7 @@ export interface NavReport {
 }
 
 export interface DashboardAccount {
+  execution_sources?: DashboardAccount[]
   source_id: string
   /** Manager display name. Uses alias when configured. */
   account: string

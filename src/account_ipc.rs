@@ -9,7 +9,7 @@ use iceoryx2::service::ipc;
 use serde::Serialize;
 use tracing::{info, warn};
 
-use crate::config::SourceConfig;
+use crate::config::{AppConfig, SourceConfig};
 
 pub const ACCOUNT_IPC_PAYLOAD: usize = 16_384;
 pub const ACCOUNT_IPC_HISTORY_SIZE: usize = 4_096;
@@ -165,10 +165,10 @@ pub struct LiveEquityHub {
 }
 
 impl LiveEquityHub {
-    pub fn spawn(sources: &[SourceConfig]) -> Self {
+    pub fn spawn(config: &AppConfig) -> Self {
         let hub = Self::default();
-        for source in sources {
-            if !source.enabled || !source.monitor_enabled {
+        for source in &config.sources {
+            if !needs_account_subscription(config, source) {
                 continue;
             }
             let Some(service_name) = source.account_ipc_service_name() else {
@@ -191,6 +191,14 @@ impl LiveEquityHub {
             .ok()
             .and_then(|guard| guard.get(source_id).and_then(SourceLiveState::reading))
     }
+}
+
+fn needs_account_subscription(config: &AppConfig, source: &SourceConfig) -> bool {
+    // Composite equity needs every execution leg, independently of the
+    // source's opt-in to standalone health checks and notifications.
+    source.enabled
+        && (source.monitor_enabled
+            || crate::managed_accounts::parent_id(config, &source.id).is_some())
 }
 
 fn subscribe_loop(
@@ -334,7 +342,9 @@ fn apply_account_message(
             state.initial_margin_ts_ms = Some(ts);
         }
     }
-    if let Some((scope, _)) = unified_scope(venue) {
+    if let Some(scope) =
+        rapidx_account_scope(service).or_else(|| unified_scope(venue).map(|(scope, _)| scope))
+    {
         if let Some((ts, ratio)) = parse_unified_risk(payload, scope) {
             state.apply_unified_risk(ts, ratio);
         }
@@ -545,6 +555,52 @@ pub fn encode_wallet_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_legs_subscribe_without_enabling_standalone_monitoring() {
+        let config: AppConfig = toml::from_str(
+            r#"
+            [database]
+            [accounts.spread]
+            name = "OKX / Binance"
+            source_ids = ["okx", "bn"]
+            created_at_us = 1
+
+            [[sources]]
+            id = "okx"
+            account = "OKX"
+            venue = "okex-futures"
+            rocksdb_path = "/unused/okx"
+            monitor_enabled = false
+
+            [[sources]]
+            id = "bn"
+            account = "Binance"
+            venue = "binance-futures"
+            rocksdb_path = "/unused/bn"
+            monitor_enabled = false
+
+            [[sources]]
+            id = "provisioned"
+            account = "Not started"
+            venue = "binance-futures"
+            rocksdb_path = "/unused/provisioned"
+            monitor_enabled = false
+            "#,
+        )
+        .unwrap();
+        for source in &config.sources[..2] {
+            assert!(needs_account_subscription(&config, source));
+            assert!(!source.monitor_enabled);
+            let mut disabled = source.clone();
+            disabled.enabled = false;
+            assert!(!needs_account_subscription(&config, &disabled));
+        }
+        let mut standalone = config.sources[2].clone();
+        assert!(!needs_account_subscription(&config, &standalone));
+        standalone.monitor_enabled = true;
+        assert!(needs_account_subscription(&config, &standalone));
+    }
 
     #[test]
     fn unified_equity_and_risk_are_source_scoped_and_never_approximate_from_wallets() {
@@ -775,6 +831,36 @@ mod tests {
         let payload = risk(40, 9995.0);
         for len in 0..payload.len() {
             assert!(parse_account_equity(&payload[..len], scope, "rapidx_account_risk").is_none());
+        }
+    }
+
+    #[test]
+    fn rapidx_reported_risk_ratio_is_available_without_inventing_initial_margin() {
+        for (venue, service, scope) in [
+            (
+                "binance-futures",
+                "one/account_pubs/rapidx_binance_one_pm",
+                BINANCE_UNIFIED_SCOPE,
+            ),
+            (
+                "okex-futures",
+                "two/account_pubs/rapidx_okex_two_pm",
+                OKEX_UNIFIED_SCOPE,
+            ),
+        ] {
+            let mut state = SourceLiveState::default();
+            let mut wallets = WalletAssetAccumulator::default();
+            for (ts, ratio) in [(20, 10.0), (30, 12.0), (10, 2.0)] {
+                let mut payload = encode_account_risk(scope, ts, ratio);
+                let offset = EVENT_HEADER_LEN + 36;
+                payload[offset..offset + 8].copy_from_slice(&f64::NAN.to_le_bytes());
+                apply_account_message(&mut state, &mut wallets, venue, service, &payload);
+            }
+            let reading = state.reading().unwrap();
+            assert!(reading.unified_account);
+            assert_eq!(reading.uni_mmr, Some(12.0));
+            assert_eq!(reading.uni_mmr_ts_ms, Some(30));
+            assert_eq!(reading.initial_margin_usd, None);
         }
     }
 

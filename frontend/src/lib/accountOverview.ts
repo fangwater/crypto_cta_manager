@@ -14,6 +14,7 @@ export interface OverviewRow {
   position_unpriced_assets?: string[]
   max_drawdown_15d_percent: number | null
   margin: number | null
+  margin_kind?: 'initial' | 'ltp_frozen' | null
   margin_percent: number | null
   date_ms: number | null
   queried_at_ms: number

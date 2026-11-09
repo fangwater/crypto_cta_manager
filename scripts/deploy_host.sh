@@ -122,7 +122,11 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
     (
         cd "$ROOT"
         cargo clean -p crypto_cta_manager
-        cargo build --locked --release --bin cta_web --bin cta_monitor --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot
+        # JP's immutable allocation anchors use the original JSON parser. Keep
+        # the in-progress daily FIFO/float parser rollout out of that deployment.
+        feature_args=()
+        if [[ "$TARGET" == jp-meta ]]; then feature_args+=(--no-default-features); fi
+        cargo build --locked --release "${feature_args[@]}" --bin cta_web --bin cta_monitor --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot
     )
     echo "building frontend locally"
     (

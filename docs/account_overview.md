@@ -9,6 +9,19 @@
 
 ## 实时事实
 
+2026-11-03，按用户选择，RapidX（RX01/RX03）保证金列使用 LTP 官方
+`Accounts.frozenMargin` 的真实冻结／占用保证金，行内标注“LTP 占用”；
+占比为占用保证金 / 同账户实时权益 × 100。读取账户监控已原子保存的
+`data/rapidx_account/<stream>/latest_financial.json`，验证恢复完成、portfolio、
+BINANCE venue 和 Accounts 通道观测时间，45秒过期后保持未知；不新增私有REST。
+官方字段定义：[RapidX Accounts](https://apidocliquidity.readme.io/reference/ws-user-data-orders-trades-assets-positions)。
+这是用户授权的展示口径，不将它写成 `initial_margin`：Manager观测分别保存
+`initial_margin` / `frozen_margin`，API的 `margin_kind` 区分 `initial` / `ltp_frozen`。
+原生账户继续使用初始保证金；不同口径的组合不混合相加。缺失、过期、错误scope
+均不填零。旧观测保持原始初始保证金含义，不补造历史占用值。
+RapidX 已上报的 UniMMR 同时按原账户 IPC 展示在账户卡片及详情，不影响交易风控。
+审计 `artifacts/rapidx_margin_display_20261103/`。
+
 新增已认证且按当前用户账户授权过滤的 `GET /api/account-overview`：
 
 - 权益来自对应 source 的现有账户 IPC 实际权益消息。

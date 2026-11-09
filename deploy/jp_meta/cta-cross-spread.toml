@@ -1,0 +1,53 @@
+# Configuration fragment for okex-binance-cta-spread-rx01. Merge into the
+# host's existing TOML; do not replace it. Both legs have fresh source IDs and
+# independent empty stores. Old trade08 history/snapshots remain with trade08.
+# No position strategy, binding, or trading process is activated by this file.
+
+[dashboard.source_viewers]
+okex_exec_trade01 = ["lgq"]
+binance_exec_spread01 = ["lgq"]
+
+# One public account, displayed with its saved alias okex_binace_cross_1min.
+# The two source aliases below identify execution processes inside that account.
+# Both native streams feed one execution table at /manager/exec/?group=cross01.
+# Actual funding collectors stay disabled; both sources use public estimates.
+[accounts.cta_cross_spread_rx01]
+name = "cross01"
+source_ids = ["okex_exec_trade01", "binance_exec_spread01"]
+created_at_us = 1793625556000000
+
+[[sources]]
+id = "okex_exec_trade01"
+account = "okex_trade01"
+alias = "okex_exec_cross01"
+venue = "okex-futures"
+rocksdb_path = "/home/ubuntu/okex_exec_trade01/data/persist_manager"
+env_path = "/home/ubuntu/okex_exec_trade01/env.sh"
+enabled = true
+monitor_enabled = false
+gateway_prefix = "/exec_okex01"
+exec_config_url = "http://127.0.0.1:18169/"
+exec_viz_url = "http://127.0.0.1:10049/"
+# Signed account fee query, 2026-11-02: VIP8 USDT SWAP. Manager uses costs;
+# OKX reports the opposite sign. Keep rebates negative in Manager.
+maker_fee_rate = -0.00005
+taker_fee_rate = 0.00015
+ipc_namespace = "okex_exec_trade01"
+account_ipc_service = "account_pubs/okex_pm"
+
+[[sources]]
+id = "binance_exec_spread01"
+account = "binance_spread01"
+alias = "binance_exec_cross01"
+venue = "binance-futures"
+rocksdb_path = "/home/ubuntu/binance_exec_spread01/data/persist_manager"
+env_path = "/home/ubuntu/binance_exec_spread01/env.sh"
+enabled = true
+monitor_enabled = false
+gateway_prefix = "/exec_binance_spread01"
+exec_config_url = "http://127.0.0.1:18170/"
+exec_viz_url = "http://127.0.0.1:10050/"
+maker_fee_rate = -0.00005
+taker_fee_rate = 0.000146
+ipc_namespace = "binance_exec_spread01"
+account_ipc_service = "account_pubs/binance_pm"

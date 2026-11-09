@@ -64,7 +64,10 @@ default_symbols = ["BNBUSDT", "XRPUSDT", "ETHUSDT", "BTCUSDT", "SOLUSDT"]
 # Bind an assigned local address; public_ip is its expected public/NAT address.
 # local_ip = "DEDICATED_LOCAL_IP"
 # public_ip = "DEDICATED_PUBLIC_IP"
-# List EVERY live trade engine TOML; the client rejects their trading IPs.
+# Only enable this explicit exception when the operator permits shared public
+# market-data and trading egress. Signed funding retains its separate checks.
+allow_trading_ip = false
+# List EVERY live trade engine TOML; the default rejects their trading IPs.
 trade_engine_configs = []
 # Also exclude trading public/NAT addresses when different from local_ips.
 forbidden_public_ips = []

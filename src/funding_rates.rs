@@ -149,6 +149,13 @@ struct Budget {
     waf_rejections: u32,
 }
 
+#[derive(Clone, Copy)]
+struct PriorityWindow {
+    from: i64,
+    through: i64,
+    expires: i64,
+}
+
 #[derive(Clone)]
 pub struct FundingRateCache {
     config: FundingRateConfig,
@@ -159,6 +166,7 @@ pub struct FundingRateCache {
     symbols: Arc<RwLock<BTreeMap<String, SymbolCache>>>,
     budget: Arc<Mutex<Budget>>,
     concurrency: Arc<Semaphore>,
+    priority_windows: Arc<RwLock<BTreeMap<String, PriorityWindow>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -193,6 +201,7 @@ impl FundingRateCache {
             symbols: Default::default(),
             budget: Default::default(),
             concurrency: Arc::new(Semaphore::new(8)),
+            priority_windows: Default::default(),
         })
     }
 
@@ -234,16 +243,22 @@ impl FundingRateCache {
                 entry.requested_from_us =
                     Some(entry.requested_from_us.map_or(from, |old| old.min(from)));
             }
-            let minimum = if self.config.daily_estimates_enabled {
-                entry
-                    .requested_from_us
-                    .unwrap_or(now - RETENTION_US - 60_000_000)
-                    .max(1)
+            // OKX needs a separate historical mark request per settlement.
+            // Load the requested window first instead of thirty days of marks.
+            let requested_window =
+                self.config.daily_estimates_enabled || symbol.starts_with("okex-futures:");
+            let retained_from = now - RETENTION_US - 60_000_000;
+            let minimum = if requested_window {
+                let requested_from = entry.requested_from_us.unwrap_or(retained_from);
+                if self.config.daily_estimates_enabled {
+                    requested_from.max(1)
+                } else {
+                    requested_from.max(retained_from)
+                }
             } else {
-                now - RETENTION_US - 60_000_000
+                retained_from
             };
-            let needs_earlier =
-                self.config.daily_estimates_enabled && entry.from_us.is_some_and(|ts| minimum < ts);
+            let needs_earlier = requested_window && entry.from_us.is_some_and(|ts| minimum < ts);
             let refresh_us = self.config.refresh_secs as i64 * 1_000_000;
             let retry_us = if entry.error.is_some() {
                 60_000_000
@@ -268,6 +283,14 @@ impl FundingRateCache {
             }
             .div_euclid(1000)
                 * 1000;
+            // Publish recent settlements before a cumulative multi-month load
+            // occupies the shared fetch slots. Older coverage extends next.
+            if self.config.daily_estimates_enabled
+                && entry.requested_from_us.is_some()
+                && entry.from_us.is_none()
+            {
+                from = from.max((now - DAY_US).div_euclid(1000) * 1000);
+            }
             // A missing historical mark must remain retryable after the normal
             // incremental overlap has moved past its settlement.
             if let Some(missing) = entry
@@ -324,6 +347,25 @@ impl FundingRateCache {
     }
 
     /// Fast, nonblocking read. Concurrent queries share one in-flight load per symbol.
+    pub fn request_priority(&self, symbols: &[String], from: i64, through: i64) -> RateCoverage {
+        let now = crate::kline::now_us();
+        if self.config.enabled && from <= through && through <= now + 1_000_000 {
+            let mut windows = self.priority_windows.write().unwrap();
+            windows.retain(|_, window| window.expires > now);
+            for symbol in symbols.iter().filter(|s| supported_symbol(s)) {
+                windows.insert(
+                    symbol.clone(),
+                    PriorityWindow {
+                        from,
+                        through,
+                        expires: now + 120_000_000,
+                    },
+                );
+            }
+        }
+        self.request(symbols, from, through)
+    }
+
     pub fn request(&self, symbols: &[String], from: i64, through: i64) -> RateCoverage {
         let now = crate::kline::now_us();
         // Millisecond API requests and a moving wall clock allow a small boundary tolerance.
@@ -353,20 +395,22 @@ impl FundingRateCache {
                 view.unavailable_reason = Some(format!("资金费不支持合约 {symbol}"));
                 continue;
             };
-            view.loading |= entry.loading;
+            let covers_window = entry.from_us.is_some_and(|ts| ts <= from)
+                && entry.through_us.is_some_and(|ts| ts >= through - 1000);
+            let missing_marks = entry
+                .rates
+                .iter()
+                .any(|r| r.ts_us >= from && r.ts_us <= through && r.mark_price.is_none());
+            // An older cumulative backfill must not keep a fully covered
+            // interactive window in a loading state.
+            view.loading |= entry.loading && (!covers_window || missing_marks);
             if let Some(error) = &entry.error {
                 view.unavailable_reason = Some(format!("{symbol} 资金费历史暂不可用：{error}"));
             }
-            if entry.from_us.is_none_or(|ts| ts > from)
-                || entry.through_us.is_none_or(|ts| ts < through - 1000)
-            {
+            if !covers_window {
                 view.unavailable_reason
                     .get_or_insert_with(|| "公开资金费历史覆盖不完整；仅汇总已加载部分".into());
-            } else if entry
-                .rates
-                .iter()
-                .any(|r| r.ts_us >= from && r.ts_us <= through && r.mark_price.is_none())
-            {
+            } else if missing_marks {
                 view.unavailable_reason.get_or_insert_with(|| {
                     format!("{symbol} 部分结算缺少标记价格；仅计入可估算部分")
                 });
@@ -411,8 +455,37 @@ impl FundingRateCache {
         }
     }
 
-    async fn reserve(&self) {
+    fn pending_priority(&self, symbol: Option<&str>) -> (bool, bool) {
+        let now = crate::kline::now_us();
+        let windows = self.priority_windows.read().unwrap();
+        let entries = self.symbols.read().unwrap();
+        let mut pending = false;
+        let mut own = false;
+        for (key, window) in windows.iter().filter(|(_, w)| w.expires > now) {
+            if entries.get(key).is_some_and(|entry| {
+                entry.loading
+                    && (entry.from_us.is_none_or(|ts| ts > window.from)
+                        || entry.through_us.is_none_or(|ts| ts < window.through - 1000)
+                        || entry.rates.iter().any(|r| {
+                            r.ts_us >= window.from
+                                && r.ts_us <= window.through
+                                && r.mark_price.is_none()
+                        }))
+            }) {
+                pending = true;
+                own |= symbol == Some(key.as_str());
+            }
+        }
+        (pending, own)
+    }
+
+    async fn reserve(&self, symbol: Option<&str>) {
         loop {
+            let (pending, own) = self.pending_priority(symbol);
+            if pending && !own {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
             let delay = {
                 let mut budget = self.budget.lock().await;
                 let now = Instant::now();
@@ -469,7 +542,6 @@ impl FundingRateCache {
     }
 
     async fn fetch(&self, symbol: &str, from: i64, through: i64) -> Result<Vec<FundingRate>> {
-        let _permit = self.concurrency.acquire().await?;
         let (venue, asset) = crate::market_data::split_cache_symbol(symbol)?;
         if venue == "okex-futures" {
             return self.fetch_okex(asset, from, through).await;
@@ -480,7 +552,10 @@ impl FundingRateCache {
         // Thirty days of hourly settlements fit in a single 1000-row request.
         // Keep pagination for additional settlement types and future interval changes.
         for _ in 0..32 {
-            self.reserve().await;
+            // Yield fetch capacity between historical pages so one long
+            // backfill cannot monopolize a slot until its entire history ends.
+            self.reserve(Some(symbol)).await;
+            let _permit = self.concurrency.acquire().await?;
             let response = self
                 .client
                 .get(&self.endpoint)
@@ -527,10 +602,12 @@ impl FundingRateCache {
 
     async fn okex_get(
         &self,
+        symbol: &str,
         endpoint: &str,
         query: &[(&str, String)],
     ) -> Result<serde_json::Value> {
-        self.reserve().await;
+        self.reserve(Some(symbol)).await;
+        let _permit = self.concurrency.acquire().await?;
         let response = self
             .client
             .get(endpoint)
@@ -579,6 +656,7 @@ impl FundingRateCache {
         for _ in 0..32 {
             let body = self
                 .okex_get(
+                    &format!("okex-futures:{symbol}"),
                     &self.okex_endpoint,
                     &[
                         ("instId", inst.clone()),
@@ -645,6 +723,7 @@ impl FundingRateCache {
             }
             let body = self
                 .okex_get(
+                    &format!("okex-futures:{symbol}"),
                     &self.okex_marks_endpoint,
                     &[
                         ("instId", inst.clone()),
@@ -915,10 +994,200 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn okex_cold_query_loads_requested_marks_and_extends_older_coverage_on_demand() {
+        let now = crate::kline::now_us().div_euclid(1000) * 1000;
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requests = observed.clone();
+        let marks = Arc::new(AtomicUsize::new(0));
+        let counter = marks.clone();
+        let app = Router::new()
+            .route("/rates", get(move |Query(q): Query<BTreeMap<String, String>>| {
+                let requests = requests.clone();
+                async move {
+                    let from = q["before"].parse::<i64>().unwrap() + 1;
+                    let through = q["after"].parse::<i64>().unwrap() - 1;
+                    requests.lock().unwrap().push(from);
+                    let rows = [8, 16, 32].into_iter().map(|hours| now / 1000 - hours * 3_600_000)
+                        .filter(|ts| (from..=through).contains(ts))
+                        .map(|ts| serde_json::json!({"instId":"BTC-USDT-SWAP", "fundingTime":ts.to_string(), "realizedRate":"0.001"}))
+                        .collect::<Vec<_>>();
+                    Json(serde_json::json!({"code":"0", "data":rows}))
+                }
+            }))
+            .route("/marks", get(move |Query(q): Query<BTreeMap<String, String>>| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let ts = q["after"].parse::<i64>().unwrap();
+                    Json(serde_json::json!({"code":"0", "data":[[(ts-60_000).to_string(), "99", "102", "98", "100", "1"]]}))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut cache = FundingRateCache::new(FundingRateConfig::default()).unwrap();
+        cache.okex_endpoint = format!("http://{address}/rates");
+        cache.okex_marks_endpoint = format!("http://{address}/marks");
+        let symbols = vec!["okex-futures:BTCUSDT".into()];
+        let from = now - DAY_US;
+        for _ in 0..10 {
+            assert!(cache.request(&symbols, from, now).loading);
+        }
+        let first = cache.wait_for(&symbols, from, now).await.unwrap();
+        assert_eq!(first.rates[&symbols[0]].len(), 2);
+        assert_eq!(*observed.lock().unwrap(), vec![from / 1000]);
+        assert_eq!(marks.load(Ordering::SeqCst), 2);
+        let older = now - 2 * DAY_US;
+        assert!(cache.request(&symbols, older, now).loading);
+        let expanded = cache.wait_for(&symbols, older, now).await.unwrap();
+        assert_eq!(expanded.rates[&symbols[0]].len(), 3);
+        assert_eq!(*observed.lock().unwrap(), vec![from / 1000, older / 1000]);
+        assert_eq!(
+            marks.load(Ordering::SeqCst),
+            3,
+            "previously loaded marks are reused"
+        );
+        assert!(!cache.request(&symbols, from, now).loading);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cumulative_cold_load_publishes_recent_window_before_older_backfill_finishes() {
+        let now = crate::kline::now_us().div_euclid(1000) * 1000;
+        let recent = now - DAY_US + 60_000_000;
+        let old = now - 10 * DAY_US;
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = requests.clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = release.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/rates",
+                    get(move |Query(q): Query<BTreeMap<String, String>>| {
+                        let observed = observed.clone();
+                        let gate = gate.clone();
+                        async move {
+                            let from = q["startTime"].parse::<i64>().unwrap();
+                            observed.lock().unwrap().push(from);
+                            if from < (now - 2 * DAY_US) / 1000 {
+                                gate.notified().await;
+                            }
+                            Json(serde_json::json!([]))
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let mut config = FundingRateConfig::default();
+        config.daily_estimates_enabled = true;
+        let mut cache = FundingRateCache::new(config).unwrap();
+        cache.endpoint = format!("http://{address}/rates");
+        let symbols = vec!["TRBUSDT".into()];
+        assert!(cache.request(&symbols, old, now).loading);
+        let recent_view = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache.wait_for(&symbols, recent, now),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(recent_view.complete_symbols.contains("TRBUSDT"));
+        assert!(!recent_view.loading);
+        let cold_from = cache.symbols.read().unwrap()["TRBUSDT"].from_us.unwrap();
+        assert!((now - DAY_US..=recent).contains(&cold_from));
+        let old_view = cache.request(&symbols, old, now);
+        assert!(old_view.loading);
+        assert!(old_view.unavailable_reason.is_some());
+        assert!(!old_view.complete_symbols.contains("TRBUSDT"));
+        assert!(cache.symbols.read().unwrap()["TRBUSDT"].loading);
+        let recent_view = cache.request(&symbols, recent, now);
+        assert!(
+            !recent_view.loading,
+            "unrelated older work cannot block the recent window"
+        );
+        assert!(recent_view.unavailable_reason.is_none());
+        assert!(recent_view.complete_symbols.contains("TRBUSDT"));
+        // Let the single older request finish after observing its query bounds.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while requests.lock().unwrap().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        release.notify_one();
+        let complete = cache.wait_for(&symbols, old, now).await.unwrap();
+        assert!(!complete.loading);
+        assert!(complete.unavailable_reason.is_none());
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![cold_from / 1000, old / 1000]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_window_gets_budget_before_background_and_releases_priority_when_covered() {
+        let cache = FundingRateCache::new(FundingRateConfig::default()).unwrap();
+        let now = crate::kline::now_us();
+        let key = "okex-futures:TRBUSDT".to_string();
+        cache.symbols.write().unwrap().insert(
+            key.clone(),
+            SymbolCache {
+                loading: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            cache
+                .request_priority(&[key.clone()], now - DAY_US, now)
+                .loading
+        );
+        let background_cache = cache.clone();
+        let mut background = tokio::spawn(async move {
+            background_cache.reserve(Some("BTCUSDT")).await;
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut background)
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_millis(100), cache.reserve(Some(&key)))
+            .await
+            .unwrap();
+        assert_eq!(cache.budget.lock().await.requests.len(), 1);
+        // The symbol can still be loading earlier history. The selected window
+        // has arrived, so it no longer blocks unrelated accounts' requests.
+        {
+            let mut entries = cache.symbols.write().unwrap();
+            let entry = entries.get_mut(&key).unwrap();
+            entry.from_us = Some(now - DAY_US);
+            entry.through_us = Some(now);
+        }
+        let covered = cache.request_priority(&[key], now - DAY_US, now);
+        assert!(!covered.loading);
+        assert!(covered.unavailable_reason.is_none());
+        cache.budget.lock().await.next_request = Some(Instant::now());
+        tokio::time::timeout(Duration::from_millis(500), background)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cache.budget.lock().await.requests.len(), 2);
+    }
+
+    #[tokio::test]
     async fn concurrent_symbols_share_request_pacing() {
         let cache = FundingRateCache::new(FundingRateConfig::default()).unwrap();
         let reserve = || async {
-            cache.reserve().await;
+            cache.reserve(None).await;
             Instant::now()
         };
         let (a, b, c) = tokio::join!(reserve(), reserve(), reserve());

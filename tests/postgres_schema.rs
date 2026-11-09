@@ -1318,3 +1318,50 @@ async fn grid_controls_maintenance_preserves_existing_market_settings_and_null_l
     assert_eq!(saved.order_parameters.grid.futures.vol_multiplier, 2.5);
     db.remove().await
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn managed_account_alias_is_durable_without_creating_an_order_source() -> Result<()> {
+    let database = TestDatabase::create().await?;
+    let pool = &database.pool;
+    postgres::initialize(pool).await?;
+    let snapshot = seed_business_data(pool).await?;
+    postgres::save_source_alias(pool, "test-source", Some("native alias")).await?;
+    let id = "cta_cross_spread_rx01";
+    postgres::save_managed_account_alias(pool, id, Some("  okex_binace_cross_1min  ")).await?;
+    let aliases = postgres::load_source_aliases(pool).await?;
+    assert_eq!(aliases[id], "okex_binace_cross_1min");
+    assert_eq!(aliases["test-source"], "native alias");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT display_alias FROM cta_managed_account_aliases WHERE account_id = $1"
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await?,
+        "okex_binace_cross_1min"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM cta_order_sources")
+            .fetch_one(pool)
+            .await?,
+        1
+    );
+    assert!(
+        postgres::save_managed_account_alias(pool, id, Some("bad\nname"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        postgres::load_source_aliases(pool).await?[id],
+        "okex_binace_cross_1min"
+    );
+    postgres::save_managed_account_alias(pool, id, None).await?;
+    assert!(!postgres::load_source_aliases(pool).await?.contains_key(id));
+    assert_eq!(
+        postgres::load_source_aliases(pool).await?["test-source"],
+        "native alias"
+    );
+    assert_business_data(pool, &snapshot).await?;
+    database.remove().await
+}
