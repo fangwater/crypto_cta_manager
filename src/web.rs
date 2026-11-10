@@ -908,7 +908,8 @@ async fn auth_middleware(
     );
     // Account grants are tiered: 'view' reads the account, 'configure' also
     // writes it. Global catalog/access mutations remain admin-only, except
-    // order templates, owned/delegated Virtual accounts and strategy grant edits.
+    // order templates, owned/delegated Virtual accounts, strategy grant edits
+    // and creator-owned strategy token edits.
     let mut access = match auth::allowed_source_access(
         &auth_state.pool,
         &user,
@@ -982,9 +983,13 @@ fn request_permission_error(
         // Handlers enforce creator/delegated-manager authorization per Virtual.
         return None;
     }
-    // Delegated grant edits reach their own strategy-level check in the
-    // handler; every other account-less write stays administrator-only.
-    if path.starts_with("/api/catalog/position-strategies/") && path.ends_with("/grants") {
+    // Grant and token edits reach their own strategy-level checks in the
+    // handlers; other account-less writes stay administrator-only.
+    if path.starts_with("/api/catalog/position-strategies/")
+        && (path.ends_with("/grants")
+            || path.ends_with("/publish-token")
+            || path.ends_with("/publish-token/reset"))
+    {
         return None;
     }
     Some("administrator permission required")
@@ -3009,12 +3014,29 @@ async fn list_position_access(
     Ok((NO_STORE, Json(access)).into_response())
 }
 
+fn position_publish_token_allowed(
+    user: &AuthUser,
+    access: &strategy_catalog::PositionAccess,
+) -> bool {
+    user.is_admin() || access.created_by_user_id == Some(user.user_id)
+}
+
 async fn save_position_publish_token(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
     Json(request): Json<strategy_catalog::SavePositionPublishTokenRequest>,
 ) -> Result<Response, ApiError> {
     let _publication_edit = state.targets.edit(&state.configuration_lock).await;
+    let access = match strategy_catalog::load_position_access(&state.pool, &name).await? {
+        Some(access) => access,
+        None => return Ok(not_found("position strategy was not found")),
+    };
+    if !position_publish_token_allowed(&user, &access) {
+        return Ok(forbidden(
+            "only the strategy creator or administrator can manage its publish token",
+        ));
+    }
     let token = request.publish_token.trim();
     if !token.is_empty()
         && let Err(message) = strategy_catalog::validate_publish_token(token)
@@ -3039,13 +3061,23 @@ async fn save_position_publish_token(
     }
 }
 
-/// Admin-only reset: generates a fresh random token, stores its hash, and
+/// Creator/admin reset: generates a fresh random token, stores its hash, and
 /// returns the plaintext once so it can be distributed to the publisher.
 async fn reset_position_publish_token(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
     let _publication_edit = state.targets.edit(&state.configuration_lock).await;
+    let access = match strategy_catalog::load_position_access(&state.pool, &name).await? {
+        Some(access) => access,
+        None => return Ok(not_found("position strategy was not found")),
+    };
+    if !position_publish_token_allowed(&user, &access) {
+        return Ok(forbidden(
+            "only the strategy creator or administrator can manage its publish token",
+        ));
+    }
     let token = auth::generate_publish_token();
     let hash = auth::publish_token_hash(&token);
     match strategy_catalog::set_position_publish_token(&state.pool, &name, Some(hash)).await {
@@ -6714,6 +6746,73 @@ mod tests {
             Some(&visible),
             false
         ));
+    }
+
+    #[test]
+    fn strategy_publish_tokens_are_managed_only_by_the_creator_or_an_admin() {
+        let mut access = crate::strategy_catalog::PositionAccess {
+            created_by_user_id: Some(3),
+            publish_token_hash: None,
+            open_visibility: false,
+            manager_user_ids: vec![7],
+            grants: BTreeMap::from([
+                (3, "view".into()),
+                (11, "view".into()),
+                (12, "configure".into()),
+            ]),
+        };
+        for open_visibility in [false, true] {
+            access.open_visibility = open_visibility;
+            for has_creator in [false, true] {
+                access.created_by_user_id = has_creator.then_some(3);
+                for (user_id, role, allowed) in [
+                    (3, "user", has_creator),
+                    (7, "user", false),
+                    (11, "user", false),
+                    (12, "user", false),
+                    (99, "user", false),
+                    (99, "admin", true),
+                ] {
+                    let user = AuthUser {
+                        user_id,
+                        username: format!("user-{user_id}"),
+                        role: role.into(),
+                    };
+                    assert_eq!(position_publish_token_allowed(&user, &access), allowed);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn strategy_token_routes_reach_the_ownership_check_and_other_admin_routes_stay_protected() {
+        let access = auth::SourceAccess {
+            view: BTreeSet::new(),
+            configure: BTreeSet::new(),
+        };
+        for path in [
+            "/api/catalog/position-strategies/rbf_mid/publish-token",
+            "/api/catalog/position-strategies/rbf_mid/publish-token/reset",
+        ] {
+            assert_eq!(
+                request_permission_error(false, false, None, path, &access),
+                None,
+            );
+        }
+        for path in [
+            "/api/catalog/position-strategies/rbf_mid/managers",
+            "/api/catalog/publish-tokens",
+            "/api/catalog/publish-tokens/1",
+        ] {
+            assert_eq!(
+                request_permission_error(false, false, None, path, &access),
+                Some("administrator permission required"),
+            );
+            assert_eq!(
+                request_permission_error(true, false, None, path, &access),
+                None,
+            );
+        }
     }
 
     #[test]

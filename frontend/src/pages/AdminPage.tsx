@@ -315,7 +315,7 @@ export function AdminPage() {
         title={isAdmin ? '账户权限' : '授权管理'}
         description={isAdmin
           ? '账户授权分三档：无权限（不显示）、仅查看（可读账户与绑定，可修改账户别名）、可配置（可编辑绑定、份数、执行参数、费率与杠杆）。策略授权独立于账户：可见即可在目录与已绑定账户中看到该策略，可配置才允许新建绑定并管理该策略的授权。已存在的绑定由账户可配置权限管理，不再重复校验策略权限。'
-          : '你创建的策略，以及持有可配置权限的账户和策略，都可以继续授权给其他用户。新建绑定还需要目标账户的配置权限。所有登录用户均可新建私有策略；全员可见、推送 token 和推送用户由管理员维护。'}
+          : '你创建的策略，以及持有可配置权限的账户和策略，都可以继续授权给其他用户。新建绑定还需要目标账户的配置权限。所有登录用户均可新建私有策略；创建者可设置、重置或清除自己策略的推送 token。全员可见和推送用户由管理员维护。'}
       />
       {error && <Alert tone="error" className="mb-4">{error}</Alert>}
       {isAdmin && (
@@ -430,7 +430,7 @@ export function AdminPage() {
         <CardHeader><CardTitle>策略权限</CardTitle></CardHeader>
         <CardContent className="space-y-5">
           <p className="text-xs text-muted">
-            策略授权独立于账户：可见用户能在目录和已绑定账户中看到该策略；可配置用户能用它新建账户绑定并管理这里的授权，绑定还需目标账户的配置权限。创建者和推送管理者自动拥有策略配置权限。新建策略默认私有；管理员可勾选全员可见或设置推送 token、推送用户。机器推送方发送 X-CTA-Publish-Token；未设置 token 的策略保持开放推送（兼容旧方式）。
+            策略授权独立于账户：可见用户能在目录和已绑定账户中看到该策略；可配置用户能用它新建账户绑定并管理这里的授权，绑定还需目标账户的配置权限。创建者和推送管理者自动拥有策略配置权限。创建者和管理员可设置、重置或清除该策略的推送 token。新建策略默认私有；全员可见和推送用户由管理员维护。机器推送方发送 X-CTA-Publish-Token；未设置 token 的策略保持开放推送（兼容旧方式）。
           </p>
           {access.map((item) => (
             <div key={item.strategy_name} className="rounded-xl border border-border-soft p-4">
@@ -440,7 +440,7 @@ export function AdminPage() {
                   <p className="text-xs text-muted">创建者 {item.created_by ?? '—'} · {item.publish_token_set ? '已设置推送 token' : '开放推送（未设 token）'} · {item.open_visibility ? '全员可见' : (item.grants.length ? '部分用户可见' : '私有')}</p>
                 </div>
               </div>
-              {isAdmin && (
+              {(isAdmin || item.created_by === user.username) && (
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <input
                     type="text"

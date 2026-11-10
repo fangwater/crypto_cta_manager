@@ -60,6 +60,10 @@ position-update responses are filtered on the server. The machine-to-machine
 `POST /api/catalog/position-strategies` lets every logged-in user create a new
 private strategy and records the creator. Creation requires a valid session;
 anonymous requests and publish tokens alone cannot create a missing strategy.
+Strategy creators and administrators may set, reset or clear that strategy's
+publish token in the permissions page. Configure grants and publish-manager
+status alone do not authorize token changes. Global fallback tokens remain
+administrator-managed.
 Updates require an administrator, creator, publish-manager or configure-grantee
 session, or a strategy/fallback publish token. Existing tokenless strategies
 retain legacy machine pushes without a session. Catalog responses include a

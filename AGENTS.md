@@ -344,8 +344,10 @@ strategy is private by default (`open_visibility = false` on
 (`cta_position_strategy_viewers`), and publish managers can see it in
 `GET /api/catalog/position-strategies` and the position-update archive.
 Setting `open_visibility` restores visibility for every logged-in user.
-Admins manage strategy tokens (set, clear, or generate a fresh random one),
-fallback tokens (`/api/catalog/publish-tokens`), viewers, and publish
+Strategy creators and admins manage that strategy's token (set, clear, or
+generate a fresh random one); configure grants and publish-manager status alone
+do not authorize token changes. Admins manage fallback tokens
+(`/api/catalog/publish-tokens`), viewers, and publish
 managers through
 `/api/catalog/position-strategies-access` and the 权限管理 page. Accounts are
 not self-registered: `/api/auth/register` only bootstraps the very first

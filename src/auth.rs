@@ -334,7 +334,7 @@ pub fn publish_token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-/// A freshly generated publish token; shown once to the administrator and only
+/// A freshly generated publish token; shown once to the authorized caller and only
 /// its hash is stored.
 pub fn generate_publish_token() -> String {
     new_session_token()

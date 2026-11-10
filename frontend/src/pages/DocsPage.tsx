@@ -734,7 +734,7 @@ print(json.dumps(request("POST", "catalog/position-strategies", payload), ensure
           推送按策略门控：管理员、策略创建者、被授权用户的会话，或
           X-CTA-Publish-Token（脚本 --token / MANAGER_PUBLISH_TOKEN）任一满足即可推送。
           token 可以是该策略自己的 token，也可以是权限管理页维护的全局兜底 token（对所有策略生效）。
-          未设置 token 的策略保持开放推送，兼容旧方式；在权限管理页为该策略设置或重置 token 后开始鉴权。
+          未设置 token 的策略保持开放推送，兼容旧方式；策略创建者或管理员可在权限管理页设置、重置或清除该策略的 token，设置后开始鉴权。
           可见性与推送相互独立：新策略默认私有，仅管理员、创建者、获授权用户与推送管理者可见；管理员开启全员可见后，所有登录用户才可见。
         </Note>
       </>
