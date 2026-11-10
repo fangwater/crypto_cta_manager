@@ -1949,17 +1949,16 @@ async fn strategies_pnl_arrow(
 async fn timeline_arrow_response(
     state: WebState,
     query: TimelineQuery,
-    use_strategy_allocation: bool,
+    strategy_rows: bool,
     visible_source_ids: BTreeSet<String>,
 ) -> Result<Response, ApiError> {
-    let snapshot =
-        match rebuild_timeline_snapshot(state, query, use_strategy_allocation, visible_source_ids)
-            .await?
-        {
-            Ok(snapshot) => snapshot,
-            Err(response) => return Ok(response),
-        };
-    let payload = if use_strategy_allocation {
+    // Row shape must not select the opening inventory. Both exports use the
+    // NAV page's effective anchor, including strategy-only opening positions.
+    let snapshot = match rebuild_timeline_snapshot(state, query, true, visible_source_ids).await? {
+        Ok(snapshot) => snapshot,
+        Err(response) => return Ok(response),
+    };
+    let payload = if strategy_rows {
         encode_strategy_timeline_arrow(&snapshot)?
     } else {
         encode_account_timeline_arrow(&snapshot)?
@@ -5885,6 +5884,145 @@ mod tests {
     #[tokio::test]
     async fn timeline_handlers_clamp_windows_longer_than_local_history() {
         assert_long_window_timeline_handlers(45).await;
+    }
+
+    #[tokio::test]
+    async fn account_pnl_arrow_uses_the_same_opening_positions_as_the_nav_page() {
+        use crate::snapshot::{
+            PositionSnapshot, SnapshotPosition, StrategyPositionSnapshot, StrategySnapshotPosition,
+        };
+
+        for (account_qty, strategy_qty, account_is_newer, expected_nav) in [
+            (None, Some(3.0), false, 90.0),
+            (None, Some(-3.0), false, -30.0),
+            (Some(3.0), None, false, 90.0),
+            (Some(1.0), Some(3.0), false, 90.0),
+            (Some(3.0), Some(1.0), true, 90.0),
+            (None, None, false, 30.0),
+        ] {
+            let (_dir, state, id, start, end) = timeline_test_state(90);
+            let snapshots = Arc::new(
+                account_qty
+                    .map(|quantity| {
+                        (
+                            id.clone(),
+                            PositionSnapshot {
+                                source_id: id.clone(),
+                                snapshot_ts_us: start - if account_is_newer { 1 } else { 2 },
+                                positions: vec![SnapshotPosition {
+                                    symbol: "BTCUSDT".into(),
+                                    venue_code: 1,
+                                    quantity,
+                                    reference_price: Some(100.0),
+                                }],
+                            },
+                        )
+                    })
+                    .into_iter()
+                    .collect(),
+            );
+            let strategy_snapshots = Arc::new(
+                strategy_qty
+                    .map(|quantity| {
+                        (
+                            id.clone(),
+                            StrategyPositionSnapshot {
+                                source_id: id.clone(),
+                                snapshot_ts_us: start - if account_is_newer { 2 } else { 1 },
+                                positions: vec![StrategySnapshotPosition {
+                                    strategy_name: "alpha".into(),
+                                    symbol: "BTCUSDT".into(),
+                                    venue_code: 1,
+                                    quantity,
+                                    reference_price: 100.0,
+                                }],
+                            },
+                        )
+                    })
+                    .into_iter()
+                    .collect(),
+            );
+            {
+                let mut cache = state.cache.write().await;
+                cache.nav_timelines = Arc::new(
+                    nav::NavTimelineCache::build(
+                        state.config.as_ref().clone(),
+                        snapshots,
+                        strategy_snapshots,
+                        cache.nav_histories.clone(),
+                    )
+                    .unwrap(),
+                );
+            }
+            let query = || TimelineQuery {
+                start_ms: Some(start / 1000),
+                end_ms: Some(end / 1000),
+                source_ids: Some(id.clone()),
+                include_theoretical: Some(false),
+                ..Default::default()
+            };
+            let visible = BTreeSet::from([id.clone()]);
+            let page = timeline(
+                State(state.clone()),
+                Query(query()),
+                Extension(VisibleSources(visible.clone())),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("NAV page request failed: {}", error.0));
+            let page: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(page.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let expected = page["report"]["points"].as_array().unwrap();
+            assert_eq!(
+                page["report"]["summary"]["nav_change_before_fee_quote"],
+                expected_nav,
+            );
+
+            let response = account_pnl_arrow(
+                State(state),
+                Query(query()),
+                Extension(VisibleSources(visible)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("account PnL request failed: {}", error.0));
+            assert_eq!(response.status(), StatusCode::OK);
+            let payload = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let reader = StreamReader::try_new_buffered(Cursor::new(payload), None).unwrap();
+            assert_eq!(reader.schema().metadata()["dataset"], "account_pnl");
+            assert!(reader.schema().field_with_name("strategy_name").is_err());
+            let mut offset = 0;
+            for batch in reader {
+                let batch = batch.unwrap();
+                for row in 0..batch.num_rows() {
+                    let point = &expected[offset + row];
+                    let ts = batch["ts_us"]
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap();
+                    assert_eq!(ts.value(row), point["ts_us"].as_i64().unwrap());
+                    for name in [
+                        "realized_pnl_before_fee_quote",
+                        "floating_pnl_quote",
+                        "estimated_trading_fee_quote",
+                        "nav_change_before_fee_quote",
+                        "nav_change_after_fee_quote",
+                    ] {
+                        let values = batch[name].as_any().downcast_ref::<Float64Array>().unwrap();
+                        assert!(
+                            (values.value(row) - point[name].as_f64().unwrap()).abs() < 1e-10,
+                            "{name} differs with account={account_qty:?}, strategy={strategy_qty:?}",
+                        );
+                    }
+                }
+                offset += batch.num_rows();
+            }
+            assert_eq!(offset, expected.len());
+        }
     }
 
     pub(super) fn timeline_test_state(

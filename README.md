@@ -538,6 +538,12 @@ Arrow IPC table keyed by `strategy_name, ts_us`. Both accept `startMs`, `endMs`,
 `estimated_trading_fee_quote`, `nav_change_before_fee_quote`, and
 `nav_change_after_fee_quote` columns. The Python SDK is available as
 `scripts/manager_pnl_sdk.py` and at `GET /api/manager_sdk.py`.
+Both exports use the same effective opening snapshot as `/api/timeline`: the
+latest applicable account or strategy snapshot, with strategy opening positions
+summed into the account ledger. The account endpoint changes the output shape,
+not the opening inventory. For the NAV page's estimated-funding curve, compare
+`estimated_total_nav_after_fee_quote`; `nav_change_after_fee_quote` excludes
+funding and `total_nav_after_fee_quote` includes saved actual funding only.
 
 `GET /api/nav/exchange` is a parameter-free real-time JSON endpoint separate
 from PnL reconstruction. It returns the latest account-monitor exchange wallet
