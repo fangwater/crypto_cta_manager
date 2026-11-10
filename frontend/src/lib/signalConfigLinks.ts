@@ -4,7 +4,17 @@ const PREP_GROUP_BY_SOURCE: Readonly<Record<string, string>> = {
   binance_exec_rx03: 'prep02',
 }
 
-export function prepSignalConfigPath(sourceId: string, strategyName?: string) {
+export function accountSignalConfigPath(sourceId: string, strategyName?: string) {
+  if (sourceId === 'cta_cross_spread_rx01') {
+    let interval = '1min'
+    if (strategyName !== undefined) {
+      const match = /^cta-spread01-okx-bn-(1min|5min|15min|1h)-pos$/.exec(strategyName)
+      if (!match) return undefined
+      interval = match[1]
+    }
+    return `/cta/cta-prep-binance-futures/config/?worker=cta-factor-spread#okex-futures_binance-futures_${interval}`
+  }
+
   const group = PREP_GROUP_BY_SOURCE[sourceId]
   if (!group) return undefined
 

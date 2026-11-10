@@ -40,7 +40,7 @@ import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
 import { executionMarketLabel, executionSymbolPlaceholder, formatUniMmr, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
 import { readSourceId, routes } from '../lib/routes'
-import { prepSignalConfigPath } from '../lib/prepConfigLinks'
+import { accountSignalConfigPath } from '../lib/signalConfigLinks'
 import { cn } from '../lib/cn'
 import { usesActualFunding } from '../lib/fundingPresentation'
 import type {
@@ -123,7 +123,7 @@ export function AccountOverviewPage() {
   const bindings = useMemo(() => accountBindings(accountStudios), [accountStudios])
   const liquidityReport = report?.execution_sources?.find(s => s.source_id === sourceId) ?? report
   const canConfigure = marketAccount?.access_level === 'configure'
-  const signalConfigPath = canConfigure ? prepSignalConfigPath(sourceId) : undefined
+  const signalConfigPath = canConfigure ? accountSignalConfigPath(publicId) : undefined
   const knownLiquidityVolume =
     (liquidityReport?.maker_volume_quote ?? 0) + (liquidityReport?.taker_volume_quote ?? 0)
   const makerRatio = knownLiquidityVolume > 0
@@ -330,7 +330,7 @@ export function AccountOverviewPage() {
                   const position = positionByName.get(binding.position_strategy_name)
                   const order = orderByName.get(binding.order_strategy_name)
                   const signalConfigPath = canConfigure
-                    ? prepSignalConfigPath(sourceId, binding.position_strategy_name)
+                    ? accountSignalConfigPath(publicId, binding.position_strategy_name)
                     : undefined
                   return (
                     <Card

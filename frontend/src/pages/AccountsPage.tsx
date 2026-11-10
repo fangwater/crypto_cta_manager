@@ -23,7 +23,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { executionMarketLabel, formatUniMmr, integer, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
 import { cn } from '../lib/cn'
 import { routes } from '../lib/routes'
-import { prepSignalConfigPath } from '../lib/prepConfigLinks'
+import { accountSignalConfigPath } from '../lib/signalConfigLinks'
 import { accountVenueLabel } from '../lib/workspace'
 import type {
   DashboardAccount,
@@ -251,7 +251,7 @@ function AccountCard({
   const executionGroup = accountExecutionGroup(account)
   const executionUrl = !ready ? null : executionGroup ? routes.execViz(executionGroup.id) : account.gateway_prefix ? `${account.gateway_prefix}/` : null
   const signalConfigPath = account.enabled && account.access_level === 'configure'
-    ? prepSignalConfigPath(account.source_id)
+    ? accountSignalConfigPath(account.source_id)
     : undefined
   const openPositions =
     report?.symbols.filter(

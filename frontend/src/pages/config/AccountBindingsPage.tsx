@@ -30,7 +30,7 @@ import { FieldHint, Input, Label, Select } from '../../components/ui/Field'
 import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { readSourceId, routes } from '../../lib/routes'
-import { prepSignalConfigPath } from '../../lib/prepConfigLinks'
+import { accountSignalConfigPath } from '../../lib/signalConfigLinks'
 import { executionMarketLabel, executionSymbolPlaceholder, symbolMatchesExecMarket } from '../../format'
 import type { AccountStudio, DashboardSnapshot, ExecOrderRateLimits } from '../../types'
 
@@ -463,7 +463,7 @@ export function AccountBindingsPage() {
                 const validShares =
                   shareDraft.trim() !== '' && Number.isFinite(parsedShares) && parsedShares >= 0
                 const sharesChanged = validShares && parsedShares !== binding.shares
-                const signalConfigPath = prepSignalConfigPath(sourceId, binding.position_strategy_name)
+                const signalConfigPath = accountSignalConfigPath(selectedPublicAccount?.source_id ?? sourceId, binding.position_strategy_name)
                 return <Card key={binding.binding_name}>
                   <CardContent className="space-y-4 pt-5">
                     <div className="flex flex-wrap items-start justify-between gap-3">
