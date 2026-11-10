@@ -1,10 +1,10 @@
-import { Activity, BookOpen, LayoutDashboard, LogOut, Settings, Shield, Scale, PiggyBank, Layers3, WalletCards, Monitor } from 'lucide-react'
+import { Activity, BookOpen, LayoutDashboard, LogOut, Settings, Shield, Scale, PiggyBank, Layers3, WalletCards } from 'lucide-react'
 import { useLayoutEffect, useRef } from 'react'
 import { useAuth } from './AuthGate'
 import { cn } from '../lib/cn'
 import { readSourceId, routes } from '../lib/routes'
 
-export type AppNavId = 'exec-viz' | 'workspace' | 'nav-monitor' | 'accounts' | 'manager' | 'acquisition-cost' | 'config' | 'virtual' | 'auto-earn' | 'docs' | 'admin'
+export type AppNavId = 'workspace' | 'nav-monitor' | 'accounts' | 'manager' | 'acquisition-cost' | 'config' | 'virtual' | 'auto-earn' | 'docs' | 'admin'
 
 const links: Array<{
   id: AppNavId
@@ -15,7 +15,6 @@ const links: Array<{
   { id: 'workspace', href: '/manager/workspace/', label: '总览', icon: LayoutDashboard },
   { id: 'nav-monitor', href: routes.navMonitor, label: '净值', icon: Activity },
   { id: 'accounts', href: routes.accounts, label: '账户', icon: WalletCards },
-  { id: 'exec-viz', href: routes.execViz(), label: '执行监控', icon: Monitor },
   { id: 'manager', href: '/manager/', label: '分析', icon: Activity },
   { id: 'acquisition-cost', href: '/manager/acquisition-cost/', label: '成本', icon: Scale },
   { id: 'config', href: '/manager/config/position/', label: '策略', icon: Settings },

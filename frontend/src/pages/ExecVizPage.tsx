@@ -1,5 +1,5 @@
 import { LoaderCircle, Monitor, RefreshCw } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ApiError, getDashboard, getTimeline } from '../api'
 import { AppShell, PageIntro, StatTile } from '../components/AppShell'
 import { Alert, Badge } from '../components/ui/Badge'
@@ -23,14 +23,14 @@ export function ExecVizPage() {
   const [pnlLoading, setPnlLoading] = useState(false)
   const [pnlError, setPnlError] = useState<string | null>(null)
   useEffect(() => {
+    if (!requestedGroup) return
     const controller = new AbortController()
     const load = () => { void getDashboard(controller.signal).then(value => { setDashboard(value); setError(null) }).catch(reason => { if (!controller.signal.aborted) { setError(String(reason)); if (reason instanceof ApiError && [401, 403].includes(reason.status)) setDashboard(null) } }) }
     load()
     const timer = window.setInterval(load, 15_000)
     return () => { controller.abort(); window.clearInterval(timer) }
-  }, [])
-  const available = useMemo(() => executionGroups.filter(g => groupAccount(dashboard?.accounts ?? [], g)), [dashboard])
-  const group = executionGroups.find(g => g.id === requestedGroup) ?? (!requestedGroup && available.length === 1 ? available[0] : undefined)
+  }, [requestedGroup])
+  const group = executionGroups.find(g => g.id === requestedGroup)
   const scope = group ? groupAccount(dashboard?.accounts ?? [], group) : null
   const account = scope?.account
   const accounts = scope?.executions
@@ -63,11 +63,14 @@ export function ExecVizPage() {
   }, [showPnl, range, groupId, revision])
   const funding = pnl?.estimated_funding?.income_quote
   const total = pnl && funding != null ? pnl.report.summary.nav_change_after_fee_quote + funding : null
-  return <AppShell active="exec-viz" title="执行监控" subtitle={account?.account ?? '账户执行监控'} icon={Monitor} wide>
+  return <AppShell active="accounts" title="执行监控" subtitle={account?.account ?? '账户执行监控'} icon={Monitor} wide>
     <PageIntro eyebrow="执行监控" title={account?.account ?? '执行监控'} description="统一查看两所的目标仓位、挂单与执行进度。"
       actions={account && <div className="flex flex-wrap gap-4 text-sm"><a href={routes.account(account.source_id)} className="text-brand">账户配置</a><a href={routes.nav(account.source_id)} className="text-brand">账户净值</a><a href={routes.configBindings(account.source_id)} className="text-brand">策略启用</a></div>} />
     {error && <Alert tone="error" className="mb-4">监控入口读取失败：{error}</Alert>}
-    {!dashboard ? <p className="py-12 text-center text-muted">正在加载账户执行监控…</p> : !accounts || !account ?
+    {!requestedGroup ? <div className="space-y-4">
+      <p className="text-sm text-muted">请从账户页面点击对应账户的“执行监控”按钮进入。</p>
+      <a href={routes.accounts} className="inline-flex text-sm font-medium text-brand">前往账户列表</a>
+    </div> : !dashboard ? <p className="py-12 text-center text-muted">正在加载账户执行监控…</p> : !accounts || !account ?
       <Alert tone="warning">所选账户不存在，或没有完整查看权限。</Alert> : <>
       <UnifiedExecutionMonitor key={account.source_id} executions={accounts} />
       <section className="mt-6 rounded-2xl border border-border bg-surface p-5">
