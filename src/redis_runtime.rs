@@ -20,6 +20,7 @@ use crate::order_config::{
 const POSITION_CLOSE_STRATEGY_NAME: &str = "SYSTEM_POSITION_CLOSE";
 const EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD: &str = "exec_order_rate_limit_per_min";
 const EXEC_ORDER_RATE_LIMIT_10S_FIELD: &str = "exec_order_rate_limit_10s";
+const EXEC_ORDER_RATE_LIMIT_DEFAULTS_REFRESH: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -169,6 +170,35 @@ impl RedisRuntime {
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
             }
         });
+    }
+
+    pub fn spawn_exec_order_rate_limit_defaults(&self, sources: Vec<SourceConfig>) {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(EXEC_ORDER_RATE_LIMIT_DEFAULTS_REFRESH);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                timer.tick().await;
+                runtime
+                    .refresh_exec_order_rate_limit_defaults(&sources)
+                    .await;
+            }
+        });
+    }
+
+    async fn refresh_exec_order_rate_limit_defaults(&self, sources: &[SourceConfig]) {
+        for source in sources
+            .iter()
+            .filter(|source| source.enabled && default_exec_order_rate_limits(source).is_some())
+        {
+            if let Err(error) = self.load_exec_order_rate_limits(source).await {
+                warn!(
+                    source_id = source.id,
+                    error = %error,
+                    "Exec order rate limit defaults refresh failed; will retry"
+                );
+            }
+        }
     }
 
     pub async fn publish_strategy(
@@ -672,31 +702,48 @@ impl RedisRuntime {
             let mut inner = self.inner.lock().await;
             let connection = inner.connection().await?;
             tokio::time::timeout(timeout, async {
-                let exists = connection
-                    .exists::<_, bool>(&key)
-                    .await
-                    .with_context(|| format!("check Redis Exec risk params key {key}"))?;
-                if !exists {
+                let defaults = default_exec_order_rate_limits(source);
+                if defaults.is_none()
+                    && !connection
+                        .exists::<_, bool>(&key)
+                        .await
+                        .with_context(|| format!("check Redis Exec risk params key {key}"))?
+                {
                     bail!("Redis Exec risk params hash does not exist: {key}");
                 }
+                let mut pipe = redis::pipe();
+                pipe.atomic();
+                // HSETNX preserves explicit settings (including zero) and any
+                // concurrent operator write. Never replace a whole risk hash.
+                if let Some((limit_per_min, limit_10s)) = defaults {
+                    pipe.cmd("HSETNX")
+                        .arg(&key)
+                        .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
+                        .arg(limit_per_min)
+                        .ignore()
+                        .cmd("HSETNX")
+                        .arg(&key)
+                        .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD)
+                        .arg(limit_10s)
+                        .ignore();
+                }
                 if let Some((limit_per_min, limit_10s)) = update {
-                    let _: i64 = redis::cmd("HSET")
+                    pipe.cmd("HSET")
                         .arg(&key)
                         .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
                         .arg(limit_per_min)
                         .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD)
                         .arg(limit_10s)
-                        .query_async(connection)
-                        .await
-                        .with_context(|| format!("write Redis Exec order rate limits key {key}"))?;
+                        .ignore();
                 }
-                let values: Vec<Option<String>> = redis::cmd("HMGET")
+                pipe.cmd("HMGET")
                     .arg(&key)
                     .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
-                    .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD)
+                    .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD);
+                let (values,): (Vec<Option<String>>,) = pipe
                     .query_async(connection)
                     .await
-                    .with_context(|| format!("read Redis Exec order rate limits key {key}"))?;
+                    .with_context(|| format!("load Redis Exec order rate limits key {key}"))?;
                 if values.len() != 2 {
                     bail!("Redis Exec order rate limit response has invalid field count");
                 }
@@ -1048,6 +1095,14 @@ fn exec_risk_params_key(source: &SourceConfig) -> String {
     format!("{}:{}:pre_trade_risk_params", source.id, source.venue)
 }
 
+fn default_exec_order_rate_limits(source: &SourceConfig) -> Option<(i32, i32)> {
+    match source.venue.as_str() {
+        // Binance USD-M exchangeInfo ORDERS limits, confirmed 2026-11-11.
+        "binance-futures" => Some((1_200, 300)),
+        _ => None,
+    }
+}
+
 fn parse_exec_order_rate_limit(raw: Option<&str>, field: &str) -> Result<i32> {
     let Some(raw) = raw else {
         return Ok(0);
@@ -1178,44 +1233,51 @@ mod tests {
         }
     }
 
-    // The fixture starts its own loopback server; it never connects to a deployed Redis.
-    #[tokio::test]
-    #[ignore = "requires EXEC_REDIS_TEST_SERVER_BIN pointing to a local redis-server binary"]
-    async fn independent_market_publish_switch_and_removal_never_cross_sources() {
-        use std::net::TcpListener;
-        use std::process::{Child, Command, Stdio};
-        struct Server(Child);
-        impl Drop for Server {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
+    struct RedisTestServer {
+        child: std::process::Child,
+        dir: tempfile::TempDir,
+    }
+
+    impl Drop for RedisTestServer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
+    }
+
+    // Starts its own loopback server; never connects to a deployed Redis.
+    async fn isolated_redis() -> (
+        RedisTestServer,
+        RedisRuntime,
+        redis::aio::MultiplexedConnection,
+        SourceConfig,
+    ) {
+        use std::net::TcpListener;
+        use std::process::{Command, Stdio};
         let dir = tempfile::tempdir().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let executable = std::env::var("EXEC_REDIS_TEST_SERVER_BIN")
             .expect("set the isolated test server binary");
-        let _server = Server(
-            Command::new(executable)
-                .args([
-                    "--bind",
-                    "127.0.0.1",
-                    "--port",
-                    &port.to_string(),
-                    "--save",
-                    "",
-                    "--appendonly",
-                    "no",
-                    "--dir",
-                    dir.path().to_str().unwrap(),
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
+        let child = Command::new(executable)
+            .args([
+                "--bind",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+                "--dir",
+                dir.path().to_str().unwrap(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let server = RedisTestServer { child, dir };
         let url = format!("redis://127.0.0.1:{port}/0");
         let client = redis::Client::open(url.clone()).unwrap();
         let mut connection = None;
@@ -1226,7 +1288,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let mut connection = connection.expect("isolated Redis startup");
+        let connection = connection.expect("isolated Redis startup");
         let runtime = RedisRuntime::connect(RedisSettings {
             url,
             ..Default::default()
@@ -1234,9 +1296,145 @@ mod tests {
         .unwrap();
         let source: SourceConfig = toml::from_str(&format!(
             "id='fixture_um'\naccount='fixture'\nvenue='binance-futures'\nrocksdb_path='{}'\n",
-            dir.path().join("um/data/persist_manager").display()
+            server.dir.path().join("um/data/persist_manager").display()
         ))
         .unwrap();
+        (server, runtime, connection, source)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires EXEC_REDIS_TEST_SERVER_BIN pointing to a local redis-server binary"]
+    async fn exec_order_rate_limit_defaults_repair_only_missing_fields() {
+        let (_server, runtime, mut connection, source) = isolated_redis().await;
+        let key = exec_risk_params_key(&source);
+        let limits = runtime.load_exec_order_rate_limits(&source).await.unwrap();
+        assert_eq!(limits.exec_order_rate_limit_per_min, 1_200);
+        assert_eq!(limits.exec_order_rate_limit_10s, 300);
+
+        let _: () = connection
+            .hset(&key, "max_pending_limit_orders", 17)
+            .await
+            .unwrap();
+        let _: () = connection
+            .hset(&key, EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD, 0)
+            .await
+            .unwrap();
+        let _: i64 = connection
+            .hdel(&key, EXEC_ORDER_RATE_LIMIT_10S_FIELD)
+            .await
+            .unwrap();
+        let limits = runtime.load_exec_order_rate_limits(&source).await.unwrap();
+        assert_eq!(limits.exec_order_rate_limit_per_min, 0);
+        assert_eq!(limits.exec_order_rate_limit_10s, 300);
+        assert_eq!(
+            connection
+                .hget::<_, _, i32>(&key, "max_pending_limit_orders")
+                .await
+                .unwrap(),
+            17
+        );
+
+        let _: () = connection
+            .hset(&key, EXEC_ORDER_RATE_LIMIT_10S_FIELD, 37)
+            .await
+            .unwrap();
+        let _: i64 = connection
+            .hdel(&key, EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
+            .await
+            .unwrap();
+        let limits = runtime.load_exec_order_rate_limits(&source).await.unwrap();
+        assert_eq!(limits.exec_order_rate_limit_per_min, 1_200);
+        assert_eq!(limits.exec_order_rate_limit_10s, 37);
+
+        let _: i64 = connection.del(&key).await.unwrap();
+        let saved = runtime
+            .save_exec_order_rate_limits(&source, 401, 0)
+            .await
+            .unwrap();
+        assert_eq!(saved.exec_order_rate_limit_per_min, 401);
+        assert_eq!(saved.exec_order_rate_limit_10s, 0);
+
+        let operator_limits = [
+            (EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD, 401),
+            (EXEC_ORDER_RATE_LIMIT_10S_FIELD, 0),
+        ];
+        for _ in 0..10 {
+            let _: i64 = connection.del(&key).await.unwrap();
+            let (read, saved): (_, redis::RedisResult<()>) = tokio::join!(
+                runtime.load_exec_order_rate_limits(&source),
+                connection.hset_multiple(&key, &operator_limits),
+            );
+            read.unwrap();
+            saved.unwrap();
+            let limits = runtime.load_exec_order_rate_limits(&source).await.unwrap();
+            assert_eq!(limits.exec_order_rate_limit_per_min, 401);
+            assert_eq!(limits.exec_order_rate_limit_10s, 0);
+        }
+
+        let _: () = connection
+            .hset(&key, EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD, "invalid")
+            .await
+            .unwrap();
+        assert!(runtime.load_exec_order_rate_limits(&source).await.is_err());
+        assert_eq!(
+            connection
+                .hget::<_, _, String>(&key, EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
+                .await
+                .unwrap(),
+            "invalid"
+        );
+
+        let mut wrong_type = source.clone();
+        wrong_type.id = "wrong_type".into();
+        let wrong_key = exec_risk_params_key(&wrong_type);
+        let _: () = connection.set(&wrong_key, "preserve").await.unwrap();
+        let mut disabled = source.clone();
+        disabled.id = "disabled".into();
+        disabled.enabled = false;
+        let mut other_venue = source.clone();
+        other_venue.id = "coin_m".into();
+        other_venue.venue = "binance-coin-futures".into();
+        let _: i64 = connection.del(&key).await.unwrap();
+        runtime
+            .refresh_exec_order_rate_limit_defaults(&[
+                wrong_type,
+                disabled.clone(),
+                other_venue.clone(),
+                source.clone(),
+            ])
+            .await;
+        assert_eq!(
+            connection.get::<_, String>(&wrong_key).await.unwrap(),
+            "preserve"
+        );
+        assert!(
+            !connection
+                .exists::<_, bool>(exec_risk_params_key(&disabled))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !connection
+                .exists::<_, bool>(exec_risk_params_key(&other_venue))
+                .await
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .load_exec_order_rate_limits(&other_venue)
+                .await
+                .is_err()
+        );
+        let limits = runtime.load_exec_order_rate_limits(&source).await.unwrap();
+        assert_eq!(limits.exec_order_rate_limit_per_min, 1_200);
+        assert_eq!(limits.exec_order_rate_limit_10s, 300);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires EXEC_REDIS_TEST_SERVER_BIN pointing to a local redis-server binary"]
+    async fn independent_market_publish_switch_and_removal_never_cross_sources() {
+        let (server, runtime, mut connection, source) = isolated_redis().await;
+        let dir = &server.dir;
         let mut coin_source = source.clone();
         coin_source.id = "fixture_cm".into();
         coin_source.venue = "binance-coin-futures".into();
@@ -1755,7 +1953,7 @@ mod tests {
 
     #[test]
     fn exec_order_rate_limit_contract_uses_account_risk_hash() {
-        let source = SourceConfig {
+        let mut source = SourceConfig {
             id: "binance_exec_trade01".to_string(),
             account: "trade01".to_string(),
             alias: None,
@@ -1780,6 +1978,17 @@ mod tests {
             exec_risk_params_key(&source),
             "binance_exec_trade01:binance-futures:pre_trade_risk_params"
         );
+        assert_eq!(default_exec_order_rate_limits(&source), Some((1_200, 300)));
+        for venue in [
+            "binance-coin-futures",
+            "binance-margin",
+            "okex-futures",
+            "bybit-futures",
+            "bitget-futures",
+        ] {
+            source.venue = venue.into();
+            assert_eq!(default_exec_order_rate_limits(&source), None);
+        }
         assert_eq!(parse_exec_order_rate_limit(None, "limit").unwrap(), 0);
         assert_eq!(
             parse_exec_order_rate_limit(Some("400"), "limit").unwrap(),

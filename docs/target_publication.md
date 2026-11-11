@@ -1,6 +1,6 @@
 # Target publication
 
-Last updated: 2026-11-07. The archive write-behind implementation below is deployed
+Last updated: 2026-11-11. The archive write-behind implementation below is deployed
 to jp-meta and el01. The earlier PG-only rollout records describe the previous
 implementation, which awaited the RocksDB WAL before Exec writes.
 
@@ -93,6 +93,21 @@ they never automatically replay old signals into Exec. Configuration-only
 archive operations also offload RocksDB calls to blocking workers. Startup and
 catalog reload read RocksDB off the runtime thread and before acquiring memory
 locks used by live publications.
+
+Binance USD-M sources (`venue = "binance-futures"`) default their Exec account
+order limits to 1,200 orders per minute and 300 orders per ten seconds, matching
+Binance `exchangeInfo`'s `ORDERS` limits checked on 2026-11-11. Manager fills
+missing fields in `<source_id>:<venue>:pre_trade_risk_params` on configuration
+reads, and for enabled sources at startup and every 60 seconds in a background
+worker. `HSETNX` preserves existing values, including an explicit zero, and all
+other risk parameters. Explicit saves take precedence over defaults. Missing
+hashes and partially populated hashes recover without a service restart; failed
+sources are retried independently. Other venues do not inherit these Binance
+defaults. Invalid existing values remain errors rather than being overwritten.
+This maintenance does not join target publication or contact an exchange API.
+As of 2026-11-11, the automatic defaulting change awaits Manager deployment.
+The missing jp-meta `binance_exec_trade01` and `binance_exec_trade04` hashes were
+repaired manually with these two limits; that repair did not restart services.
 
 ## JP production deployment
 

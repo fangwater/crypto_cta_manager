@@ -450,6 +450,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let exec_config = ExecConfigClient::new(config.order_config.request_timeout_secs)?;
     let redis_runtime = RedisRuntime::connect(config.redis.clone())?;
     redis_runtime.spawn_keepalive();
+    redis_runtime.spawn_exec_order_rate_limit_defaults(config.sources.clone());
     crate::market_rules::spawn(
         config.sources.clone(),
         redis_runtime.clone(),
