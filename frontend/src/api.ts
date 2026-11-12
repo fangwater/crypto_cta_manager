@@ -160,7 +160,7 @@ export function setAuthUserRole(userId: number, role: 'admin' | 'user') {
 }
 
 export function getDashboard(signal?: AbortSignal) {
-  return requestJson<DashboardSnapshot>('/dashboard', { signal })
+  return requestJson<DashboardSnapshot>('/dashboard?includeSymbols=false', { signal })
 }
 
 export function saveAccountAlias(sourceId: string, alias: string | null) {

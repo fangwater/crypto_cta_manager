@@ -253,7 +253,7 @@ function AccountCard({
   const signalConfigPath = account.enabled && account.access_level === 'configure'
     ? accountSignalConfigPath(account.source_id)
     : undefined
-  const openPositions =
+  const openPositions = account.open_position_symbol_count ??
     report?.symbols.filter(
       (symbol) =>
         Math.abs(symbol.long_position_value_quote) > 1e-9 ||

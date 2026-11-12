@@ -9,6 +9,26 @@ type Market = (String, i16);
 pub(super) type Requests = BTreeMap<Market, BTreeSet<i64>>;
 type Prices = BTreeMap<Market, BTreeMap<i64, f64>>;
 
+fn price_ranges(requests: &Requests) -> Result<BTreeMap<String, (i64, i64)>> {
+    requests
+        .iter()
+        .filter_map(|((symbol, venue), opens)| {
+            Some((
+                symbol,
+                venue,
+                opens.first().copied()?,
+                opens.last().copied()?,
+            ))
+        })
+        .map(|(symbol, venue, first, last)| {
+            Ok((
+                crate::market_data::cache_symbol(symbol, *venue)?,
+                (first, last + MINUTE_US),
+            ))
+        })
+        .collect()
+}
+
 pub(super) enum MinuteMarks {
     Collect(Mutex<Requests>),
     Loaded { revision: u64, prices: Prices },
@@ -175,6 +195,8 @@ async fn load_prices(
     end: i64,
 ) -> Result<MinuteMarks> {
     validate(&store, start, end)?;
+    let ranges = price_ranges(&requests)?;
+    let mut revision = store.range_revision(&ranges);
     let read_store = store.clone();
     let (requests, (mut prices, missing)) = tokio::task::spawn_blocking(move || {
         let result = read_prices(&read_store, &requests)?;
@@ -184,6 +206,7 @@ async fn load_prices(
     if !missing.is_empty() {
         let warm = warm_ranges(&store, missing).await;
         validate(&store, start, end)?;
+        revision = store.range_revision(&ranges);
         let read_store = store.clone();
         let (loaded, missing) =
             tokio::task::spawn_blocking(move || read_prices(&read_store, &requests)).await??;
@@ -202,10 +225,7 @@ async fn load_prices(
         }
         prices = loaded;
     }
-    Ok(MinuteMarks::Loaded {
-        revision: store.revision(),
-        prices,
-    })
+    Ok(MinuteMarks::Loaded { revision, prices })
 }
 
 impl NavTimelineCache {
@@ -389,7 +409,7 @@ impl NavTimelineCache {
         request.selected_source_ids.dedup();
         request.selected_symbols.sort();
         request.selected_symbols.dedup();
-        let key = TimelineCacheKey {
+        let plan_key = TimelineCacheKey {
             start: request.start_ts_us,
             end: request.end_ts_us,
             sources: request.selected_source_ids.clone(),
@@ -397,18 +417,20 @@ impl NavTimelineCache {
             max_points: request.max_points,
             tick_interval_us: request.tick_interval_us,
             strategy_allocation: allocation,
-            minute_marks_revision: Some(store.revision()),
+            minute_marks_revision: None,
         };
-        if let Some(report) = self.results.get(&key) {
-            return Ok(report);
+        if let Some(plan) = self.mark_plans.get(&plan_key) {
+            let key = TimelineCacheKey {
+                minute_marks_revision: Some(store.range_revision(&price_ranges(&plan)?)),
+                ..plan_key.clone()
+            };
+            if let Some(report) = self.results.get(&key) {
+                return Ok(report);
+            }
         }
         let cache = self.clone();
         let plan_request = request.clone();
         let requests = tokio::task::spawn_blocking(move || {
-            let plan_key = TimelineCacheKey {
-                minute_marks_revision: None,
-                ..key
-            };
             let recent = cache.daily.is_none() || request_cacheable(&plan_key);
             cache.mark_plans.get_or_compute_if(
                 plan_key,
@@ -466,6 +488,70 @@ mod tests {
         db.db()
             .put_cf(&db.db().cf_handle("klines_1m").unwrap(), key, value)
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn priced_curve_reuses_unrelated_candle_updates_and_reprices_corrected_marks() {
+        let (_dir, db, store) = fixture();
+        let end = now_us().div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
+        let first = end - 2 * MINUTE_US + 123;
+        let mut cache =
+            super::super::tests::minute_mark_fixture(vec![super::super::tests::event_at(
+                first, first, "BTCUSDT", 1, 1, 100.0, 1.0,
+            )]);
+        cache.config.sources[0].venue = "binance-futures".into();
+        let cache = Arc::new(cache);
+        for open in [end - 3 * MINUTE_US, end - 2 * MINUTE_US, end - MINUTE_US] {
+            candle(&db, "BTCUSDT", open, 120.0);
+        }
+        let request = NavTimelineRequest {
+            start_ts_us: Some(first),
+            end_ts_us: end,
+            selected_source_ids: vec!["trade01".into()],
+            selected_symbols: vec![],
+            max_points: 200,
+            tick_interval_us: None,
+        };
+        let first_report = cache
+            .rebuild_priced(request.clone(), false, store.clone())
+            .await
+            .unwrap();
+        let mut bar = crate::kline::Kline {
+            open_ts_us: end - MINUTE_US,
+            open: 120.0,
+            high: 150.0,
+            low: 50.0,
+            close: 121.0,
+            base_volume: 1.0,
+            quote_volume: 120.0,
+            trades: 1,
+        };
+        store
+            .save_page("ETHUSDT", bar.open_ts_us, bar.end_ts_us(), &[bar])
+            .unwrap();
+        bar.open_ts_us = end - 10 * MINUTE_US;
+        store
+            .save_page("BTCUSDT", bar.open_ts_us, bar.end_ts_us(), &[bar])
+            .unwrap();
+        let repeated = cache
+            .rebuild_priced(request.clone(), false, store.clone())
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first_report, &repeated));
+        bar.open_ts_us = end - MINUTE_US;
+        store
+            .save_page("BTCUSDT", bar.open_ts_us, bar.end_ts_us(), &[bar])
+            .unwrap();
+        let corrected = cache
+            .rebuild_priced(request, false, store.clone())
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first_report, &corrected));
+        assert_eq!(
+            corrected.summary.floating_pnl_quote,
+            first_report.summary.floating_pnl_quote + 1.0
+        );
+        assert_eq!(store.status().requests, 0);
     }
 
     #[tokio::test]

@@ -99,6 +99,8 @@ export interface DashboardAccount {
   gateway_prefix: string | null
   configurable: boolean
   target_proxy_enabled: boolean
+  /** Count supplied by the compact dashboard projection, without symbol detail rows. */
+  open_position_symbol_count?: number | null
   /** Current session's grant on this account. Undefined only in stale payloads. */
   access_level?: 'view' | 'configure' | null
   can_edit_alias?: boolean

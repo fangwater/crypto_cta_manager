@@ -15,6 +15,10 @@ use std::sync::{Arc, Mutex};
 
 const ZERO_EPSILON: f64 = 1e-12;
 
+#[cfg(test)]
+#[path = "theoretical_nav/performance_tests.rs"]
+mod performance_tests;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct TheoreticalNavPoint {
     pub ts_us: i64,
@@ -129,6 +133,13 @@ type MarketKey = (String, String, String);
 type CarriedInventory = BTreeMap<MarketKey, f64>;
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct TargetQueryRevision {
+    epoch: u64,
+    prefixes: Vec<(MarketKey, usize)>,
+    tail_revision: Option<u64>,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 struct CurveQueryKey {
     execution_models: ExecutionModels,
     start: i64,
@@ -136,12 +147,13 @@ struct CurveQueryKey {
     max_points: usize,
     sources: Vec<String>,
     fees: Vec<(String, u64, Vec<(String, u64)>, u64, Vec<(String, u64)>)>,
-    target_revision: u64,
+    target_revision: TargetQueryRevision,
     candle_revision: u64,
 }
 
 #[derive(Default)]
 struct TargetCacheState {
+    epoch: u64,
     cursor: Option<(i64, u32)>,
     latest: BTreeMap<(String, String), LatestTargets>,
     deltas: Vec<VirtualDelta>,
@@ -149,6 +161,40 @@ struct TargetCacheState {
     markets: BTreeMap<MarketKey, MarketDeltaIndex>,
     tail_markets: BTreeMap<MarketKey, MarketDeltaIndex>,
     revision: u64,
+}
+
+impl TargetCacheState {
+    fn query_revision(&self, source_ids: &[String], end: i64) -> TargetQueryRevision {
+        let selected = |market: &MarketKey| source_ids.is_empty() || source_ids.contains(&market.0);
+        let mut prefixes = self
+            .markets
+            .iter()
+            .filter(|(market, _)| selected(market))
+            .filter_map(|(market, index)| {
+                let count = index
+                    .positions
+                    .partition_point(|p| self.deltas[*p].received_at_us <= end);
+                (count != 0).then(|| (market.clone(), count))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut has_tail = false;
+        for (market, index) in &self.tail_markets {
+            if selected(market)
+                && index
+                    .positions
+                    .first()
+                    .is_some_and(|p| self.tail_deltas[*p].received_at_us <= end)
+            {
+                has_tail = true;
+                prefixes.entry(market.clone()).or_insert(0);
+            }
+        }
+        TargetQueryRevision {
+            epoch: self.epoch,
+            prefixes: prefixes.into_iter().collect(),
+            tail_revision: has_tail.then_some(self.revision),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -231,7 +277,12 @@ impl TheoreticalTargetCache {
             .archive
             .target_changes_since(state.revision, state.cursor);
         if invalidated {
+            let epoch = state
+                .epoch
+                .checked_add(1)
+                .context("target cache epoch exhausted")?;
             *state = TargetCacheState::default();
+            state.epoch = epoch;
             self.ready.store(false, Ordering::Release);
         }
         // Re-read the recent tail. HTTP publications commonly complete out of
@@ -286,18 +337,7 @@ impl TheoreticalTargetCache {
             .map(|(deltas, _, _)| deltas))
     }
 
-    /// Binary-search each source/market's prefix quantity rather than replaying
-    /// every old delta to establish the requested window's initial inventory.
-    async fn query_inputs(
-        self: &Arc<Self>,
-        fee_rates: BTreeMap<String, TheoreticalFeeRates>,
-        end: i64,
-        source_ids: &[String],
-        strategy: Option<&str>,
-        nav_start: Option<i64>,
-        received_start: Option<i64>,
-        models: ExecutionModels,
-    ) -> Result<Option<(Vec<VirtualDelta>, CarriedInventory, u64)>> {
+    async fn ready_for_query(self: &Arc<Self>) -> Result<bool> {
         self.refresh();
         let wait = async {
             loop {
@@ -316,7 +356,25 @@ impl TheoreticalTargetCache {
         };
         match tokio::time::timeout(std::time::Duration::from_secs(10), wait).await {
             Ok(result) => result?,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Binary-search each source/market's prefix quantity rather than replaying
+    /// every old delta to establish the requested window's initial inventory.
+    async fn query_inputs(
+        self: &Arc<Self>,
+        fee_rates: BTreeMap<String, TheoreticalFeeRates>,
+        end: i64,
+        source_ids: &[String],
+        strategy: Option<&str>,
+        nav_start: Option<i64>,
+        received_start: Option<i64>,
+        models: ExecutionModels,
+    ) -> Result<Option<(Vec<VirtualDelta>, CarriedInventory, TargetQueryRevision)>> {
+        if !self.ready_for_query().await? {
+            return Ok(None);
         }
         let cache = self.clone();
         let source_ids = source_ids.to_vec();
@@ -398,7 +456,8 @@ impl TheoreticalTargetCache {
                 deltas.push(delta);
             }
             carry.retain(|_, quantity| clean_zero(*quantity) != 0.0);
-            Ok(Some((deltas, carry, state.revision)))
+            let revision = state.query_revision(&source_ids, end);
+            Ok(Some((deltas, carry, revision)))
         })
         .await
         .context("theoretical target reader failed")?
@@ -593,8 +652,12 @@ pub async fn load_timeline(
             Some("区间起点没有保留范围内的完整分钟基准价，请将起点后移一分钟".into());
         return Ok(output);
     }
+    let mut sources = source_ids.to_vec();
+    sources.sort();
+    sources.dedup();
     let curve_fees: Vec<_> = fees
         .iter()
+        .filter(|(source, _)| sources.is_empty() || sources.contains(source))
         .map(|(source, rate)| {
             (
                 source.clone(),
@@ -633,17 +696,38 @@ pub async fn load_timeline(
         });
         return Ok(output);
     }
-    let mut sources = source_ids.to_vec();
-    sources.sort();
-    sources.dedup();
-    targets.refresh();
-    if targets.ready.load(Ordering::Acquire)
-        && !targets.loading.load(Ordering::Acquire)
+    let pricing_span =
+        models.values().map(|m| m.sample_count()).max().unwrap_or(5) as i64 * MINUTE_US;
+    // A schedule crossing the baseline needs its earlier volume/price samples
+    // too: changing one can alter the quantity carried into this window.
+    let range_start = baseline_open.saturating_sub(pricing_span);
+    let range_end = effective_end.saturating_add(pricing_span);
+    let price_ranges_for =
+        |revision: &TargetQueryRevision| -> Result<BTreeMap<String, (i64, i64)>> {
+            revision
+                .prefixes
+                .iter()
+                .filter(|((_, _, venue), _)| {
+                    matches!(
+                        venue.as_str(),
+                        "binance-futures" | "binance-margin" | "okex-futures" | "okex-margin"
+                    )
+                })
+                .map(|((_, symbol, venue), _)| {
+                    Ok((
+                        crate::market_data::market_key(venue, symbol)?,
+                        (range_start, range_end),
+                    ))
+                })
+                .collect()
+        };
+    if targets.ready_for_query().await?
         && let Ok(state) = targets.state.try_lock()
     {
         let (revision, _) = targets
             .archive
             .target_changes_since(state.revision, state.cursor);
+        let target_revision = state.query_revision(&sources, effective_end);
         if revision == state.revision
             && let Some(curve) = targets.curves.get(&CurveQueryKey {
                 execution_models: models.clone(),
@@ -652,8 +736,8 @@ pub async fn load_timeline(
                 max_points,
                 sources: sources.clone(),
                 fees: curve_fees.clone(),
-                target_revision: revision,
-                candle_revision: store.revision(),
+                candle_revision: store.range_revision(&price_ranges_for(&target_revision)?),
+                target_revision,
             })
         {
             return Ok(curve.as_ref().clone());
@@ -662,7 +746,7 @@ pub async fn load_timeline(
     let Some((deltas, mut carry, target_revision)) = targets
         .query_inputs(
             fees,
-            end,
+            effective_end,
             source_ids,
             None,
             Some(start),
@@ -733,8 +817,8 @@ pub async fn load_timeline(
         max_points,
         sources,
         fees: curve_fees,
+        candle_revision: store.range_revision(&price_ranges_for(&target_revision)?),
         target_revision,
-        candle_revision: store.revision(),
     };
     let compute_targets = targets.clone();
     output = tokio::task::spawn_blocking(move || {
@@ -916,6 +1000,73 @@ fn rebuild_timeline(
             ),
         );
     }
+    // Intern market identities once. Preserve the original BTreeMap summation
+    // order and every FIFO operation, without allocating/looking up three
+    // strings for each virtual fill and each market at every sample.
+    let mut used_deltas = vec![false; deltas.len()];
+    for (_, index, _) in &fills {
+        used_deltas[*index] = true;
+    }
+    for (delta, used) in deltas.iter().zip(&used_deltas) {
+        if *used {
+            states
+                .entry((
+                    delta.source_id.clone(),
+                    delta.symbol.clone(),
+                    delta.venue.clone(),
+                ))
+                .or_insert_with(|| {
+                    (
+                        SymbolState {
+                            next_lot_seq: 1,
+                            ..Default::default()
+                        },
+                        VecDeque::new(),
+                    )
+                });
+        }
+    }
+    let state_indices = states
+        .keys()
+        .cloned()
+        .enumerate()
+        .map(|(index, key)| (key, index))
+        .collect::<BTreeMap<_, _>>();
+    let state_by_delta = deltas
+        .iter()
+        .zip(used_deltas)
+        .map(|(delta, used)| {
+            if used {
+                state_indices[&(
+                    delta.source_id.clone(),
+                    delta.symbol.clone(),
+                    delta.venue.clone(),
+                )]
+            } else {
+                usize::MAX
+            }
+        })
+        .collect::<Vec<_>>();
+    let symbol_count = markets.len();
+    let market_indices = markets
+        .keys()
+        .cloned()
+        .enumerate()
+        .map(|(index, market)| (market, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut states = states
+        .into_iter()
+        .map(|((_, symbol, venue), (state, lots))| {
+            let market = crate::market_data::market_key(&venue, &symbol)?;
+            Ok((state, lots, market_indices[&market]))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Ticks increase monotonically, so each market's candle cursor advances
+    // once per minute instead of binary-searching its whole 7D history again.
+    let mut marks = markets
+        .into_values()
+        .map(|bars| (bars, 0_usize, None))
+        .collect::<Vec<_>>();
     let mut ticks = BTreeSet::from([start, end]);
     let mut tick = start.div_euclid(900 * 1_000_000) * 900 * 1_000_000 + 900 * 1_000_000;
     while tick < end {
@@ -935,20 +1086,7 @@ fn rebuild_timeline(
             if delta.legacy_fee {
                 legacy.insert(index);
             }
-            let key = (
-                delta.source_id.clone(),
-                delta.symbol.clone(),
-                delta.venue.clone(),
-            );
-            let (state, lots) = states.entry(key).or_insert_with(|| {
-                (
-                    SymbolState {
-                        next_lot_seq: 1,
-                        ..Default::default()
-                    },
-                    VecDeque::new(),
-                )
-            });
+            let (state, lots, _) = &mut states[state_by_delta[index]];
             let applied = evaluate_fill(
                 *state,
                 std::mem::take(lots),
@@ -964,14 +1102,24 @@ fn rebuild_timeline(
             };
             *lots = applied.lots;
         }
+        for (bars, cursor, price) in &mut marks {
+            while *cursor < bars.len() && bars[*cursor].end_ts_us() <= ts {
+                *cursor += 1;
+            }
+            *price = cursor
+                .checked_sub(1)
+                .and_then(|index| bars.get(index))
+                .filter(|candle| ts - candle.end_ts_us() < MINUTE_US)
+                .map(|candle| candle.close);
+        }
         let mut point = TheoreticalNavPoint {
             ts_us: ts,
             ..Default::default()
         };
-        for ((_, symbol, venue), (state, lots)) in &states {
+        for (state, lots, market) in &states {
             let floating = if lots.is_empty() {
                 0.0
-            } else if let Some(price) = mark(&crate::market_data::market_key(venue, symbol)?, ts) {
+            } else if let Some(price) = marks[*market].2 {
                 floating_pnl_at_mark(lots, price)?
             } else {
                 output.missing_price_count += 1;
@@ -1008,7 +1156,7 @@ fn rebuild_timeline(
     tracing::info!(
         delta_count = deltas.len(),
         virtual_slice_count,
-        symbol_count = markets.len(),
+        symbol_count,
         pricing_duration_ms,
         mark_scan_duration_ms,
         fifo_curve_duration_ms = fifo_started.elapsed().as_millis(),
@@ -1854,6 +2002,53 @@ mod tests {
         assert_eq!(first.points, repeated.points);
         assert_eq!(store.status().cache_hits, reads.cache_hits);
         assert_eq!(store.status().pricing_cache_hits, reads.pricing_cache_hits);
+        // A real later target and unrelated candle downloads do not change
+        // this fixed historical window or force it through pricing again.
+        let mut later = strategy.clone();
+        later.targets.get_mut("BTCUSDT").unwrap().qty = 13.0;
+        archive
+            .append(start + 20 * MINUTE_US, &later, Vec::new(), accounts.clone())
+            .unwrap();
+        let mut outside = bars[0];
+        outside.open_ts_us = start + 20 * MINUTE_US;
+        store
+            .save_page(
+                "BTCUSDT",
+                outside.open_ts_us,
+                outside.end_ts_us(),
+                &[outside],
+            )
+            .unwrap();
+        store
+            .save_page("ETHUSDT", start - MINUTE_US, start + 6 * MINUTE_US, &bars)
+            .unwrap();
+        archive
+            .append(
+                start + 21 * MINUTE_US,
+                &strategy,
+                Vec::new(),
+                vec![crate::position_archive::published_account(
+                    "unselected",
+                    "alpha",
+                    1.0,
+                )],
+            )
+            .unwrap();
+        let cached = load_timeline(
+            rates.clone(),
+            &targets,
+            &store,
+            start,
+            start + 5 * MINUTE_US,
+            &sources,
+            100,
+            ExecutionModel::Vwap3m,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached.points, first.points);
+        assert_eq!(store.status().cache_hits, reads.cache_hits);
+        assert_eq!(store.status().pricing_cache_hits, reads.pricing_cache_hits);
         let higher_fee = load_timeline(
             BTreeMap::from([(source, 0.0004.into())]),
             &targets,
@@ -1910,6 +2105,39 @@ mod tests {
         .unwrap();
         assert!(!corrected.points.is_empty());
         assert_ne!(corrected.points, late.points);
+        let partial_fees = BTreeMap::from([(sources[0].clone(), 0.0002.into())]);
+        let partial = load_timeline(
+            partial_fees.clone(),
+            &targets,
+            &store,
+            start + 2 * MINUTE_US,
+            start + 5 * MINUTE_US,
+            &sources,
+            100,
+            ExecutionModel::Vwap3m,
+        )
+        .await
+        .unwrap();
+        bars[1].base_volume = 0.0;
+        bars[1].quote_volume = 0.0;
+        bars[1].trades = 0;
+        store
+            .save_page("BTCUSDT", start, start + MINUTE_US, &[bars[1]])
+            .unwrap();
+        let repaired_baseline = load_timeline(
+            partial_fees,
+            &targets,
+            &store,
+            start + 2 * MINUTE_US,
+            start + 5 * MINUTE_US,
+            &sources,
+            100,
+            ExecutionModel::Vwap3m,
+        )
+        .await
+        .unwrap();
+        assert!(!repaired_baseline.points.is_empty());
+        assert_ne!(partial.points, repaired_baseline.points);
         assert_eq!(store.status().requests, 0);
     }
     fn delta(start: i64) -> VirtualDelta {

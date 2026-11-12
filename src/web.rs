@@ -133,6 +133,8 @@ pub struct DashboardAccount {
     pub gateway_prefix: Option<String>,
     pub configurable: bool,
     pub target_proxy_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_position_symbol_count: Option<usize>,
     /// Current session's grant on this account: "view" or "configure".
     /// Annotated per request after the shared snapshot is filtered.
     pub access_level: Option<&'static str>,
@@ -1524,8 +1526,53 @@ async fn save_external_overview_access(
     }
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardQuery {
+    include_symbols: Option<bool>,
+}
+
+/// Browsers need source totals and account-card position counts, not every
+/// historical symbol/venue. Full reports remain available without this projection.
+fn compact_dashboard_report(report: &mut nav::NavReport) -> BTreeMap<String, usize> {
+    fn compact(source: &mut nav::SourceNavReport, counts: &mut BTreeMap<String, usize>) {
+        counts.insert(
+            source.source_id.clone(),
+            source
+                .symbols
+                .iter()
+                .filter(|symbol| {
+                    symbol.long_position_value_quote.abs() > 1e-9
+                        || symbol.short_position_value_quote.abs() > 1e-9
+                })
+                .count(),
+        );
+        source.symbols.clear();
+        for leg in &mut source.execution_sources {
+            compact(leg, counts);
+        }
+    }
+    let mut counts = BTreeMap::new();
+    for source in &mut report.sources {
+        compact(source, &mut counts);
+    }
+    report.aggregate.symbols.clear();
+    counts
+}
+
+fn apply_dashboard_position_counts(
+    accounts: &mut [DashboardAccount],
+    counts: &BTreeMap<String, usize>,
+) {
+    for account in accounts {
+        account.open_position_symbol_count = counts.get(&account.source_id).copied();
+        apply_dashboard_position_counts(&mut account.execution_sources, counts);
+    }
+}
+
 async fn dashboard(
     State(state): State<WebState>,
+    Query(query): Query<DashboardQuery>,
     Extension(visible): Extension<VisibleSources>,
     Extension(configurable): Extension<ConfigurableSources>,
 ) -> Result<Response, ApiError> {
@@ -1589,6 +1636,10 @@ async fn dashboard(
     }
     managed_accounts::project(&state.config, &mut dashboard, &visible.0);
     managed_accounts::apply_aliases(&mut dashboard, &aliases);
+    if query.include_symbols == Some(false) {
+        let counts = compact_dashboard_report(&mut dashboard.report);
+        apply_dashboard_position_counts(&mut dashboard.accounts, &counts);
+    }
     Ok((NO_STORE, Json(dashboard)).into_response())
 }
 
@@ -5690,6 +5741,7 @@ async fn build_dashboard(
                 gateway_prefix: source.gateway_prefix.clone(),
                 configurable: source.exec_config_url.is_some(),
                 target_proxy_enabled: source.target_proxy.is_some(),
+                open_position_symbol_count: None,
                 access_level: None,
                 can_edit_alias: false,
                 display_alias: None,
@@ -5817,6 +5869,29 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn compact_dashboard_preserves_totals_and_counts_parent_and_execution_leg_positions() {
+        let (_dir, state, id, _, _) = timeline_test_state(7);
+        let mut report = state.cache.read().await.dashboard.report.clone();
+        let mut leg = report.sources[0].clone();
+        leg.source_id = "execution-leg".into();
+        for symbol in &mut leg.symbols {
+            symbol.long_position_value_quote = 0.0;
+            symbol.short_position_value_quote = 0.0;
+        }
+        report.sources[0].execution_sources.push(leg);
+        let mut expected = report.clone();
+        let before_bytes = serde_json::to_vec(&report).unwrap().len();
+        let counts = compact_dashboard_report(&mut report);
+        assert_eq!(counts[&id], 1);
+        assert_eq!(counts["execution-leg"], 0);
+        expected.aggregate.symbols.clear();
+        expected.sources[0].symbols.clear();
+        expected.sources[0].execution_sources[0].symbols.clear();
+        assert_eq!(report, expected);
+        assert!(serde_json::to_vec(&report).unwrap().len() < before_bytes);
+    }
+
     use std::io::Cursor;
 
     use arrow_array::Array;

@@ -215,6 +215,39 @@ struct WeightGate {
     used: u32,
     blocked_until: tokio::time::Instant,
 }
+
+/// Bounded invalidation history. Losing old entries invalidates conservatively;
+/// a candle fetched for another market/window must not discard a priced curve.
+#[derive(Default)]
+struct CandleChanges {
+    discarded_revision: u64,
+    pages: VecDeque<(u64, Option<String>, i64, i64)>,
+}
+
+impl CandleChanges {
+    fn record(&mut self, revision: u64, symbol: Option<String>, start: i64, end: i64) {
+        self.pages.push_back((revision, symbol, start, end));
+        if self.pages.len() > 4096 {
+            self.discarded_revision = self.pages.pop_front().unwrap().0;
+        }
+    }
+
+    fn revision_for(&self, ranges: &BTreeMap<String, (i64, i64)>) -> u64 {
+        self.pages
+            .iter()
+            .filter(|(_, symbol, start, end)| {
+                let overlaps = |range: &(i64, i64)| *start < range.1 && range.0 < *end;
+                match symbol {
+                    Some(symbol) => ranges.get(symbol).is_some_and(overlaps),
+                    None => ranges.values().any(overlaps),
+                }
+            })
+            .map(|(revision, _, _, _)| *revision)
+            .max()
+            .unwrap_or(0)
+            .max(self.discarded_revision)
+    }
+}
 impl WeightGate {
     /// Allow concurrent requests within the budget, while enforcing it across
     /// every rolling minute (including Binance's server-directed cooldown).
@@ -260,6 +293,7 @@ struct Inner {
     warming: Mutex<BTreeMap<String, Arc<WarmJob>>>,
     minutes: Mutex<BTreeMap<String, Arc<Mutex<MinuteCache>>>>,
     candle_revision: AtomicU64,
+    candle_changes: Mutex<CandleChanges>,
     permits: Semaphore,
     request_queue: Mutex<BTreeMap<(std::cmp::Reverse<i64>, u64), ()>>,
     request_sequence: AtomicU64,
@@ -442,6 +476,7 @@ impl KlineStore {
                 warming: Mutex::new(BTreeMap::new()),
                 minutes: Mutex::new(BTreeMap::new()),
                 candle_revision: AtomicU64::new(0),
+                candle_changes: Mutex::new(CandleChanges::default()),
                 weight: AsyncMutex::new(WeightGate {
                     reservations: VecDeque::new(),
                     used: 0,
@@ -466,6 +501,14 @@ impl KlineStore {
     }
     pub fn revision(&self) -> u64 {
         self.inner.candle_revision.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn range_revision(&self, ranges: &BTreeMap<String, (i64, i64)>) -> u64 {
+        self.inner
+            .candle_changes
+            .lock()
+            .unwrap()
+            .revision_for(ranges)
     }
 
     fn warm_symbol(&self, symbol: String, range: (i64, i64)) -> watch::Receiver<WarmCompletion> {
@@ -1173,6 +1216,9 @@ impl KlineStore {
                 batch.put_cf(&data, key(symbol, candle.open_ts_us)?, candle.encode());
             }
         }
+        // Publish candles and their invalidation together, so a cache lookup
+        // observes either the old data/revision or the committed replacement.
+        let mut changes = self.inner.candle_changes.lock().unwrap();
         self.inner.db.db().write(batch)?;
         let cache = self.minute_cache(symbol);
         let mut cache = cache.lock().unwrap();
@@ -1180,7 +1226,8 @@ impl KlineStore {
             cache.insert(*candle);
         }
         if !candles.is_empty() {
-            self.inner.candle_revision.fetch_add(1, Ordering::Release);
+            let revision = self.inner.candle_revision.fetch_add(1, Ordering::Release) + 1;
+            changes.record(revision, Some(symbol.to_owned()), start, end);
         }
         self.inner.status.lock().unwrap().fetched_candles += candles.len() as u64;
         Ok(())
@@ -1222,7 +1269,9 @@ impl KlineStore {
             cache.lock().unwrap().prune(cutoff);
         }
         if removed > 0 {
-            self.inner.candle_revision.fetch_add(1, Ordering::Release);
+            let mut changes = self.inner.candle_changes.lock().unwrap();
+            let revision = self.inner.candle_revision.fetch_add(1, Ordering::Release) + 1;
+            changes.record(revision, None, i64::MIN, cutoff);
         }
         Ok(removed)
     }
@@ -2414,4 +2463,23 @@ mod tests {
         );
         drop(store);
     }
+}
+#[test]
+fn candle_revisions_isolate_windows_and_markets_and_invalidate_after_journal_eviction() {
+    let wanted = BTreeMap::from([("BTCUSDT".to_owned(), (100, 200))]);
+    let mut changes = CandleChanges::default();
+    changes.record(1, Some("BTCUSDT".into()), 200, 300);
+    changes.record(2, Some("ETHUSDT".into()), 100, 200);
+    assert_eq!(changes.revision_for(&wanted), 0);
+    changes.record(3, Some("BTCUSDT".into()), 150, 160);
+    assert_eq!(changes.revision_for(&wanted), 3);
+    changes.record(4, None, i64::MIN, 100);
+    assert_eq!(changes.revision_for(&wanted), 3);
+    changes.record(5, None, 199, 201);
+    assert_eq!(changes.revision_for(&wanted), 5);
+    for revision in 6..=4_110 {
+        changes.record(revision, Some("ETHUSDT".into()), 100, 200);
+    }
+    assert_eq!(changes.pages.len(), 4096);
+    assert!(changes.revision_for(&wanted) > 5);
 }
