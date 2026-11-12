@@ -103,6 +103,7 @@ trade_engine_configs = [
   "/home/el01/binance_exec_trade12/trade_engine.toml",
   "/home/el01/binance_exec_trade13/trade_engine.toml",
   "/home/el01/binance_exec_trade14/trade_engine.toml",
+  "/home/el01/binance_exec_cta2024_902_15/trade_engine.toml",
 ]
 
 
@@ -337,4 +338,24 @@ exec_viz_url = "http://127.0.0.1:10055/"
 maker_fee_rate = 0.0001
 taker_fee_rate = 0.0003
 ipc_namespace = "binance_exec_trade14"
+account_ipc_service = "account_pubs/binance_pm"
+
+# cgy, dzy and shaokai have configure and grant-management access in PostgreSQL.
+# Observation services only until account mode and trading activation are reviewed.
+[[sources]]
+id = "binance_exec_cta2024_902_15"
+account = "trade15"
+alias = "cta2024-902"
+venue = "binance-futures"
+rocksdb_path = "/home/el01/binance_exec_cta2024_902_15/data/persist_manager"
+env_path = "/home/el01/binance_exec_cta2024_902_15/env.sh"
+enabled = true
+monitor_enabled = true
+gateway_prefix = "/exec_trade15"
+exec_config_url = "http://127.0.0.1:18175/"
+exec_viz_url = "http://127.0.0.1:10056/"
+maker_fee_rate = 0.0001
+taker_fee_rate = 0.0003
+quote_fee_rates = { USDC = { maker_fee_rate = 0.0, taker_fee_rate = 0.000165, theoretical_twap_fee_rate = 0.0000825 } }
+ipc_namespace = "binance_exec_cta2024_902_15"
 account_ipc_service = "account_pubs/binance_pm"

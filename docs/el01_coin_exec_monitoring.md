@@ -319,6 +319,13 @@ Exec binaries were published and SHA-256 verified, with no process started.
 The operator explicitly reiterated that xy_lxy21 must remain stopped.
 Nginx's existing trade05 auth route now checks the new source ID.
 
+On 2026-11-12 the operator confirmed that xy_lxy21 must retain this active
+trade05 slot. The new cgy account `cta2024-902` instead received independent
+trade15 source `binance_exec_cta2024_902_15`; cgy, dzy and shaokai all hold
+account configuration and grant-management access.
+It runs observation services only because its current STANDARD account has
+Multi-Assets Mode disabled. See [deployment and verification](el01_cta2024_902_20261112.md).
+
 Manager backend `0ce67dd` fixed Treasury route resolution. Subsequent release
 `20261009T095926Z`, source `25e2776`, adds Virtual creators and delegated
 managers in the API and frontend. Any logged-in user can create an owned Virtual;
