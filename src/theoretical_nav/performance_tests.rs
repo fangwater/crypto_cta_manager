@@ -2,6 +2,127 @@ use super::*;
 use crate::kline::{DAY_US, Kline};
 use sha2::{Digest, Sha256};
 
+// Frozen scan-based replay oracle: quantities, FIFO realization and fees are
+// checked independently of the new constant-time inventory valuation.
+fn reference_curve(
+    deltas: &[VirtualDelta],
+    carry: CarriedInventory,
+    fills: &[(i64, usize, usize)],
+    store: &KlineStore,
+    start: i64,
+    end: i64,
+) -> Vec<TheoreticalNavPoint> {
+    let schedules = deltas
+        .iter()
+        .map(|delta| delta.prices(store).unwrap().unwrap())
+        .collect::<Vec<_>>();
+    let markets = deltas
+        .iter()
+        .map(|delta| delta.symbol.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|symbol| {
+            (
+                symbol.clone(),
+                store.scan(&symbol, start - MINUTE_US, end).unwrap(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mark = |symbol: &str, ts: i64| {
+        let bars = &markets[symbol];
+        bars[bars.partition_point(|c| c.end_ts_us() <= ts) - 1].close
+    };
+    let mut states = BTreeMap::new();
+    for (key, quantity) in carry {
+        let price = mark(&key.1, start);
+        states.insert(
+            key,
+            (
+                SymbolState {
+                    net_quantity: quantity,
+                    next_lot_seq: 2,
+                    ..Default::default()
+                },
+                VecDeque::from([FifoLot {
+                    seq: 1,
+                    quantity,
+                    entry_price: price,
+                }]),
+            ),
+        );
+    }
+    let mut ticks = BTreeSet::from([start, end]);
+    let mut tick = start.div_euclid(900_000_000) * 900_000_000 + 900_000_000;
+    while tick < end {
+        ticks.insert(tick);
+        tick += 900_000_000;
+    }
+    ticks.extend(fills.iter().map(|fill| fill.0));
+    let mut cursor = 0;
+    let mut points = Vec::new();
+    for ts in ticks {
+        while cursor < fills.len() && fills[cursor].0 <= ts {
+            let (_, index, slice) = fills[cursor];
+            cursor += 1;
+            let delta = &deltas[index];
+            let (state, lots) = states
+                .entry((
+                    delta.source_id.clone(),
+                    delta.symbol.clone(),
+                    delta.venue.clone(),
+                ))
+                .or_insert_with(|| {
+                    (
+                        SymbolState {
+                            next_lot_seq: 1,
+                            ..Default::default()
+                        },
+                        VecDeque::new(),
+                    )
+                });
+            let priced = &schedules[index];
+            let applied = evaluate_fill(
+                *state,
+                std::mem::take(lots),
+                priced.quantity(delta.delta_qty, slice),
+                priced.prices[slice].unwrap(),
+                delta.fee_rate,
+            )
+            .unwrap();
+            *state = SymbolState {
+                net_quantity: applied.net_quantity,
+                realized_pnl_before_fee_quote: applied.realized_pnl_before_fee_quote,
+                estimated_trading_fee_quote: applied.cumulative_fee_quote,
+                next_lot_seq: applied.next_lot_seq,
+            };
+            *lots = applied.lots;
+        }
+        let mut point = TheoreticalNavPoint {
+            ts_us: ts,
+            ..Default::default()
+        };
+        for ((_, symbol, _), (state, lots)) in &states {
+            let floating = if lots.is_empty() {
+                0.0
+            } else {
+                floating_pnl_at_mark(lots, mark(symbol, ts)).unwrap()
+            };
+            point.nav_change_before_fee_quote += state.realized_pnl_before_fee_quote + floating;
+            point.estimated_trading_fee_quote += state.estimated_trading_fee_quote;
+        }
+        point.nav_change_after_fee_quote =
+            point.nav_change_before_fee_quote - point.estimated_trading_fee_quote;
+        if ts == start {
+            point = TheoreticalNavPoint {
+                ts_us: ts,
+                ..Default::default()
+            };
+        }
+        points.push(point);
+    }
+    points
+}
+
 #[test]
 #[ignore = "release-mode seven-day FIFO benchmark"]
 fn seven_day_curve_benchmark() {
@@ -89,6 +210,7 @@ fn seven_day_curve_benchmark() {
             )
         });
         let mut result = TheoreticalNavTimeline::default();
+        let reference = reference_curve(&deltas, carry.clone(), &fills, &store, start, end);
         let at = std::time::Instant::now();
         rebuild_timeline(
             &deltas,
@@ -97,7 +219,7 @@ fn seven_day_curve_benchmark() {
             &store,
             start,
             end,
-            3500,
+            usize::MAX,
             &mut result,
         )
         .unwrap();
@@ -108,7 +230,7 @@ fn seven_day_curve_benchmark() {
             result.unavailable_reason
         );
         let mut digest = Sha256::new();
-        for point in &result.points {
+        for point in &downsample_points(reference.clone(), 3500) {
             digest.update((point.ts_us - start).to_be_bytes());
             for value in [
                 point.nav_change_before_fee_quote,
@@ -133,10 +255,32 @@ fn seven_day_curve_benchmark() {
         };
         assert_eq!(
             fingerprint, expected,
-            "financial double bits changed for {model:?}"
+            "scan-based reference changed for {model:?}"
         );
+        assert_eq!(result.points.len(), reference.len());
+        let mut max_error = 0.0_f64;
+        for (actual, expected) in result.points.iter().zip(&reference) {
+            assert_eq!(actual.ts_us, expected.ts_us);
+            assert_eq!(
+                actual.estimated_trading_fee_quote.to_bits(),
+                expected.estimated_trading_fee_quote.to_bits()
+            );
+            for (actual, expected) in [
+                (
+                    actual.nav_change_before_fee_quote,
+                    expected.nav_change_before_fee_quote,
+                ),
+                (
+                    actual.nav_change_after_fee_quote,
+                    expected.nav_change_after_fee_quote,
+                ),
+            ] {
+                max_error = max_error.max((actual - expected).abs());
+                assert!((actual - expected).abs() <= 1e-8 + expected.abs() * 2e-13);
+            }
+        }
         eprintln!(
-            "model={model:?} deltas={} points={} elapsed_ms={} financial_sha256={}",
+            "model={model:?} deltas={} points={} elapsed_ms={} max_nav_error={max_error:e} reference_sha256={}",
             deltas.len(),
             result.points.len(),
             elapsed.as_millis(),

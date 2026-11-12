@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 
 const ZERO_EPSILON: f64 = 1e-12;
 
+mod inventory;
+use inventory::Inventory;
+
 #[cfg(test)]
 #[path = "theoretical_nav/performance_tests.rs"]
 mod performance_tests;
@@ -873,7 +876,7 @@ fn rebuild_timeline(
 ) -> Result<()> {
     let started = std::time::Instant::now();
     let virtual_slice_count = fills.len();
-    let mut schedules = BTreeMap::new();
+    let mut schedules = vec![None; deltas.len()];
     let indices = fills
         .iter()
         .map(|(_, index, _)| *index)
@@ -903,11 +906,11 @@ fn rebuild_timeline(
         }
         output.zero_volume_skipped_sample_count += priced.zero_volume_skipped_sample_count;
         output.zero_volume_fallback_sample_count += priced.zero_volume_fallback_sample_count;
-        schedules.insert(index, priced);
+        schedules[index] = Some(priced);
     }
     let pricing_duration_ms = started.elapsed().as_millis();
     for (_, index, slice) in fills.iter().filter(|(ts, _, _)| *ts < start) {
-        if let Some(priced) = schedules.get(index)
+        if let Some(priced) = &schedules[*index]
             && priced.prices[*slice].is_some()
         {
             let delta = &deltas[*index];
@@ -925,8 +928,8 @@ fn rebuild_timeline(
         .into_iter()
         .filter(|(ts, index, slice)| {
             *ts >= start
-                && schedules
-                    .get(index)
+                && schedules[*index]
+                    .as_ref()
                     .is_some_and(|p| p.prices[*slice].is_some())
         })
         .collect::<Vec<_>>();
@@ -1058,7 +1061,8 @@ fn rebuild_timeline(
         .into_iter()
         .map(|((_, symbol, venue), (state, lots))| {
             let market = crate::market_data::market_key(&venue, &symbol)?;
-            Ok((state, lots, market_indices[&market]))
+            let inventory = Inventory::new(&lots);
+            Ok((state, lots, market_indices[&market], inventory))
         })
         .collect::<Result<Vec<_>>>()?;
     // Ticks increase monotonically, so each market's candle cursor advances
@@ -1081,26 +1085,22 @@ fn rebuild_timeline(
             let (_, index, slice) = fills[cursor];
             let delta = &deltas[index];
             cursor += 1;
-            let priced = &schedules[&index];
+            let priced = schedules[index]
+                .as_ref()
+                .context("missing execution schedule")?;
             let price = priced.prices[slice].context("scheduled minute has no price")?;
             if delta.legacy_fee {
                 legacy.insert(index);
             }
-            let (state, lots, _) = &mut states[state_by_delta[index]];
-            let applied = evaluate_fill(
+            let (state, lots, _, inventory) = &mut states[state_by_delta[index]];
+            *state = apply_fill(
                 *state,
-                std::mem::take(lots),
+                lots,
+                inventory,
                 priced.quantity(delta.delta_qty, slice),
                 price,
                 delta.fee_rate,
             )?;
-            *state = SymbolState {
-                net_quantity: applied.net_quantity,
-                realized_pnl_before_fee_quote: applied.realized_pnl_before_fee_quote,
-                estimated_trading_fee_quote: applied.cumulative_fee_quote,
-                next_lot_seq: applied.next_lot_seq,
-            };
-            *lots = applied.lots;
         }
         for (bars, cursor, price) in &mut marks {
             while *cursor < bars.len() && bars[*cursor].end_ts_us() <= ts {
@@ -1116,11 +1116,11 @@ fn rebuild_timeline(
             ts_us: ts,
             ..Default::default()
         };
-        for (state, lots, market) in &states {
+        for (state, lots, market, inventory) in &states {
             let floating = if lots.is_empty() {
                 0.0
             } else if let Some(price) = marks[*market].2 {
-                floating_pnl_at_mark(lots, price)?
+                inventory.floating(price)?
             } else {
                 output.missing_price_count += 1;
                 0.0
@@ -1181,6 +1181,7 @@ struct SymbolState {
     next_lot_seq: i64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 struct AppliedFill {
     lots: VecDeque<FifoLot>,
@@ -1253,11 +1254,22 @@ fn target_deltas(previous: Option<&LatestTargets>, next: &LatestTargets) -> BTre
         .collect()
 }
 
+#[cfg(test)]
 fn apply_fifo_fill(
+    lots: VecDeque<FifoLot>,
+    fill_quantity: f64,
+    fill_price: f64,
+    next_lot_seq: i64,
+) -> Result<(VecDeque<FifoLot>, f64, i64)> {
+    apply_fifo_fill_with_inventory(lots, fill_quantity, fill_price, next_lot_seq, None)
+}
+
+fn apply_fifo_fill_with_inventory(
     mut lots: VecDeque<FifoLot>,
     fill_quantity: f64,
     fill_price: f64,
     mut next_lot_seq: i64,
+    mut inventory: Option<&mut Inventory>,
 ) -> Result<(VecDeque<FifoLot>, f64, i64)> {
     if !fill_quantity.is_finite() || !fill_price.is_finite() || fill_price <= 0.0 {
         bail!("invalid theoretical FIFO fill");
@@ -1278,11 +1290,20 @@ fn apply_fifo_fill(
             matched * (front.entry_price - fill_price)
         };
         let direction = remaining.signum();
-        front.quantity = clean_zero(front.quantity + direction * matched);
+        let previous = front.quantity;
+        front.quantity = clean_zero(previous + direction * matched);
+        if let Some(inventory) = inventory.as_deref_mut() {
+            inventory.replace(previous, front.quantity, front.entry_price);
+        }
         remaining = clean_zero(remaining - direction * matched);
         if front.quantity == 0.0 {
             lots.pop_front();
         }
+    }
+    if lots.is_empty()
+        && let Some(inventory) = inventory.as_deref_mut()
+    {
+        inventory.clear();
     }
     if remaining.abs() > ZERO_EPSILON {
         lots.push_back(FifoLot {
@@ -1290,6 +1311,9 @@ fn apply_fifo_fill(
             quantity: remaining,
             entry_price: fill_price,
         });
+        if let Some(inventory) = inventory {
+            inventory.replace(0.0, remaining, fill_price);
+        }
         next_lot_seq = next_lot_seq
             .checked_add(1)
             .context("theoretical FIFO lot sequence overflowed")?;
@@ -1300,6 +1324,63 @@ fn apply_fifo_fill(
     Ok((lots, clean_zero(realized), next_lot_seq))
 }
 
+fn apply_fill(
+    state: SymbolState,
+    lots: &mut VecDeque<FifoLot>,
+    inventory: &mut Inventory,
+    fill_quantity: f64,
+    fill_price: f64,
+    fee_rate: f64,
+) -> Result<SymbolState> {
+    ensure!(fee_rate.is_finite(), "invalid theoretical fee rate");
+    let (next_lots, realized_increment, next_lot_seq) = apply_fifo_fill_with_inventory(
+        std::mem::take(lots),
+        fill_quantity,
+        fill_price,
+        state.next_lot_seq,
+        Some(inventory),
+    )?;
+    *lots = next_lots;
+    let net_quantity = inventory.quantity();
+    let expected_net = clean_zero(state.net_quantity + fill_quantity);
+    let scale = state
+        .net_quantity
+        .abs()
+        .max(fill_quantity.abs())
+        .max(net_quantity.abs());
+    ensure!(
+        quantities_equal(net_quantity, expected_net, scale),
+        "theoretical FIFO quantity diverged: fifo={net_quantity} expected={expected_net}"
+    );
+    let realized = clean_zero(state.realized_pnl_before_fee_quote + realized_increment);
+    let fee_quote = fill_quantity.abs() * fill_price * fee_rate;
+    let cumulative_fee = clean_zero(state.estimated_trading_fee_quote + fee_quote);
+    // Preserve finite-value validation of the old fill-price valuation, without
+    // scanning all remaining lots for an intermediate value the chart discards.
+    let nav_before = clean_zero(realized + inventory.floating(fill_price)?);
+    let nav_after = clean_zero(nav_before - cumulative_fee);
+    ensure!(
+        [
+            net_quantity,
+            realized,
+            fee_quote,
+            cumulative_fee,
+            nav_before,
+            nav_after
+        ]
+        .into_iter()
+        .all(f64::is_finite),
+        "theoretical NAV overflowed"
+    );
+    Ok(SymbolState {
+        net_quantity,
+        realized_pnl_before_fee_quote: realized,
+        estimated_trading_fee_quote: cumulative_fee,
+        next_lot_seq,
+    })
+}
+
+#[cfg(test)]
 fn evaluate_fill(
     state: SymbolState,
     lots: VecDeque<FifoLot>,
@@ -1355,6 +1436,7 @@ fn evaluate_fill(
     })
 }
 
+#[cfg(test)]
 fn floating_pnl_at_mark(lots: &VecDeque<FifoLot>, mark_price: f64) -> Result<f64> {
     if !mark_price.is_finite() || mark_price <= 0.0 {
         bail!("invalid theoretical mark price");
