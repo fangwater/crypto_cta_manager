@@ -406,6 +406,14 @@ CREATE TABLE cta_virtual_account_bindings (
     shares double precision NOT NULL CHECK (shares >= 0 AND shares < 'Infinity'::double precision),
     PRIMARY KEY (virtual_id, binding_name)
 );
+CREATE TABLE cta_virtual_account_children (
+    parent_virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id) ON DELETE CASCADE,
+    child_virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id),
+    multiplier double precision NOT NULL CHECK (multiplier >= 0 AND multiplier < 'Infinity'::double precision),
+    PRIMARY KEY (parent_virtual_id, child_virtual_id),
+    CHECK (parent_virtual_id <> child_virtual_id)
+);
+CREATE INDEX cta_virtual_account_children_child_idx ON cta_virtual_account_children(child_virtual_id);
 CREATE TABLE cta_account_follows (
     source_id text NOT NULL REFERENCES cta_order_sources(source_id),
     virtual_id text NOT NULL REFERENCES cta_virtual_accounts(virtual_id),

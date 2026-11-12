@@ -932,6 +932,13 @@ jp-meta deployment still uses BNBUSDT pending the combined virtual-account relea
 跟随者的账户；授权管理仍由创建者或管理员负责。未获授权的组合保持只读。
 此授权不改变实际账户的配置权限、仓位策略的可见性或发布权限。
 
+Virtual 的添加选项同时支持仓位策略和子 Virtual。子 Virtual 沿用自己的下单模板，
+配比逐层相乘，再乘实际账户的跟随倍率；相同发布名的贡献相加，仓位策略和下单
+模板必须一致。修改子组合会更新跟随任意上层组合的实际账户。禁止循环引用，
+有上层引用的 Virtual 不能删除。已有数据库需先显式执行
+[嵌套 Virtual 维护脚本](scripts/apply_nested_virtual_schema.sql)，详见
+[Virtual 账户说明](docs/virtual_accounts.md)。
+
 ### Optional funding and execution slippage
 
 The NAV page exposes before/after-fee NAV gaps against the minute-VWAP theoretical portfolio, divided by actual quote turnover in the same time window and expressed in bps. Acquisition cost also reports after-fee execution shortfall bps on its existing same-fill-quantity benchmark.

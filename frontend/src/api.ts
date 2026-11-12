@@ -11,6 +11,7 @@ import type {
   AccountConfiguration,
   VirtualAccount,
   VirtualBinding,
+  VirtualChild,
   CatalogOrderStrategy,
   DashboardSnapshot,
   ExecOrderRateLimits,
@@ -708,15 +709,15 @@ export function saveVirtualGrants(virtualId: string, userIds: number[]) {
   })
 }
 
-export function createVirtualAccount(name: string, bindings: VirtualBinding[]) {
+export function createVirtualAccount(name: string, bindings: VirtualBinding[], children?: VirtualChild[]) {
   return requestJson<VirtualAccount>('/catalog/virtual-accounts', {
-    method: 'POST', body: { name, bindings },
+    method: 'POST', body: { name, bindings, children },
   })
 }
 
-export function saveVirtualAccount(virtualId: string, name: string, bindings: VirtualBinding[]) {
+export function saveVirtualAccount(virtualId: string, name: string, bindings: VirtualBinding[], children?: VirtualChild[]) {
   return requestJson<VirtualAccount>(`/catalog/virtual-accounts/${encodeURIComponent(virtualId)}`, {
-    method: 'PUT', body: { name, bindings },
+    method: 'PUT', body: { name, bindings, children },
   })
 }
 

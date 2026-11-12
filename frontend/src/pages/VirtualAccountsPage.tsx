@@ -12,7 +12,8 @@ import { FieldHint, Input, Label, Select } from '../components/ui/Field'
 import { Alert, Badge } from '../components/ui/Badge'
 import { useConfigWrite } from '../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
-import type { VirtualAccount, VirtualBinding } from '../types'
+import { canAddVirtualChild, composeVirtual } from '../lib/virtualComposition'
+import type { VirtualAccount, VirtualBinding, VirtualChild } from '../types'
 
 export function VirtualAccountsPage() {
   const { user } = useAuth()
@@ -22,6 +23,8 @@ export function VirtualAccountsPage() {
   const [selected, setSelected] = useState('')
   const [name, setName] = useState('')
   const [bindings, setBindings] = useState<VirtualBinding[]>([])
+  const [children, setChildren] = useState<VirtualChild[]>([])
+  const [childInputs, setChildInputs] = useState<Record<string, string>>({})
   const [readError, setReadError] = useState<string | null>(null)
   const [reading, setReading] = useState(true)
   const [shareInputs, setShareInputs] = useState<Record<string, string>>({})
@@ -34,6 +37,8 @@ export function VirtualAccountsPage() {
   const openAccount = useCallback((account?: VirtualAccount) => {
     setSelected(account?.virtual_id ?? '')
     setName(account?.name ?? '')
+    setChildren(account?.children.map(child => ({ ...child })) ?? [])
+    setChildInputs(Object.fromEntries((account?.children ?? []).map(child => [child.virtual_id, String(child.multiplier)])))
     setBindings(account?.bindings.map((binding) => ({ ...binding })) ?? [])
     setShareInputs(Object.fromEntries((account?.bindings ?? []).map((binding) => [binding.binding_name, String(binding.shares)])))
     setStrategyToAdd('')
@@ -71,22 +76,36 @@ export function VirtualAccountsPage() {
     const value = shareInputs[binding.binding_name] ?? String(binding.shares)
     return value.trim() !== '' && Number.isFinite(Number(value)) && Number(value) >= 0
   }
-  const validShares = bindings.every(validShare)
+  const validChild = (child: VirtualChild) => {
+    const value = childInputs[child.virtual_id] ?? String(child.multiplier)
+    return value.trim() !== '' && Number.isFinite(Number(value)) && Number(value) >= 0
+  }
+  const validShares = bindings.every(validShare) && children.every(validChild)
+  const availableChildren = accounts.filter(account => !children.some(child => child.virtual_id === account.virtual_id)
+    && canAddVirtualChild(accounts, selected, account.virtual_id))
   const selectedAccount = accounts.find((account) => account.virtual_id === selected)
   const canEdit = !selected || selectedAccount?.can_configure === true
   const serverGrantIds = selectedAccount?.managers.map((manager) => manager.user_id).sort((a, b) => a - b).join(',') ?? ''
   useEffect(() => { setGrantUserIds(serverGrantIds ? serverGrantIds.split(',').map(Number) : []) }, [selected, serverGrantIds])
   const grantsDirty = [...grantUserIds].sort((a, b) => a - b).join(',') !== serverGrantIds
   const nextBindings = bindings.map((binding) => ({ ...binding, shares: Number(shareInputs[binding.binding_name] ?? binding.shares) }))
+  const nextChildren = children.map(child => ({ ...child, multiplier: Number(childInputs[child.virtual_id] ?? child.multiplier) }))
+  let composition: VirtualBinding[] = []
+  let compositionError: string | null = null
+  try {
+    if (children.some(child => accounts.some(account => account.virtual_id === child.virtual_id)
+      && !canAddVirtualChild(accounts, selected, child.virtual_id))) throw new Error('子 Virtual 引用会形成循环')
+    composition = composeVirtual(nextBindings, nextChildren, accounts)
+  } catch (reason) { compositionError = reason instanceof Error ? reason.message : String(reason) }
   const dirty = selectedAccount
-    ? name.trim() !== selectedAccount.name || JSON.stringify(nextBindings) !== JSON.stringify(selectedAccount.bindings)
-    : !!name.trim() || bindings.length > 0
+    ? name.trim() !== selectedAccount.name || JSON.stringify(nextBindings) !== JSON.stringify(selectedAccount.bindings) || JSON.stringify(nextChildren) !== JSON.stringify(selectedAccount.children)
+    : !!name.trim() || bindings.length > 0 || children.length > 0
   const filtered = accounts.filter((account) => `${account.name} ${account.virtual_id}`.toLowerCase().includes(query.trim().toLowerCase()))
   const followerCount = new Set(accounts.flatMap((account) => account.followers.map((follower) => follower.source_id))).size
   const locked = !canEdit || saving || loading || reading
 
   return <AppShell active="virtual" title="Virtual 账户" subtitle="策略组合管理工作台" icon={Layers3}>
-    <PageIntro eyebrow="Virtual Accounts" title="Virtual 账户管理" description="维护策略组合，在实际账户的策略启用页选择跟随账户与倍率。" actions={<div className="flex flex-wrap gap-2">
+    <PageIntro eyebrow="Virtual Accounts" title="Virtual 账户管理" description="组合仓位策略与子 Virtual，在实际账户的策略启用页设置跟随倍率。" actions={<div className="flex flex-wrap gap-2">
       <Button type="button" disabled={saving || reading} onClick={() => void withWrite(async () => { await reload(); return '列表与同步状态已刷新。' })}><RefreshCw size={15} /> 刷新</Button>
       <Button type="button" variant="primary" disabled={saving || reading} onClick={() => select('')}><Plus size={15} /> 新建账户</Button>
     </div>} />
@@ -98,7 +117,7 @@ export function VirtualAccountsPage() {
       <Card className="min-w-0">
         <CardHeader>
           <CardTitle className="flex items-center justify-between gap-2">账户列表<Badge>{reading ? '…' : accounts.length}</Badge></CardTitle>
-          <CardDescription>{reading ? '正在加载账户' : `${accounts.reduce((sum, account) => sum + account.bindings.length, 0)} 条策略绑定 · ${followerCount} 个跟随账户`}</CardDescription>
+          <CardDescription>{reading ? '正在加载账户' : `${accounts.length} 个 Virtual · ${followerCount} 个跟随账户`}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <Input aria-label="搜索 Virtual 账户" placeholder="搜索编号或别名" value={query} onChange={(event) => setQuery(event.target.value)} />
@@ -107,7 +126,7 @@ export function VirtualAccountsPage() {
               className={cn('w-full min-w-0 rounded-xl border p-3 text-left transition-colors', selected === account.virtual_id ? 'border-brand-ring bg-brand-soft' : 'border-border hover:bg-canvas')}>
               <span className="block break-all font-mono text-xs text-muted">{account.virtual_id}</span>
               <span className="mt-1 block truncate text-sm font-semibold text-ink" title={account.name}>{account.name}</span>
-              <span className="mt-2 block text-xs text-muted">{account.bindings.length} 条策略 · {account.followers.length} 个跟随账户</span>
+              <span className="mt-2 block text-xs text-muted">展开 {account.expanded_bindings.length} 条策略 · {account.children.length} 个子 Virtual</span>
             </button>)}
           </div>
         </CardContent>
@@ -120,16 +139,16 @@ export function VirtualAccountsPage() {
               <CardTitle className="min-w-0 break-words">{selectedAccount ? selectedAccount.name : '新建 Virtual 账户'}</CardTitle>
               {canEdit && <Badge tone={dirty ? 'warning' : 'neutral'}>{selected ? dirty ? '有未保存修改' : '已保存' : '新建草稿'}</Badge>}
             </div>
-            <CardDescription>配置别名、仓位策略、下单模板和每份组合的份数。</CardDescription>
+            <CardDescription>添加仓位策略或子 Virtual，设置每份组合的份数与配比。</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={(event) => {
               event.preventDefault()
-              if (locked || !name.trim() || !validShares) return
+              if (locked || !name.trim() || !validShares || compositionError) return
               void withWrite(async () => {
                 const saved = selected
-                  ? await saveVirtualAccount(selected, name.trim(), nextBindings)
-                  : await createVirtualAccount(name.trim(), nextBindings)
+                  ? await saveVirtualAccount(selected, name.trim(), nextBindings, nextChildren)
+                  : await createVirtualAccount(name.trim(), nextBindings, nextChildren)
                 setAccounts(await listVirtualAccounts())
                 openAccount(saved)
                 return '组合已保存，跟随账户将自动同步。'
@@ -146,11 +165,11 @@ export function VirtualAccountsPage() {
                 </div>
 
                 <div className="space-y-3 border-t border-border-soft pt-5">
-                  <div className="flex flex-wrap items-center gap-2"><h4 className="text-sm font-semibold text-ink">策略组合</h4><Badge>{bindings.length} 条</Badge></div>
-                  <FieldHint>实际账户生效份数 = Virtual 份数 × 跟随倍率。份数设为 0 可停止此 Virtual 对该策略的贡献。</FieldHint>
-                  {bindings.length === 0 ? <div className="rounded-xl border border-dashed border-border bg-canvas/50 px-4 py-6 text-center">
-                    <p className="text-sm font-medium text-muted">尚未添加策略</p>
-                    <p className="mt-1 text-xs text-subtle">从下方选择仓位策略，添加到组合中。</p>
+                  <div className="flex flex-wrap items-center gap-2"><h4 className="text-sm font-semibold text-ink">策略组合</h4><Badge>{bindings.length} 条策略 · {children.length} 个子 Virtual</Badge></div>
+                  <FieldHint>底层份数 × 各层子 Virtual 配比 × 实际账户跟随倍率。配比按填写值相乘，设为 0 可暂停对应贡献。</FieldHint>
+                  {bindings.length === 0 && children.length === 0 ? <div className="rounded-xl border border-dashed border-border bg-canvas/50 px-4 py-6 text-center">
+                    <p className="text-sm font-medium text-muted">尚未添加策略或子 Virtual</p>
+                    <p className="mt-1 text-xs text-subtle">从下方选择仓位策略或 Virtual 账户，添加到组合中。</p>
                   </div> : bindings.map((binding, index) => <div key={binding.binding_name} className="min-w-0 rounded-xl border border-border bg-canvas/30 p-4">
                     <div className="mb-4 flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -168,28 +187,60 @@ export function VirtualAccountsPage() {
                       <Label className="min-w-0">Virtual 份数<Input inputMode="decimal" aria-invalid={!validShare(binding)} value={shareInputs[binding.binding_name] ?? String(binding.shares)} onChange={(event) => setShareInputs((old) => ({ ...old, [binding.binding_name]: event.target.value }))} />{!validShare(binding) && <FieldHint className="text-danger">请输入不小于 0 的数字。</FieldHint>}</Label>
                     </div>
                   </div>)}
+                  {children.map((child) => {
+                    const account = accounts.find(account => account.virtual_id === child.virtual_id)
+                    return <div key={child.virtual_id} className="min-w-0 rounded-xl border border-border bg-canvas/30 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs text-muted">子 Virtual · {child.virtual_id}</p>
+                          <p className="mt-1 break-all text-sm font-semibold text-ink">{account?.name ?? '不可见或已删除'}</p>
+                          <FieldHint>沿用子 Virtual 的仓位策略和下单模板，修改子组合后自动更新。</FieldHint>
+                        </div>
+                        {canEdit && <Button type="button" variant="ghost" size="sm" className="shrink-0" aria-label={`移除 ${child.virtual_id}`} onClick={() => setChildren(old => old.filter(item => item.virtual_id !== child.virtual_id))}><Trash2 size={14} /> 移除</Button>}
+                      </div>
+                      <Label className="mt-3 max-w-xs">子 Virtual 配比<Input inputMode="decimal" aria-invalid={!validChild(child)} value={childInputs[child.virtual_id] ?? String(child.multiplier)} onChange={event => setChildInputs(old => ({ ...old, [child.virtual_id]: event.target.value }))} />{!validChild(child) && <FieldHint className="text-danger">请输入不小于 0 的数字。</FieldHint>}</Label>
+                    </div>
+                  })}
                   {canEdit && <div className="flex flex-col items-stretch gap-3 rounded-xl bg-canvas p-3 sm:flex-row sm:items-end">
-                    <Label className="min-w-0 flex-1">添加仓位策略<Select className="min-w-0" value={strategyToAdd} onChange={(event) => setStrategyToAdd(event.target.value)} disabled={!orders.length || !available.length}>
-                      <option value="">{!orders.length ? '请先创建下单模板' : !available.length ? '没有可添加的仓位策略' : '选择仓位策略'}</option>
-                      {available.map((position) => <option key={position.strategy_name} value={position.strategy_name}>{position.strategy_name}</option>)}
+                    <Label className="min-w-0 flex-1">添加仓位策略或 Virtual<Select className="min-w-0" value={strategyToAdd} onChange={(event) => setStrategyToAdd(event.target.value)} disabled={(!orders.length || !available.length) && !availableChildren.length}>
+                      <option value="">选择仓位策略或子 Virtual</option>
+                      {orders.length > 0 && available.length > 0 && <optgroup label="仓位策略">{available.map((position) => <option key={position.strategy_name} value={`strategy:${position.strategy_name}`}>{position.strategy_name}</option>)}</optgroup>}
+                      {availableChildren.length > 0 && <optgroup label="Virtual 账户">{availableChildren.map(account => <option key={account.virtual_id} value={`virtual:${account.virtual_id}`}>{account.virtual_id} · {account.name}</option>)}</optgroup>}
                     </Select></Label>
-                    <Button type="button" className="shrink-0" disabled={!strategyToAdd || !orders.length} onClick={() => {
-                      if (!orders[0] || !available.some((position) => position.strategy_name === strategyToAdd)) return
-                      setBindings((old) => [...old, { binding_name: strategyToAdd, position_strategy_name: strategyToAdd, order_strategy_name: orders[0].strategy_name, shares: 1 }])
-                      setShareInputs((old) => ({ ...old, [strategyToAdd]: '1' }))
+                    <Button type="button" className="shrink-0" disabled={!strategyToAdd} onClick={() => {
+                      if (strategyToAdd.startsWith('virtual:')) {
+                        const id = strategyToAdd.slice('virtual:'.length)
+                        if (!availableChildren.some(account => account.virtual_id === id)) return
+                        setChildren(old => [...old, { virtual_id: id, multiplier: 1 }])
+                        setChildInputs(old => ({ ...old, [id]: '1' }))
+                      } else {
+                        const strategy = strategyToAdd.slice('strategy:'.length)
+                        if (!orders[0] || !available.some(position => position.strategy_name === strategy)) return
+                        setBindings(old => [...old, { binding_name: strategy, position_strategy_name: strategy, order_strategy_name: orders[0].strategy_name, shares: 1 }])
+                        setShareInputs(old => ({ ...old, [strategy]: '1' }))
+                      }
                       setStrategyToAdd('')
                     }}><Plus size={15} /> 添加</Button>
                   </div>}
                 </div>
 
-                {selectedAccount && selectedAccount.bindings.length > 0 && bindings.length === 0 && <Alert tone="warning">保存空组合将移除此 Virtual 的全部策略贡献，其他 Virtual 的贡献保留。</Alert>}
-                <FieldHint>保存后自动更新全部跟随账户。移除策略时仅撤掉此 Virtual 的贡献，其他 Virtual 的贡献保留。</FieldHint>
+                <div className="space-y-3 border-t border-border-soft pt-5">
+                  <h4 className="text-sm font-semibold text-ink">每份组合展开预览</h4>
+                  {compositionError ? <Alert tone="error">{compositionError}</Alert> : !validShares ? <Alert tone="error">请填写有效份数与配比。</Alert> : composition.length === 0 ? <FieldHint>当前组合没有底层策略。</FieldHint> : <div className="overflow-x-auto"><table className="w-full text-left text-xs">
+                    <thead className="text-muted"><tr><th className="p-2">发布名 / 仓位策略</th><th className="p-2">下单模板</th><th className="p-2 text-right">合计份数</th></tr></thead>
+                    <tbody>{composition.map(binding => <tr key={binding.binding_name} className="border-t border-border-soft"><td className="break-all p-2">{binding.binding_name}{binding.position_strategy_name !== binding.binding_name && <span className="block text-muted">{binding.position_strategy_name}</span>}</td><td className="break-all p-2">{binding.order_strategy_name}</td><td className="p-2 text-right tabular-nums">{binding.shares}</td></tr>)}</tbody>
+                  </table></div>}
+                  <FieldHint>相同发布名的贡献相加，仓位策略和下单模板必须一致；实际账户再乘自己的跟随倍率。</FieldHint>
+                </div>
+
+                {selectedAccount && (selectedAccount.bindings.length > 0 || selectedAccount.children.length > 0) && bindings.length === 0 && children.length === 0 && <Alert tone="warning">保存空组合将移除此 Virtual 的全部策略贡献，其他 Virtual 的贡献保留。</Alert>}
+                <FieldHint>保存后沿上层 Virtual 更新全部实际跟随账户。移除某项时撤掉其贡献，其他贡献保留。</FieldHint>
                 {canEdit && <div className="flex flex-col gap-3 border-t border-border-soft pt-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                   <div className="flex flex-wrap gap-2">
-                    <Button type="submit" variant="primary" disabled={!name.trim() || !validShares || (!!selected && !dirty)}><Save size={15} /> {saving ? '正在保存…' : selected ? '保存并同步' : '创建账户'}</Button>
+                    <Button type="submit" variant="primary" disabled={!name.trim() || !validShares || !!compositionError || (!!selected && !dirty)}><Save size={15} /> {saving ? '正在保存…' : selected ? '保存并同步' : '创建账户'}</Button>
                     <Button type="button" disabled={!dirty && !!selected} onClick={() => select(selected || accounts[0]?.virtual_id || '')}>{selected ? '撤销修改' : '取消新建'}</Button>
                   </div>
-                  {selectedAccount && <Button type="button" variant="danger" disabled={selectedAccount.followers.length > 0} title={selectedAccount.followers.length ? '请先从跟随账户中移除此 Virtual' : undefined} onClick={() => void withWrite(async () => {
+                  {selectedAccount && <Button type="button" variant="danger" disabled={selectedAccount.followers.length > 0 || selectedAccount.parents.length > 0} title={selectedAccount.parents.length ? '请先从上层 Virtual 中移除此引用' : selectedAccount.followers.length ? '请先从跟随账户中移除此 Virtual' : undefined} onClick={() => void withWrite(async () => {
                     await deleteVirtualAccount(selected)
                     const next = await listVirtualAccounts()
                     setAccounts(next)
@@ -227,11 +278,12 @@ export function VirtualAccountsPage() {
 
         {selectedAccount && <Card className="min-w-0">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2"><Users size={16} /> 跟随账户<Badge>{selectedAccount.followers.length}</Badge></CardTitle>
+            <CardTitle className="flex items-center gap-2"><Users size={16} /> 直接跟随账户<Badge>{selectedAccount.followers.length}</Badge></CardTitle>
             <CardDescription>组合更新：{timestampUs(selectedAccount.updated_at_us)} · 同步状态每 10 秒刷新</CardDescription>
           </CardHeader>
           <CardContent>
-            {selectedAccount.followers.length === 0 ? <p className="text-sm leading-relaxed text-muted">暂无跟随账户。在实际账户的策略启用页选择「跟随 Virtual」，再设置倍率。</p> : <div className="grid gap-3 xl:grid-cols-2">{selectedAccount.followers.map((follower) => <div key={follower.source_id} className="min-w-0 rounded-xl border border-border p-4">
+            {selectedAccount.parents.length > 0 && <p className="mb-3 text-sm text-muted">上层 Virtual：{selectedAccount.parents.join('、')}。子组合修改会同步到跟随这些上层组合的实际账户。</p>}
+            {selectedAccount.followers.length === 0 ? <p className="text-sm leading-relaxed text-muted">暂无直接跟随账户。可由上层 Virtual 引用，也可在实际账户的策略启用页选择跟随。</p> : <div className="grid gap-3 xl:grid-cols-2">{selectedAccount.followers.map((follower) => <div key={follower.source_id} className="min-w-0 rounded-xl border border-border p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <a href={routes.configBindings(follower.source_id)} className="min-w-0 break-all text-sm font-medium text-brand">{follower.source_id} →</a>
                 <Badge tone={follower.pending_publishes.length ? 'warning' : 'success'}>{follower.pending_publishes.length ? `待同步 ${follower.pending_publishes.length} 条` : '已同步'}</Badge>

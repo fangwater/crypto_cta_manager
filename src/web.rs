@@ -4879,6 +4879,10 @@ fn catalog_error(error: anyhow::Error) -> Response {
     let status = if message.contains("following a virtual")
         || message.contains("still pending")
         || message.contains("still has followers")
+        || message.contains("still referenced")
+        || message.contains("reference cycle")
+        || message.contains("conflicts across virtual")
+        || message.contains("duplicate child virtual")
         || message.contains("duplicate binding")
         || message.contains("must contain")
         || message.contains("exceeds")
@@ -7179,17 +7183,11 @@ async fn list_virtual_accounts(
     }
     if !user.is_admin() {
         let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
-        accounts.retain(|account| {
-            account.can_configure
-                || account.bindings.iter().all(|binding| {
-                    visibility
-                        .iter()
-                        .find(|v| v.strategy_name == binding.position_strategy_name)
-                        .is_some_and(|v| v.user_can_view(user.user_id))
-                })
-        });
+        accounts.retain(|account| account.user_can_view(&user, &visibility));
     }
+    let visible_virtuals: BTreeSet<_> = accounts.iter().map(|a| a.virtual_id.clone()).collect();
     for account in &mut accounts {
+        account.parents.retain(|id| visible_virtuals.contains(id));
         account
             .followers
             .retain(|follower| visible.0.contains(&follower.source_id));
@@ -7275,23 +7273,42 @@ async fn save_virtual_account_response(
             ));
         }
     }
-    // Also validate catalogs when the virtual account has no real followers.
+    let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
+    if !user.is_admin() {
+        let mut candidates = virtual_accounts::list(&state.pool).await?;
+        for account in &mut candidates {
+            account.permissions_for(user);
+        }
+        if request.children.iter().flatten().any(|child| {
+            !candidates.iter().any(|account| {
+                account.virtual_id == child.virtual_id && account.user_can_view(user, &visibility)
+            })
+        }) {
+            return Ok(forbidden(
+                "Virtual view permission required for every child account",
+            ));
+        }
+    }
+    // Resolve before permission/venue checks, including all descendants and zero edges.
+    let expanded = match virtual_accounts::preview_virtual(&state.pool, virtual_id, &request).await
+    {
+        Ok(bindings) => bindings,
+        Err(error) => return Ok(catalog_error(error)),
+    };
     let positions = current_position_strategies(&state).await?;
     let orders = strategy_catalog::list_order_strategies(&state.pool).await?;
-    if !user.is_admin() {
-        let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
-        if request.bindings.iter().any(|binding| {
+    if !user.is_admin()
+        && expanded.iter().any(|binding| {
             !visibility.iter().any(|v| {
                 v.strategy_name == binding.position_strategy_name && v.user_can_view(user.user_id)
             })
-        }) {
-            return Ok(forbidden("position strategy view permission required"));
-        }
+        })
+    {
+        return Ok(forbidden(
+            "position strategy view permission required for all nested Virtual bindings",
+        ));
     }
-    if let Err(error) = virtual_accounts::effective_bindings(&request.bindings, 1.0) {
-        return Ok(catalog_error(error));
-    }
-    for b in &request.bindings {
+    for b in &expanded {
         if !positions
             .iter()
             .any(|p| p.strategy_name == b.position_strategy_name)
@@ -7318,7 +7335,7 @@ async fn save_virtual_account_response(
         let combined = match virtual_accounts::preview_bindings(
             &state.pool,
             &follows,
-            virtual_id.map(|id| (id, request.bindings.as_slice())),
+            virtual_id.map(|id| (id, &request)),
         )
         .await
         {
@@ -7383,12 +7400,19 @@ async fn virtual_account_for_user(
     user: &AuthUser,
     id: &str,
 ) -> Result<Option<virtual_accounts::VirtualAccount>, ApiError> {
-    let mut account = virtual_accounts::list(&state.pool)
-        .await?
-        .into_iter()
-        .find(|a| a.virtual_id == id);
-    if let Some(account) = &mut account {
+    let mut accounts = virtual_accounts::list(&state.pool).await?;
+    for account in &mut accounts {
         account.permissions_for(user);
+    }
+    let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
+    let visible_ids: BTreeSet<_> = accounts
+        .iter()
+        .filter(|account| account.user_can_view(user, &visibility))
+        .map(|account| account.virtual_id.clone())
+        .collect();
+    let mut account = accounts.into_iter().find(|a| a.virtual_id == id);
+    if let Some(account) = &mut account {
+        account.parents.retain(|id| visible_ids.contains(id));
     }
     Ok(account)
 }

@@ -8,6 +8,8 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::strategy_catalog::{SaveBindingRequest, validate_nonnegative_multiplier};
 
+mod graph;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VirtualBinding {
     pub binding_name: String,
@@ -21,6 +23,9 @@ pub struct VirtualAccount {
     pub virtual_id: String,
     pub name: String,
     pub bindings: Vec<VirtualBinding>,
+    pub children: Vec<AccountFollow>,
+    pub expanded_bindings: Vec<VirtualBinding>,
+    pub parents: Vec<String>,
     pub updated_at_us: i64,
     pub followers: Vec<VirtualFollower>,
     pub created_by_user_id: Option<i64>,
@@ -37,13 +42,32 @@ pub struct VirtualGrantee {
 }
 
 impl VirtualAccount {
-    pub fn permissions_for(&mut self, user: &crate::auth::AuthUser) {
-        self.can_manage_grants = user.is_admin() || self.created_by_user_id == Some(user.user_id);
-        self.can_configure = self.can_manage_grants
+    fn user_can_configure(&self, user: &crate::auth::AuthUser) -> bool {
+        user.is_admin()
+            || self.created_by_user_id == Some(user.user_id)
             || self
                 .managers
                 .iter()
-                .any(|manager| manager.user_id == user.user_id);
+                .any(|manager| manager.user_id == user.user_id)
+    }
+
+    pub fn user_can_view(
+        &self,
+        user: &crate::auth::AuthUser,
+        visibility: &[crate::strategy_catalog::PositionVisibility],
+    ) -> bool {
+        self.user_can_configure(user)
+            || self.expanded_bindings.iter().all(|binding| {
+                visibility.iter().any(|v| {
+                    v.strategy_name == binding.position_strategy_name
+                        && v.user_can_view(user.user_id)
+                })
+            })
+    }
+
+    pub fn permissions_for(&mut self, user: &crate::auth::AuthUser) {
+        self.can_manage_grants = user.is_admin() || self.created_by_user_id == Some(user.user_id);
+        self.can_configure = self.user_can_configure(user);
     }
 }
 
@@ -58,6 +82,8 @@ pub struct VirtualFollower {
 pub struct SaveVirtualAccount {
     pub name: String,
     pub bindings: Vec<VirtualBinding>,
+    #[serde(default)]
+    pub children: Option<Vec<AccountFollow>>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -127,6 +153,8 @@ pub async fn pending(pool: &PgPool, source_id: &str) -> Result<Vec<PendingPublis
 }
 
 pub async fn list(pool: &PgPool) -> Result<Vec<VirtualAccount>> {
+    let definitions = graph::load(&mut *pool.acquire().await?).await?;
+    let expanded = graph::expand(&definitions)?;
     let mut accounts = Vec::new();
     for row in sqlx::query(
         "SELECT v.virtual_id, v.name, v.updated_at_us, v.created_by_user_id, u.username AS owner_username FROM cta_virtual_accounts v LEFT JOIN cta_users u ON u.user_id = v.created_by_user_id ORDER BY v.virtual_id",
@@ -135,13 +163,8 @@ pub async fn list(pool: &PgPool) -> Result<Vec<VirtualAccount>> {
     .await?
     {
         let id: String = row.try_get("virtual_id")?;
-        let bindings = sqlx::query("SELECT binding_name, position_strategy_name, order_strategy_name, shares FROM cta_virtual_account_bindings WHERE virtual_id = $1 ORDER BY binding_name")
-            .bind(&id).fetch_all(pool).await?.into_iter().map(|row| Ok(VirtualBinding {
-                binding_name: row.try_get("binding_name")?,
-                position_strategy_name: row.try_get("position_strategy_name")?,
-                order_strategy_name: row.try_get("order_strategy_name")?,
-                shares: row.try_get("shares")?,
-            })).collect::<Result<Vec<_>>>()?;
+        let definition = &definitions[&id];
+        let bindings = definition.bindings.clone();
         let mut followers = Vec::new();
         for row in sqlx::query("SELECT source_id, multiplier FROM cta_account_follows WHERE virtual_id = $1 ORDER BY source_id")
             .bind(&id).fetch_all(pool).await? {
@@ -155,6 +178,9 @@ pub async fn list(pool: &PgPool) -> Result<Vec<VirtualAccount>> {
         accounts.push(VirtualAccount {
             virtual_id: id.clone(),
             name: row.try_get("name")?,
+            children: definition.children.clone(),
+            expanded_bindings: expanded[&id].clone(),
+            parents: definitions.iter().filter(|(_, definition)| definition.children.iter().any(|child| child.virtual_id == id)).map(|(parent, _)| parent.clone()).collect(),
             bindings,
             updated_at_us: row.try_get("updated_at_us")?,
             followers,
@@ -230,27 +256,7 @@ fn combined_bindings(
             .get(&follow.virtual_id)
             .ok_or_else(|| anyhow::anyhow!("unknown virtual account: {}", follow.virtual_id))?;
         for b in effective_bindings(bindings, follow.multiplier)? {
-            if let Some(existing) = combined.get_mut(&b.binding_name) {
-                ensure!(
-                    existing.position_strategy_name == b.position_strategy_name
-                        && existing.order_strategy_name == b.order_strategy_name,
-                    "binding {} conflicts across virtual accounts: position strategy and order template must match",
-                    b.binding_name
-                );
-                existing.shares += b.shares;
-                validate_nonnegative_multiplier(existing.shares, "combined shares")
-                    .map_err(anyhow::Error::msg)?;
-            } else {
-                combined.insert(
-                    b.binding_name.clone(),
-                    VirtualBinding {
-                        binding_name: b.binding_name,
-                        position_strategy_name: b.position_strategy_name,
-                        order_strategy_name: b.order_strategy_name,
-                        shares: b.shares,
-                    },
-                );
-            }
+            graph::merge(&mut combined, b)?;
         }
     }
     Ok(combined.into_values().collect())
@@ -259,42 +265,41 @@ fn combined_bindings(
 async fn load_combined_bindings(
     conn: &mut PgConnection,
     follows: &[AccountFollow],
-    replacement: Option<(&str, &[VirtualBinding])>,
+    replacement: Option<(&str, &SaveVirtualAccount)>,
 ) -> Result<Vec<VirtualBinding>> {
-    let mut templates = BTreeMap::new();
-    for follow in follows {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM cta_virtual_accounts WHERE virtual_id = $1)",
-        )
-        .bind(&follow.virtual_id)
-        .fetch_one(&mut *conn)
-        .await?;
-        ensure!(exists, "unknown virtual account: {}", follow.virtual_id);
-        let bindings = if let Some((_, bindings)) =
-            replacement.filter(|(id, _)| *id == follow.virtual_id)
-        {
-            bindings.to_vec()
-        } else {
-            sqlx::query("SELECT binding_name, position_strategy_name, order_strategy_name, shares FROM cta_virtual_account_bindings WHERE virtual_id = $1 ORDER BY binding_name")
-                .bind(&follow.virtual_id).fetch_all(&mut *conn).await?.into_iter().map(|row| Ok(VirtualBinding {
-                    binding_name: row.try_get("binding_name")?,
-                    position_strategy_name: row.try_get("position_strategy_name")?,
-                    order_strategy_name: row.try_get("order_strategy_name")?,
-                    shares: row.try_get("shares")?,
-                })).collect::<Result<Vec<_>>>()?
-        };
-        templates.insert(follow.virtual_id.clone(), bindings);
+    let mut definitions = graph::load(conn).await?;
+    if let Some((id, request)) = replacement {
+        validate_request(request)?;
+        definitions
+            .entry(id.to_owned())
+            .or_default()
+            .replace(request);
     }
-    combined_bindings(follows, &templates)
+    combined_bindings(follows, &graph::expand(&definitions)?)
 }
 
-// Preview the complete account target, including an unsaved template edit.
+// Preview the complete account target, including an unsaved nested template edit.
 pub async fn preview_bindings(
     pool: &PgPool,
     follows: &[AccountFollow],
-    replacement: Option<(&str, &[VirtualBinding])>,
+    replacement: Option<(&str, &SaveVirtualAccount)>,
 ) -> Result<Vec<VirtualBinding>> {
     load_combined_bindings(&mut *pool.acquire().await?, follows, replacement).await
+}
+
+pub async fn preview_virtual(
+    pool: &PgPool,
+    id: Option<&str>,
+    request: &SaveVirtualAccount,
+) -> Result<Vec<VirtualBinding>> {
+    validate_request(request)?;
+    let mut definitions = graph::load(&mut *pool.acquire().await?).await?;
+    let id = match id {
+        Some(id) => id.to_owned(),
+        None => next_virtual_id(&definitions.keys().cloned().collect::<Vec<_>>())?,
+    };
+    definitions.entry(id.clone()).or_default().replace(request);
+    Ok(graph::expand(&definitions)?.remove(&id).unwrap_or_default())
 }
 
 async fn begin(pool: &PgPool) -> Result<Transaction<'_, Postgres>> {
@@ -375,6 +380,18 @@ fn validate_request(request: &SaveVirtualAccount) -> Result<()> {
         "virtual account name must contain 1–200 bytes"
     );
     effective_bindings(&request.bindings, 1.0)?;
+    let mut ids = BTreeSet::new();
+    for child in request.children.iter().flatten() {
+        crate::order_config::validate_strategy_name(&child.virtual_id)
+            .map_err(anyhow::Error::msg)?;
+        ensure!(
+            ids.insert(&child.virtual_id),
+            "duplicate child virtual account: {}",
+            child.virtual_id
+        );
+        validate_nonnegative_multiplier(child.multiplier, "child multiplier")
+            .map_err(anyhow::Error::msg)?;
+    }
     Ok(())
 }
 
@@ -487,15 +504,24 @@ async fn save_in_transaction(
         sqlx::query("INSERT INTO cta_virtual_account_bindings (virtual_id,binding_name,position_strategy_name,order_strategy_name,shares) VALUES ($1,$2,$3,$4,$5)")
             .bind(id).bind(&b.binding_name).bind(&b.position_strategy_name).bind(&b.order_strategy_name).bind(b.shares).execute(&mut **tx).await?;
     }
-    let followers: Vec<String> = sqlx::query_scalar(
-        "SELECT source_id FROM cta_account_follows WHERE virtual_id = $1 ORDER BY source_id",
-    )
-    .bind(id)
-    .fetch_all(&mut **tx)
-    .await?;
+    // Older clients that do not edit children must not silently remove a nested portfolio.
+    if let Some(children) = &request.children {
+        sqlx::query("DELETE FROM cta_virtual_account_children WHERE parent_virtual_id = $1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        for child in children {
+            sqlx::query("INSERT INTO cta_virtual_account_children (parent_virtual_id, child_virtual_id, multiplier) VALUES ($1,$2,$3)")
+                .bind(id).bind(&child.virtual_id).bind(child.multiplier).execute(&mut **tx).await?;
+        }
+    }
+    // Validate the entire DAG inside the configuration transaction, including zero edges.
+    let definitions = graph::load(tx).await?;
+    let expanded = graph::expand(&definitions)?;
+    let followers = followers_on(tx, id).await?;
     for source in followers {
         let follows = load_follows(tx, &source).await?;
-        let combined = load_combined_bindings(tx, &follows, None).await?;
+        let combined = combined_bindings(&follows, &expanded)?;
         materialize(tx, &source, &combined, 1.0, at, false).await?;
     }
     Ok(())
@@ -540,6 +566,16 @@ pub async fn delete(pool: &PgPool, id: &str) -> Result<bool> {
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;
+    let parent: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM cta_virtual_account_children WHERE child_virtual_id = $1)",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    ensure!(
+        !parent,
+        "virtual account is still referenced by another Virtual; remove the child reference first"
+    );
     if followed {
         bail!(
             "virtual account still has followers; remove this virtual from their follow lists first"
@@ -559,13 +595,14 @@ pub async fn enqueue_order_followers(pool: &PgPool, order: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn followers(pool: &PgPool, id: &str) -> Result<Vec<String>> {
+async fn followers_on(conn: &mut PgConnection, id: &str) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar(
-        "SELECT source_id FROM cta_account_follows WHERE virtual_id = $1 ORDER BY source_id",
-    )
-    .bind(id)
-    .fetch_all(pool)
-    .await?)
+        "WITH RECURSIVE ancestors(virtual_id) AS (SELECT $1::text UNION SELECT c.parent_virtual_id FROM cta_virtual_account_children c JOIN ancestors a ON c.child_virtual_id = a.virtual_id) SELECT DISTINCT f.source_id FROM cta_account_follows f JOIN ancestors a USING (virtual_id) ORDER BY f.source_id",
+    ).bind(id).fetch_all(conn).await?)
+}
+
+pub async fn followers(pool: &PgPool, id: &str) -> Result<Vec<String>> {
+    followers_on(&mut *pool.acquire().await?, id).await
 }
 
 // Used by validation before a template is changed or attached to a live account.
@@ -605,11 +642,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn virtual_ownership_and_delegation_do_not_grant_further_delegation() {
+    fn nested_leaf_visibility_and_virtual_delegation_preserve_permissions() {
         let mut account = VirtualAccount {
             virtual_id: "virtual01".into(),
             name: "model".into(),
             bindings: vec![],
+            children: vec![],
+            expanded_bindings: vec![],
+            parents: vec![],
             updated_at_us: 1,
             followers: vec![],
             created_by_user_id: Some(1),
@@ -628,6 +668,33 @@ mod tests {
             username: "guest".into(),
             role: "user".into(),
         };
+        account.expanded_bindings = ["visible", "private"]
+            .into_iter()
+            .map(|name| VirtualBinding {
+                binding_name: name.into(),
+                position_strategy_name: name.into(),
+                order_strategy_name: "maker".into(),
+                shares: 0.0,
+            })
+            .collect();
+        let mut visibility = vec![crate::strategy_catalog::PositionVisibility {
+            strategy_name: "visible".into(),
+            created_by_user_id: None,
+            open_visibility: true,
+            manager_user_ids: vec![],
+            grants: BTreeMap::new(),
+        }];
+        // An empty direct-binding list cannot bypass private inherited leaves, even at zero weight.
+        assert!(!account.user_can_view(&guest, &visibility));
+        assert!(account.user_can_view(&owner, &[]));
+        visibility.push(crate::strategy_catalog::PositionVisibility {
+            strategy_name: "private".into(),
+            created_by_user_id: None,
+            open_visibility: false,
+            manager_user_ids: vec![],
+            grants: BTreeMap::from([(guest.user_id, "view".into())]),
+        });
+        assert!(account.user_can_view(&guest, &visibility));
         account.permissions_for(&owner);
         assert!(account.can_configure && account.can_manage_grants);
         account.permissions_for(&guest);

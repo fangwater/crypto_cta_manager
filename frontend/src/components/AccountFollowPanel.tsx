@@ -89,7 +89,7 @@ export function AccountFollowPanel({ sourceId, studio, onChange }: {
         </fieldset>
       </form>
       <FieldHint>{mode === 'follow'
-        ? '跟随会替换本账户的策略组合。各 Virtual 的份数 × 倍率后叠加；相同发布名的仓位策略与下单模板须一致。倍率 0 或移除只撤掉对应 Virtual 的贡献，其他贡献继续保留。'
+        ? '跟随会替换本账户的策略组合。子 Virtual 配比逐层相乘，再乘本账户倍率后叠加；相同发布名的仓位策略与下单模板须一致。倍率 0 或移除只撤掉对应 Virtual 的贡献，其他贡献继续保留。'
         : '独立维护本账户的策略组合。从跟随模式切回独立配置时，会保留当前组合。'}</FieldHint>
       <a href={routes.virtualAccounts} className="text-sm text-brand">管理 Virtual 账户 →</a>
       {pending.length > 0 ? <Alert tone={'warning'}>

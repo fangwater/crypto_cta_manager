@@ -651,10 +651,18 @@ export interface VirtualBinding {
   shares: number
 }
 
+export interface VirtualChild {
+  virtual_id: string
+  multiplier: number
+}
+
 export interface VirtualAccount {
   virtual_id: string
   name: string
   bindings: VirtualBinding[]
+  children: VirtualChild[]
+  expanded_bindings: VirtualBinding[]
+  parents: string[]
   updated_at_us: number
   created_by_user_id: number | null
   owner_username: string | null

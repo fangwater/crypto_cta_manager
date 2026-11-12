@@ -14,6 +14,56 @@ Delivery status appears in the account editor. Failures remain durable across Ma
 
 ## API
 
+### Nested Virtual composition
+
+The Virtual editor's Add selector accepts either a position strategy or a visible
+Virtual account. A child reference has its own nonnegative `multiplier` and keeps
+the child's execution templates. Ratios are literal multipliers, not automatically
+normalized percentages: use `0.6` and `0.4` for a 60/40 combination.
+
+Every path multiplies the leaf shares by each child multiplier and then by the real
+account's follow multiplier. Contributions with the same publication binding name
+sum only when both the position strategy and order template match; otherwise the
+whole save is rejected. Different binding names retain independent attribution.
+For example, a child with 2 shares at ratio 0.6 contributes 1.2 shares per parent;
+a real account following the parent at 3 publishes 3.6 shares. Multiple paths to
+the same child add their contributions.
+
+The editor previews the expanded bindings and shares per one parent. Editing a
+descendant recalculates every real source following it or any ancestor, combining
+all of that source's other follows in the same transaction. Each changed effective
+binding queues once per source. Removing a child or setting its ratio to zero
+removes only its contribution. Obsolete bindings retain their original identity
+at zero shares for the existing stop/retry path. Direct followers and visible parent
+references are shown separately; follower multipliers always refer to direct follows.
+
+Self references, indirect cycles (including zero-ratio edges), duplicate children,
+missing children, conflicting binding identities, nonfinite/negative ratios, share
+overflow and nesting beyond 64 Virtual levels are rejected. A referenced child
+cannot be deleted until every parent removes it, including zero-ratio references.
+Virtual visibility checks all expanded leaf strategies; hidden parent IDs are
+omitted from responses. Adding children requires their visibility and view access
+to their leaf strategies. Following from a real account still requires configure
+access to every expanded leaf strategy and the existing account permissions.
+
+Create/save requests include `children: [{virtual_id, multiplier}]` alongside
+direct `bindings`. An omitted (or null) `children` field preserves existing child
+references when saving, and means no children for creation; an explicit empty
+array clears references. Responses add `children`, `expanded_bindings` and visible
+`parents`; `bindings` continues to contain only directly configured leaf bindings.
+There is one current contract, with no parallel versioned endpoint.
+
+```json
+{
+  "name": "组合账户",
+  "bindings": [],
+  "children": [
+    {"virtual_id": "virtual01", "multiplier": 0.6},
+    {"virtual_id": "virtual02", "multiplier": 0.4}
+  ]
+}
+```
+
 2026-10-11 jp-meta deployment: `virtual02`, alias `lgq_cta`, owns five one-share
 bindings (`lgq_cta_factor_036`, `lgq_cta_factor_051`, `lgq_cta_factor_170`,
 `lgq_cta_TD_TI_002`, `lgq_cta_baseline_004`) using order template
@@ -32,13 +82,24 @@ account-mode checks do not apply to a RapidX sub-portfolio. Exec retains account
 risk checks, venue rules, and its usual net execution and position ledger.
 
 - `GET /api/catalog/virtual-accounts` lists visible templates.
-- `POST /api/catalog/virtual-accounts` creates `{name, bindings}` and returns the account with its automatic number.
-- `PUT /api/catalog/virtual-accounts/{virtual_id}` replaces `{name, bindings: [{binding_name, position_strategy_name, order_strategy_name, shares}]}`.
-- `DELETE /api/catalog/virtual-accounts/{virtual_id}` deletes an unfollowed template.
+- `POST /api/catalog/virtual-accounts` creates `{name, bindings, children}` and returns the account with its automatic number.
+- `PUT /api/catalog/virtual-accounts/{virtual_id}` replaces `{name, bindings: [{binding_name, position_strategy_name, order_strategy_name, shares}], children: [{virtual_id, multiplier}]}`; omitting children preserves existing references.
+- `DELETE /api/catalog/virtual-accounts/{virtual_id}` deletes a template with no followers or parent references.
 - `PUT /api/catalog/accounts/{source_id}/configuration` accepts `{"mode":"follow","follows":[{"virtual_id":"virtual01","multiplier":2},{"virtual_id":"virtual02","multiplier":0.5}]}` or `{"mode":"independent"}`.
 - Existing account studio responses add `configuration` and `pending_publishes`.
 
 ## Existing database maintenance
+
+For nested composition, back up the target Manager database and explicitly apply
+`scripts/apply_nested_virtual_schema.sql` once with configuration writes paused
+before deploying the updated backend/frontend. This adds only the child-reference
+table and its reverse-reference index. Existing direct bindings, actual-account
+follows, effective shares, publish queues and historical snapshots stay unchanged.
+Fresh databases already include the table in `migrations/schema.sql`; normal startup
+never executes this maintenance. Rollback to a binary without nesting requires first
+removing child references and verifying the resulting real-account targets, or
+restoring the reviewed pre-change configuration. An older backend would ignore
+child contributions when recomputing follows.
 
 For multiple follows, apply `scripts/apply_multiple_virtual_follows_schema.sql`
 explicitly after a backup, with configuration writes paused during the coordinated

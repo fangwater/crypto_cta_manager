@@ -255,6 +255,7 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
     postgres::initialize(&db.pool).await?;
     seed_business_data(&db.pool).await?;
     let legacy = SaveVirtualAccount {
+        children: None,
         name: "Legacy alias".into(),
         bindings: vec![],
     };
@@ -264,6 +265,7 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
         let pool = db.pool.clone();
         tasks.push(tokio::spawn(async move {
             let request = SaveVirtualAccount {
+                children: None,
                 name: format!("Alias {index}"),
                 bindings: vec![],
             };
@@ -300,6 +302,7 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
         &db.pool,
         "virtual01",
         &SaveVirtualAccount {
+            children: None,
             name: "Updated alias".into(),
             bindings: vec![],
         },
@@ -322,6 +325,236 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
     );
     let next = virtual_accounts::create(&db.pool, &legacy, None, 12).await?;
     assert_eq!(next, "virtual09");
+    db.remove().await
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated local PostgreSQL 16 test cluster"]
+async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> Result<()> {
+    use crypto_cta_manager::order_config::OrderParameters;
+    use crypto_cta_manager::strategy_catalog::{self, SaveOrderStrategyRequest};
+    use crypto_cta_manager::virtual_accounts::{
+        self, AccountConfiguration, AccountFollow, SaveVirtualAccount, VirtualBinding,
+    };
+    let db = TestDatabase::create().await?;
+    let pool = &db.pool;
+    postgres::initialize(pool).await?;
+    let snapshot = seed_business_data(pool).await?;
+    sqlx::raw_sql("INSERT INTO cta_order_sources (source_id,account_label,venue_label,rocksdb_path) VALUES ('other-source','other','binance-futures','/unused/other'); INSERT INTO cta_position_strategies(strategy_name,updated_at_us) VALUES ('other-position',1)")
+        .execute(pool).await?;
+    for name in ["maker", "taker"] {
+        strategy_catalog::upsert_order_strategy(
+            pool,
+            &SaveOrderStrategyRequest {
+                strategy_name: name.into(),
+                order_parameters: OrderParameters::default(),
+            },
+            1,
+            None,
+        )
+        .await?;
+    }
+    let leaf = |shares| VirtualBinding {
+        binding_name: "signal".into(),
+        position_strategy_name: "test-strategy".into(),
+        order_strategy_name: "maker".into(),
+        shares,
+    };
+    let child = |id: &str, multiplier| AccountFollow {
+        virtual_id: id.into(),
+        multiplier,
+    };
+    let request = |bindings, children| SaveVirtualAccount {
+        name: "Portfolio".into(),
+        bindings,
+        children,
+    };
+    let config = |follows| AccountConfiguration::Follow { follows };
+    virtual_accounts::save(pool, "a", &request(vec![leaf(2.0)], None), 1).await?;
+    virtual_accounts::set_configuration(pool, "other-source", &config(vec![child("a", 3.0)]), 2)
+        .await?;
+    let original = strategy_catalog::load_account_studio(pool, "other-source").await?;
+    let catalog_before = serde_json::to_value(virtual_accounts::list(pool).await?)?;
+    // Add the new table to a previous-schema database without changing any targets or history.
+    sqlx::raw_sql("DROP TABLE cta_virtual_account_children")
+        .execute(pool)
+        .await?;
+    sqlx::raw_sql(include_str!("../scripts/apply_nested_virtual_schema.sql"))
+        .execute(pool)
+        .await?;
+    assert_eq!(
+        strategy_catalog::load_account_studio(pool, "other-source").await?,
+        original
+    );
+    assert_eq!(
+        serde_json::to_value(virtual_accounts::list(pool).await?)?,
+        catalog_before
+    );
+    assert_business_data(pool, &snapshot).await?;
+
+    virtual_accounts::save(
+        pool,
+        "b",
+        &request(vec![leaf(1.0)], Some(vec![child("a", 3.0)])),
+        3,
+    )
+    .await?;
+    virtual_accounts::save(
+        pool,
+        "root",
+        &request(vec![], Some(vec![child("a", 0.5), child("b", 4.0)])),
+        4,
+    )
+    .await?;
+    // root = a*0.5 + (1 + a*3)*4 = 29; account also follows a directly.
+    virtual_accounts::set_configuration(
+        pool,
+        "test-source",
+        &config(vec![child("root", 2.0), child("a", 1.0)]),
+        5,
+    )
+    .await?;
+    let studio = strategy_catalog::load_account_studio(pool, "test-source").await?;
+    assert_eq!(studio.bindings.len(), 1);
+    assert_eq!(studio.bindings[0].shares, 60.0);
+    let accounts = virtual_accounts::list(pool).await?;
+    assert_eq!(
+        accounts
+            .iter()
+            .find(|a| a.virtual_id == "a")
+            .unwrap()
+            .parents,
+        ["b", "root"]
+    );
+    assert_eq!(
+        accounts
+            .iter()
+            .find(|a| a.virtual_id == "root")
+            .unwrap()
+            .expanded_bindings,
+        [leaf(29.0)]
+    );
+    assert_eq!(
+        virtual_accounts::followers(pool, "a").await?,
+        ["other-source", "test-source"]
+    );
+    assert!(virtual_accounts::delete(pool, "a").await.is_err());
+
+    sqlx::query("DELETE FROM cta_follow_publish_queue")
+        .execute(pool)
+        .await?;
+    virtual_accounts::save(pool, "a", &request(vec![leaf(4.0)], None), 6).await?;
+    // Both the direct path and diamond ancestors recompute; one queue update per account/binding.
+    let updated = strategy_catalog::load_account_studio(pool, "test-source").await?;
+    assert_eq!(updated.bindings[0].shares, 112.0);
+    assert_eq!(
+        strategy_catalog::load_account_studio(pool, "other-source")
+            .await?
+            .bindings[0]
+            .shares,
+        12.0
+    );
+    let revisions: Vec<i64> =
+        sqlx::query_scalar("SELECT revision FROM cta_follow_publish_queue ORDER BY source_id")
+            .fetch_all(pool)
+            .await?;
+    assert_eq!(revisions, [1, 1]);
+    virtual_accounts::enqueue_order_followers(pool, "maker").await?;
+    let revisions: Vec<i64> =
+        sqlx::query_scalar("SELECT revision FROM cta_follow_publish_queue ORDER BY source_id")
+            .fetch_all(pool)
+            .await?;
+    assert_eq!(revisions, [2, 2]);
+
+    let before = serde_json::to_value(virtual_accounts::list(pool).await?)?;
+    let queue_before: serde_json::Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(q) ORDER BY source_id,binding_name) FROM cta_follow_publish_queue q").fetch_one(pool).await?;
+    let mut bad_order = leaf(4.0);
+    bad_order.order_strategy_name = "taker".into();
+    let mut bad_position = leaf(4.0);
+    bad_position.position_strategy_name = "other-position".into();
+    let invalid = [
+        request(vec![bad_order], None), // conflicts with b's direct contribution
+        request(vec![bad_position], None),
+        request(vec![leaf(4.0)], Some(vec![child("root", 0.0)])), // zero cycles reject too
+        request(vec![leaf(4.0)], Some(vec![child("a", 1.0)])),
+        request(vec![leaf(4.0)], Some(vec![child("missing", 1.0)])),
+        request(vec![leaf(f64::MAX)], None), // multiplication overflows in ancestor
+        request(vec![leaf(4.0)], Some(vec![child("b", -1.0)])),
+        request(
+            vec![leaf(4.0)],
+            Some(vec![child("b", 1.0), child("b", 2.0)]),
+        ),
+    ];
+    for bad in invalid {
+        assert!(
+            virtual_accounts::preview_virtual(pool, Some("a"), &bad)
+                .await
+                .is_err()
+        );
+        assert!(virtual_accounts::save(pool, "a", &bad, 7).await.is_err());
+        assert_eq!(
+            serde_json::to_value(virtual_accounts::list(pool).await?)?,
+            before
+        );
+        assert_eq!(
+            strategy_catalog::load_account_studio(pool, "test-source").await?,
+            updated
+        );
+        let queue_after: serde_json::Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(q) ORDER BY source_id,binding_name) FROM cta_follow_publish_queue q").fetch_one(pool).await?;
+        assert_eq!(queue_after, queue_before);
+    }
+    // Old clients can rename a parent without erasing its children.
+    virtual_accounts::save(pool, "root", &request(vec![], None), 8).await?;
+    assert_eq!(
+        strategy_catalog::load_account_studio(pool, "test-source").await?,
+        updated
+    );
+    assert_eq!(
+        virtual_accounts::list(pool)
+            .await?
+            .iter()
+            .find(|a| a.virtual_id == "root")
+            .unwrap()
+            .children
+            .len(),
+        2
+    );
+
+    // Explicitly clearing root keeps the separate direct follow of a active.
+    virtual_accounts::save(pool, "root", &request(vec![], Some(vec![])), 9).await?;
+    assert_eq!(
+        strategy_catalog::load_account_studio(pool, "test-source")
+            .await?
+            .bindings[0]
+            .shares,
+        4.0
+    );
+    virtual_accounts::set_configuration(pool, "test-source", &config(vec![child("root", 1.0)]), 10)
+        .await?;
+    let stopped = strategy_catalog::load_account_studio(pool, "test-source").await?;
+    assert_eq!(stopped.bindings.len(), 1);
+    assert_eq!(stopped.bindings[0].shares, 0.0);
+    assert_eq!(stopped.bindings[0].binding_name, "signal");
+    assert_eq!(stopped.bindings[0].position_strategy_name, "test-strategy");
+    assert_eq!(stopped.bindings[0].order_strategy_name, "maker");
+    assert_eq!(stopped.pending_publishes.len(), 1);
+    assert_eq!(
+        strategy_catalog::load_account_studio(pool, "other-source")
+            .await?
+            .bindings[0]
+            .shares,
+        12.0
+    );
+    assert!(virtual_accounts::delete(pool, "b").await?);
+    virtual_accounts::set_configuration(
+        pool,
+        "other-source",
+        &AccountConfiguration::Independent,
+        11,
+    )
+    .await?;
+    assert!(virtual_accounts::delete(pool, "a").await?);
+    assert_business_data(pool, &snapshot).await?;
     db.remove().await
 }
 
@@ -356,6 +589,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
         shares,
     };
     let template = |shares| SaveVirtualAccount {
+        children: None,
         name: "A".into(),
         bindings: vec![binding("shared", shares), binding("only-a", 4.0)],
     };
@@ -364,6 +598,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
         &db.pool,
         "b",
         &SaveVirtualAccount {
+            children: None,
             name: "B".into(),
             bindings: vec![binding("shared", 5.0), binding("only-b", 6.0)],
         },
@@ -439,7 +674,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
     conflict.bindings[0].order_strategy_name = "order-b".into();
     if let AccountConfiguration::Follow { follows } = &updated.configuration {
         assert!(
-            virtual_accounts::preview_bindings(&db.pool, follows, Some(("a", &conflict.bindings)))
+            virtual_accounts::preview_bindings(&db.pool, follows, Some(("a", &conflict)))
                 .await
                 .is_err()
         );
@@ -504,6 +739,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
         &db.pool,
         "b",
         &SaveVirtualAccount {
+            children: None,
             name: "B".into(),
             bindings: vec![binding("only-b", 6.0)],
         },
@@ -589,6 +825,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
     };
     strategy_catalog::save_binding(&db.pool, "test-source", &independent, 1).await?;
     let template = |shares, order: &str| SaveVirtualAccount {
+        children: None,
         name: "Model".into(),
         bindings: vec![VirtualBinding {
             binding_name: "test-strategy".into(),
@@ -712,6 +949,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
     assert!(!sqlx::query_scalar::<_, bool>("SELECT archived FROM cta_follow_publish_queue WHERE source_id = 'test-source' AND binding_name = 'test-strategy'").fetch_one(&db.pool).await?);
     // An incompatible replacement must roll back every follower and the template.
     let incompatible = SaveVirtualAccount {
+        children: None,
         name: "bad".into(),
         bindings: vec![VirtualBinding {
             binding_name: "test-strategy".into(),
@@ -779,6 +1017,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
         &db.pool,
         "model",
         &SaveVirtualAccount {
+            children: None,
             name: "Model".into(),
             bindings: vec![],
         },
@@ -827,6 +1066,7 @@ async fn virtual_owner_and_manager_grants_survive_edits_and_revoke_immediately()
     let ids: Vec<i64> = sqlx::query_scalar("INSERT INTO cta_users (username,password_hash) VALUES ('owner','fixture'),('guest','fixture') RETURNING user_id")
         .fetch_all(&db.pool).await?;
     let request = SaveVirtualAccount {
+        children: None,
         name: "Owned".into(),
         bindings: vec![],
     };
@@ -841,6 +1081,7 @@ async fn virtual_owner_and_manager_grants_survive_edits_and_revoke_immediately()
         &db.pool,
         &id,
         &SaveVirtualAccount {
+            children: None,
             name: "Renamed".into(),
             bindings: vec![],
         },
