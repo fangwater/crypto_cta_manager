@@ -127,8 +127,14 @@ seconds until ready, preserving the factual chart. Changing accounts/ranges
 cancels the old retry. Permanent unsupported ranges do not loop. Already cached
 minutes can be read immediately while older backfills for that symbol continue.
 
-The browser requests factual NAV first with `includeTheoretical=false`, then
-loads the theoretical overlay. Factual retries reuse a bounded shared result
+The browser uses Protobuf plus HTTP gzip, sharing time axes and loading symbol
+or strategy curves only for the selected view. Exactly empty symbol curves are
+omitted; interval execution statistics remain in summaries. It requests factual
+NAV first with `includeTheoretical=false`, then loads a theory-only overlay
+without retransmitting the factual report. Funding coverage retries separately.
+See [NAV browser transport](docs/nav_browser_transport.md) for the schema and
+binding generation. Existing JSON clients and Arrow exports keep their contracts.
+Factual retries reuse a bounded shared result
 cache within the same dashboard generation. Background refreshes prepare sorted
 fills and hourly FIFO checkpoints, atomically publishing them with the snapshots
 and actual/theoretical fee settings. Queries replay from the checkpoint before
@@ -661,6 +667,8 @@ Overrides affect execution parameters only, not target qty, binding shares, targ
 signal, or exchange contract leverage.
 
 Build the API and frontend locally, then deploy one independent host:
+
+Rust builds require `protoc` for the browser NAV Protobuf schema.
 
 ```bash
 # compile here, then upload to one physical host

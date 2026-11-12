@@ -17,7 +17,8 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './nav-dashboard.css'
-import { ApiError, getAccountTimeline, getDashboard, getHealth, getTimeline } from './api'
+import type { TimelineQuery } from './api'
+import { ApiError, getAccountTimeline, getDashboard, getHealth, getTimeline, getTimelineOverlay } from './api'
 import { AppShell } from './components/AppShell'
 import { NavMonitorPage } from './pages/NavMonitorPage'
 import { WorkspacePage } from './pages/WorkspacePage'
@@ -67,6 +68,7 @@ import type {
   SourceNavReport,
   TimelineChartMode,
   TimelineSnapshot,
+  TimelineOverlay,
 } from './types'
 
 const UI_POLL_MS = 15_000
@@ -257,6 +259,7 @@ function NavPage() {
   const [timelineError, setTimelineError] = useState<string | null>(null)
   const [navPricingLoading, setNavPricingLoading] = useState(false)
   const [timelineRevision, setTimelineRevision] = useState(0)
+  const timelineView = chartMode === 'symbols' ? 'symbols' : chartMode === 'strategies' || chartMode === 'strategyFunding' ? 'strategies' : 'portfolio'
   const initialized = useRef(false)
   const scopeReady = Boolean(dashboard?.report.sources.some((source) => source.source_id === scope))
 
@@ -356,40 +359,68 @@ function NavPage() {
         : [...previous.report.selected_symbols].sort().join(',') === [...selectedSymbols].sort().join(','))
       ? previous : null)
     const loadTimeline = pnlMode === 'account' ? getAccountTimeline : getTimeline
-    const load = (includeTheoretical: boolean) => loadTimeline({
-      startMs,
-      endMs,
-      sourceIds: [scope],
-      symbols: selectedSymbols ?? undefined,
-      maxPoints: 3_500,
-      includeTheoretical,
-      signal: controller.signal,
-    })
-      .then((next) => {
+    const request: TimelineQuery = {
+      startMs, endMs, sourceIds: [scope], symbols: selectedSymbols ?? undefined,
+      maxPoints: 3_500, view: timelineView, signal: controller.signal,
+    }
+    let factual: TimelineSnapshot | null = null
+    let overlay: TimelineOverlay | null = null
+    let overlayStarted = false
+    let fundingRetry: number | undefined
+    const publish = () => {
+      if (!factual || controller.signal.aborted) return
+      setTimeline(overlay ? {
+        ...factual, theoretical: overlay.theoretical, execution_slippage: overlay.execution_slippage,
+        generation_duration_ms: factual.generation_duration_ms + overlay.generation_duration_ms,
+      } : factual)
+    }
+    const adjustRange = (references: TimelineSnapshot['theoretical']) => {
+      const nextStart = references.some(reference => reference.points.length > 0) ? startMs
+        : retainedQuickRangeStartMs(activeRange, startMs, endMs,
+          references[0]?.available_from_us ?? null, references[0]?.execution_window_secs ?? 0)
+      if (nextStart === startMs) return false
+      setRetainedRangeAdjusted(true)
+      setStartInput(toDatetimeLocal(nextStart))
+      setStartMs(nextStart)
+      return true
+    }
+    const loadOverlay = async () => {
+      try {
+        const next = await getTimelineOverlay(request, pnlMode === 'account')
+        if (controller.signal.aborted || adjustRange(next.theoretical)) return
+        overlay = next
+        publish()
+        if (next.theoretical.some(reference => reference.loading)) retryTimer = window.setTimeout(() => void loadOverlay(), 10_000)
+      } catch (reason) {
         if (controller.signal.aborted) return
-        const nextStart = next.theoretical.some((reference) => reference.points.length > 0)
-          ? startMs
-          : retainedQuickRangeStartMs(
-              activeRange,
-              startMs,
-              endMs,
-              next.theoretical[0]?.available_from_us ?? null,
-              next.theoretical[0]?.execution_window_secs ?? 0,
-            )
-        if (nextStart !== startMs) {
-          setRetainedRangeAdjusted(true)
-          setStartInput(toDatetimeLocal(nextStart))
-          setStartMs(nextStart)
-          return
+        const loading = reason instanceof ApiError && reason.navPricing?.loading === true
+        if (factual) {
+          overlay = {
+            generated_at_us: factual.generated_at_us, generation_duration_ms: 0,
+            theoretical: factual.theoretical.map(reference => ({
+              ...reference, loading, unavailable_reason: '理论分析暂不可用，请稍后重试',
+            })),
+            execution_slippage: factual.execution_slippage,
+          }
+          publish()
         }
-        setTimeline(next)
+        if (loading) retryTimer = window.setTimeout(() => void loadOverlay(), 10_000)
+      }
+    }
+    const load = async () => {
+      try {
+        const next = await loadTimeline({ ...request, includeTheoretical: false })
+        if (controller.signal.aborted || adjustRange(next.theoretical)) return
+        factual = next
+        publish()
         setNavPricingLoading(false)
         setTimelineError(null)
-        if (!includeTheoretical && next.theoretical.some((reference) => reference.loading)) void load(true)
-        else if (next.theoretical.some((reference) => reference.loading) || next.estimated_funding?.loading) retryTimer = window.setTimeout(() => void load(true), 10_000)
-      })
-      .catch((reason: unknown) => {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        if (!overlayStarted && next.theoretical.some(reference => reference.loading)) {
+          overlayStarted = true
+          void loadOverlay()
+        }
+        if (next.estimated_funding?.loading) fundingRetry = window.setTimeout(() => void load(), 10_000)
+      } catch (reason) {
         if (controller.signal.aborted) return
         if (reason instanceof ApiError && reason.navPricing) {
           setNavPricingLoading(reason.navPricing.loading)
@@ -401,19 +432,20 @@ function NavPage() {
             setStartMs(nextStart)
             return
           }
-          if (reason.navPricing.loading) retryTimer = window.setTimeout(() => void load(false), 10_000)
+          if (reason.navPricing.loading) fundingRetry = window.setTimeout(() => void load(), 10_000)
         }
         setTimelineError(reason instanceof Error ? reason.message : String(reason))
-      })
-      .finally(() => {
+      } finally {
         if (!controller.signal.aborted) setTimelineLoading(false)
-      })
-    void load(false)
+      }
+    }
+    void load()
     return () => {
       controller.abort()
       window.clearTimeout(retryTimer)
+      window.clearTimeout(fundingRetry)
     }
-  }, [activeRange, endMs, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision])
+  }, [activeRange, endMs, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision, timelineView])
 
   const selectedSource = useMemo(
     () => dashboard?.report.sources.find((source) => source.source_id === scope),

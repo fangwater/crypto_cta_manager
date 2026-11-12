@@ -7,7 +7,8 @@ function hasNonzeroValues(values: Record<string, number>, ignoredKey?: string) {
 /** Hide only empty window series. Historical fills, carried exposure and even
  * offsetting or very small funding must keep their original strategy identity. */
 export function hasNavStrategyActivity(strategy: StrategyNavTimeline, funding?: StrategyFundingEstimate) {
-  return strategy.symbol_count !== 0
+  return strategy.has_activity === true
+    || strategy.symbol_count !== 0
     || strategy.gross_position_value_quote !== 0
     || strategy.net_position_value_quote !== 0
     || hasNonzeroValues({ ...strategy.summary })

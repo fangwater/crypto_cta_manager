@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package cta.nav;
+
+import "google/protobuf/struct.proto";
+
+// Small report/coverage/summary objects retain their existing property names.
+// All time-series points are encoded below, never inside metadata or JSON blobs.
+message Timeline {
+  google.protobuf.Struct metadata = 1;
+  repeated TimeAxis axes = 2;
+  repeated Curve curves = 3;
+}
+
+// Exact microseconds. Curves with the same samples reference one shared axis.
+message TimeAxis {
+  sint64 start_us = 1;
+  repeated sint64 deltas_us = 2 [packed = true];
+}
+
+enum CurveKind {
+  CURVE_KIND_UNSPECIFIED = 0;
+  CURVE_KIND_PORTFOLIO = 1;
+  CURVE_KIND_SYMBOL = 2;
+  CURVE_KIND_STRATEGY = 3;
+  CURVE_KIND_ACTUAL_FUNDING = 4;
+  CURVE_KIND_ESTIMATED_FUNDING = 5;
+  CURVE_KIND_STRATEGY_FUNDING = 6;
+  CURVE_KIND_THEORETICAL = 7;
+}
+
+enum Metric {
+  METRIC_UNSPECIFIED = 0;
+  METRIC_REALIZED_BEFORE_FEE = 1;
+  METRIC_FLOATING_PNL = 2;
+  METRIC_TRADING_FEE = 3;
+  METRIC_NAV_BEFORE_FEE = 4;
+  METRIC_NAV_AFTER_FEE = 5;
+  METRIC_GROSS_POSITION = 6;
+  METRIC_NET_POSITION = 7;
+  METRIC_FUNDING_INCOME = 8;
+  METRIC_TOTAL_NAV_BEFORE_FEE = 9;
+  METRIC_TOTAL_NAV_AFTER_FEE = 10;
+}
+
+message Curve {
+  CurveKind kind = 1;
+  // Symbol, strategy, or index into theoretical metadata; empty for portfolio.
+  string key = 2;
+  uint32 axis = 3;
+  repeated Column columns = 4;
+}
+
+message Column {
+  Metric metric = 1;
+  // A constant column has one value; otherwise exactly the axis sample count.
+  repeated double values = 2 [packed = true];
+}

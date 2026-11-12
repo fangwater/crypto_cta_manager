@@ -304,7 +304,7 @@ export interface DashboardSnapshot {
   report: NavReport
 }
 
-export interface NavTimelinePoint extends NavTotals {
+export interface NavTimelinePoint extends Pick<NavTotals, ActualNavSeriesKey> {
   ts_us: number
   gross_position_value_quote: number
   net_position_value_quote: number
@@ -316,6 +316,7 @@ export interface SymbolNavTimeline {
 }
 
 export interface StrategyNavTimeline {
+  has_activity?: boolean
   strategy: string
   symbol_count: number
   gross_position_value_quote: number
@@ -350,6 +351,8 @@ export interface TimelineSnapshot {
   funding?: FundingTimeline
   estimated_funding?: FundingEstimate
 }
+
+export type TimelineOverlay = Pick<TimelineSnapshot, 'generated_at_us' | 'generation_duration_ms' | 'theoretical' | 'execution_slippage'>
 
 export interface ExecutionSlippage {
   start_ts_us: number

@@ -1,3 +1,6 @@
+import { fetchTimeline } from './lib/timelineRequest'
+import type { TimelinePayload } from './lib/timelineProto'
+import type { TimelineOverlay } from './types'
 import type { AccountOverview } from './lib/accountOverview'
 import { normalizeTargetMap } from './lib/targetPositions'
 import { serverClock } from './lib/serverClock'
@@ -217,6 +220,7 @@ export function getHealth(signal?: AbortSignal) {
 }
 
 export interface TimelineQuery {
+  view?: 'portfolio' | 'symbols' | 'strategies'
   includeTheoretical?: boolean
   startMs?: number
   endMs?: number
@@ -227,14 +231,24 @@ export interface TimelineQuery {
 }
 
 export function getTimeline(query: TimelineQuery) {
-  return getTimelineFromPath('/timeline', query)
+  return getTimelineReport('/timeline', query)
 }
 
 export function getAccountTimeline(query: TimelineQuery) {
-  return getTimelineFromPath('/account-timeline', query)
+  return getTimelineReport('/account-timeline', query)
 }
 
-function getTimelineFromPath(path: string, query: TimelineQuery) {
+async function getTimelineReport(path: string, query: TimelineQuery): Promise<TimelineSnapshot> {
+  const payload = await getTimelineFromPath(path, query, query.view ?? 'portfolio')
+  if (!payload.report) throw new Error('净值响应缺少报表')
+  return payload as TimelineSnapshot
+}
+
+export async function getTimelineOverlay(query: TimelineQuery, account: boolean): Promise<TimelineOverlay> {
+  return getTimelineFromPath(account ? '/account-timeline' : '/timeline', query, 'theoretical')
+}
+
+async function getTimelineFromPath(path: string, query: TimelineQuery, view: string): Promise<TimelinePayload> {
   const params = new URLSearchParams()
   if (query.startMs !== undefined) params.set('startMs', String(query.startMs))
   if (query.endMs !== undefined) params.set('endMs', String(query.endMs))
@@ -242,9 +256,10 @@ function getTimelineFromPath(path: string, query: TimelineQuery) {
   if (query.symbols?.length) params.set('symbols', query.symbols.join(','))
   params.set('maxPoints', String(query.maxPoints ?? 3_000))
   if (query.includeTheoretical !== undefined) params.set('includeTheoretical', String(query.includeTheoretical))
-  return requestJson<TimelineSnapshot>(`${path}?${params}`, {
-    signal: query.signal,
-  })
+  params.set('view', view)
+  return fetchTimeline(`${API_BASE}${path}?${params}`, query.signal,
+    (message, status, pricing) => new ApiError(message, status, pricing),
+    value => serverClock.observe(value))
 }
 
 export interface AcquisitionCostQuery {

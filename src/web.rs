@@ -55,6 +55,7 @@ mod publication;
 #[cfg(test)]
 mod publication_tests;
 mod target_state;
+mod timeline_proto;
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");
@@ -266,6 +267,7 @@ struct TimelineQuery {
     max_points: Option<usize>,
     include_theoretical: Option<bool>,
     interval_hours: Option<u32>,
+    view: Option<timeline_proto::View>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -830,6 +832,14 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
             },
             auth_middleware,
         ))
+        .layer(
+            tower_http::compression::CompressionLayer::new()
+                .gzip(true)
+                .compress_when(tower_http::compression::predicate::Predicate::and(
+                    tower_http::compression::predicate::DefaultPredicate::new(),
+                    timeline_proto::compressible,
+                )),
+        )
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -1916,24 +1926,54 @@ async fn timeline(
     State(state): State<WebState>,
     Query(query): Query<TimelineQuery>,
     Extension(visible): Extension<VisibleSources>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let snapshot = match rebuild_timeline_snapshot(state, query, true, visible.0).await? {
-        Ok(snapshot) => snapshot,
-        Err(response) => return Ok(response),
-    };
-    Ok((NO_STORE, Json(snapshot)).into_response())
+    browser_timeline_response(state, query, true, visible.0, headers).await
 }
 
 async fn account_timeline(
     State(state): State<WebState>,
     Query(query): Query<TimelineQuery>,
     Extension(visible): Extension<VisibleSources>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let snapshot = match rebuild_timeline_snapshot(state, query, false, visible.0).await? {
+    browser_timeline_response(state, query, false, visible.0, headers).await
+}
+
+async fn browser_timeline_response(
+    state: WebState,
+    query: TimelineQuery,
+    allocation: bool,
+    visible: BTreeSet<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let protobuf = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .any(|v| v.trim() == timeline_proto::CONTENT_TYPE)
+        });
+    let view = query.view.unwrap_or_default();
+    let snapshot = match rebuild_timeline_snapshot(state, query, allocation, visible).await? {
         Ok(snapshot) => snapshot,
         Err(response) => return Ok(response),
     };
-    Ok((NO_STORE, Json(snapshot)).into_response())
+    if !protobuf {
+        return Ok((NO_STORE, Json(snapshot)).into_response());
+    }
+    let bytes = tokio::task::spawn_blocking(move || timeline_proto::encode(&snapshot, view))
+        .await
+        .context("browser NAV encoding task failed")??;
+    Ok((
+        NO_STORE,
+        [
+            (header::CONTENT_TYPE, timeline_proto::CONTENT_TYPE),
+            (header::VARY, "Accept"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn account_pnl_arrow(
@@ -1985,6 +2025,10 @@ async fn rebuild_timeline_snapshot(
     use_strategy_allocation: bool,
     visible_source_ids: BTreeSet<String>,
 ) -> Result<std::result::Result<TimelineSnapshot, Response>, ApiError> {
+    let overlay_only = query.view == Some(timeline_proto::View::Theoretical);
+    if overlay_only {
+        query.include_theoretical = Some(true);
+    }
     let requested_source_ids = parse_csv(query.source_ids.as_deref(), false);
     if requested_source_ids
         .iter()
@@ -2165,7 +2209,9 @@ async fn rebuild_timeline_snapshot(
                 &s.id == id && matches!(s.venue.as_str(), "binance-futures" | "okex-futures")
             })
         });
-    let estimated_funding = if supported {
+    let estimated_funding = if overlay_only {
+        Default::default()
+    } else if supported {
         let (cache, estimate_report, symbols) = tokio::task::spawn_blocking(move || {
             let symbols =
                 funding_timelines.funding_symbols(&estimate_report, use_strategy_allocation);
@@ -2214,7 +2260,11 @@ async fn rebuild_timeline_snapshot(
     };
     // Keep local statements visible even when public estimates cannot cover the
     // range. These remain account-owned and are never allocated to strategies.
-    let funding = state.funding.timeline(&report);
+    let funding = if overlay_only {
+        Default::default()
+    } else {
+        state.funding.timeline(&report)
+    };
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     info!(
         actual_duration_ms,
@@ -5999,6 +6049,7 @@ mod tests {
                 State(state.clone()),
                 Query(query()),
                 Extension(VisibleSources(visible.clone())),
+                HeaderMap::new(),
             )
             .await
             .unwrap_or_else(|error| panic!("NAV page request failed: {}", error.0));
@@ -6208,9 +6259,10 @@ mod tests {
                     });
                     let visible = Extension(VisibleSources(BTreeSet::from([id.clone()])));
                     let response = if account {
-                        account_timeline(State(state.clone()), query, visible).await
+                        account_timeline(State(state.clone()), query, visible, HeaderMap::new())
+                            .await
                     } else {
-                        timeline(State(state.clone()), query, visible).await
+                        timeline(State(state.clone()), query, visible, HeaderMap::new()).await
                     }
                     .unwrap_or_else(|error| panic!("timeline handler failed: {}", error.0));
                     assert_eq!(response.status(), StatusCode::OK);
