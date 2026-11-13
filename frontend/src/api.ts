@@ -63,7 +63,7 @@ export interface AuthStatus {
   user: AuthUser | null
 }
 
-async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   Object.assign(headers, options.headers)
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'

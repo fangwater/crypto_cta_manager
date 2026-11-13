@@ -859,6 +859,17 @@ pub async fn upsert_position_strategy(
             );
         }
     }
+    store_position_strategy(pool, request, created_by_user_id, updated_at_us).await
+}
+
+/// Persist a strategy after its market-specific validation and authorization.
+/// Crypto and domestic targets keep distinct symbol and quantity validators.
+pub(crate) async fn store_position_strategy(
+    pool: &PgPool,
+    request: &SavePositionStrategyRequest,
+    created_by_user_id: Option<i64>,
+    updated_at_us: i64,
+) -> Result<PositionStrategy> {
     let targets = serde_json::to_value(&request.targets)?;
     let symbol_order_strategy_overrides =
         serde_json::to_value(&request.symbol_order_strategy_overrides)?;
