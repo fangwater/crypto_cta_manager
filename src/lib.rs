@@ -20,6 +20,7 @@ pub mod market_data;
 pub mod market_rules;
 pub mod model;
 pub mod monitor;
+pub mod native_futures;
 pub mod nav;
 pub mod order_config;
 pub mod position_archive;

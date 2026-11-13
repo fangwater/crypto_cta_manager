@@ -1,0 +1,19 @@
+# Independent Manager storage. This process never loads a trading SDK.
+secondary_root = "/home/operator/cn_futures_cta_manager/data/secondaries"
+stale_secs = 30
+recent_rows = 200
+
+[database]
+url_env = "CN_FUTURES_CTA_DATABASE_URL"
+max_connections = 8
+
+# Optional host-enforced account visibility boundary, including administrators:
+# [source_viewers]
+# yida_sim01 = ["operator"]
+
+[[sources]]
+id = "yida_sim01"
+account = "易达仿真"
+adapter = "yida"
+rocksdb_path = "/home/operator/yida_sim01/flow/persist_manager"
+enabled = true

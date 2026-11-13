@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:cn-futures": "tsc -b && vite build --mode cn-futures",
     "test:acquisition": "node --test tests/acquisitionAnalysis.test.mjs",
     "lint": "oxlint src vite.config.ts",
     "generate:nav-proto": "protoc -I ../src/web --plugin=protoc-gen-es=node_modules/.bin/protoc-gen-es --es_out=src/generated --es_opt=target=js+dts ../src/web/timeline.proto",

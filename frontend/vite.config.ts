@@ -4,9 +4,17 @@ import tailwindcss from '@tailwindcss/vite'
 
 const apiTarget = process.env.CTA_API_TARGET ?? 'http://127.0.0.1:18201'
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   base: '/manager/',
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), {
+    name: 'manager-domain-title',
+    transformIndexHtml: {
+      order: 'pre',
+      handler: (html: string) => mode === 'cn-futures'
+        ? html.replace('<title>CTA NAV</title>', '<title>国内期货 CTA</title>')
+          .replace('/src/main.tsx', '/src/native/main.tsx') : html,
+    },
+  }],
   server: {
     host: '127.0.0.1',
     port: 5174,
@@ -18,4 +26,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))

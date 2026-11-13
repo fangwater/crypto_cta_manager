@@ -2,7 +2,18 @@
 
 ## Project Scope
 
-`crypto_cta_manager` is an independent Rust project for Exec/CTA management and
+`cn_futures_cta_manager` is a Git-history-preserving fork of `crypto_cta_manager`.
+The native entry point is `cn_futures_web`, with code under `src/native_futures/`
+and `frontend/src/native/`. Keep the common library/package names and upstream
+modules stable so changes can be merged. Use the shared auth and strategy tables
+in a SEPARATE Manager database, with `CN_FUTURES_CTA_DATABASE_URL`.
+Native reads use separate RocksDB secondaries; never write execution stores,
+load trading SDKs, publish execution targets, submit orders or infer fill/strategy
+identity. Preserve native trading days, groups, lots and open/close semantics.
+CTP execution is forbidden on this development machine and all intranet hosts,
+including SDK initialization, probes, tests and offline SDK runs. Compilation is allowed.
+
+The upstream `crypto_cta_manager` is an independent Rust project for Exec/CTA management and
 read-only order-history analysis. It is intentionally separate from
 `/home/fanghaizhou/crypto_nav_manager`, whose current responsibility is
 NAV-oriented order/history collection. Large Exec-specific changes belong here;
@@ -23,7 +34,7 @@ to `mkt_signal`.
 
 ## Working Directory
 
-Work directly in `/home/fanghaizhou/crypto_cta_manager`. Make edits, run checks,
+Work directly in `/home/fanghaizhou/cn_futures_cta_manager`. Make edits, run checks,
 and prepare deployments in this existing checkout. Do not create additional Git
 worktrees or alternate project checkouts unless the operator explicitly requests
 one. Preserve existing and concurrent edits; merge overlapping changes instead
