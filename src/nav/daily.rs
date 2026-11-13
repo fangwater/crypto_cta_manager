@@ -329,13 +329,22 @@ pub(super) fn load_history_window(
     from: Option<i64>,
     limits: Option<&BTreeMap<String, Option<Vec<u8>>>>,
 ) -> Result<NavSourceHistory> {
-    load_history_window_from(source, from, limits, None)
+    load_history_window_from(source, from, limits, None, None)
 }
+
+pub(super) fn load_fill_history(
+    source: &SourceConfig,
+    symbols: &[String],
+) -> Result<NavSourceHistory> {
+    load_history_window_from(source, None, None, None, Some(symbols))
+}
+
 fn load_history_window_from(
     source: &SourceConfig,
     from: Option<i64>,
     limits: Option<&BTreeMap<String, Option<Vec<u8>>>>,
     uniform_start: Option<Vec<u8>>,
+    fill_symbols: Option<&[String]>,
 ) -> Result<NavSourceHistory> {
     if !source.rocksdb_path.join("CURRENT").is_file() {
         return Ok(NavSourceHistory::default());
@@ -381,7 +390,18 @@ fn load_history_window_from(
             }
             if cf == crate::model::UNIFORM_ORDERS_CF {
                 let event: Arc<NavEvent> = decode_uniform_order(key, value)?.into();
-                if rapidx || from.is_none_or(|bound| fifo_ts_us(&event) >= bound) {
+                // Recovery requires RapidX lifecycle rows. Native diagnostic
+                // replays can discard non-fills before allocating their history.
+                if rapidx
+                    || ((fill_symbols.is_none_or(|symbols| {
+                        event.amount_update != 0.0
+                            && (symbols.is_empty()
+                                || symbols.contains(&crate::exec_routing::target_symbol(
+                                    &event.symbol,
+                                    event.venue_code,
+                                )))
+                    })) && from.is_none_or(|bound| fifo_ts_us(&event) >= bound))
+                {
                     wanted.insert((
                         event.symbol.clone(),
                         event.venue_code,
@@ -411,6 +431,14 @@ fn load_history_window_from(
         fill_recovery::resolve(source, &events, &mut Default::default())?.unwrap_or(events);
     let events = events
         .into_iter()
+        .filter(|e| {
+            fill_symbols.is_none_or(|symbols| {
+                e.amount_update != 0.0
+                    && (symbols.is_empty()
+                        || symbols
+                            .contains(&crate::exec_routing::target_symbol(&e.symbol, e.venue_code)))
+            })
+        })
         .filter(|e| from.is_none_or(|bound| fifo_ts_us(e) >= bound))
         .collect();
     Ok(NavSourceHistory {
@@ -705,6 +733,7 @@ impl NavTimelineCache {
                 from,
                 Some(&current.read_limits),
                 entry.as_ref().and_then(|e| e.uniform_scan_from.clone()),
+                None,
             )?;
             history.allocations = current.allocations.clone();
             history.events = history

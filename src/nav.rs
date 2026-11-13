@@ -2080,6 +2080,24 @@ pub fn load_nav_source_histories(
     Ok(histories)
 }
 
+/// Maintenance replays need factual fills and raw liquidity evidence, but not
+/// native zero-fill lifecycle rows. Keep the live history/index loader unchanged.
+pub fn load_nav_source_fill_histories(
+    config: &AppConfig,
+    selected_source_ids: &[String],
+    selected_symbols: &[String],
+) -> Result<NavSourceHistories> {
+    select_sources(config, selected_source_ids)?
+        .into_iter()
+        .map(|source| {
+            Ok((
+                source.id.clone(),
+                daily::load_fill_history(source, selected_symbols)?,
+            ))
+        })
+        .collect()
+}
+
 /// How far behind the per-column-family checkpoint each incremental scan
 /// restarts, so records committed slightly out of key order are still read.
 const NAV_HISTORY_SCAN_OVERLAP_US: i64 = 300 * 1_000_000;
@@ -4242,6 +4260,102 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fill_only_maintenance_history_preserves_fifo_and_allocation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut source = source("trade01", Some(-0.0001));
+        source.rocksdb_path = temp.path().to_owned();
+        let mut maker = strategy_event_at(200, 200, "BTCUSDT", 1, 1, 100.0, 0.7, "alpha");
+        maker.fill_liquidity = Some(crate::model::FillLiquidity::Maker);
+        write_events(
+            temp.path(),
+            &[
+                strategy_event_at(100, 100, "BTCUSDT", 1, 1, 100.0, 0.0, "alpha"),
+                maker,
+                strategy_event_at(300, 300, "BTCUSDT", 1, 2, 110.0, 0.2, "alpha"),
+                strategy_event_at(
+                    400,
+                    400,
+                    "BTCUSDT",
+                    1,
+                    2,
+                    120.0,
+                    0.1,
+                    "SYSTEM_POSITION_CLOSE",
+                ),
+            ],
+        );
+        let config = app_config(vec![source]);
+        let full = load_nav_source_histories(&config, &[]).unwrap();
+        let fills = load_nav_source_fill_histories(&config, &[], &[]).unwrap();
+        assert_eq!(full["trade01"].events.len(), 4);
+        assert_eq!(fills["trade01"].events.len(), 3);
+        let strategies = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            strategy_position_snapshot("trade01", 150, vec![("alpha", "BTCUSDT", 2.0, 90.0)]),
+        )]));
+        let build = |histories| {
+            NavTimelineCache::build(
+                config.clone(),
+                Arc::new(BTreeMap::new()),
+                strategies.clone(),
+                Arc::new(histories),
+            )
+            .unwrap()
+        };
+        let full = build(full);
+        let fills = build(fills);
+        assert_eq!(
+            serde_json::to_value(full.allocation_audit("trade01", 500).unwrap()).unwrap(),
+            serde_json::to_value(fills.allocation_audit("trade01", 500).unwrap()).unwrap()
+        );
+        let request = NavTimelineRequest {
+            start_ts_us: Some(150),
+            end_ts_us: 500,
+            selected_source_ids: vec!["trade01".into()],
+            selected_symbols: vec![],
+            max_points: 100,
+            tick_interval_us: None,
+        };
+        assert_eq!(
+            full.rebuild(request.clone(), true).unwrap(),
+            fills.rebuild(request.clone(), true).unwrap()
+        );
+        write_events(
+            temp.path(),
+            &[strategy_event_at(
+                450, 450, "ETHUSDT", 1, 1, 200.0, 3.0, "beta",
+            )],
+        );
+        let scoped =
+            build(load_nav_source_fill_histories(&config, &[], &["BTCUSDT".into()]).unwrap());
+        assert_eq!(
+            fills.rebuild(request.clone(), true).unwrap(),
+            scoped.rebuild(request, true).unwrap()
+        );
+        // Filtering lifecycle rows must not hide corrupt fill quantities.
+        write_events(
+            temp.path(),
+            &[strategy_event_at(
+                460, 460, "BTCUSDT", 1, 1, 100.0, -1.0, "alpha",
+            )],
+        );
+        for histories in [
+            load_nav_source_histories(&config, &[]).unwrap(),
+            load_nav_source_fill_histories(&config, &[], &["BTCUSDT".into()]).unwrap(),
+        ] {
+            assert!(
+                NavTimelineCache::build(
+                    config.clone(),
+                    Arc::new(BTreeMap::new()),
+                    strategies.clone(),
+                    Arc::new(histories),
+                )
+                .is_err()
+            );
+        }
+    }
+
     fn write_raw_uniform_record(path: &std::path::Path, record_key: &str, payload: &[u8]) {
         let db = open_uniform_orders_db(path);
         let column_family = db.cf_handle(UNIFORM_ORDERS_CF).unwrap();
@@ -4416,6 +4530,16 @@ mod tests {
         assert_eq!(
             load_nav_source_histories(&config, &[]).unwrap()["rx01"].events(),
             after["rx01"].events()
+        );
+        let recovered_fills = load_nav_source_fill_histories(&config, &[], &[]).unwrap();
+        assert_eq!(
+            recovered_fills["rx01"].events(),
+            &after["rx01"]
+                .events()
+                .iter()
+                .filter(|e| e.amount_update > 0.0)
+                .cloned()
+                .collect::<im::Vector<_>>()
         );
     }
 

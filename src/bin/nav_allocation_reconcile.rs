@@ -13,6 +13,10 @@ struct Args {
     config: PathBuf,
     #[arg(long)]
     source: String,
+    /// Limit maintenance replay and verification to these markets (repeatable).
+    /// Every candidate and existing correction market must be included.
+    #[arg(long = "symbol")]
+    symbols: Vec<String>,
     #[arg(long)]
     snapshot_json: Option<PathBuf>,
     /// Read-only Manager RocksDB holding the existing minute candles.
@@ -75,9 +79,22 @@ async fn main() -> Result<()> {
     if let Some(snapshot) = postgres::load_latest_position_snapshot(&pool, &args.source).await? {
         snapshots.insert(args.source.clone(), snapshot);
     }
-    let mut histories = nav::load_nav_source_histories(&config, &[args.source.clone()])?;
+    let mut histories =
+        nav::load_nav_source_fill_histories(&config, &[args.source.clone()], &args.symbols)?;
     // Schema must be installed explicitly before the maintenance tool is used.
-    nav::allocation::attach(&mut histories, &nav::allocation::load(&pool).await?);
+    let existing = nav::allocation::load(&pool).await?;
+    ensure!(
+        args.symbols.is_empty()
+            || existing
+                .get(&args.source)
+                .is_none_or(|rows| rows.iter().all(|row| {
+                    row.positions
+                        .iter()
+                        .all(|p| args.symbols.contains(&p.symbol))
+                })),
+        "scoped replay must include every existing allocation market"
+    );
+    nav::allocation::attach(&mut histories, &existing);
     let cache = nav::NavTimelineCache::build(
         config.clone(),
         Arc::new(snapshots.clone()),
@@ -308,6 +325,14 @@ async fn main() -> Result<()> {
         "candidate source mismatch"
     );
     candidate.validate()?;
+    ensure!(
+        args.symbols.is_empty()
+            || candidate
+                .positions
+                .iter()
+                .all(|p| args.symbols.contains(&p.symbol)),
+        "scoped replay must include every candidate market"
+    );
     let audit = cache.allocation_audit(&args.source, candidate.snapshot_ts_us)?;
     for p in &candidate.positions {
         let before = audit
@@ -350,7 +375,7 @@ async fn main() -> Result<()> {
             start_ts_us: Some(start),
             end_ts_us: end,
             selected_source_ids: vec![args.source.clone()],
-            selected_symbols: vec![],
+            selected_symbols: args.symbols.clone(),
             max_points: 3500,
             tick_interval_us: None,
         };
@@ -379,7 +404,9 @@ async fn main() -> Result<()> {
     if let Some(path) = &args.verification_json {
         std::fs::write(
             path,
-            serde_json::to_vec(&json!({"before":audit,"after":after,"windows":verification}))?,
+            serde_json::to_vec(
+                &json!({"verified_symbols":args.symbols,"before":audit,"after":after,"windows":verification}),
+            )?,
         )?;
     }
     if args.apply {

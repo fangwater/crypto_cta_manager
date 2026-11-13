@@ -20,6 +20,10 @@ struct Args {
     #[arg(long = "symbol")]
     symbols: Vec<String>,
 
+    /// Restrict output to these attributed strategies (repeatable).
+    #[arg(long = "strategy")]
+    strategies: Vec<String>,
+
     /// Snapshot anchor in microseconds. Fills at or before it are "pre-anchor".
     #[arg(long)]
     anchor_ts_us: Option<i64>,
@@ -31,23 +35,28 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let mut records =
-        rocks_source::read_available_column_families(&args.rocksdb_path, &[UNIFORM_ORDERS_CF])?;
-    let records = records
-        .remove(UNIFORM_ORDERS_CF)
-        .context("uniform_orders column family missing")?;
-
     let mut events = Vec::new();
-    for record in records {
-        let event = decode_uniform_order(&record.key, &record.value)?;
-        if event.amount_update <= 0.0 {
-            continue;
-        }
-        if !args.symbols.is_empty() && !args.symbols.iter().any(|s| s == &event.symbol) {
-            continue;
-        }
-        events.push(event);
-    }
+    let heads = rocks_source::visit_column_families_from(
+        &args.rocksdb_path,
+        &[(UNIFORM_ORDERS_CF.to_string(), None)],
+        |_, key, value| {
+            let event = decode_uniform_order(key, value)?;
+            if event.amount_update <= 0.0
+                || (!args.symbols.is_empty() && !args.symbols.contains(&event.symbol))
+                || (!args.strategies.is_empty()
+                    && !args
+                        .strategies
+                        .contains(&strategy_from_from_key(&event.from_key_text)))
+            {
+                return Ok(());
+            }
+            events.push(event);
+            Ok(())
+        },
+    )?;
+    heads
+        .get(UNIFORM_ORDERS_CF)
+        .context("uniform_orders column family missing")?;
     let fifo_ts = |e: &crypto_cta_manager::model::UniformOrderEvent| {
         if e.update_ts_us > 0 {
             e.update_ts_us
