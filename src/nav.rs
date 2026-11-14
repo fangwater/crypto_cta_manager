@@ -4783,6 +4783,7 @@ mod tests {
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
             funding_rates: Default::default(),
+            archive: Default::default(),
             sources,
         }
     }
@@ -7807,6 +7808,7 @@ mod tests {
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
             funding_rates: Default::default(),
+            archive: Default::default(),
             sources: vec![source],
         };
 

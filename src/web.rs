@@ -179,6 +179,7 @@ pub struct HealthResponse {
     pub pending_target_archives: usize,
     pub pending_target_mirrors: usize,
     pub target_persistence_error: bool,
+    pub position_archive_retained_from_us: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -555,6 +556,14 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let position_archive = Arc::new(PositionArchive::open(manager_db.clone())?);
     let targets = Arc::new(target_state::Targets::default());
     targets.load(&pool, &position_archive).await?;
+    if let Some(socket) = &config.archive.socket {
+        let targets = targets.clone();
+        crate::position_archive::retention::start_socket(
+            position_archive.clone(),
+            socket,
+            move |before| targets.ensure_archive_since(before.0),
+        )?;
+    }
     let klines = Arc::new(KlineStore::from_db(
         manager_db.clone(),
         config.kline.clone(),
@@ -1856,6 +1865,7 @@ async fn health(
         pending_target_archives,
         pending_target_mirrors,
         target_persistence_error,
+        position_archive_retained_from_us: state.position_archive.retention_floor().0,
     };
     (NO_STORE, Json(response))
 }
@@ -2686,6 +2696,19 @@ async fn position_updates(
             ));
         }
     };
+    if state.position_archive.retention_floor() > (1, 0)
+        && after.is_some_and(|cursor| cursor < state.position_archive.retention_floor())
+    {
+        return Ok((
+            StatusCode::GONE,
+            NO_STORE,
+            Json(serde_json::json!({
+                "error": "该游标已转存离线归档，请从在线保留边界重新读取",
+                "retained_from": state.position_archive.retention_floor()
+            })),
+        )
+            .into_response());
+    }
     let limit = query.limit.unwrap_or(DEFAULT_POSITION_UPDATE_PAGE_SIZE);
     if limit == 0 || limit > MAX_POSITION_UPDATE_PAGE_SIZE {
         return Ok(bad_request(format!(
@@ -2719,6 +2742,10 @@ async fn position_updates(
     .context("position update archive read task failed")??;
     let mut response = payload.into_response();
     let headers = response.headers_mut();
+    headers.insert(
+        "x-cta-archive-retained-from-us",
+        HeaderValue::from_str(&state.position_archive.retention_floor().0.to_string()).unwrap(),
+    );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
         header::CONTENT_TYPE,
@@ -6744,6 +6771,7 @@ mod tests {
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
             funding_rates: Default::default(),
+            archive: Default::default(),
             sources: vec![crate::config::SourceConfig {
                 id: "binance_exec_trade01".into(),
                 account: "trade01".into(),
@@ -6835,6 +6863,7 @@ mod tests {
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
             funding_rates: Default::default(),
+            archive: Default::default(),
             sources: vec![source],
         };
         let sources = resolve_sources(&config, &[]).unwrap();

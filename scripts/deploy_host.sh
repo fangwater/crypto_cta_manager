@@ -123,7 +123,7 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
         cd "$ROOT"
         cargo clean -p crypto_cta_manager
         # All hosts use the same bounded FIFO and exact checkpoint codec.
-        cargo build --locked --release --bin cta_web --bin cta_monitor --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot
+        cargo build --locked --release --bin cta_web --bin cta_monitor --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot --bin cta_position_archive
     )
     echo "building frontend locally"
     (
@@ -139,6 +139,7 @@ require_local_file "$LOCAL_RELEASE_DIR/cta_web"
 require_local_file "$LOCAL_RELEASE_DIR/nav_rebuild"
 require_local_file "$LOCAL_RELEASE_DIR/nav_snapshot"
 require_local_file "$LOCAL_RELEASE_DIR/nav_strategy_snapshot"
+require_local_file "$LOCAL_RELEASE_DIR/cta_position_archive"
 require_local_file "$ROOT/frontend/dist/index.html"
 require_local_file "$DEPLOY_DIR/cta-manager.toml"
 require_local_file "$DEPLOY_DIR/crypto-cta-manager-web.service"
@@ -160,7 +161,7 @@ cleanup_local() {
 }
 trap cleanup_local EXIT
 
-BINARIES=(cta_web nav_rebuild nav_snapshot nav_strategy_snapshot)
+BINARIES=(cta_web nav_rebuild nav_snapshot nav_strategy_snapshot cta_position_archive)
 if [[ $MANAGER_ONLY -eq 0 ]]; then
     BINARIES+=(cta_monitor)
 fi

@@ -8,7 +8,7 @@ use crate::theoretical_execution::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,6 +21,10 @@ use inventory::Inventory;
 #[cfg(test)]
 #[path = "theoretical_nav/performance_tests.rs"]
 mod performance_tests;
+
+#[cfg(test)]
+#[path = "theoretical_nav/retention_tests.rs"]
+mod retention_tests;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct TheoreticalNavPoint {
@@ -128,6 +132,7 @@ impl VirtualDelta {
 
 #[derive(Default)]
 struct MarketDeltaIndex {
+    base_quantity: f64,
     positions: Vec<usize>,
     cumulative_quantity: Vec<f64>,
 }
@@ -177,7 +182,8 @@ impl TargetCacheState {
                 let count = index
                     .positions
                     .partition_point(|p| self.deltas[*p].received_at_us <= end);
-                (count != 0).then(|| (market.clone(), count))
+                (count != 0 || clean_zero(index.base_quantity) != 0.0)
+                    .then(|| (market.clone(), count))
             })
             .collect::<BTreeMap<_, _>>();
         let mut has_tail = false;
@@ -276,6 +282,7 @@ impl TheoreticalTargetCache {
         let initial = !self.ready.load(Ordering::Acquire);
         let processed_before = self.processed_messages.load(Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
+        let _retention_guard = self.archive.retention_read();
         let (revision, invalidated) = self
             .archive
             .target_changes_since(state.revision, state.cursor);
@@ -287,6 +294,39 @@ impl TheoreticalTargetCache {
             *state = TargetCacheState::default();
             state.epoch = epoch;
             self.ready.store(false, Ordering::Release);
+        }
+        if state.cursor.is_none() {
+            let (floor, checkpoint) = self.archive.boundary();
+            for ((source_id, binding), mut latest) in checkpoint.latest {
+                if let Some(source) = self
+                    .config
+                    .sources
+                    .iter()
+                    .find(|s| s.enabled && s.id == source_id)
+                {
+                    latest.venue = source.venue.clone();
+                    state.latest.insert((source_id, binding), latest);
+                }
+            }
+            for ((source_id, symbol), quantity) in checkpoint.cumulative {
+                if let Some(source) = self
+                    .config
+                    .sources
+                    .iter()
+                    .find(|s| s.enabled && s.id == source_id)
+                {
+                    let venue =
+                        crate::exec_routing::archived_symbol_market(&source.venue, &symbol)?
+                            .to_string();
+                    state
+                        .markets
+                        .entry((source_id, symbol, venue))
+                        .or_default()
+                        .base_quantity = quantity;
+                }
+            }
+            // The scan excludes its cursor; use the predecessor of the exclusive floor.
+            state.cursor = crate::position_archive::retention::predecessor(floor);
         }
         // Re-read the recent tail. HTTP publications commonly complete out of
         // timestamp order; older late inserts explicitly invalidate the base.
@@ -411,9 +451,12 @@ impl TheoreticalTargetCache {
                             })
                         },
                     );
-                    if nav_start.is_some() && first_index > 0 {
-                        *carry.entry(market.clone()).or_default() +=
-                            index.cumulative_quantity[first_index - 1];
+                    if nav_start.is_some() {
+                        *carry.entry(market.clone()).or_default() += if first_index > 0 {
+                            index.cumulative_quantity[first_index - 1]
+                        } else {
+                            index.base_quantity
+                        };
                     }
                     selected.extend(
                         index.positions[first_index..end_index]
@@ -484,16 +527,7 @@ fn ingest_target(
         let next = LatestTargets {
             position_strategy_name: message.strategy.strategy_name.clone(),
             venue: source.venue.clone(),
-            targets: if let Some(projection) = &account.target_projection {
-                projection
-                    .targets
-                    .iter()
-                    .filter(|(_, t)| clean_zero(t.qty) != 0.0)
-                    .map(|(symbol, target)| (symbol.clone(), clean_zero(target.qty)))
-                    .collect()
-            } else {
-                normalized_scaled_targets(message, account.effective_shares())?
-            },
+            targets: crate::position_archive::normalized_account_targets(message, account)?,
             received_at_us: message.received_at_us,
             update_seq: message.seq,
         };
@@ -532,9 +566,14 @@ fn ingest_target(
                 });
                 let index = state.markets.entry(market).or_default();
                 index.positions.push(position);
-                index
-                    .cumulative_quantity
-                    .push(index.cumulative_quantity.last().copied().unwrap_or(0.0) + quantity);
+                index.cumulative_quantity.push(
+                    index
+                        .cumulative_quantity
+                        .last()
+                        .copied()
+                        .unwrap_or(index.base_quantity)
+                        + quantity,
+                );
             }
         }
         state.latest.insert(key, next);
@@ -1195,16 +1234,16 @@ struct AppliedFill {
     next_lot_seq: i64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct LatestTargets {
-    position_strategy_name: String,
-    venue: String,
-    targets: BTreeMap<String, f64>,
-    received_at_us: i64,
-    update_seq: u32,
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct LatestTargets {
+    pub(crate) position_strategy_name: String,
+    pub(crate) venue: String,
+    pub(crate) targets: BTreeMap<String, f64>,
+    pub(crate) received_at_us: i64,
+    pub(crate) update_seq: u32,
 }
 
-fn normalized_scaled_targets(
+pub(crate) fn normalized_scaled_targets(
     message: &PositionUpdateMsg,
     shares: f64,
 ) -> Result<BTreeMap<String, f64>> {
@@ -1221,7 +1260,10 @@ fn normalized_scaled_targets(
     Ok(targets)
 }
 
-fn target_positions_changed(previous: Option<&LatestTargets>, next: &LatestTargets) -> bool {
+pub(crate) fn target_positions_changed(
+    previous: Option<&LatestTargets>,
+    next: &LatestTargets,
+) -> bool {
     previous.is_none_or(|previous| {
         previous.venue != next.venue || !target_maps_equal(&previous.targets, &next.targets)
     })
@@ -1236,7 +1278,10 @@ fn target_maps_equal(left: &BTreeMap<String, f64>, right: &BTreeMap<String, f64>
         })
 }
 
-fn target_deltas(previous: Option<&LatestTargets>, next: &LatestTargets) -> BTreeMap<String, f64> {
+pub(crate) fn target_deltas(
+    previous: Option<&LatestTargets>,
+    next: &LatestTargets,
+) -> BTreeMap<String, f64> {
     let empty = BTreeMap::new();
     let previous = previous.map(|value| &value.targets).unwrap_or(&empty);
     previous
@@ -1503,7 +1548,7 @@ fn downsample_points(
     sampled
 }
 
-fn clean_zero(value: f64) -> f64 {
+pub(crate) fn clean_zero(value: f64) -> f64 {
     if value.abs() <= ZERO_EPSILON {
         0.0
     } else {

@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly verified CTA signal backup and retention
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=120
+Persistent=true
+Unit=cta-position-archive.service
+
+[Install]
+WantedBy=timers.target

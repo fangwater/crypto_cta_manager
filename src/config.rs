@@ -109,6 +109,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub kline: KlineConfig,
     #[serde(default)]
+    pub archive: ArchiveConfig,
+    #[serde(default)]
     pub monitor: MonitorConfig,
     #[serde(default)]
     pub treasury: TreasuryConfig,
@@ -117,6 +119,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub funding_rates: FundingRateConfig,
     pub sources: Vec<SourceConfig>,
+}
+
+/// Independent, opt-in owner-only signal retention control.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArchiveConfig {
+    pub socket: Option<PathBuf>,
 }
 
 /// Explicit egress selection for BFUSD and BNB asset management.
@@ -752,6 +761,12 @@ impl AppConfig {
             }
         }
         self.kline.validate()?;
+        if let Some(socket) = &self.archive.socket {
+            anyhow::ensure!(
+                socket.is_absolute() && socket.file_name().is_some(),
+                "archive.socket must be an absolute file path"
+            );
+        }
         if self.sources.is_empty() {
             bail!("at least one [[sources]] entry is required");
         }
@@ -1142,6 +1157,7 @@ mod tests {
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
             funding_rates: Default::default(),
+            archive: Default::default(),
             sources,
         }
     }

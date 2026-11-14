@@ -1,0 +1,10 @@
+[Unit]
+Description=Verified CTA position signal offload to powerleader NVMe
+
+[Service]
+Type=oneshot
+UMask=0077
+Nice=15
+IOSchedulingClass=idle
+ExecStart=/usr/bin/python3 /mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager_archives/bin/pull_position_archive.py --config /home/fanghaizhou/.config/crypto-cta-manager/position-archive.toml --apply --max-chunks 32 --compact
+TimeoutStartSec=2h

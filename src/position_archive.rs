@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
+
+pub mod retention;
 
 use anyhow::{Context, Result, bail};
 use rocksdb::{Direction, IteratorMode};
@@ -112,6 +114,26 @@ impl PositionUpdateMsg {
     }
 }
 
+/// Shared normalization for hot replay and durable retention checkpoints.
+pub(crate) fn normalized_account_targets(
+    message: &PositionUpdateMsg,
+    account: &ArchivedPublishedAccount,
+) -> Result<BTreeMap<String, f64>> {
+    if let Some(projection) = &account.target_projection {
+        let mut targets = BTreeMap::new();
+        for (symbol, target) in &projection.targets {
+            anyhow::ensure!(target.qty.is_finite(), "nonfinite projected target");
+            let qty = crate::theoretical_nav::clean_zero(target.qty);
+            if qty != 0.0 {
+                targets.insert(symbol.clone(), qty);
+            }
+        }
+        Ok(targets)
+    } else {
+        crate::theoretical_nav::normalized_scaled_targets(message, account.effective_shares())
+    }
+}
+
 pub fn published_account(
     source_id: impl Into<String>,
     binding_name: impl Into<String>,
@@ -150,6 +172,7 @@ fn archive_source(source: SourceFactualPositions) -> ArchivedSourcePositions {
 #[derive(Default)]
 struct TargetWrites {
     revision: u64,
+    retention_revision: u64,
     discarded_late_revision: u64,
     late: VecDeque<(u64, (i64, u32))>,
 }
@@ -158,6 +181,8 @@ pub struct PositionArchive {
     db: ManagerDb,
     last_key: Mutex<(i64, u32)>,
     target_writes: Mutex<TargetWrites>,
+    retention: Mutex<retention::RetentionState>,
+    retention_gate: RwLock<()>,
 }
 
 impl PositionArchive {
@@ -169,7 +194,8 @@ impl PositionArchive {
 
     pub fn open(db: ManagerDb) -> Result<Self> {
         db.ensure_column_family(POSITION_UPDATES_CF)?;
-        let last_key = latest_key(&db)?.unwrap_or((0, 0));
+        let retention = retention::RetentionState::load(&db)?;
+        let last_key = latest_key(&db)?.unwrap_or((0, 0)).max(retention.head);
         info!(
             path = %db.path().display(),
             cf = POSITION_UPDATES_CF,
@@ -181,6 +207,8 @@ impl PositionArchive {
             db,
             last_key: Mutex::new(last_key),
             target_writes: Mutex::new(TargetWrites::default()),
+            retention: Mutex::new(retention),
+            retention_gate: RwLock::new(()),
         })
     }
 
@@ -239,6 +267,10 @@ impl PositionArchive {
         mut message: PositionUpdateMsg,
         positions: Vec<SourceFactualPositions>,
     ) -> Result<()> {
+        let _sequence = self.last_key.lock().unwrap();
+        if (message.received_at_us, message.seq) < self.retention.lock().unwrap().sealed {
+            return Ok(());
+        }
         message.factual_positions = positions.into_iter().map(archive_source).collect();
         let handle = self
             .db
@@ -312,6 +344,10 @@ impl PositionArchive {
             }
             bail!("current target has no matching atomic archive event");
         }
+        anyhow::ensure!(
+            (received_at_us, 0) >= self.retention.lock().unwrap().sealed,
+            "historical target is inside the sealed archive range"
+        );
         let seq = if received_at_us > last.0 {
             0
         } else if received_at_us == last.0 {
@@ -388,13 +424,14 @@ impl PositionArchive {
         stable_cursor: Option<(i64, u32)>,
     ) -> (u64, bool) {
         let writes = self.target_writes.lock().unwrap();
-        let invalidated = stable_cursor.is_some_and(|cursor| {
-            revision < writes.discarded_late_revision
-                || writes
-                    .late
-                    .iter()
-                    .any(|(change, key)| *change > revision && *key <= cursor)
-        });
+        let invalidated = revision < writes.retention_revision
+            || stable_cursor.is_some_and(|cursor| {
+                revision < writes.discarded_late_revision
+                    || writes
+                        .late
+                        .iter()
+                        .any(|(change, key)| *change > revision && *key <= cursor)
+            });
         (writes.revision, invalidated)
     }
 
@@ -416,6 +453,11 @@ impl PositionArchive {
         if start_received_at_us < 0 {
             bail!("position update scan start must not be negative");
         }
+        let _retention = self.retention_read();
+        anyhow::ensure!(
+            start_received_at_us.max(1) >= self.retention_floor().0,
+            "requested position signals are in the offline archive"
+        );
         let handle = self
             .db
             .db()
@@ -544,6 +586,12 @@ impl PositionArchive {
         allowed_source_ids: Option<&BTreeSet<String>>,
         allowed_strategy_names: Option<&BTreeSet<String>>,
     ) -> Result<Vec<u8>> {
+        let _retention = self.retention_read();
+        anyhow::ensure!(
+            self.retention_floor() == (1, 0)
+                || after.is_none_or(|cursor| cursor >= self.retention_floor()),
+            "requested position signals are in the offline archive"
+        );
         if limit == 0 {
             bail!("position update page limit must be greater than zero");
         }

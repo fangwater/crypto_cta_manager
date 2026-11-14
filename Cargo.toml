@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+flate2 = "1"
 arrow-array = "59.1.0"
 arrow-ipc = { version = "59.1.0", features = ["zstd"] }
 arrow-schema = "59.1.0"
@@ -40,4 +41,3 @@ prost-types = "0.14"
 prost-build = "0.14"
 
 [dev-dependencies]
-flate2 = "1"

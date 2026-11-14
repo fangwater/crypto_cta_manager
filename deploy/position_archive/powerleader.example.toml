@@ -1,0 +1,16 @@
+backup_root = "/mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager_archives"
+verifier = "/mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager_archives/bin/cta_position_archive"
+
+[[hosts]]
+name = "el01"
+enabled = false
+ssh = "cta_exec_bridge"
+binary = "/home/el01/crypto_cta_manager/bin/cta_position_archive"
+socket = "/home/el01/crypto_cta_manager/archive-control/position.sock"
+
+[[hosts]]
+name = "jp-meta"
+enabled = false
+ssh = "jp-meta-elvpn"
+binary = "/home/ubuntu/crypto_cta_manager/bin/cta_position_archive"
+socket = "/home/ubuntu/crypto_cta_manager/archive-control/position.sock"

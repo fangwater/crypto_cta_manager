@@ -53,6 +53,11 @@ reconnect_interval_ms = 500
 # local_ip = "DEDICATED_NON_TRADING_LOCAL_IP"
 # use_account_ip_rotation = true # mutually exclusive with local_ip
 
+# Independent owner-only position-signal retention; disabled unless a socket is set.
+# Originals must be restored and verified on powerleader before receipt-gated pruning.
+# [archive]
+# socket = "/absolute/manager/root/archive-control/position.sock"
+
 [kline]
 # Enable only after assigning a dedicated non-trading market-data egress.
 enabled = false
