@@ -516,16 +516,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     if klines.enabled() {
         theoretical_targets.refresh();
     }
-    let history_store = {
-        #[cfg(feature = "daily-fifo")]
-        {
-            nav::NavHistoryStore::with_daily(nav::daily::DailyFifoStore::open(manager_db.clone())?)
-        }
-        #[cfg(not(feature = "daily-fifo"))]
-        {
-            nav::NavHistoryStore::default()
-        }
-    };
+    let history_store =
+        nav::NavHistoryStore::with_daily(nav::daily::DailyFifoStore::open(manager_db.clone())?);
     let nav_history_store = Arc::new(std::sync::Mutex::new(history_store));
     let first_build = build_dashboard(
         &config,
@@ -6229,6 +6221,7 @@ mod tests {
                 amount_update: qty,
                 from_key_text: "batch_exec:alpha".into(),
                 fill_liquidity: None,
+                report_liquidity: None,
             })
         })
         .collect();

@@ -32,7 +32,7 @@ pub type SourceStrategyPositionSnapshots = BTreeMap<String, StrategyPositionSnap
 
 /// Disposable analysis projection. Raw order records stay in Exec RocksDB;
 /// BBO payloads, status strings and unused timestamps need not stay in RAM.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct NavEvent {
     pub record_key: String,
     pub event_ts_us: i64,
@@ -45,10 +45,25 @@ pub(crate) struct NavEvent {
     pub venue: String,
     pub order_type_code: i16,
     pub side_code: i16,
+    #[serde(with = "event_float_bits")]
     pub price: f64,
+    #[serde(with = "event_float_bits")]
     pub amount_update: f64,
     pub from_key_text: String,
     pub fill_liquidity: Option<crate::model::FillLiquidity>,
+    /// Joined role for a legacy fill; the complete exchange report is discarded.
+    pub report_liquidity: Option<crate::model::FillLiquidity>,
+}
+
+// Scratch ordering must preserve factual IEEE values even in non-default builds.
+mod event_float_bits {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(value.to_bits())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        u64::deserialize(deserializer).map(f64::from_bits)
+    }
 }
 
 impl From<UniformOrderEvent> for NavEvent {
@@ -69,6 +84,7 @@ impl From<UniformOrderEvent> for NavEvent {
             amount_update: event.amount_update,
             from_key_text: event.from_key_text,
             fill_liquidity: event.fill_liquidity,
+            report_liquidity: None,
         }
     }
 }
@@ -92,15 +108,126 @@ pub struct NavSourceHistory {
     symbol_index_events: Vec<Arc<NavEvent>>,
     read_limits: BTreeMap<String, Option<Vec<u8>>>,
     change: Option<Arc<HistoryChange>>,
+    recovery_view: Option<Arc<fill_recovery::store::View>>,
 }
 
 static HISTORY_REVISION: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Default)]
+struct HistoryMetadata {
+    funding_starts: BTreeMap<String, i64>,
+    representatives: BTreeMap<(String, i16), [Option<Arc<NavEvent>>; 3]>,
+}
+
+impl HistoryMetadata {
+    fn from_history(history: &NavSourceHistory) -> Self {
+        let mut result = Self {
+            funding_starts: history.funding_starts.clone(),
+            ..Self::default()
+        };
+        for event in &history.symbol_index_events {
+            result.observe(event);
+        }
+        result
+    }
+
+    fn observe(&mut self, event: &Arc<NavEvent>) {
+        let e = event.as_ref();
+        if e.venue_code == 1 && (e.symbol.ends_with("USDT") || e.symbol.ends_with("USDC")) {
+            if let Some(ts) = [e.create_ts_us, e.event_ts_us, e.update_ts_us]
+                .into_iter()
+                .find(|ts| *ts > 0)
+            {
+                self.funding_starts
+                    .entry(e.symbol.clone())
+                    .and_modify(|old| *old = (*old).min(ts))
+                    .or_insert(ts);
+            }
+        }
+        let slots = self
+            .representatives
+            .entry((e.symbol.clone(), e.venue_code))
+            .or_default();
+        if slots[0]
+            .as_ref()
+            .is_none_or(|old| e.event_ts_us < old.event_ts_us)
+        {
+            slots[0] = Some(event.clone());
+        }
+        if e.amount_update > 0.0 {
+            if slots[1]
+                .as_ref()
+                .is_none_or(|old| fifo_ts_us(e) < fifo_ts_us(old))
+            {
+                slots[1] = Some(event.clone());
+            }
+            if slots[2]
+                .as_ref()
+                .is_none_or(|old| fifo_ts_us(e) > fifo_ts_us(old))
+            {
+                slots[2] = Some(event.clone());
+            }
+        }
+    }
+
+    fn attach(self, history: &mut NavSourceHistory) {
+        history.funding_starts = self.funding_starts;
+        history.symbol_index_events = self
+            .representatives
+            .into_values()
+            .flatten()
+            .flatten()
+            .collect();
+    }
+}
+
+fn rapidx_source(source: &SourceConfig) -> bool {
+    crate::market_rules::source_values(source)
+        .ok()
+        .is_some_and(|values| {
+            matches!(
+                crate::market_rules::execution_backend(&source.venue, &values),
+                Ok("ltp")
+            )
+        })
+}
+
+fn joined_role(role: LiquidityRole) -> crate::model::FillLiquidity {
+    match role {
+        LiquidityRole::Maker => crate::model::FillLiquidity::Maker,
+        LiquidityRole::Taker => crate::model::FillLiquidity::Taker,
+        LiquidityRole::Unknown | LiquidityRole::InternalCross => {
+            crate::model::FillLiquidity::Unknown
+        }
+    }
+}
+
+fn liquidity_code(role: LiquidityRole) -> u8 {
+    match role {
+        LiquidityRole::Unknown => 0,
+        LiquidityRole::Maker => 1,
+        LiquidityRole::Taker => 2,
+        LiquidityRole::InternalCross => 3,
+    }
+}
+fn liquidity_from_code(code: u8) -> Result<LiquidityRole> {
+    match code {
+        0 => Ok(LiquidityRole::Unknown),
+        1 => Ok(LiquidityRole::Maker),
+        2 => Ok(LiquidityRole::Taker),
+        3 => Ok(LiquidityRole::InternalCross),
+        _ => anyhow::bail!("invalid cached liquidity"),
+    }
+}
 
 #[derive(Debug)]
 struct HistoryChange {
     previous_revision: u64,
     events: Vec<Arc<NavEvent>>,
     earliest_liquidity_fill_ts_us: Option<i64>,
+    liquidity_changes: BTreeMap<LiquidityOrderKey, LiquidityRole>,
+    removed_records: BTreeSet<String>,
+    replaced_from_ts_us: Option<i64>,
 }
 
 impl NavSourceHistory {
@@ -482,6 +609,7 @@ struct PreparedSourceEvents {
     snapshot_ts_us: Option<i64>,
     initial_states: BTreeMap<(String, i16), VenueState>,
     initial_strategy_states: BTreeMap<(String, String, i16), VenueState>,
+    initial_reference_fills: BTreeMap<(String, i16), Arc<NavEvent>>,
     strategy_allocation_active: bool,
     fill_events: im::Vector<PreparedFill>,
     order_event_count: u64,
@@ -638,6 +766,7 @@ impl CachedTimelineSource {
             BTreeMap::new(),
             BTreeMap::new(),
             next_checkpoint,
+            None,
         )
     }
 
@@ -659,6 +788,27 @@ impl CachedTimelineSource {
             return Ok(None);
         }
         let mut prepared = self.prepared.clone();
+        if prepared
+            .initial_reference_fills
+            .values()
+            .any(|e| change.removed_records.contains(&e.record_key))
+        {
+            return Ok(None);
+        }
+        let removed = prepared
+            .fill_events
+            .iter()
+            .filter(|f| change.removed_records.contains(&f.event.record_key))
+            .count();
+        if removed > 0 {
+            prepared.fill_events = prepared
+                .fill_events
+                .iter()
+                .filter(|f| !change.removed_records.contains(&f.event.record_key))
+                .cloned()
+                .collect();
+            prepared.order_event_count = prepared.order_event_count.saturating_sub(removed as u64);
+        }
         let mut added = Vec::new();
         for event in &change.events {
             prepared.order_event_count += 1;
@@ -689,19 +839,28 @@ impl CachedTimelineSource {
         let earliest_added = added.first().map(|fill| fill.fill_ts_us);
         // A newly discovered first reference fill can change the immutable
         // snapshot's valuation basis. Rebuild that source rather than reuse it.
-        if earliest_added.is_some_and(|ts| {
-            self.prepared
-                .fill_events
-                .last()
-                .is_some_and(|last| ts <= last.fill_ts_us)
-        }) && prepared.initial_states.values().any(|state| {
-            state.initial_reference_price_source == Some(InitialReferencePriceSource::FirstFill)
+        if added.iter().any(|fill| {
+            prepared
+                .initial_reference_fills
+                .get(&(fill.event.symbol.clone(), fill.event.venue_code))
+                .is_some_and(|reference| {
+                    (
+                        fill.fill_ts_us,
+                        fill.event.event_ts_us,
+                        &fill.event.record_key,
+                    ) < (
+                        fifo_ts_us(reference),
+                        reference.event_ts_us,
+                        &reference.record_key,
+                    )
+                })
         }) {
             return Ok(None);
         }
         let first_changed_ts = earliest_added
             .into_iter()
             .chain(change.earliest_liquidity_fill_ts_us)
+            .chain(change.replaced_from_ts_us)
             .min();
         if self
             .retained_from_us
@@ -710,6 +869,7 @@ impl CachedTimelineSource {
             return Ok(None);
         }
         let append_only = change.earliest_liquidity_fill_ts_us.is_none()
+            && change.removed_records.is_empty()
             && added.first().is_none_or(|first| {
                 prepared
                     .fill_events
@@ -737,6 +897,7 @@ impl CachedTimelineSource {
                 self.symbols.clone(),
                 self.strategies.clone(),
                 next_checkpoint,
+                None,
             )
             .map(Some);
         }
@@ -754,6 +915,15 @@ impl CachedTimelineSource {
             .collect::<Vec<_>>();
         if change.earliest_liquidity_fill_ts_us.is_some() {
             for fill in &mut tail {
+                if fill.event.fill_liquidity.is_none()
+                    && let Some(role) = change.liquidity_changes.get(&(
+                        fill.event.symbol.clone(),
+                        fill.event.venue_code,
+                        fill.event.client_order_id,
+                    ))
+                {
+                    Arc::make_mut(&mut fill.event).report_liquidity = Some(joined_role(*role));
+                }
                 fill.liquidity = liquidity_role_for_event(&fill.event, &history.liquidity_by_order);
             }
         }
@@ -791,6 +961,7 @@ impl CachedTimelineSource {
                 symbols,
                 strategies,
                 Some(cp.ts_us.saturating_add(CHECKPOINT_US)),
+                None,
             )
             .map(Some)
         } else {
@@ -809,6 +980,7 @@ impl CachedTimelineSource {
         mut symbols: BTreeMap<String, i64>,
         mut strategies: BTreeMap<String, i64>,
         mut next_checkpoint: Option<i64>,
+        through: Option<i64>,
     ) -> Result<Self> {
         for a in prepared.allocations.iter() {
             for p in &a.positions {
@@ -853,8 +1025,8 @@ impl CachedTimelineSource {
             }
             state.apply_fill(fill)?;
         }
-        state.activate_snapshot_at(i64::MAX);
-        state.advance_allocations(i64::MAX, true)?;
+        state.activate_snapshot_at(through.unwrap_or(i64::MAX));
+        state.advance_allocations(through.unwrap_or(i64::MAX), through.is_none())?;
         let mut symbol_builders = BTreeMap::<String, SymbolReportBuilder>::new();
         for ((symbol, _), venue) in &state.states {
             symbol_builders
@@ -949,6 +1121,7 @@ pub struct NavTimelineCache {
     mark_plans: Arc<crate::analysis::QueryCache<TimelineCacheKey, minute_marks::Requests>>,
     daily: Option<Arc<daily::DailyFifoStore>>,
     funding_fingerprints: BTreeMap<String, Arc<BTreeMap<i64, String>>>,
+    funding_prefixes: BTreeMap<String, Arc<funding_estimate::DailyPrefixes>>,
 }
 
 impl NavTimelineCache {
@@ -967,6 +1140,24 @@ impl NavTimelineCache {
         strategy_snapshots: Arc<SourceStrategyPositionSnapshots>,
         histories: Arc<NavSourceHistories>,
         previous: Option<&Self>,
+    ) -> Result<Self> {
+        Self::refresh_inner(
+            config,
+            snapshots,
+            strategy_snapshots,
+            histories,
+            previous,
+            true,
+        )
+    }
+
+    fn refresh_inner(
+        config: AppConfig,
+        snapshots: Arc<SourcePositionSnapshots>,
+        strategy_snapshots: Arc<SourceStrategyPositionSnapshots>,
+        histories: Arc<NavSourceHistories>,
+        previous: Option<&Self>,
+        allow_full: bool,
     ) -> Result<Self> {
         let mut work = Vec::new();
         for source in config.sources.iter().filter(|source| source.enabled) {
@@ -1027,8 +1218,10 @@ impl NavTimelineCache {
                     }
                     let complete;
                     let history = if history.retained_from_us.is_some() {
-                        complete =
-                            daily::load_history_window(source, None, Some(&history.read_limits))?;
+                        if !allow_full {
+                            return Err(daily::FullHistoryRequired.into());
+                        }
+                        complete = daily::load_history_for(source, history, None, None)?;
                         &NavSourceHistory {
                             allocations: history.allocations.clone(),
                             ..complete
@@ -1105,6 +1298,7 @@ impl NavTimelineCache {
             mark_plans,
             daily: None,
             funding_fingerprints: BTreeMap::new(),
+            funding_prefixes: BTreeMap::new(),
         })
     }
 
@@ -1415,6 +1609,7 @@ struct VenueState {
 struct FirstFillReference {
     price: f64,
     venue: String,
+    event: Arc<NavEvent>,
 }
 
 impl VenueState {
@@ -1827,6 +2022,7 @@ fn prepare_source_events<E: Into<Arc<NavEvent>>>(
             .or_insert_with(|| FirstFillReference {
                 price: event.price,
                 venue: event.venue.clone(),
+                event: event.clone(),
             });
         fill_events.push(PreparedFill {
             event,
@@ -1979,11 +2175,24 @@ fn prepare_source_events<E: Into<Arc<NavEvent>>>(
             );
         }
     }
+    let initial_reference_fills = initial_states
+        .iter()
+        .filter_map(|(key, state)| {
+            (state.initial_reference_price_source == Some(InitialReferencePriceSource::FirstFill))
+                .then(|| {
+                    first_fill_references
+                        .get(key)
+                        .map(|reference| (key.clone(), reference.event.clone()))
+                })
+                .flatten()
+        })
+        .collect();
     Ok(PreparedSourceEvents {
         allocations: Arc::new(allocations),
         snapshot_ts_us,
         initial_states,
         initial_strategy_states,
+        initial_reference_fills,
         strategy_allocation_active: strategy_snapshot.is_some(),
         fill_events: fill_events.into_iter().collect(),
         order_event_count,
@@ -1999,7 +2208,7 @@ fn liquidity_role_for_event(
     if event.order_type_code == INTERNAL_CROSS_ORDER_TYPE_CODE {
         return LiquidityRole::InternalCross;
     }
-    if let Some(role) = event.fill_liquidity {
+    if let Some(role) = event.fill_liquidity.or(event.report_liquidity) {
         return match role {
             crate::model::FillLiquidity::Maker => LiquidityRole::Maker,
             crate::model::FillLiquidity::Taker => LiquidityRole::Taker,
@@ -2080,8 +2289,7 @@ pub fn load_nav_source_histories(
     Ok(histories)
 }
 
-/// Maintenance replays need factual fills and raw liquidity evidence, but not
-/// native zero-fill lifecycle rows. Keep the live history/index loader unchanged.
+/// Load factual fills and liquidity attributes for read-only maintenance replays.
 pub fn load_nav_source_fill_histories(
     config: &AppConfig,
     selected_source_ids: &[String],
@@ -2107,7 +2315,7 @@ const NAV_HISTORY_COLUMN_FAMILIES: &[&str] = &[
     TRADE_UPDATES_UNMATCHED_CF,
 ];
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct ColumnFamilyCheckpoint {
     /// Newest key timestamp observed in this column family.
     last_record_ts_us: Option<i64>,
@@ -2131,11 +2339,9 @@ struct IncrementalSourceHistory {
     db_identity: Option<Vec<u8>>,
     checkpoints: BTreeMap<String, ColumnFamilyCheckpoint>,
     history: NavSourceHistory,
-    /// Keep original lifecycle events after evidence first changes the analysis
-    /// projection, so a later real fill cannot duplicate a recovered execution.
-    raw_events: Option<im::Vector<Arc<NavEvent>>>,
-    rapidx_liquidity: fill_recovery::LiquidityJournal,
+    recovery: Option<fill_recovery::store::State>,
     legacy_fill_times: im::OrdMap<LiquidityOrderKey, i64>,
+    full_rebuild_required: bool,
 }
 
 /// Incremental NAV history cache. Each refresh opens every enabled source
@@ -2186,15 +2392,149 @@ impl NavHistoryStore {
 }
 
 impl IncrementalSourceHistory {
+    fn refresh_recovered_source(&mut self, source: &SourceConfig, materialize: bool) -> Result<()> {
+        let mut recovery = match self.recovery.take() {
+            Some(recovery) => recovery,
+            None => fill_recovery::store::State::open(source, None)?,
+        };
+        let result = (|| {
+            let first = self.history.recovery_view.is_none();
+            let identity = std::fs::read(source.rocksdb_path.join("IDENTITY")).ok();
+            let requests = NAV_HISTORY_COLUMN_FAMILIES
+                .iter()
+                .map(|cf| {
+                    (
+                        (*cf).to_owned(),
+                        self.checkpoints
+                            .get(*cf)
+                            .and_then(ColumnFamilyCheckpoint::scan_start_key),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut metadata = HistoryMetadata::from_history(&self.history);
+            let mut staged = IncrementalSourceHistory::default();
+            let heads = rocks_source::visit_column_families_from(
+                &source.rocksdb_path,
+                &requests,
+                |cf, key, value| {
+                    if self
+                        .checkpoints
+                        .get(cf)
+                        .is_some_and(|cp| cp.seen_keys.contains(key))
+                    {
+                        return Ok(());
+                    }
+                    if cf == crate::model::UNIFORM_ORDERS_CF {
+                        let event: Arc<NavEvent> = decode_uniform_order(key, value)?.into();
+                        metadata.observe(&event);
+                        recovery.ingest(&event)?;
+                    } else {
+                        recovery.observe_report(decode_trade_update(key, value)?)?;
+                    }
+                    daily::rebuild::note_key(&mut staged, cf, key)?;
+                    Ok(())
+                },
+            )?;
+            anyhow::ensure!(
+                heads.contains_key(crate::model::UNIFORM_ORDERS_CF),
+                "missing uniform_orders"
+            );
+            let update =
+                recovery.finish(source, self.history.retained_from_us, !first && materialize)?;
+            anyhow::ensure!(
+                identity == std::fs::read(source.rocksdb_path.join("IDENTITY")).ok(),
+                "Exec database changed during evidence join"
+            );
+            for (cf, scan) in staged.checkpoints {
+                let cp = self.checkpoints.entry(cf).or_default();
+                cp.last_record_ts_us = scan.last_record_ts_us.or(cp.last_record_ts_us);
+                cp.seen_keys.extend(scan.seen_keys);
+            }
+            daily::rebuild::finish_keys(self);
+            metadata.attach(&mut self.history);
+            self.history.read_limits = heads;
+            self.history.source_identity = identity.clone();
+            self.db_identity = identity;
+            if self.history.checkpoint_epoch == 0 {
+                self.history.checkpoint_epoch =
+                    HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            if first {
+                if materialize {
+                    let mut events = im::Vector::new();
+                    update.view.visit(|event| {
+                        events.push_back(event);
+                        Ok(())
+                    })?;
+                    events.sort_by(|a, b| a.record_key.cmp(&b.record_key));
+                    self.history.events = events;
+                }
+                self.history.revision = HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
+                self.history.change = None;
+            } else if update.changed_from.is_some() {
+                if update.requires_rebuild {
+                    self.full_rebuild_required = true;
+                    self.history.change = None;
+                    if self.history.retained_from_us.is_none() {
+                        let mut events = im::Vector::new();
+                        update.view.visit(|e| {
+                            events.push_back(e);
+                            Ok(())
+                        })?;
+                        events.sort_by(|a, b| a.record_key.cmp(&b.record_key));
+                        self.history.events = events;
+                    }
+                } else {
+                    self.history.events = self
+                        .history
+                        .events
+                        .iter()
+                        .filter(|e| !update.removed.contains(&e.record_key))
+                        .cloned()
+                        .collect();
+                    self.history.events.extend(update.events.iter().cloned());
+                    self.history
+                        .events
+                        .sort_by(|a, b| a.record_key.cmp(&b.record_key));
+                    self.history.change = Some(Arc::new(HistoryChange {
+                        previous_revision: self.history.revision,
+                        events: update.events,
+                        earliest_liquidity_fill_ts_us: None,
+                        liquidity_changes: Default::default(),
+                        removed_records: update.removed,
+                        replaced_from_ts_us: update.changed_from,
+                    }));
+                }
+                self.history.revision = HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            self.history.recovery_view = Some(update.view);
+            Ok(())
+        })();
+        self.recovery = Some(recovery);
+        result
+    }
+
     fn refresh_source(&mut self, source: &SourceConfig) -> Result<()> {
+        self.refresh_source_inner(source, true)
+    }
+
+    fn refresh_source_inner(&mut self, source: &SourceConfig, allow_full: bool) -> Result<()> {
         let path = source.rocksdb_path.as_path();
         let identity = std::fs::read(path.join("IDENTITY")).ok();
         if identity.is_some() && self.db_identity.is_some() && self.db_identity != identity {
+            if !allow_full {
+                self.full_rebuild_required = true;
+                return Ok(());
+            }
             info!(
                 source_id = source.id,
                 "source RocksDB identity changed; rebuilding NAV history"
             );
             *self = IncrementalSourceHistory::default();
+        }
+
+        if rapidx_source(source) {
+            return self.refresh_recovered_source(source, true);
         }
 
         let refresh_started = Instant::now();
@@ -2209,11 +2549,34 @@ impl IncrementalSourceHistory {
             })
             .collect::<Vec<_>>();
         let mut new_events = Vec::new();
+        let mut metadata = HistoryMetadata::from_history(&self.history);
         let mut roles = self.history.liquidity_by_order.clone();
+
+        for e in &self.history.events {
+            if e.fill_liquidity.is_none()
+                && let Some(role) = e.report_liquidity
+            {
+                roles.insert(
+                    (e.symbol.clone(), e.venue_code, e.client_order_id),
+                    match role {
+                        crate::model::FillLiquidity::Maker => LiquidityRole::Maker,
+                        crate::model::FillLiquidity::Taker => LiquidityRole::Taker,
+                        crate::model::FillLiquidity::Unknown => LiquidityRole::Unknown,
+                    },
+                );
+            }
+        }
+
+        let mut wanted = self
+            .legacy_fill_times
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let mut changed_roles = BTreeSet::new();
         let mut scanned_record_count = 0usize;
         let mut scanned = BTreeMap::<String, (BTreeSet<Vec<u8>>, Option<i64>)>::new();
         let mut historical_role = false;
+        let mut unretained_role = false;
         let heads = rocks_source::visit_column_families_from(path, &requests, |cf, key, value| {
             scanned_record_count += 1;
             let ts = parse_record_key_ts(key)?;
@@ -2234,14 +2597,37 @@ impl IncrementalSourceHistory {
                 return Ok(());
             }
             if cf == crate::model::UNIFORM_ORDERS_CF {
-                new_events.push(Arc::<NavEvent>::from(decode_uniform_order(key, value)?));
+                let event: Arc<NavEvent> = decode_uniform_order(key, value)?.into();
+                metadata.observe(&event);
+                if event.amount_update != 0.0 {
+                    if event.fill_liquidity.is_none() {
+                        wanted.insert((
+                            event.symbol.clone(),
+                            event.venue_code,
+                            event.client_order_id,
+                        ));
+                    }
+                    new_events.push(event);
+                }
             } else {
                 let event = decode_trade_update(key, value)?;
-                historical_role |= self
+                let old_report = self
                     .history
                     .retained_from_us
                     .is_some_and(|bound| event.trade_ts_us <= 0 || event.trade_ts_us < bound);
-                merge_liquidity_event(&mut roles, &mut changed_roles, event);
+                let relevant = wanted.contains(&(
+                    crate::exec_routing::target_symbol(&event.symbol, event.venue_code),
+                    event.venue_code,
+                    event.client_order_id,
+                ));
+                unretained_role |= old_report
+                    && !relevant
+                    && event.cumulative_filled_quantity > 0.0
+                    && event.client_order_id != 0;
+                if relevant {
+                    historical_role |= old_report;
+                    merge_liquidity_event(&mut roles, &mut changed_roles, event);
+                }
             }
             Ok(())
         })?;
@@ -2260,71 +2646,90 @@ impl IncrementalSourceHistory {
                     && changed_roles.contains(&(e.symbol.clone(), e.venue_code, e.client_order_id))
             })
         });
-        if historical_role && !changed_roles.is_empty() {
+        if unretained_role || historical_role && !changed_roles.is_empty() {
+            if !allow_full {
+                self.full_rebuild_required = true;
+                return Ok(());
+            }
             *self = Self::default();
             return self.refresh_source(source);
         }
         self.history.read_limits = heads;
+        metadata.attach(&mut self.history);
 
-        // Execution evidence can arrive without another uniform_orders record.
-        // Reconcile it on every refresh, always against the original lifecycle.
-        // Change FIFO generations only when the resulting projection changes.
-        let mut combined = self
-            .raw_events
-            .as_ref()
-            .unwrap_or(&self.history.events)
-            .clone();
-        combined.extend(new_events.iter().cloned());
-        let recovered = fill_recovery::resolve(source, &combined, &mut self.rapidx_liquidity)?;
-        let recovery_active = recovered.is_some() || self.raw_events.is_some();
-        let recovered_events = if recovery_active {
-            let mut appended = self.history.events.clone();
-            appended.extend(new_events.iter().cloned());
-            appended.sort_by(|a, b| a.record_key.cmp(&b.record_key));
-            let projection = recovered.as_ref().unwrap_or(&combined);
-            (projection != &appended).then(|| projection.clone())
-        } else {
-            None
-        };
-        let raw_events = recovery_active.then_some(combined);
+        for event in &mut new_events {
+            if event.fill_liquidity.is_none()
+                && let Some(role) = roles.get(&(
+                    event.symbol.clone(),
+                    event.venue_code,
+                    event.client_order_id,
+                ))
+            {
+                Arc::make_mut(event).report_liquidity = Some(joined_role(*role));
+            }
+        }
+        if !changed_roles.is_empty() {
+            self.history.events = self
+                .history
+                .events
+                .iter()
+                .map(|event| {
+                    if event.fill_liquidity.is_none()
+                        && changed_roles.contains(&(
+                            event.symbol.clone(),
+                            event.venue_code,
+                            event.client_order_id,
+                        ))
+                    {
+                        let mut event = event.clone();
+                        Arc::make_mut(&mut event).report_liquidity = roles
+                            .get(&(
+                                event.symbol.clone(),
+                                event.venue_code,
+                                event.client_order_id,
+                            ))
+                            .copied()
+                            .map(joined_role);
+                        event
+                    } else {
+                        event.clone()
+                    }
+                })
+                .collect();
+        }
+
         let earliest_liquidity_fill_ts_us = changed_roles
             .iter()
             .filter_map(|key| self.legacy_fill_times.get(key).copied())
             .min();
-        if recovered_events.is_some() {
-            self.history.change = None;
-            self.history.revision = HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
-        } else if !new_events.is_empty() || !changed_roles.is_empty() {
+        if !new_events.is_empty() || !changed_roles.is_empty() {
             self.history.change = Some(Arc::new(HistoryChange {
                 previous_revision: self.history.revision,
                 events: new_events.clone(),
+                removed_records: Default::default(),
+                replaced_from_ts_us: None,
                 earliest_liquidity_fill_ts_us,
+                liquidity_changes: changed_roles
+                    .iter()
+                    .filter_map(|key| roles.get(key).map(|role| (key.clone(), *role)))
+                    .collect(),
             }));
             self.history.revision = HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
         }
-        self.history.liquidity_by_order = roles;
-        self.raw_events = raw_events;
+        self.history.liquidity_by_order = Default::default();
         let out_of_order = self
             .history
             .events
             .last()
             .zip(new_events.first())
             .is_some_and(|(last, first)| first.record_key < last.record_key);
-        let index_events = if let Some(events) = recovered_events {
-            self.history.events = events;
-            self.legacy_fill_times.clear();
-            // Rebuild legacy-role lookups for the replaced source projection.
-            self.history.events.iter().cloned().collect::<Vec<_>>()
-        } else {
-            let index_events = new_events.clone();
-            self.history.events.extend(new_events);
-            if out_of_order {
-                self.history
-                    .events
-                    .sort_by(|left, right| left.record_key.cmp(&right.record_key));
-            }
-            index_events
-        };
+        let index_events = new_events.clone();
+        self.history.events.extend(new_events);
+        if out_of_order {
+            self.history
+                .events
+                .sort_by(|a, b| a.record_key.cmp(&b.record_key));
+        }
         for event in index_events {
             if event.fill_liquidity.is_none() && event.amount_update > 0.0 {
                 let ts = fifo_ts_us(&event);
@@ -4288,7 +4693,7 @@ mod tests {
         let config = app_config(vec![source]);
         let full = load_nav_source_histories(&config, &[]).unwrap();
         let fills = load_nav_source_fill_histories(&config, &[], &[]).unwrap();
-        assert_eq!(full["trade01"].events.len(), 4);
+        assert_eq!(full["trade01"].events.len(), 3);
         assert_eq!(fills["trade01"].events.len(), 3);
         let strategies = Arc::new(BTreeMap::from([(
             "trade01".into(),
@@ -4487,7 +4892,7 @@ mod tests {
             3.0
         );
         let revision = history.revision;
-        assert!(history.change.is_none());
+        assert!(history.change.is_some());
         assert_eq!(store.refresh(&config).unwrap()["rx01"].revision, revision);
 
         let mut late = lifecycle.clone();
@@ -4594,7 +4999,7 @@ mod tests {
         let after = store.refresh(&config).unwrap();
         let history = &after["rx01"];
         assert_ne!(history.revision, before["rx01"].revision);
-        assert!(history.change.is_none());
+        assert!(history.change.is_some());
         assert_eq!(history.liquidity_role_name(&history.events()[0]), "maker");
         assert_close(
             history
@@ -7580,7 +7985,7 @@ mod tests {
         write_recovery_records(path, &[], &[recovery_fact("b", "2", "103", true)]);
         let histories = Arc::new(store.refresh(&config).unwrap());
         assert_eq!(histories["trade06"].events.len(), 3);
-        assert!(histories["trade06"].change.is_none());
+        assert!(histories["trade06"].change.is_some());
         let updated = NavTimelineCache::refresh(
             config.clone(),
             snapshots.clone(),
@@ -8438,7 +8843,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "daily-fifo")]
     fn daily_fifo_preserves_history_start_without_position_snapshots() {
         let temp = tempfile::tempdir().unwrap();
         let exec = temp.path().join("exec");
@@ -8495,7 +8899,782 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "daily-fifo")]
+    fn daily_fifo_recent_late_fills_reuse_history_and_repair_daily_funding() {
+        let temp = tempfile::tempdir().unwrap();
+        let exec = temp.path().join("exec");
+        let manager = crate::manager_db::ManagerDb::open(&temp.path().join("manager")).unwrap();
+        let daily = Arc::new(daily::DailyFifoStore::open(manager).unwrap());
+        let day = crate::funding_daily::DAY_US;
+        let start = crate::funding_daily::day_start(1_790_000_000_000_000);
+        let now = start + 40 * day + 3_600_000_000;
+        let config = app_config(vec![source_at("trade01", &exec, -0.0002)]);
+        let snapshots = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            position_snapshot("trade01", start - 1, 2.0, None),
+        )]));
+        let events = (0..=40)
+            .map(|d| {
+                strategy_event_at(
+                    start + d * day,
+                    start + d * day,
+                    "BTCUSDT",
+                    1,
+                    1,
+                    100.0 + d as f64,
+                    0.7,
+                    "alpha",
+                )
+            })
+            .chain(std::iter::once(strategy_event_at(
+                now, now, "BTCUSDT", 1, 2, 151.0, 0.5, "alpha",
+            )))
+            .collect::<Vec<_>>();
+        write_events(&exec, &events);
+        let mut store = NavHistoryStore::default();
+        let mut cache = NavTimelineCache::refresh_daily(
+            config.clone(),
+            snapshots.clone(),
+            Arc::default(),
+            &BTreeMap::new(),
+            &mut store,
+            None,
+            daily.clone(),
+            now,
+        )
+        .unwrap();
+        let epoch = cache.histories["trade01"].checkpoint_epoch;
+        // Reproduce the 202 ms inversion, then amend a completed recent day.
+        // Neither update changes the immutable opening basis or allocations.
+        for (receive, fill_ts) in [(now + 1, now - 202_174), (now + 2, start + 38 * day + 500)] {
+            write_events(
+                &exec,
+                &[strategy_event_at(
+                    receive, fill_ts, "BTCUSDT", 1, 2, 149.0, 0.1, "alpha",
+                )],
+            );
+            let updated = NavTimelineCache::refresh_daily(
+                config.clone(),
+                snapshots.clone(),
+                Arc::default(),
+                &BTreeMap::new(),
+                &mut store,
+                Some(&cache),
+                daily.clone(),
+                now,
+            )
+            .unwrap();
+            // A full scan would reset this provenance epoch. Check the actual
+            // cache path as well as the financial results, not just final size.
+            assert_eq!(updated.histories["trade01"].checkpoint_epoch, epoch);
+            assert!(updated.sources[&("trade01".into(), true)].replayed_fills < events.len());
+            let full = NavTimelineCache::build(
+                config.clone(),
+                snapshots.clone(),
+                Arc::default(),
+                Arc::new(load_nav_source_histories(&config, &[]).unwrap()),
+            )
+            .unwrap();
+            assert_eq!(updated.dashboard_report(), full.dashboard_report());
+            let cutoffs = (1..=40).map(|d| start + d * day - 1).collect::<Vec<_>>();
+            assert_eq!(
+                updated
+                    .funding_daily_fingerprints("trade01", &cutoffs)
+                    .unwrap(),
+                full.funding_daily_fingerprints("trade01", &cutoffs)
+                    .unwrap()
+            );
+            for allocation in [false, true] {
+                let request =
+                    timeline_request(start + 37 * day, now, vec!["trade01".into()], vec![]);
+                assert_eq!(
+                    updated.rebuild(request.clone(), allocation).unwrap(),
+                    full.rebuild(request, allocation).unwrap()
+                );
+            }
+            cache = updated;
+        }
+        // Advancing the day resumes the saved prefix instead of loading all
+        // old events merely to extend the cumulative funding input digest.
+        let next = NavTimelineCache::refresh_daily(
+            config.clone(),
+            snapshots.clone(),
+            Arc::default(),
+            &BTreeMap::new(),
+            &mut store,
+            Some(&cache),
+            daily,
+            now + day,
+        )
+        .unwrap();
+        assert_eq!(next.histories["trade01"].checkpoint_epoch, epoch);
+        let full = NavTimelineCache::build(
+            config.clone(),
+            snapshots,
+            Arc::default(),
+            Arc::new(load_nav_source_histories(&config, &[]).unwrap()),
+        )
+        .unwrap();
+        let cutoffs = (1..=41).map(|d| start + d * day - 1).collect::<Vec<_>>();
+        assert_eq!(
+            next.funding_daily_fingerprints("trade01", &cutoffs)
+                .unwrap(),
+            full.funding_daily_fingerprints("trade01", &cutoffs)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn bounded_rapidx_rebuild_shares_daily_fifo_and_freezes_late_evidence_views() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = recovery_config(temp.path());
+        config.sources[0].maker_fee_rate = Some(-0.0001);
+        config.sources[0].taker_fee_rate = Some(0.0005);
+        let path = config.sources[0].rocksdb_path.clone();
+        let day = crate::funding_daily::DAY_US;
+        let start = crate::funding_daily::day_start(1_790_000_000_000_000);
+        let now = start + 40 * day;
+        let manager = crate::manager_db::ManagerDb::open(&temp.path().join("manager")).unwrap();
+        let daily = Arc::new(daily::DailyFifoStore::open(manager).unwrap());
+        let mut orders = Vec::new();
+        let mut facts = Vec::new();
+        let mut journal = Vec::new();
+        for d in 0..40_i64 {
+            for j in 0..128_i64 {
+                let fill_ts = start + d * day + (j + 1) * 1_000_000;
+                let receive = fill_ts + 1000;
+                let client = d * 128 + j + 1;
+                let (symbol, venue, market) = if j % 4 < 2 {
+                    ("FILUSDT", 0, "MARGIN")
+                } else {
+                    ("FILUSDT", 1, "PERP")
+                };
+                let qty = 0.12345678901234567;
+                let price = 100.00000000000003 + (j % 7) as f64 * 0.01;
+                let side = if j % 2 == 0 { 1 } else { 2 };
+                let role = if j % 2 == 0 { "MAKER" } else { "TAKER" };
+                let mut event = strategy_event_at(
+                    receive,
+                    fill_ts,
+                    symbol,
+                    venue,
+                    side,
+                    if j % 3 == 0 { 0.0 } else { price },
+                    if j % 3 == 0 {
+                        0.0
+                    } else if j % 3 == 1 {
+                        qty / 2.0
+                    } else {
+                        qty
+                    },
+                    "alpha",
+                );
+                event.create_ts_us = fill_ts - 1000;
+                event.client_order_id = client;
+                event.fill_liquidity = Some(crate::model::FillLiquidity::Unknown);
+                orders.push(event);
+                let tx = format!("tx-{client:08}");
+                let mut fact = recovery_fact(&tx, &qty.to_string(), &price.to_string(), false);
+                fact["execution"]["client_order_id"] = client.to_string().into();
+                fact["execution"]["order_id"] = format!("order-{client}").into();
+                fact["execution"]["timestamp_ms"] = (fill_ts / 1000).into();
+                fact["execution"]["side"] = if side == 1 {
+                    "BUY".into()
+                } else {
+                    "SELL".into()
+                };
+                fact["execution"]["symbol"] = format!("BINANCE_{market}_FIL_USDT").into();
+                facts.push(fact.clone());
+                fact["execution"]["rest"] = true.into();
+                facts.push(fact);
+                let row = serde_json::json!({"message":{"channel":"Trades","data":{
+                    "portfolioId":"123","exchangeType":"BINANCE","transactionId":tx,
+                    "orderId":format!("order-{client}"),"clientOrderId":client.to_string(),"sym":format!("BINANCE_{market}_FIL_USDT"),
+                    "side":if side==1{"BUY"}else{"SELL"},"quantity":qty.to_string(),"price":price.to_string(),"createAt":(fill_ts/1000).to_string(),"execType":role
+                }}});
+                journal.extend(serde_json::to_vec(&row).unwrap());
+                journal.push(b'\n');
+            }
+        }
+        for (client, d) in [(10001, 35), (10002, 5)] {
+            let ts = start + d * day + 200_000_000;
+            let mut event = strategy_event_at(ts, ts, "FILUSDT", 0, 2, 0.0, 0.0, "alpha");
+            event.create_ts_us = ts - 1000;
+            event.client_order_id = client;
+            orders.push(event);
+        }
+        write_recovery_records(&path, &orders, &facts);
+        let journal_dir = path
+            .parent()
+            .unwrap()
+            .join("rapidx_account/rapidx_binance_123");
+        std::fs::create_dir_all(&journal_dir).unwrap();
+        std::fs::write(journal_dir.join("a.jsonl"), journal).unwrap();
+        let snapshots = Arc::new(BTreeMap::from([(
+            "trade06".into(),
+            position_snapshot(
+                "trade06",
+                start - 1,
+                1.2345678901234567,
+                Some(99.00000000000003),
+            ),
+        )]));
+        let strategies = Arc::new(BTreeMap::from([(
+            "trade06".into(),
+            strategy_position_snapshot(
+                "trade06",
+                start - 1,
+                vec![("alpha", "BTCUSDT", 1.2345678901234567, 99.00000000000003)],
+            ),
+        )]));
+        let (cache, state, stats) = daily::rebuild::build(
+            config.clone(),
+            &config.sources[0],
+            snapshots.clone(),
+            strategies.clone(),
+            Arc::default(),
+            daily.clone(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(stats.fills, 5120);
+        assert!(stats.max_buffered_events <= 4096);
+        assert!(stats.max_buffered_bytes <= 4 * 1024 * 1024);
+        assert!(cache.histories["trade06"].events.len() < 1200);
+        assert!(cache.histories["trade06"].liquidity_by_order.is_empty());
+        let mut store = NavHistoryStore::default();
+        store.sources.insert("trade06".into(), state);
+        let verify = |cache: &NavTimelineCache| {
+            let full = NavTimelineCache::build(
+                config.clone(),
+                snapshots.clone(),
+                strategies.clone(),
+                Arc::new(load_nav_source_histories(&config, &[]).unwrap()),
+            )
+            .unwrap();
+            assert_eq!(cache.dashboard_report(), full.dashboard_report());
+            for allocation in [false, true] {
+                for begin in [
+                    start,
+                    start + 15 * day + 123,
+                    start + 34 * day,
+                    start + 39 * day,
+                ] {
+                    let request = timeline_request(begin, now, vec!["trade06".into()], vec![]);
+                    assert_eq!(
+                        cache.rebuild(request.clone(), allocation).unwrap(),
+                        full.rebuild(request, allocation).unwrap()
+                    );
+                }
+            }
+        };
+        verify(&cache);
+        let request = timeline_request(start, now, vec!["trade06".into()], vec![]);
+        let frozen = cache.rebuild(request.clone(), true).unwrap();
+        let epoch = store.sources["trade06"].history.checkpoint_epoch;
+        let mut late = recovery_fact("late-recent", "0.5", "100.1", true);
+        late["execution"]["client_order_id"] = "10001".into();
+        late["execution"]["timestamp_ms"] = ((start + 35 * day + 200_000_000) / 1000).into();
+        write_recovery_records(&path, &[], &[late]);
+        let recent = NavTimelineCache::refresh_daily(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            &BTreeMap::new(),
+            &mut store,
+            Some(&cache),
+            daily.clone(),
+            now + 1,
+        )
+        .unwrap();
+        assert_eq!(epoch, store.sources["trade06"].history.checkpoint_epoch);
+        verify(&recent);
+        assert_eq!(cache.rebuild(request.clone(), true).unwrap(), frozen);
+        let mut late = recovery_fact("late-old", "0.25", "101.3", true);
+        late["execution"]["client_order_id"] = "10002".into();
+        late["execution"]["timestamp_ms"] = ((start + 5 * day + 200_000_000) / 1000).into();
+        write_recovery_records(&path, &[], &[late]);
+        let old = NavTimelineCache::refresh_daily(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            &BTreeMap::new(),
+            &mut store,
+            Some(&recent),
+            daily.clone(),
+            now + 2,
+        )
+        .unwrap();
+        assert_ne!(epoch, store.sources["trade06"].history.checkpoint_epoch);
+        verify(&old);
+        assert_eq!(cache.rebuild(request, true).unwrap(), frozen);
+        let restarted = NavTimelineCache::refresh_daily(
+            config.clone(),
+            snapshots.clone(),
+            strategies.clone(),
+            &BTreeMap::new(),
+            &mut NavHistoryStore::default(),
+            None,
+            daily,
+            now + 3,
+        )
+        .unwrap();
+        verify(&restarted);
+    }
+
+    #[test]
+    #[ignore = "explicit RapidX recovery RSS comparison; creates a 40-day ledger"]
+    fn rapidx_rebuild_memory_benchmark() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = recovery_config(temp.path());
+        config.sources[0].maker_fee_rate = Some(-0.0001);
+        config.sources[0].taker_fee_rate = Some(0.0005);
+        let source = &config.sources[0];
+        let path = &source.rocksdb_path;
+        let day = crate::funding_daily::DAY_US;
+        let start = crate::funding_daily::day_start(1_790_000_000_000_000);
+        let now = start + 40 * day;
+        write_recovery_records(path, &[], &[]);
+        let db = DB::open_cf(
+            &Options::default(),
+            path,
+            [UNIFORM_ORDERS_CF, "rapidx_executions"],
+        )
+        .unwrap();
+        let cf = db.cf_handle(UNIFORM_ORDERS_CF).unwrap();
+        let executions = db.cf_handle("rapidx_executions").unwrap();
+        let dir = path
+            .parent()
+            .unwrap()
+            .join("rapidx_account/rapidx_binance_123");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut journal =
+            std::io::BufWriter::new(std::fs::File::create(dir.join("a.jsonl")).unwrap());
+        let mut batch = rocksdb::WriteBatch::default();
+        for i in 0..25_000_i64 {
+            let ts = start + (i / 625) * day + (i % 625 + 1) * 1_000_000;
+            let client = i + 1;
+            let side = if i % 2 == 0 { 1 } else { 2 };
+            let (symbol, venue, market) = if i % 4 < 2 {
+                ("FILUSDT", 0, "MARGIN")
+            } else {
+                ("FILUSDT", 1, "PERP")
+            };
+            for row in 0..4 {
+                let mut event = strategy_event_at(
+                    ts + row + 1,
+                    ts,
+                    symbol,
+                    venue,
+                    side,
+                    0.0,
+                    if row == 3 { 0.125 } else { 0.0 },
+                    "alpha",
+                );
+                event.create_ts_us = ts - 1000;
+                event.signal_ts_us = ts - 2000;
+                event.client_order_id = client;
+                batch.put_cf(cf, event.record_key.as_bytes(), encode_event(&event));
+            }
+            let tx = format!("tx-{client:08}");
+            let price = if side == 1 { "100" } else { "101" };
+            for rest in [false, true] {
+                let mut fact = recovery_fact(&tx, "0.125", price, rest);
+                fact["execution"]["client_order_id"] = client.to_string().into();
+                fact["execution"]["order_id"] = format!("o-{client}").into();
+                fact["execution"]["timestamp_ms"] = (ts / 1000).into();
+                fact["execution"]["side"] = if side == 1 {
+                    "BUY".into()
+                } else {
+                    "SELL".into()
+                };
+                fact["execution"]["symbol"] = format!("BINANCE_{market}_FIL_USDT").into();
+                let mut hash = Sha256::new();
+                hash.update(b"mkt_signal/rapidx_execution/stable_key");
+                for part in ["123", "BINANCE", tx.as_str()] {
+                    hash.update((part.len() as u64).to_be_bytes());
+                    hash.update(part.as_bytes());
+                }
+                hash.update([u8::from(rest)]);
+                batch.put_cf(
+                    executions,
+                    hash.finalize(),
+                    serde_json::to_vec(&fact).unwrap(),
+                );
+            }
+            let role = serde_json::json!({"message":{"channel":"Trades","data":{
+                "portfolioId":"123","exchangeType":"BINANCE","transactionId":tx,
+                "orderId":format!("o-{client}"),"clientOrderId":client.to_string(),"sym":format!("BINANCE_{market}_FIL_USDT"),
+                "side":if side==1{"BUY"}else{"SELL"},"quantity":"0.125","price":price,"createAt":(ts/1000).to_string(),"execType":if side==1{"MAKER"}else{"TAKER"}
+            }}});
+            serde_json::to_writer(&mut journal, &role).unwrap();
+            journal.write_all(b"\n").unwrap();
+            if batch.len() >= 4096 {
+                db.write(std::mem::take(&mut batch)).unwrap();
+            }
+        }
+        db.write(batch).unwrap();
+        drop(db);
+        drop(journal);
+        let mode =
+            std::env::var("CTA_NAV_RECOVERY_BENCH_MODE").unwrap_or_else(|_| "bounded".into());
+        let began = Instant::now();
+        let (cache, stats) = if mode == "bounded" {
+            let daily = Arc::new(
+                daily::DailyFifoStore::open(
+                    crate::manager_db::ManagerDb::open(&temp.path().join("manager")).unwrap(),
+                )
+                .unwrap(),
+            );
+            let (cache, _state, stats) = daily::rebuild::build(
+                config.clone(),
+                source,
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                daily,
+                now,
+            )
+            .unwrap();
+            (cache, Some(stats))
+        } else {
+            assert_eq!(mode, "materialized");
+            let mut records = rocks_source::read_available_column_families(
+                path,
+                &[UNIFORM_ORDERS_CF, "rapidx_executions"],
+            )
+            .unwrap();
+            let raw = records.remove(UNIFORM_ORDERS_CF).unwrap();
+            let events = raw
+                .iter()
+                .map(|r| decode_uniform_order(&r.key, &r.value).unwrap().into())
+                .collect::<im::Vector<Arc<NavEvent>>>();
+            let wanted = events
+                .iter()
+                .map(|e| (e.symbol.clone(), e.venue_code, e.client_order_id))
+                .collect::<BTreeSet<_>>();
+            let mut roles = fill_recovery::liquidity_journal::LiquidityJournal::default();
+            let roles = roles.refresh(&dir, "123", "BINANCE").unwrap();
+            let fills = fill_recovery::decode_fills_with_roles(
+                &records.remove("rapidx_executions").unwrap(),
+                "123",
+                "BINANCE",
+                &wanted,
+                roles,
+            )
+            .unwrap();
+            let canonical = fill_recovery::replace_orders(&events, &wanted, &fills).unwrap();
+            let history = NavSourceHistory::from_test_events(canonical);
+            let cache = NavTimelineCache::build(
+                config.clone(),
+                Arc::default(),
+                Arc::default(),
+                Arc::new(BTreeMap::from([("trade06".into(), history)])),
+            )
+            .unwrap();
+            (cache, None)
+        };
+        let elapsed = began.elapsed().as_millis();
+        let totals = cache.dashboard_report().aggregate.totals;
+        assert_eq!(totals.fill_count, 25_000);
+        assert_eq!(
+            (totals.maker_fill_count, totals.taker_fill_count),
+            (12_500, 12_500)
+        );
+        assert_close(totals.realized_pnl_before_fee_quote, 1562.5);
+        assert!((totals.estimated_trading_fee_quote - 63.28125).abs() < 1e-8);
+        let peak = std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("VmHWM:")
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<usize>().ok())
+            })
+            .unwrap();
+        println!(
+            "BENCH {}",
+            serde_json::json!({"mode":mode,"raw_lifecycle":100000,"fills":25000,"process_peak_rss_kib":peak,"elapsed_ms":elapsed,"retained_events":cache.histories["trade06"].events.len(),"max_buffered_fills":stats.as_ref().map(|s|s.max_buffered_events),"maker_count":totals.maker_fill_count,"taker_count":totals.taker_fill_count,"realized":totals.realized_pnl_before_fee_quote,"fees":totals.estimated_trading_fee_quote})
+        );
+    }
+
+    #[test]
+    fn bounded_native_rebuild_discards_lifecycle_and_preserves_ownership_and_prices() {
+        let temp = tempfile::tempdir().unwrap();
+        let exec = temp.path().join("exec");
+        let manager_path = temp.path().join("manager");
+        let manager = crate::manager_db::ManagerDb::open(&manager_path).unwrap();
+        let daily = Arc::new(daily::DailyFifoStore::open(manager).unwrap());
+        let day = crate::funding_daily::DAY_US;
+        let start = crate::funding_daily::day_start(1_790_000_000_000_000);
+        let now = start + 40 * day;
+        let mut config = app_config(vec![source_at("trade01", &exec, 0.0005)]);
+        config.sources[0].maker_fee_rate = Some(-0.0001);
+        let db = open_uniform_orders_db(&exec);
+        let cf = db.cf_handle(UNIFORM_ORDERS_CF).unwrap();
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut expected_recent = 0;
+        let mut first_reference = None;
+        for d in 0..40_i64 {
+            for j in 0..300_i64 {
+                let fill_ts = start + d * day + (j + 1) * 1_000;
+                let (symbol, venue) = if j / 2 % 2 == 0 {
+                    ("BTCUSDT", 1)
+                } else {
+                    ("BTC", 6)
+                };
+                for row in 0..4_i64 {
+                    // Receive order runs opposite to factual fill order across
+                    // the whole history; sorting each receive batch is invalid.
+                    let receive = start + (39 - d) * day + (j * 4 + row + 1) * 1_000;
+                    let mut event = strategy_event_at(
+                        receive,
+                        fill_ts,
+                        symbol,
+                        venue,
+                        if j % 2 == 0 { 1 } else { 2 },
+                        100.0 + (j % 7) as f64 * 0.000001,
+                        if row == 0 { 0.1 } else { 0.0 },
+                        "alpha",
+                    );
+                    event.fill_liquidity = Some(if j % 2 == 0 {
+                        crate::model::FillLiquidity::Maker
+                    } else {
+                        crate::model::FillLiquidity::Taker
+                    });
+                    if d == 0 && j == 0 && row == 0 {
+                        first_reference = Some(event.price);
+                    }
+                    if row == 0
+                        && (fill_ts >= now - daily::MEMORY_WINDOW_US
+                            || receive >= now - daily::MEMORY_WINDOW_US)
+                    {
+                        expected_recent += 1;
+                    }
+                    batch.put_cf(cf, event.record_key.as_bytes(), encode_event(&event));
+                    if batch.len() >= 4096 {
+                        db.write(std::mem::take(&mut batch)).unwrap();
+                    }
+                }
+            }
+        }
+        db.write(batch).unwrap();
+        drop(db);
+        let snapshots = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            position_snapshot("trade01", start - 1, 3.0, None),
+        )]));
+        let strategies = Arc::new(BTreeMap::from([(
+            "trade01".into(),
+            strategy_position_snapshot(
+                "trade01",
+                start - 1,
+                vec![("alpha", "BTCUSDT", 3.0, first_reference.unwrap())],
+            ),
+        )]));
+        let correction = allocation::AllocationSnapshot {
+            source_id: "trade01".into(),
+            snapshot_ts_us: start + 15 * day + day / 2,
+            positions: vec![
+                allocation::AllocationPosition {
+                    strategy: "alpha".into(),
+                    symbol: "BTCUSDT".into(),
+                    venue_code: 1,
+                    before_qty: 3.0,
+                    after_qty: 0.0,
+                    reference_price: 120.0,
+                },
+                allocation::AllocationPosition {
+                    strategy: UNALLOCATED_STRATEGY.into(),
+                    symbol: "BTCUSDT".into(),
+                    venue_code: 1,
+                    before_qty: 0.0,
+                    after_qty: 3.0,
+                    reference_price: 120.0,
+                },
+            ],
+            restatements: Vec::new(),
+        };
+        let allocations = Arc::new(vec![correction]);
+        let (bounded, state, stats) = daily::rebuild::build(
+            config.clone(),
+            &config.sources[0],
+            snapshots.clone(),
+            strategies.clone(),
+            allocations.clone(),
+            daily,
+            now,
+        )
+        .unwrap();
+        assert_eq!(stats.fills, 12_000);
+        assert_eq!(stats.zero_fills, 36_000);
+        assert_eq!(stats.max_buffered_events, 4096);
+        assert!(stats.max_buffered_bytes <= 4 * 1024 * 1024);
+        assert_eq!(state.history.events.len(), expected_recent);
+        assert!(
+            state
+                .history
+                .events
+                .iter()
+                .all(|event| event.amount_update > 0.0)
+        );
+        assert!(state.history.liquidity_by_order.is_empty());
+        assert!(state.history.symbol_index_events.len() <= 6);
+        let scratch = manager_path.parent().unwrap().join("run/nav-replay");
+        assert_eq!(std::fs::read_dir(scratch).unwrap().count(), 0);
+        let mut histories = load_nav_source_histories(&config, &[]).unwrap();
+        histories.get_mut("trade01").unwrap().allocations = allocations;
+        let full =
+            NavTimelineCache::build(config.clone(), snapshots, strategies, Arc::new(histories))
+                .unwrap();
+        assert_eq!(bounded.dashboard_report(), full.dashboard_report());
+        assert_eq!(
+            bounded.sources[&("trade01".into(), false)]
+                .prepared
+                .initial_states[&("BTCUSDT".into(), 1)]
+                .initial_reference_price,
+            first_reference
+        );
+        let cutoffs = (1..=40).map(|d| start + d * day - 1).collect::<Vec<_>>();
+        assert_eq!(
+            bounded
+                .funding_daily_fingerprints("trade01", &cutoffs)
+                .unwrap(),
+            full.funding_daily_fingerprints("trade01", &cutoffs)
+                .unwrap()
+        );
+        for mode in [false, true] {
+            for begin in [start, start + 20 * day, start + 39 * day] {
+                let request = timeline_request(begin, now, vec!["trade01".into()], Vec::new());
+                assert_eq!(
+                    bounded.rebuild(request.clone(), mode).unwrap(),
+                    full.rebuild(request, mode).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit native replay RSS benchmark; creates 1.8 million fixture records"]
+    fn native_rebuild_memory_benchmark() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("artifacts/native-rebuild-memory");
+        std::fs::create_dir_all(&root).unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("fixture-")
+            .tempdir_in(&root)
+            .unwrap();
+        let exec = temp.path().join("exec");
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        options.set_write_buffer_size(8 * 1024 * 1024);
+        options.set_max_write_buffer_number(2);
+        options.set_max_open_files(64);
+        let db = DB::open_cf_descriptors(
+            &options,
+            &exec,
+            [
+                ColumnFamilyDescriptor::new("default", options.clone()),
+                ColumnFamilyDescriptor::new(UNIFORM_ORDERS_CF, options.clone()),
+            ],
+        )
+        .unwrap();
+        let cf = db.cf_handle(UNIFORM_ORDERS_CF).unwrap();
+        let day = crate::funding_daily::DAY_US;
+        let start = crate::funding_daily::day_start(1_790_000_000_000_000);
+        let days = 90_i64;
+        let per_day = 5_000_i64;
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut write = rocksdb::WriteOptions::default();
+        write.disable_wal(true);
+        for d in 0..days {
+            for j in 0..per_day {
+                for row in 0..4 {
+                    let ts = start + d * day + (j * 4 + row + 1) * 1_000;
+                    let mut event = strategy_event_at(
+                        ts,
+                        ts,
+                        "BTCUSDT",
+                        1,
+                        if j % 2 == 0 { 1 } else { 2 },
+                        if j % 2 == 0 { 100.0 } else { 101.0 },
+                        if row == 0 { 1.0 } else { 0.0 },
+                        "alpha",
+                    );
+                    event.fill_liquidity = Some(if j % 2 == 0 {
+                        crate::model::FillLiquidity::Maker
+                    } else {
+                        crate::model::FillLiquidity::Taker
+                    });
+                    batch.put_cf(cf, event.record_key.as_bytes(), encode_event(&event));
+                    if batch.len() >= 4096 {
+                        db.write_opt(std::mem::take(&mut batch), &write).unwrap();
+                    }
+                }
+            }
+        }
+        db.write_opt(batch, &write).unwrap();
+        drop(db);
+        let mut config = app_config(vec![source_at("trade01", &exec, 0.0005)]);
+        config.sources[0].maker_fee_rate = Some(-0.0001);
+        let mode =
+            std::env::var("CTA_NAV_REBUILD_BENCH_MODE").unwrap_or_else(|_| "bounded".to_owned());
+        let started = Instant::now();
+        let (cache, stats) = if mode == "bounded" {
+            let manager = crate::manager_db::ManagerDb::open(&temp.path().join("manager")).unwrap();
+            let daily = Arc::new(daily::DailyFifoStore::open(manager).unwrap());
+            let (cache, _, stats) = daily::rebuild::build(
+                config.clone(),
+                &config.sources[0],
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                daily,
+                start + days * day,
+            )
+            .unwrap();
+            assert_eq!(stats.fills, (days * per_day) as usize);
+            assert_eq!(stats.zero_fills, (days * per_day * 3) as usize);
+            assert!(stats.max_buffered_events <= 4096);
+            (cache, Some(stats))
+        } else {
+            assert_eq!(mode, "materialized");
+            let histories = Arc::new(load_nav_source_histories(&config, &[]).unwrap());
+            (
+                NavTimelineCache::build(config, Arc::default(), Arc::default(), histories).unwrap(),
+                None,
+            )
+        };
+        let elapsed_ms = started.elapsed().as_millis();
+        let report = cache.dashboard_report();
+        let totals = report.aggregate.totals;
+        let pairs = (days * per_day / 2) as u64;
+        assert_eq!(totals.fill_count, 2 * pairs);
+        assert_eq!(totals.maker_fill_count, pairs);
+        assert_eq!(totals.taker_fill_count, pairs);
+        assert_close(totals.realized_pnl_before_fee_quote, pairs as f64);
+        assert!((totals.estimated_trading_fee_quote - pairs as f64 * 0.0405).abs() < 0.0001);
+        let peak_kib = std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("VmHWM:"))
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        println!(
+            "BENCH {}",
+            serde_json::json!({"mode":mode,"raw_records":days*per_day*4,"fills":totals.fill_count,"elapsed_ms":elapsed_ms,"process_peak_rss_kib":peak_kib,
+            "retained_events":cache.histories["trade01"].events.len(),"max_buffered_fills":stats.as_ref().map(|s|s.max_buffered_events),"max_buffered_bytes":stats.as_ref().map(|s|s.max_buffered_bytes),
+            "maker_count":totals.maker_fill_count,"taker_count":totals.taker_fill_count,"realized":totals.realized_pnl_before_fee_quote,"fees":totals.estimated_trading_fee_quote})
+        );
+    }
+
+    #[test]
     fn daily_fifo_retains_seven_days_and_replays_old_windows_exactly() {
         let temp = tempfile::tempdir().unwrap();
         let exec = temp.path().join("exec");

@@ -159,6 +159,14 @@ orders. Dropping legacy tables is a separate database maintenance operation.
 
 ## CTA PnL Reconstruction
 
+All sources use the same bounded FIFO, daily checkpoints and recent-fill window,
+with one build policy for every host. Keep JSON's original numeric parsing for
+immutable allocation fingerprints; derived daily state uses an exact binary
+codec independently of JSON features. Source adapters feed only validated fills
+into the shared FIFO. Keep evidence joins in bounded Manager-owned disposable
+indexes, preserve frozen query generations, and reject incomplete or conflicting
+evidence. See `docs/nav_daily_fifo_design.md`.
+
 `nav_rebuild` reconstructs CTA PnL from a PostgreSQL position snapshot plus the
 later local `uniform_orders` RocksDB history. PostgreSQL is only the immutable
 recomputation anchor; order events remain sourced directly from RocksDB. A pure

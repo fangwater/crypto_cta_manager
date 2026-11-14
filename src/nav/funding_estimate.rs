@@ -3,6 +3,110 @@ use super::*;
 use crate::funding_rates::{
     FundingEstimateRecord, FundingEstimateRecords, FundingRate, supported_symbol,
 };
+use sha2::{Digest, Sha256};
+
+/// Resumable, disposable SHA state at completed daily cutoffs. A digest alone
+/// cannot resume a cumulative hash after recent history has been discarded.
+/// Keep only one small state per day; ownership inputs are hashed separately.
+#[derive(Debug)]
+pub(super) struct DailyPrefixes {
+    seed: [u8; 32],
+    prefixes: BTreeMap<i64, Sha256>,
+    fingerprints: BTreeMap<i64, String>,
+}
+
+fn fingerprint_seed(prepared: &PreparedSourceEvents) -> Result<Sha256> {
+    let mut hash = Sha256::new();
+    hash.update(serde_json::to_vec(&prepared.snapshot_ts_us)?);
+    for (key, state) in &prepared.initial_states {
+        hash.update(serde_json::to_vec(&(
+            key,
+            state.fifo.long_quantity(1.0),
+            state.fifo.short_quantity(1.0),
+        ))?);
+    }
+    for (key, state) in &prepared.initial_strategy_states {
+        hash.update(serde_json::to_vec(&(
+            key,
+            state.fifo.long_quantity(1.0),
+            state.fifo.short_quantity(1.0),
+        ))?);
+    }
+    Ok(hash)
+}
+
+fn fingerprint_fill(hash: &mut Sha256, fill: &PreparedFill) {
+    let e = &fill.event;
+    for text in [&e.record_key, &e.symbol, &e.from_key_text] {
+        hash.update((text.len() as u64).to_be_bytes());
+        hash.update(text.as_bytes());
+    }
+    hash.update(fill.fill_ts_us.to_be_bytes());
+    hash.update(e.venue_code.to_be_bytes());
+    hash.update(e.side_code.to_be_bytes());
+    hash.update(e.order_type_code.to_be_bytes());
+    hash.update(e.amount_update.to_bits().to_be_bytes());
+}
+
+impl DailyPrefixes {
+    pub(super) fn refresh(
+        prepared: &PreparedSourceEvents,
+        cutoffs: &[i64],
+        previous: Option<&Self>,
+        changed_from: Option<i64>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            cutoffs.windows(2).all(|w| w[0] < w[1]),
+            "unordered funding cutoffs"
+        );
+        let initial = fingerprint_seed(prepared)?;
+        let seed: [u8; 32] = initial.clone().finalize().into();
+        let previous = previous.filter(|old| old.seed == seed);
+        let mut prefixes = BTreeMap::new();
+        let mut fingerprints = BTreeMap::new();
+        let mut hash = initial;
+        let mut after = None;
+        let fills = &prepared.fill_events;
+        let mut index = 0;
+        for &end in cutoffs {
+            if changed_from.is_none_or(|changed| end < changed)
+                && let Some(prefix) = previous.and_then(|p| p.prefixes.get(&end))
+            {
+                hash = prefix.clone();
+                after = Some(end);
+                index = fill_partition_point(fills, |fill| fill.fill_ts_us <= end);
+            } else {
+                if let Some(after) = after {
+                    index = index.max(fill_partition_point(fills, |fill| fill.fill_ts_us <= after));
+                }
+                while index < fills.len() && fills[index].fill_ts_us <= end {
+                    fingerprint_fill(&mut hash, &fills[index]);
+                    index += 1;
+                }
+                after = Some(end);
+            }
+            prefixes.insert(end, hash.clone());
+            let mut daily = hash.clone();
+            for a in prepared
+                .allocations
+                .iter()
+                .take_while(|a| a.snapshot_ts_us <= end)
+            {
+                daily.update(serde_json::to_vec(a)?);
+            }
+            fingerprints.insert(end, hex::encode(daily.finalize()));
+        }
+        Ok(Self {
+            seed,
+            prefixes,
+            fingerprints,
+        })
+    }
+
+    pub(super) fn fingerprints(&self) -> BTreeMap<i64, String> {
+        self.fingerprints.clone()
+    }
+}
 
 impl NavTimelineCache {
     /// Fingerprint funding quantity inputs at daily cutoffs in one ordered pass.
@@ -23,45 +127,20 @@ impl NavTimelineCache {
                 .restore_window(&[source_id.to_owned()], None)?
                 .funding_daily_fingerprints(source_id, cutoffs);
         }
-        use sha2::{Digest, Sha256};
         let source = self
             .sources
             .get(&(source_id.to_owned(), true))
             .context("funding source unavailable")?;
-        let mut hash = Sha256::new();
-        hash.update(serde_json::to_vec(&source.prepared.snapshot_ts_us)?);
-        for (key, state) in &source.prepared.initial_states {
-            hash.update(serde_json::to_vec(&(
-                key,
-                state.fifo.long_quantity(1.0),
-                state.fifo.short_quantity(1.0),
-            ))?);
-        }
-        for (key, state) in &source.prepared.initial_strategy_states {
-            hash.update(serde_json::to_vec(&(
-                key,
-                state.fifo.long_quantity(1.0),
-                state.fifo.short_quantity(1.0),
-            ))?);
-        }
+        let mut hash = fingerprint_seed(&source.prepared)?;
         let mut index = 0;
         let fills = &source.prepared.fill_events;
         let mut result = BTreeMap::new();
         for &end in cutoffs {
             while index < fills.len() && fills[index].fill_ts_us <= end {
                 let fill = &fills[index];
-                let e = &fill.event;
                 // Millions of fills share the dashboard CPU: hash unambiguous
                 // length-prefixed bytes without allocating JSON per fill.
-                for text in [&e.record_key, &e.symbol, &e.from_key_text] {
-                    hash.update((text.len() as u64).to_be_bytes());
-                    hash.update(text.as_bytes());
-                }
-                hash.update(fill.fill_ts_us.to_be_bytes());
-                hash.update(e.venue_code.to_be_bytes());
-                hash.update(e.side_code.to_be_bytes());
-                hash.update(e.order_type_code.to_be_bytes());
-                hash.update(e.amount_update.to_bits().to_be_bytes());
+                fingerprint_fill(&mut hash, fill);
                 index += 1;
             }
             let mut daily = hash.clone();
@@ -551,6 +630,7 @@ mod tests {
                 amount_update: qty,
                 from_key_text: format!("batch_exec:{owner}"),
                 fill_liquidity: None,
+                report_liquidity: None,
             })
         };
         let history = NavSourceHistory {

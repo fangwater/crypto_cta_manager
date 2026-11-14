@@ -5,17 +5,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::info;
 
 use super::NavEvent;
 use crate::config::SourceConfig;
 use crate::model::FillLiquidity;
 use crate::rocks_source::{self, RawRocksRecord};
 
-mod liquidity_journal;
-pub(super) use liquidity_journal::LiquidityJournal;
+pub(super) mod liquidity_journal;
+pub(super) mod store;
 
 const EXECUTIONS_CF: &str = "rapidx_executions";
 type OrderKey = (String, i16, i64);
@@ -39,7 +38,7 @@ struct StoredExecution {
     execution: Execution,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Execution {
     transaction_id: String,
     order_id: String,
@@ -52,8 +51,8 @@ struct Execution {
     rest: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct Fill {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(super) struct Fill {
     transaction_id: String,
     order_id: String,
     side_code: i16,
@@ -61,106 +60,6 @@ struct Fill {
     price: f64,
     timestamp_us: i64,
     liquidity: Option<FillLiquidity>,
-}
-
-/// Join only executions with an order already recorded by this Exec source.
-/// Historical executions without a matching order keep their original identity.
-pub(super) fn resolve(
-    source: &SourceConfig,
-    events: &im::Vector<Arc<NavEvent>>,
-    journal: &mut LiquidityJournal,
-) -> Result<Option<im::Vector<Arc<NavEvent>>>> {
-    if events.is_empty() {
-        return Ok(None);
-    }
-    let unpriced = events.iter().any(|e| needs_price(e));
-    let values = match crate::market_rules::source_values(source) {
-        Ok(values) => values,
-        Err(_) if !unpriced => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let rapidx = matches!(
-        crate::market_rules::execution_backend(&source.venue, &values),
-        Ok("ltp")
-    );
-    if !rapidx {
-        ensure!(
-            !unpriced,
-            "source {} has an unpriced fill without RapidX execution evidence",
-            source.id
-        );
-        return Ok(None);
-    }
-    let wanted = events
-        .iter()
-        .filter(|e| e.order_type_code != crate::model::INTERNAL_CROSS_ORDER_TYPE_CODE)
-        .filter(|e| e.client_order_id > 0)
-        .map(|e| order_key(e))
-        .collect::<BTreeSet<_>>();
-    if wanted.is_empty() {
-        ensure!(
-            !unpriced,
-            "unpriced fill has no matching external order identity"
-        );
-        return Ok(None);
-    }
-    let portfolio = values
-        .get("LTP_PORTFOLIO_ID")
-        .context("missing execution portfolio scope")?;
-    ensure!(
-        !portfolio.is_empty() && portfolio.bytes().all(|b| b.is_ascii_digit()),
-        "invalid execution portfolio scope"
-    );
-    let exchange = match source.venue.as_str() {
-        "binance-futures" | "binance-margin" => "BINANCE",
-        "okex-futures" | "okex-margin" => "OKX",
-        _ => anyhow::bail!(
-            "unsupported execution evidence venue for source {}",
-            source.id
-        ),
-    };
-    let mut records =
-        rocks_source::read_available_column_families(&source.rocksdb_path, &[EXECUTIONS_CF])?;
-    let Some(records) = records.remove(EXECUTIONS_CF) else {
-        ensure!(
-            !unpriced,
-            "source {} is waiting for durable execution prices: missing {EXECUTIONS_CF}",
-            source.id
-        );
-        return Ok(None);
-    };
-    let journal_dir = source
-        .rocksdb_path
-        .parent()
-        .context("missing Exec data directory")?
-        .join("rapidx_account")
-        .join(format!(
-            "rapidx_{}_{portfolio}",
-            exchange.to_ascii_lowercase()
-        ));
-    let roles = journal.refresh(&journal_dir, portfolio, exchange)?;
-    let fills = decode_fills_with_roles(&records, portfolio, exchange, &wanted, roles)
-        .with_context(|| format!("source {} execution price evidence is invalid", source.id))?;
-    let resolved = replace_orders(events, &wanted, &fills).with_context(|| {
-        format!(
-            "source {} is waiting for complete execution prices",
-            source.id
-        )
-    })?;
-    if resolved == *events {
-        return Ok(None);
-    }
-    let recovered_orders = resolved
-        .iter()
-        .filter(|e| e.record_key.contains(":execution:"))
-        .map(|e| order_key(e))
-        .collect::<BTreeSet<_>>()
-        .len();
-    info!(
-        source_id = source.id,
-        recovered_orders, "recovered NAV fills from durable execution evidence"
-    );
-    Ok(Some(resolved))
 }
 
 #[cfg(test)]
@@ -173,7 +72,8 @@ fn decode_fills(
     decode_fills_with_roles(records, portfolio, exchange, wanted, &BTreeMap::new())
 }
 
-fn decode_fills_with_roles(
+#[cfg(test)]
+pub(super) fn decode_fills_with_roles(
     records: &[RawRocksRecord],
     portfolio: &str,
     exchange: &str,
@@ -181,93 +81,22 @@ fn decode_fills_with_roles(
     roles: &BTreeMap<String, liquidity_journal::RoleEvidence>,
 ) -> Result<BTreeMap<OrderKey, BTreeMap<String, Fill>>> {
     let mut result = BTreeMap::<OrderKey, BTreeMap<String, Fill>>::new();
-    let wanted_clients = wanted.iter().map(|key| key.2).collect::<BTreeSet<_>>();
+    let clients = wanted.iter().map(|key| key.2).collect::<BTreeSet<_>>();
     for record in records {
-        let stored: StoredExecution =
-            serde_json::from_slice(&record.value).context("decode stored execution JSON")?;
-        if stored.portfolio != portfolio || stored.exchange != exchange {
-            continue;
-        }
-        let e = stored.execution;
-        let Ok(client_order_id) = e.client_order_id.parse::<i64>() else {
+        let Some((key, execution, mut fill)) = decode_record(
+            record,
+            portfolio,
+            exchange,
+            |client| Ok(clients.contains(&client)),
+            |key| Ok(wanted.contains(key)),
+        )?
+        else {
             continue;
         };
-        if !wanted_clients.contains(&client_order_id) {
-            continue;
-        }
-        let parts = e.symbol.split('_').collect::<Vec<_>>();
-        ensure!(
-            parts.len() == 4
-                && parts[0] == exchange
-                && matches!(parts[3], "USDT" | "USDC")
-                && !parts[2].is_empty(),
-            "invalid execution symbol scope"
-        );
-        let venue_code = match (exchange, parts[1]) {
-            ("BINANCE", "SPOT" | "MARGIN") => 0,
-            ("BINANCE", "PERP") => 1,
-            ("OKX", "SPOT" | "MARGIN") => 2,
-            ("OKX", "PERP") => 3,
-            _ => anyhow::bail!("unsupported execution market"),
-        };
-        let symbol = if matches!(venue_code, 0 | 2) {
-            ensure!(parts[3] == "USDT", "cash execution requires USDT quote");
-            parts[2].to_owned()
-        } else {
-            format!("{}{}", parts[2], parts[3])
-        };
-        let key = (symbol, venue_code, client_order_id);
-        if !wanted.contains(&key) {
-            continue;
-        }
-
-        // WS and REST have distinct storage keys but describe the same trade.
-        // Validate the existing single storage contract before deduplicating.
-        let mut hash = Sha256::new();
-        hash.update(b"mkt_signal/rapidx_execution/stable_key");
-        for part in [portfolio, exchange, &e.transaction_id] {
-            hash.update((part.len() as u64).to_be_bytes());
-            hash.update(part.as_bytes());
-        }
-        hash.update([u8::from(e.rest)]);
-        let expected_key: [u8; 32] = hash.finalize().into();
-        ensure!(
-            record.key.as_slice() == expected_key,
-            "execution storage identity mismatch"
-        );
-        let quantity: f64 = e.quantity.parse().context("invalid execution quantity")?;
-        let price: f64 = e.price.parse().context("invalid execution price")?;
-        ensure!(
-            quantity.is_finite() && quantity > 0.0 && price.is_finite() && price > 0.0,
-            "execution quantity and price must be finite and positive"
-        );
-        ensure!(
-            !e.transaction_id.is_empty() && !e.order_id.is_empty() && client_order_id > 0,
-            "execution identity is empty or invalid"
-        );
-        let timestamp_us = e
-            .timestamp_ms
-            .checked_mul(1_000)
-            .filter(|t| *t > 0)
-            .context("invalid execution timestamp")?;
-        let side_code = match e.side.as_str() {
-            "BUY" => 1,
-            "SELL" => 2,
-            _ => anyhow::bail!("invalid execution side"),
-        };
-        let liquidity = roles
-            .get(&e.transaction_id)
-            .map(|role| role.validate(&e))
+        fill.liquidity = roles
+            .get(&execution.transaction_id)
+            .map(|role| role.validate(&execution))
             .transpose()?;
-        let fill = Fill {
-            transaction_id: e.transaction_id,
-            order_id: e.order_id,
-            side_code,
-            quantity,
-            price,
-            timestamp_us,
-            liquidity,
-        };
         let order = result.entry(key).or_default();
         if let Some(old) = order.get(&fill.transaction_id) {
             ensure!(
@@ -282,11 +111,103 @@ fn decode_fills_with_roles(
     Ok(result)
 }
 
+fn decode_record(
+    record: &RawRocksRecord,
+    portfolio: &str,
+    exchange: &str,
+    wanted_client: impl Fn(i64) -> Result<bool>,
+    wanted_order: impl Fn(&OrderKey) -> Result<bool>,
+) -> Result<Option<(OrderKey, Execution, Fill)>> {
+    let stored: StoredExecution =
+        serde_json::from_slice(&record.value).context("decode stored execution JSON")?;
+    if stored.portfolio != portfolio || stored.exchange != exchange {
+        return Ok(None);
+    }
+    let e = stored.execution;
+    let Ok(client_order_id) = e.client_order_id.parse::<i64>() else {
+        return Ok(None);
+    };
+    if !wanted_client(client_order_id)? {
+        return Ok(None);
+    }
+    let parts = e.symbol.split('_').collect::<Vec<_>>();
+    ensure!(
+        parts.len() == 4
+            && parts[0] == exchange
+            && matches!(parts[3], "USDT" | "USDC")
+            && !parts[2].is_empty(),
+        "invalid execution symbol scope"
+    );
+    let venue_code = match (exchange, parts[1]) {
+        ("BINANCE", "SPOT" | "MARGIN") => 0,
+        ("BINANCE", "PERP") => 1,
+        ("OKX", "SPOT" | "MARGIN") => 2,
+        ("OKX", "PERP") => 3,
+        _ => anyhow::bail!("unsupported execution market"),
+    };
+    let symbol = if matches!(venue_code, 0 | 2) {
+        ensure!(parts[3] == "USDT", "cash execution requires USDT quote");
+        parts[2].to_owned()
+    } else {
+        format!("{}{}", parts[2], parts[3])
+    };
+    let key = (symbol, venue_code, client_order_id);
+    if !wanted_order(&key)? {
+        return Ok(None);
+    }
+
+    // WS and REST have distinct storage keys but describe the same trade.
+    // Validate the existing single storage contract before deduplicating.
+    let mut hash = Sha256::new();
+    hash.update(b"mkt_signal/rapidx_execution/stable_key");
+    for part in [portfolio, exchange, &e.transaction_id] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    hash.update([u8::from(e.rest)]);
+    let expected_key: [u8; 32] = hash.finalize().into();
+    ensure!(
+        record.key.as_slice() == expected_key,
+        "execution storage identity mismatch"
+    );
+    let quantity: f64 = e.quantity.parse().context("invalid execution quantity")?;
+    let price: f64 = e.price.parse().context("invalid execution price")?;
+    ensure!(
+        quantity.is_finite() && quantity > 0.0 && price.is_finite() && price > 0.0,
+        "execution quantity and price must be finite and positive"
+    );
+    ensure!(
+        !e.transaction_id.is_empty() && !e.order_id.is_empty() && client_order_id > 0,
+        "execution identity is empty or invalid"
+    );
+    let timestamp_us = e
+        .timestamp_ms
+        .checked_mul(1_000)
+        .filter(|t| *t > 0)
+        .context("invalid execution timestamp")?;
+    let side_code = match e.side.as_str() {
+        "BUY" => 1,
+        "SELL" => 2,
+        _ => anyhow::bail!("invalid execution side"),
+    };
+
+    let fill = Fill {
+        transaction_id: e.transaction_id.clone(),
+        order_id: e.order_id.clone(),
+        side_code,
+        quantity,
+        price,
+        timestamp_us,
+        liquidity: None,
+    };
+    Ok(Some((key, e, fill)))
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
 
-    fn event(price: f64, quantity: f64, receive_us: i64) -> Arc<NavEvent> {
+    pub(in crate::nav) fn event(price: f64, quantity: f64, receive_us: i64) -> Arc<NavEvent> {
         Arc::new(NavEvent {
             record_key: format!("{receive_us:020}"),
             event_ts_us: receive_us,
@@ -303,6 +224,7 @@ pub(super) mod tests {
             amount_update: quantity,
             from_key_text: "batch_exec:alpha".into(),
             fill_liquidity: Some(crate::model::FillLiquidity::Unknown),
+            report_liquidity: None,
         })
     }
 
@@ -611,7 +533,8 @@ pub(super) mod tests {
     }
 }
 
-fn replace_orders(
+#[cfg(test)]
+pub(super) fn replace_orders(
     events: &im::Vector<Arc<NavEvent>>,
     wanted: &BTreeSet<OrderKey>,
     fills: &BTreeMap<OrderKey, BTreeMap<String, Fill>>,
@@ -732,6 +655,7 @@ fn with_role(event: &NavEvent, role: Option<FillLiquidity>) -> Result<NavEvent> 
     Ok(result)
 }
 
+#[cfg(test)]
 fn apply_roles(
     original: &[&Arc<NavEvent>],
     order: &BTreeMap<String, Fill>,

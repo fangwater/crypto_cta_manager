@@ -10,6 +10,17 @@ pub const MEMORY_WINDOW_US: i64 = 7 * crate::funding_daily::DAY_US;
 const DAY_US: i64 = crate::funding_daily::DAY_US;
 use crate::funding_daily::day_start;
 
+pub(super) mod rebuild;
+
+#[derive(Debug)]
+pub(super) struct FullHistoryRequired;
+impl std::fmt::Display for FullHistoryRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("full NAV fill rebuild required")
+    }
+}
+impl std::error::Error for FullHistoryRequired {}
+
 // Historical replays and cold source builds share one memory budget. The guard
 // stays in the blocking worker, including when its HTTP caller disconnects.
 static REPLAY: OnceLock<Mutex<()>> = OnceLock::new();
@@ -122,7 +133,7 @@ impl DailyFifoStore {
                 break;
             }
             let entry: DailyEntry =
-                serde_json::from_slice(&bytes).context("invalid daily FIFO state")?;
+                rmp_serde::from_slice(&bytes).context("invalid daily FIFO state")?;
             anyhow::ensure!(
                 entry.source_id == id && Self::key(id, entry.boundary_us)? == key.as_ref(),
                 "daily FIFO identity mismatch"
@@ -161,6 +172,16 @@ impl DailyFifoStore {
         Ok(())
     }
     fn persist(&self, cache: &NavTimelineCache, id: &str, through: i64) -> Result<()> {
+        self.persist_with_cursors(cache, id, through, None)
+    }
+
+    fn persist_with_cursors(
+        &self,
+        cache: &NavTimelineCache,
+        id: &str,
+        through: i64,
+        cursors: Option<&BTreeMap<i64, Vec<u8>>>,
+    ) -> Result<()> {
         let account = &cache.sources[&(id.to_owned(), false)];
         let strategy = &cache.sources[&(id.to_owned(), true)];
         let first = [account, strategy]
@@ -181,12 +202,21 @@ impl DailyFifoStore {
                 source_id: id.to_owned(),
                 boundary_us: day,
                 input_fingerprint: fingerprint.clone(),
-                uniform_scan_from: cache.histories[id]
-                    .events
-                    .iter()
-                    .filter(|e| fifo_ts_us(e) >= day)
-                    .map(|e| e.record_key.as_bytes().to_vec())
-                    .min()
+                uniform_scan_from: cursors
+                    .and_then(|c| c.range(day..).next().map(|(_, key)| key.clone()))
+                    .or_else(|| {
+                        cursors
+                            .is_none()
+                            .then(|| {
+                                cache.histories[id]
+                                    .events
+                                    .iter()
+                                    .filter(|e| fifo_ts_us(e) >= day)
+                                    .map(|e| e.record_key.as_bytes().to_vec())
+                                    .min()
+                            })
+                            .flatten()
+                    })
                     .or_else(|| {
                         cache.histories[id]
                             .read_limits
@@ -202,7 +232,7 @@ impl DailyFifoStore {
             self.0.db().put_cf_opt(
                 &cf,
                 Self::key(id, day)?,
-                serde_json::to_vec(&entry)?,
+                rmp_serde::to_vec_named(&entry)?,
                 &options,
             )?;
             day += DAY_US;
@@ -332,6 +362,37 @@ pub(super) fn load_history_window(
     load_history_window_from(source, from, limits, None, None)
 }
 
+pub(super) fn load_history_for(
+    source: &SourceConfig,
+    history: &NavSourceHistory,
+    from: Option<i64>,
+    uniform_start: Option<Vec<u8>>,
+) -> Result<NavSourceHistory> {
+    if let Some(view) = &history.recovery_view {
+        let mut complete = history.clone();
+        complete.events.clear();
+        complete.change = None;
+        complete.retained_from_us = from;
+        view.visit(|event| {
+            if from.is_none_or(|bound| fifo_ts_us(&event) >= bound) {
+                complete.events.push_back(event);
+            }
+            Ok(())
+        })?;
+        complete
+            .events
+            .sort_by(|a, b| a.record_key.cmp(&b.record_key));
+        return Ok(complete);
+    }
+    load_history_window_from(
+        source,
+        from,
+        Some(&history.read_limits),
+        uniform_start,
+        None,
+    )
+}
+
 pub(super) fn load_fill_history(
     source: &SourceConfig,
     symbols: &[String],
@@ -349,22 +410,30 @@ fn load_history_window_from(
     if !source.rocksdb_path.join("CURRENT").is_file() {
         return Ok(NavSourceHistory::default());
     }
-    // RapidX recovery joins lifecycle and exchange execution evidence. Keep the
-    // full join temporary; trimming inputs before recovery can double-count fills.
-    let rapidx = crate::market_rules::source_values(source)
-        .ok()
-        .is_some_and(|v| {
-            matches!(
-                crate::market_rules::execution_backend(&source.venue, &v),
-                Ok("ltp")
-            )
-        });
+    if rapidx_source(source) {
+        anyhow::ensure!(
+            limits.is_none(),
+            "RapidX history requires its immutable canonical fill view"
+        );
+        let mut state = IncrementalSourceHistory::default();
+        state.refresh_recovered_source(source, false)?;
+        let mut history = load_history_for(source, &state.history, from, None)?;
+        if let Some(symbols) = fill_symbols {
+            history.events = history
+                .events
+                .iter()
+                .filter(|event| symbols.is_empty() || symbols.contains(&event.symbol))
+                .cloned()
+                .collect();
+        }
+        return Ok(history);
+    }
     let requests = NAV_HISTORY_COLUMN_FAMILIES
         .iter()
         .map(|cf| {
             (
                 cf.to_string(),
-                if !rapidx && *cf == crate::model::UNIFORM_ORDERS_CF {
+                if *cf == crate::model::UNIFORM_ORDERS_CF {
                     uniform_start.clone()
                 } else {
                     None
@@ -375,6 +444,7 @@ fn load_history_window_from(
     let mut events = im::Vector::new();
     let mut roles = LiquidityByOrder::new();
     let mut wanted = BTreeSet::new();
+    let mut metadata = HistoryMetadata::default();
     let heads = rocks_source::visit_column_families_from(
         &source.rocksdb_path,
         &requests,
@@ -390,23 +460,24 @@ fn load_history_window_from(
             }
             if cf == crate::model::UNIFORM_ORDERS_CF {
                 let event: Arc<NavEvent> = decode_uniform_order(key, value)?.into();
-                // Recovery requires RapidX lifecycle rows. Native diagnostic
-                // replays can discard non-fills before allocating their history.
-                if rapidx
-                    || ((fill_symbols.is_none_or(|symbols| {
-                        event.amount_update != 0.0
-                            && (symbols.is_empty()
-                                || symbols.contains(&crate::exec_routing::target_symbol(
-                                    &event.symbol,
-                                    event.venue_code,
-                                )))
-                    })) && from.is_none_or(|bound| fifo_ts_us(&event) >= bound))
+                metadata.observe(&event);
+                if event.amount_update != 0.0
+                    && (fill_symbols.is_none_or(|symbols| {
+                        symbols.is_empty()
+                            || symbols.contains(&crate::exec_routing::target_symbol(
+                                &event.symbol,
+                                event.venue_code,
+                            ))
+                    }))
+                    && from.is_none_or(|bound| fifo_ts_us(&event) >= bound)
                 {
-                    wanted.insert((
-                        event.symbol.clone(),
-                        event.venue_code,
-                        event.client_order_id,
-                    ));
+                    if event.fill_liquidity.is_none() {
+                        wanted.insert((
+                            event.symbol.clone(),
+                            event.venue_code,
+                            event.client_order_id,
+                        ));
+                    }
                     events.push_back(event);
                 }
             } else {
@@ -427,10 +498,21 @@ fn load_history_window_from(
         heads.contains_key(crate::model::UNIFORM_ORDERS_CF),
         "missing uniform_orders"
     );
-    let events =
-        fill_recovery::resolve(source, &events, &mut Default::default())?.unwrap_or(events);
     let events = events
         .into_iter()
+        .map(|mut event| {
+            if event.fill_liquidity.is_none() {
+                Arc::make_mut(&mut event).report_liquidity = roles
+                    .get(&(
+                        event.symbol.clone(),
+                        event.venue_code,
+                        event.client_order_id,
+                    ))
+                    .copied()
+                    .map(joined_role);
+            }
+            event
+        })
         .filter(|e| {
             fill_symbols.is_none_or(|symbols| {
                 e.amount_update != 0.0
@@ -441,13 +523,15 @@ fn load_history_window_from(
         })
         .filter(|e| from.is_none_or(|bound| fifo_ts_us(e) >= bound))
         .collect();
-    Ok(NavSourceHistory {
+    let mut history = NavSourceHistory {
         events,
-        liquidity_by_order: roles,
+        liquidity_by_order: Default::default(),
         read_limits: limits.cloned().unwrap_or(heads),
         source_identity: std::fs::read(source.rocksdb_path.join("IDENTITY")).ok(),
         ..Default::default()
-    })
+    };
+    metadata.attach(&mut history);
+    Ok(history)
 }
 
 impl NavSourceHistory {
@@ -528,15 +612,18 @@ impl NavTimelineCache {
         let mut inputs = BTreeMap::new();
         let mut histories = BTreeMap::new();
         let mut funding_fingerprints = BTreeMap::new();
+        let mut funding_prefixes = BTreeMap::new();
         for source in config.sources.iter().filter(|s| s.enabled) {
             let mut scoped = config.clone();
             scoped.sources.retain(|s| s.id == source.id);
             // Refresh only this source without removing other incremental readers.
             let state = store.sources.entry(source.id.clone()).or_default();
+            let present = source.rocksdb_path.join("CURRENT").is_file();
+            let cold = present && (state.db_identity.is_none() || state.full_rebuild_required);
             if !source.rocksdb_path.join("CURRENT").is_file() {
                 *state = IncrementalSourceHistory::default();
-            } else {
-                state.refresh_source(source)?;
+            } else if !cold {
+                state.refresh_source_inner(source, false)?;
             }
             let mut history = state.history.clone();
             history.allocations = allocations.get(&source.id).cloned().unwrap_or_default();
@@ -544,26 +631,39 @@ impl NavTimelineCache {
             let changed_from = history.change.as_ref().and_then(|c| {
                 c.events
                     .iter()
+                    // NEW/cancel rows do not change FIFO or a daily boundary.
+                    // Keep invalid negative/non-finite quantities on the normal
+                    // validation path rather than silently treating them as zero.
+                    .filter(|e| e.amount_update != 0.0)
                     .map(|e| fifo_ts_us(e))
                     .chain(c.earliest_liquidity_fill_ts_us)
+                    .chain(c.replaced_from_ts_us)
                     .min()
             });
-            let needs_full = old.is_none()
+            let needs_full = cold
+                || state.full_rebuild_required
+                || old.is_none()
                 || !source.rocksdb_path.join("CURRENT").is_file()
-                || history.change.is_none()
-                    && previous.is_none_or(|p| {
-                        p.histories
-                            .get(&source.id)
-                            .is_none_or(|h| h.revision != history.revision)
+                || previous.is_some_and(|p| {
+                    p.histories.get(&source.id).is_none_or(|h| {
+                        h.revision != history.revision
+                            && history
+                                .change
+                                .as_ref()
+                                .is_none_or(|change| change.previous_revision != h.revision)
                     })
+                })
                 || changed_from.is_some_and(|ts| {
-                    ts < boundary
+                    old.and_then(|s| s.retained_from_us)
+                        .is_some_and(|retained| ts < retained)
                         || old.is_some_and(|s| {
-                            s.report
-                                .last_fill_ts_us
-                                .into_iter()
-                                .chain(s.prepared.allocations.last().map(|a| a.snapshot_ts_us))
-                                .any(|end| ts <= end)
+                            // A retained FIFO checkpoint can replay ordinary
+                            // out-of-order fills. Audited ownership corrections
+                            // still require their original full preconditions.
+                            s.prepared
+                                .allocations
+                                .last()
+                                .is_some_and(|a| ts <= a.snapshot_ts_us)
                         })
                 })
                 || previous.is_some_and(|p| {
@@ -584,16 +684,11 @@ impl NavTimelineCache {
                         })
                     })
                 });
-            let needs_full = needs_full
-                || crate::market_rules::source_values(source)
-                    .ok()
-                    .is_some_and(|v| {
-                        matches!(
-                            crate::market_rules::execution_backend(&source.venue, &v),
-                            Ok("ltp")
-                        )
-                    });
-            if needs_full {
+            if needs_full && !present {
+                info!(source_id=%source.id, changed_from_us=?changed_from,
+                    retained_from_us=?old.and_then(|s| s.retained_from_us),
+                    history_revision=history.revision,
+                    "rebuilding full NAV source history");
                 daily.invalidate(&source.id, i64::MIN)?;
                 if history.retained_from_us.is_some() {
                     *state = IncrementalSourceHistory::default();
@@ -604,13 +699,42 @@ impl NavTimelineCache {
             } else if let Some(from) = changed_from {
                 daily.invalidate(&source.id, from)?;
             }
-            let mut built = Self::refresh(
-                scoped,
-                snapshots.clone(),
-                strategies.clone(),
-                Arc::new(BTreeMap::from([(source.id.clone(), history)])),
-                if needs_full { None } else { previous },
-            )?;
+            let attempt = if needs_full && present {
+                Err(FullHistoryRequired.into())
+            } else {
+                Self::refresh_inner(
+                    scoped,
+                    snapshots.clone(),
+                    strategies.clone(),
+                    Arc::new(BTreeMap::from([(source.id.clone(), history)])),
+                    if needs_full { None } else { previous },
+                    false,
+                )
+            };
+            let mut built = match attempt {
+                Ok(built) => built,
+                Err(error) if error.is::<FullHistoryRequired>() => {
+                    info!(source_id=%source.id, changed_from_us=?changed_from, "starting bounded NAV fill rebuild");
+                    let (built, next, _) = rebuild::build_with_state(
+                        config.clone(),
+                        source,
+                        snapshots.clone(),
+                        strategies.clone(),
+                        allocations.get(&source.id).cloned().unwrap_or_default(),
+                        daily.clone(),
+                        now,
+                        std::mem::take(state),
+                    )?;
+                    *state = next;
+                    histories.insert(source.id.clone(), built.histories[&source.id].clone());
+                    sources.extend(built.sources);
+                    inputs.extend(built.inputs);
+                    funding_fingerprints.extend(built.funding_fingerprints);
+                    funding_prefixes.extend(built.funding_prefixes);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             // Keep original lifetime first-fill metadata when incremental tails
             // no longer contain the first fill.
             for mode in [false, true] {
@@ -638,24 +762,17 @@ impl NavTimelineCache {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let previous_hashes = previous
-                .and_then(|p| p.funding_fingerprints.get(&source.id))
-                .filter(|_| !needs_full);
-            let hashes = if let Some(old) =
-                previous_hashes.filter(|old| cutoffs.iter().all(|t| old.contains_key(t)))
-            {
-                old.clone()
-            } else {
-                let hashes = if built.histories[&source.id].retained_from_us.is_some() {
-                    built
-                        .restore_window(std::slice::from_ref(&source.id), None)?
-                        .funding_daily_fingerprints(&source.id, &cutoffs)?
-                } else {
-                    built.funding_daily_fingerprints(&source.id, &cutoffs)?
-                };
-                Arc::new(hashes)
-            };
-            funding_fingerprints.insert(source.id.clone(), hashes);
+            let prefixes = funding_estimate::DailyPrefixes::refresh(
+                &built.sources[&(source.id.clone(), true)].prepared,
+                &cutoffs,
+                previous
+                    .and_then(|p| p.funding_prefixes.get(&source.id))
+                    .filter(|_| !needs_full)
+                    .map(AsRef::as_ref),
+                changed_from,
+            )?;
+            funding_fingerprints.insert(source.id.clone(), Arc::new(prefixes.fingerprints()));
+            funding_prefixes.insert(source.id.clone(), Arc::new(prefixes));
             daily.persist(&built, &source.id, now)?;
             for mode in [false, true] {
                 Arc::make_mut(built.sources.get_mut(&(source.id.clone(), mode)).unwrap())
@@ -668,9 +785,6 @@ impl NavTimelineCache {
                 .filter(|(_, ts)| **ts >= boundary)
                 .map(|(k, v)| (k.clone(), *v))
                 .collect();
-            // Recovery needs the original lifecycle; refresh it temporarily for
-            // that source rather than keeping its entire raw history resident.
-            state.raw_events = None;
             let mut compact = state.history.clone();
             compact.allocations = allocations.get(&source.id).cloned().unwrap_or_default();
             info!(source_id=%source.id, retained_from_us=boundary, cached_events=compact.events.len(),
@@ -695,6 +809,7 @@ impl NavTimelineCache {
             mark_plans: Arc::new(crate::analysis::QueryCache::new(4)),
             daily: Some(daily),
             funding_fingerprints,
+            funding_prefixes,
         })
     }
     pub fn histories(&self) -> Arc<NavSourceHistories> {
@@ -728,12 +843,11 @@ impl NavTimelineCache {
                 current.source_identity == std::fs::read(source.rocksdb_path.join("IDENTITY")).ok(),
                 "Exec database changed; wait for dashboard refresh"
             );
-            let mut history = load_history_window_from(
+            let mut history = load_history_for(
                 source,
+                current,
                 from,
-                Some(&current.read_limits),
                 entry.as_ref().and_then(|e| e.uniform_scan_from.clone()),
-                None,
             )?;
             history.allocations = current.allocations.clone();
             history.events = history
@@ -810,6 +924,7 @@ impl NavTimelineCache {
             mark_plans: Arc::new(crate::analysis::QueryCache::new(0)),
             daily: None,
             funding_fingerprints: BTreeMap::new(),
+            funding_prefixes: BTreeMap::new(),
         })
     }
 }
@@ -824,7 +939,7 @@ impl NavSourceHistory {
             );
             // Acquisition-cost queries are keyed by receive timestamp, so a
             // FIFO timestamp filter would incorrectly drop delayed fills.
-            let mut full = load_history_window(source, None, Some(&self.read_limits))?;
+            let mut full = load_history_for(source, self, None, None)?;
             full.allocations = self.allocations.clone();
             full.events = full
                 .events

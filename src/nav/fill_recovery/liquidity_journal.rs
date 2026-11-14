@@ -4,16 +4,19 @@
 use super::{Execution, FillLiquidity};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 
-#[derive(Clone, Debug)]
-pub(super) struct RoleEvidence {
-    execution: Execution,
-    role: FillLiquidity,
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(in crate::nav) struct RoleEvidence {
+    pub(super) execution: Execution,
+    pub(super) role: FillLiquidity,
 }
 
 impl RoleEvidence {
@@ -44,6 +47,7 @@ fn number(value: &str) -> Result<f64> {
     Ok(value)
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct JournalFile {
     identity: (u64, u64),
@@ -51,6 +55,7 @@ struct JournalFile {
     roles: BTreeMap<String, RoleEvidence>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct LiquidityJournal {
     scope: Option<(PathBuf, String, String)>,
@@ -58,8 +63,9 @@ pub(crate) struct LiquidityJournal {
     roles: BTreeMap<String, RoleEvidence>,
 }
 
+#[cfg(test)]
 impl LiquidityJournal {
-    pub(super) fn refresh(
+    pub(in crate::nav) fn refresh(
         &mut self,
         dir: &Path,
         portfolio: &str,
@@ -136,6 +142,7 @@ impl LiquidityJournal {
     }
 }
 
+#[cfg(test)]
 fn merge(roles: &mut BTreeMap<String, RoleEvidence>, role: RoleEvidence) -> Result<()> {
     if let Some(old) = roles.get(&role.execution.transaction_id) {
         ensure!(
@@ -148,7 +155,11 @@ fn merge(roles: &mut BTreeMap<String, RoleEvidence>, role: RoleEvidence) -> Resu
     Ok(())
 }
 
-fn parse_role(line: &[u8], portfolio: &str, exchange: &str) -> Result<Option<RoleEvidence>> {
+pub(super) fn parse_role(
+    line: &[u8],
+    portfolio: &str,
+    exchange: &str,
+) -> Result<Option<RoleEvidence>> {
     // Account/position snapshots dominate the journal. Avoid decoding those on
     // cold scans; whitespace and field order do not affect this string filter.
     if !line

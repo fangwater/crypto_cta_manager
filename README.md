@@ -939,6 +939,13 @@ Virtual 的添加选项同时支持仓位策略和子 Virtual。子 Virtual 沿�
 [嵌套 Virtual 维护脚本](scripts/apply_nested_virtual_schema.sql)，详见
 [Virtual 账户说明](docs/virtual_accounts.md)。
 
+### NAV reconstruction
+
+All sources use the same bounded FIFO replay, daily checkpoints and recent-fill
+window. Only validated fills enter FIFO; source adapters handle decoding,
+deduplication and liquidity evidence. Builds use the standard Cargo commands on
+every host. See [reconstruction and resource boundaries](docs/nav_daily_fifo_design.md).
+
 ### Optional funding and execution slippage
 
 The NAV page exposes before/after-fee NAV gaps against the minute-VWAP theoretical portfolio, divided by actual quote turnover in the same time window and expressed in bps. Acquisition cost also reports after-fee execution shortfall bps on its existing same-fill-quantity benchmark.
