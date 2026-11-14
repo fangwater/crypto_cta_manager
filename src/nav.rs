@@ -4949,7 +4949,7 @@ mod tests {
     }
 
     #[test]
-    fn late_rapidx_journal_role_reprices_fees_without_new_orders_or_fifo_changes() {
+    fn late_rapidx_durable_role_reprices_fees_without_new_orders_or_fifo_changes() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("persist_manager");
         let env_path = temp.path().join("exec.env");
@@ -4988,14 +4988,9 @@ mod tests {
             before["rx01"].estimated_fee_quote(&source, event).unwrap(),
             0.0525,
         );
-        let dir = temp.path().join("rapidx_account/rapidx_binance_123");
-        std::fs::create_dir_all(&dir).unwrap();
-        let role = serde_json::json!({"message":{"channel":"Trades","data":{
-            "portfolioId":"123","exchangeType":"BINANCE","transactionId":"a",
-            "orderId":"88","clientOrderId":"7","sym":"BINANCE_PERP_FIL_USDT",
-            "side":"SELL","quantity":"3","price":"100","createAt":"100","execType":"MAKER"
-        }}});
-        std::fs::write(dir.join("one.jsonl"), format!("{role}\n")).unwrap();
+        let record = fill_recovery::tests::record("123", "PERP", "a", 3.0, 100.0, false);
+        let fact: serde_json::Value = serde_json::from_slice(&record.value).unwrap();
+        write_recovery_roles(&path, &[serde_json::json!({"record":fact,"role":"MAKER"})]);
         let after = store.refresh(&config).unwrap();
         let history = &after["rx01"];
         assert_ne!(history.revision, before["rx01"].revision);
@@ -7860,12 +7855,13 @@ mod tests {
         let mut options = Options::default();
         options.create_if_missing(true);
         options.create_missing_column_families(true);
-        let db = DB::open_cf(
-            &options,
-            path,
-            ["default", UNIFORM_ORDERS_CF, "rapidx_executions"],
-        )
-        .unwrap();
+        let mut names = DB::list_cf(&options, path).unwrap_or_default();
+        for name in ["default", UNIFORM_ORDERS_CF, "rapidx_executions"] {
+            if !names.iter().any(|v| v == name) {
+                names.push(name.into());
+            }
+        }
+        let db = DB::open_cf(&options, path, names).unwrap();
         for event in events {
             db.put_cf(
                 db.cf_handle(UNIFORM_ORDERS_CF).unwrap(),
@@ -7893,6 +7889,39 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    fn write_recovery_roles(path: &std::path::Path, roles: &[serde_json::Value]) {
+        use sha2::{Digest, Sha256};
+        let mut options = Options::default();
+        options.create_missing_column_families(true);
+        let mut names = DB::list_cf(&options, path).unwrap();
+        if !names.iter().any(|v| v == "rapidx_execution_roles") {
+            names.push("rapidx_execution_roles".into());
+        }
+        let db = DB::open_cf(&options, path, names).unwrap();
+        let mut batch = rocksdb::WriteBatch::default();
+        for role in roles {
+            let record = &role["record"];
+            let e = &record["execution"];
+            let mut hash = Sha256::new();
+            hash.update(b"mkt_signal/rapidx_execution/stable_key");
+            for part in [
+                record["portfolio"].as_str().unwrap(),
+                record["exchange"].as_str().unwrap(),
+                e["transaction_id"].as_str().unwrap(),
+            ] {
+                hash.update((part.len() as u64).to_be_bytes());
+                hash.update(part.as_bytes());
+            }
+            hash.update([u8::from(e["rest"].as_bool().unwrap())]);
+            batch.put_cf(
+                db.cf_handle("rapidx_execution_roles").unwrap(),
+                hash.finalize(),
+                serde_json::to_vec(role).unwrap(),
+            );
+        }
+        db.write(batch).unwrap();
     }
 
     fn unpriced_recovery_event() -> UniformOrderEvent {
@@ -9037,7 +9066,7 @@ mod tests {
         let daily = Arc::new(daily::DailyFifoStore::open(manager).unwrap());
         let mut orders = Vec::new();
         let mut facts = Vec::new();
-        let mut journal = Vec::new();
+        let mut roles = Vec::new();
         for d in 0..40_i64 {
             for j in 0..128_i64 {
                 let fill_ts = start + d * day + (j + 1) * 1_000_000;
@@ -9083,16 +9112,10 @@ mod tests {
                     "SELL".into()
                 };
                 fact["execution"]["symbol"] = format!("BINANCE_{market}_FIL_USDT").into();
+                roles.push(serde_json::json!({"record":fact,"role":role}));
                 facts.push(fact.clone());
                 fact["execution"]["rest"] = true.into();
                 facts.push(fact);
-                let row = serde_json::json!({"message":{"channel":"Trades","data":{
-                    "portfolioId":"123","exchangeType":"BINANCE","transactionId":tx,
-                    "orderId":format!("order-{client}"),"clientOrderId":client.to_string(),"sym":format!("BINANCE_{market}_FIL_USDT"),
-                    "side":if side==1{"BUY"}else{"SELL"},"quantity":qty.to_string(),"price":price.to_string(),"createAt":(fill_ts/1000).to_string(),"execType":role
-                }}});
-                journal.extend(serde_json::to_vec(&row).unwrap());
-                journal.push(b'\n');
             }
         }
         for (client, d) in [(10001, 35), (10002, 5)] {
@@ -9103,12 +9126,7 @@ mod tests {
             orders.push(event);
         }
         write_recovery_records(&path, &orders, &facts);
-        let journal_dir = path
-            .parent()
-            .unwrap()
-            .join("rapidx_account/rapidx_binance_123");
-        std::fs::create_dir_all(&journal_dir).unwrap();
-        std::fs::write(journal_dir.join("a.jsonl"), journal).unwrap();
+        write_recovery_roles(&path, &roles);
         let snapshots = Arc::new(BTreeMap::from([(
             "trade06".into(),
             position_snapshot(
@@ -9225,7 +9243,6 @@ mod tests {
     #[ignore = "explicit RapidX recovery RSS comparison; creates a 40-day ledger"]
     fn rapidx_rebuild_memory_benchmark() {
         use sha2::{Digest, Sha256};
-        use std::io::Write;
         let temp = tempfile::tempdir().unwrap();
         let mut config = recovery_config(temp.path());
         config.sources[0].maker_fee_rate = Some(-0.0001);
@@ -9236,21 +9253,17 @@ mod tests {
         let start = crate::funding_daily::day_start(1_790_000_000_000_000);
         let now = start + 40 * day;
         write_recovery_records(path, &[], &[]);
-        let db = DB::open_cf(
+        let mut db = DB::open_cf(
             &Options::default(),
             path,
             [UNIFORM_ORDERS_CF, "rapidx_executions"],
         )
         .unwrap();
+        db.create_cf("rapidx_execution_roles", &Options::default())
+            .unwrap();
         let cf = db.cf_handle(UNIFORM_ORDERS_CF).unwrap();
         let executions = db.cf_handle("rapidx_executions").unwrap();
-        let dir = path
-            .parent()
-            .unwrap()
-            .join("rapidx_account/rapidx_binance_123");
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut journal =
-            std::io::BufWriter::new(std::fs::File::create(dir.join("a.jsonl")).unwrap());
+        let roles = db.cf_handle("rapidx_execution_roles").unwrap();
         let mut batch = rocksdb::WriteBatch::default();
         for i in 0..25_000_i64 {
             let ts = start + (i / 625) * day + (i % 625 + 1) * 1_000_000;
@@ -9297,26 +9310,23 @@ mod tests {
                     hash.update(part.as_bytes());
                 }
                 hash.update([u8::from(rest)]);
+                let key = hash.finalize();
+                batch.put_cf(executions, key, serde_json::to_vec(&fact).unwrap());
                 batch.put_cf(
-                    executions,
-                    hash.finalize(),
-                    serde_json::to_vec(&fact).unwrap(),
+                    roles,
+                    key,
+                    serde_json::to_vec(
+                        &serde_json::json!({"record":fact,"role":if side==1{"MAKER"}else{"TAKER"}}),
+                    )
+                    .unwrap(),
                 );
             }
-            let role = serde_json::json!({"message":{"channel":"Trades","data":{
-                "portfolioId":"123","exchangeType":"BINANCE","transactionId":tx,
-                "orderId":format!("o-{client}"),"clientOrderId":client.to_string(),"sym":format!("BINANCE_{market}_FIL_USDT"),
-                "side":if side==1{"BUY"}else{"SELL"},"quantity":"0.125","price":price,"createAt":(ts/1000).to_string(),"execType":if side==1{"MAKER"}else{"TAKER"}
-            }}});
-            serde_json::to_writer(&mut journal, &role).unwrap();
-            journal.write_all(b"\n").unwrap();
             if batch.len() >= 4096 {
                 db.write(std::mem::take(&mut batch)).unwrap();
             }
         }
         db.write(batch).unwrap();
         drop(db);
-        drop(journal);
         let mode =
             std::env::var("CTA_NAV_RECOVERY_BENCH_MODE").unwrap_or_else(|_| "bounded".into());
         let began = Instant::now();
@@ -9342,7 +9352,11 @@ mod tests {
             assert_eq!(mode, "materialized");
             let mut records = rocks_source::read_available_column_families(
                 path,
-                &[UNIFORM_ORDERS_CF, "rapidx_executions"],
+                &[
+                    UNIFORM_ORDERS_CF,
+                    "rapidx_executions",
+                    "rapidx_execution_roles",
+                ],
             )
             .unwrap();
             let raw = records.remove(UNIFORM_ORDERS_CF).unwrap();
@@ -9354,14 +9368,19 @@ mod tests {
                 .iter()
                 .map(|e| (e.symbol.clone(), e.venue_code, e.client_order_id))
                 .collect::<BTreeSet<_>>();
-            let mut roles = fill_recovery::liquidity_journal::LiquidityJournal::default();
-            let roles = roles.refresh(&dir, "123", "BINANCE").unwrap();
+            let mut roles = BTreeMap::new();
+            for row in records.remove("rapidx_execution_roles").unwrap() {
+                let role = fill_recovery::liquidity::decode(&row.key, &row.value, "123", "BINANCE")
+                    .unwrap()
+                    .unwrap();
+                roles.insert(role.transaction_id().to_owned(), role);
+            }
             let fills = fill_recovery::decode_fills_with_roles(
                 &records.remove("rapidx_executions").unwrap(),
                 "123",
                 "BINANCE",
                 &wanted,
-                roles,
+                &roles,
             )
             .unwrap();
             let canonical = fill_recovery::replace_orders(&events, &wanted, &fills).unwrap();

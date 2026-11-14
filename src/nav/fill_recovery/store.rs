@@ -3,9 +3,7 @@
 use super::*;
 use crate::nav::{LiquidityByOrder, NavEvent, fifo_ts_us, joined_role};
 use rocksdb::{BlockBasedOptions, Cache, DB, Direction, IteratorMode, Options};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Mutex, Weak};
 
 type Id = [u8; 32];
@@ -78,19 +76,11 @@ impl View {
     }
 }
 
-#[derive(Debug, Default)]
-struct JournalCursor {
-    identity: (u64, u64),
-    offset: u64,
-}
-
 #[derive(Debug)]
 pub(crate) struct State {
     disk: Arc<Disk>,
     portfolio: String,
     exchange: String,
-    journal: PathBuf,
-    cursors: BTreeMap<PathBuf, JournalCursor>,
     generation: u64,
     zero_rows: std::cell::Cell<usize>,
 }
@@ -161,15 +151,6 @@ impl State {
         table.set_block_cache(&Cache::new_lru_cache(8 * 1024 * 1024));
         options.set_block_based_table_factory(&table);
         let db = DB::open(&options, directory.path())?;
-        let journal = source
-            .rocksdb_path
-            .parent()
-            .context("missing Exec data directory")?
-            .join("rapidx_account")
-            .join(format!(
-                "rapidx_{}_{portfolio}",
-                exchange.to_ascii_lowercase()
-            ));
         Ok(Self {
             disk: Arc::new(Disk {
                 db,
@@ -178,8 +159,6 @@ impl State {
             }),
             portfolio,
             exchange,
-            journal,
-            cursors: Default::default(),
             generation: 0,
             zero_rows: Default::default(),
         })
@@ -255,18 +234,18 @@ impl State {
         Ok(())
     }
 
-    fn journal_role(&self, role: liquidity_journal::RoleEvidence) -> Result<()> {
+    fn durable_role(&self, role: liquidity::RoleEvidence) -> Result<()> {
         let k = key(b'J', role.execution.transaction_id.as_bytes());
         if let Some(old) = self.disk.db.get(&k)? {
-            let old: liquidity_journal::RoleEvidence = decode(&old)?;
+            let old: liquidity::RoleEvidence = decode(&old)?;
             ensure!(
                 old.validate(&role.execution)? == role.role,
-                "conflicting RapidX journal fill roles"
+                "conflicting RapidX durable fill roles"
             );
             return Ok(());
         }
         self.disk.db.put(k, encode(&role)?)?;
-        // Journal evidence can arrive without any new lifecycle or execution row.
+        // Role evidence can arrive without any new lifecycle or execution row.
         if let Some(hash) = self
             .disk
             .db
@@ -277,74 +256,16 @@ impl State {
         Ok(())
     }
 
-    fn refresh_journal(&mut self) -> Result<()> {
-        let mut paths = match std::fs::read_dir(&self.journal) {
-            Ok(rows) => rows
-                .map(|row| row.map(|e| e.path()))
-                .collect::<std::io::Result<Vec<_>>>()?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e).context("read RapidX journal directory"),
-        };
-        paths.retain(|p| p.extension().is_some_and(|e| e == "jsonl"));
-        paths.sort();
-        let replaced = self.cursors.iter().any(|(path, state)| {
-            path.metadata().map_or(true, |m| {
-                (m.dev(), m.ino()) != state.identity || m.len() < state.offset
-            })
-        });
-        if replaced {
-            // Removed/replaced files invalidate their roles. Re-read remaining
-            // files into disk; never retain the journal's historical rows in RAM.
-            for row in self.disk.db.prefix_iterator([b'J']) {
-                let (k, v) = row?;
-                if k.first() != Some(&b'J') {
-                    break;
-                }
-                let old: liquidity_journal::RoleEvidence = decode(&v)?;
-                if let Some(hash) = self
-                    .disk
-                    .db
-                    .get(key(b'I', old.execution.transaction_id.as_bytes()))?
-                {
-                    self.disk.db.put(key(b'D', &hash), [])?;
-                }
-                self.disk.db.delete(k)?;
-            }
-            self.cursors.clear();
+    fn ingest_role(&self, raw_key: &[u8], value: &[u8]) -> Result<()> {
+        let k = key(b'K', raw_key);
+        if let Some(old) = self.disk.db.get(&k)? {
+            ensure!(old.as_slice() == value, "durable RapidX role was changed");
+            return Ok(());
         }
-        for path in paths {
-            let mut file = std::fs::File::open(&path)?;
-            let metadata = file.metadata()?;
-            let old = self.cursors.get(&path).map_or(0, |s| s.offset);
-            file.seek(SeekFrom::Start(old))?;
-            let mut reader = BufReader::new(file.take(metadata.len() - old));
-            let mut line = Vec::new();
-            let mut offset = old;
-            loop {
-                line.clear();
-                let n = reader
-                    .by_ref()
-                    .take(MAX_RECORD as u64 + 1)
-                    .read_until(b'\n', &mut line)?;
-                ensure!(n <= MAX_RECORD, "RapidX journal line exceeds 8 MiB");
-                if !line.ends_with(b"\n") {
-                    break;
-                }
-                if let Some(role) =
-                    liquidity_journal::parse_role(&line, &self.portfolio, &self.exchange)?
-                {
-                    self.journal_role(role)?;
-                }
-                offset += n as u64;
-            }
-            self.cursors.insert(
-                path,
-                JournalCursor {
-                    identity: (metadata.dev(), metadata.ino()),
-                    offset,
-                },
-            );
+        if let Some(role) = liquidity::decode(raw_key, value, &self.portfolio, &self.exchange)? {
+            self.durable_role(role)?;
         }
+        self.disk.db.put(k, value)?;
         Ok(())
     }
 
@@ -406,14 +327,22 @@ impl State {
         retain: Option<i64>,
         collect: bool,
     ) -> Result<Update> {
-        self.refresh_journal()?;
         // Exec execution keys are content hashes, not receive-time cursors.
         // Stream them and compare their durable identity/value on disk so a
         // newly inserted smaller key is never skipped.
         rocks_source::visit_column_families_from(
             &source.rocksdb_path,
-            &[(EXECUTIONS_CF.to_owned(), None)],
-            |_, key, value| self.ingest_execution(key, value),
+            &[
+                (ROLES_CF.to_owned(), None),
+                (EXECUTIONS_CF.to_owned(), None),
+            ],
+            |cf, key, value| {
+                if cf == ROLES_CF {
+                    self.ingest_role(key, value)
+                } else {
+                    self.ingest_execution(key, value)
+                }
+            },
         )?;
         let generation = self
             .generation
@@ -760,7 +689,7 @@ impl State {
                 .disk
                 .db
                 .get(key(b'J', fill.transaction_id.as_bytes()))?
-                .map(|v| decode::<liquidity_journal::RoleEvidence>(&v)?.validate(&execution))
+                .map(|v| decode::<liquidity::RoleEvidence>(&v)?.validate(&execution))
                 .transpose()?;
             visit(&k, fill)?;
         }

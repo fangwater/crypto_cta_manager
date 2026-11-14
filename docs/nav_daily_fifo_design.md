@@ -33,15 +33,18 @@ flowchart LR
 ## 证据关联
 
 需要补价、去重或补充角色的来源使用 Manager 自有的可丢弃磁盘索引。
-RapidX 适配器关联生命周期、`rapidx_executions` 和账户角色 journal，按
+RapidX 适配器关联生命周期、`rapidx_executions` 和 Exec 持久化的
+`rapidx_execution_roles`，按
 portfolio、exchange、symbol、venue、方向及订单/成交身份验证。
 同一 transaction 的 WS/REST 事实去重；已有完整、有价成交保留原价、数量、
 时间与策略归属。角色只作用于证据覆盖的数量，混合角色逐笔对应。
 
 execution 的 hash key 不代表时间。适配器每轮流式核对内容指纹，只重新关联
-发生变化的订单，不能把最大 hash key 当作增量时间游标。journal 按字节位置
-增量读取完整行，处理换文件、截断和未完成尾行；没有新生命周期时，晚到的
-成交或角色证据也须生效。身份、价格或数量不完整的恢复成交不能作为事实
+发生变化的订单，不能把最大 hash key 当作增量时间游标。角色事实同样校验
+存储键、source 对应的 portfolio/exchange 和执行身份；已入库角色的内容变化
+或 WS/REST 角色冲突必须拒绝。没有新生命周期时，晚到的成交或角色证据也须生效。
+Manager 不再扫描账户监控的原始流水；切换前通过 Exec 的持久化 IPC 显式导入
+历史角色，原始历史文件保留。身份、价格或数量不完整的恢复成交不能作为事实
 推进；缺少角色时保留 Unknown 并沿用既有估费规则，不能伪造已确认角色。
 
 索引位于 Manager DB 父目录的 `run/nav-recovery/`。每份报表持有不可变成交

@@ -1,7 +1,9 @@
 //! Recover unpriced and missing lifecycle fills from durable, uniquely identified
 //! RapidX executions. The original Exec records remain read-only audit facts.
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
@@ -13,10 +15,11 @@ use crate::config::SourceConfig;
 use crate::model::FillLiquidity;
 use crate::rocks_source::{self, RawRocksRecord};
 
-pub(super) mod liquidity_journal;
+pub(super) mod liquidity;
 pub(super) mod store;
 
 const EXECUTIONS_CF: &str = "rapidx_executions";
+const ROLES_CF: &str = "rapidx_execution_roles";
 type OrderKey = (String, i16, i64);
 
 pub(super) fn needs_price(event: &NavEvent) -> bool {
@@ -78,7 +81,7 @@ pub(super) fn decode_fills_with_roles(
     portfolio: &str,
     exchange: &str,
     wanted: &BTreeSet<OrderKey>,
-    roles: &BTreeMap<String, liquidity_journal::RoleEvidence>,
+    roles: &BTreeMap<String, liquidity::RoleEvidence>,
 ) -> Result<BTreeMap<OrderKey, BTreeMap<String, Fill>>> {
     let mut result = BTreeMap::<OrderKey, BTreeMap<String, Fill>>::new();
     let clients = wanted.iter().map(|key| key.2).collect::<BTreeSet<_>>();
