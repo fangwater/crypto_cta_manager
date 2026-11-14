@@ -85,3 +85,48 @@ analysis workers and financial automation still wait for a complete report.
 Fee edits notify the background worker without waiting for a long rebuild under
 the publication configuration lock. Cold loading, initial build failure/retry,
 last-good retention and publication with a cold cache are covered by local tests.
+
+## Manager repair deployment
+
+Code commit `7c53612` was pushed to `origin/main` and deployed only to jp-meta
+as `web-releases/20261114T075024Z`. The full default test suite passed (536
+library tests, plus binary tests; environment-dependent tests stayed ignored),
+all 16 Redis-module tests passed with isolated Redis 7.4, and the isolated live
+publication test passed with a cold NAV cache, closed PG, stalled archive and
+stalled snapshot HTTP. Formatting, `cargo check`, release builds and frontend
+`npm run build` passed.
+
+The new Manager PID 44499 started at 07:51:00. All eight startup account-mode
+checks completed before HTTP opened at 07:51:03.602, approximately 3.6 seconds
+after process start. NAV reconstruction began at 07:51:04.027. The first
+`rbf_small` POST succeeded at 07:51:06.609, and subsequent logs confirmed both
+trade03 and trade04 publication during the cold rebuild. Analysis 503 responses
+while this first generation is pending are intentional and contain loading
+state rather than a fabricated NAV report.
+
+The previous Manager exceeded systemd's 15-second SIGTERM timeout and was killed
+at 07:50:59. Its archive drain completion cannot be certified from the logs.
+New immutable archive records and ordinary publication resumed under the new
+process. Startup/shutdown ordering should be reviewed further to bound existing
+HTTP requests and drain the archive before systemd's stop deadline.
+
+Redis PID 4100946 and the trading/Delist processes were not restarted. Of 187
+non-Manager process records in the pre-deploy sample, 186 retained executable,
+start time and affinity; the sampled transient `sync_history` PID was absent
+after deployment. All 31 sampled trading configuration hashes and the live
+Manager TOML hash matched. Rollback binaries, old frontend pointer and sanitized
+verification are in the host-only
+`backups/manager-startup-recovery-20261114/` directory.
+
+Do not claim all long-tail timeouts are fixed. At 07:55:11, CTA_TOP_V1/V2 had
+two 502 responses: a two-second Redis operation timeout and a connection-lock
+timeout. Both completed in about 2.7 seconds of wall time and publication
+recovered immediately, without restarting Manager. By 07:55:58, 658 other
+target requests had returned 200, including 95 `rbf_small` requests. Subsequent
+30-second read-only sampling measured Redis PING at most 10 ms and the Manager
+unauthenticated health response at most 34.3 ms; it did not capture the earlier
+stall. These samples cannot identify the exact cause of the 2.7-second delay.
+Redis counters remained `ERR=1`, `NOPERM=1`. The cumulative delayed-fsync count
+was one, corresponding to a 07:30:02 warning before this deployment; AOF writes
+were healthy. The first background NAV generation was still rebuilding at this
+verification point, while target publication remained available.
