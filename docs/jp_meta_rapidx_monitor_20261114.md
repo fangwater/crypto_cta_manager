@@ -222,3 +222,68 @@ setting was retained is not established. The immediate configuration question
 should be resolved before assuming that moving cores is the only remedy.
 No env.sh, flag, trading behavior or process lifecycle was changed in this audit.
 Sanitized local evidence: `artifacts/redis_rootcause_20261114/fr_poll_modes.json`.
+
+### Operator-authorized FR04 replacement and alignment
+
+The operator subsequently authorized cancellation, latest FR binaries through
+publish-fr, and taker exposure alignment. Gate FR04 alone was stopped through
+its environment-local wrappers, with logs, binaries and host-only credentials
+backed up before stopping. After the signal/execution producers stopped, both
+exchange open-order scopes were verified empty; no cancellation DELETE was
+necessary at that checkpoint. Its env.sh override changed from fast poll1 to
+off. Other configuration files and account trading source IP were preserved.
+
+Seven binaries were built locally from production arbmm483937e8 with the
+recorded existing worktree patch SHA-256
+`910adcc36eb846a61535c30b217932c47a2c8bf31a77c41acb2d996c54224a04`.
+The Gate FR path was reviewed; the existing Binance Exec leverage edits were
+not committed as part of this task. The six standard binaries were installed by
+`publish-jp-meta-fr.sh --skip-build`; the separate dashboard binary used explicit
+SCP staging, SHA-256 verification and atomic replacement. All seven installed
+hashes matched the local manifest. Seven focused fast-poll tests and all release
+builds passed; no CTP code was executed.
+
+With automated trading still stopped, fresh signed REST reads explicitly bound
+the account's unchanged172.31.35.231 trading address. Four futures SELL IOC
+orders aligned MUBARAK (two), CTR and O, totaling302.36290 USDT. Each order had
+terminal confirmation, complete taker fill evidence and the expected factual
+position delta before the next submission. Each child was below100 USDT and
+the shortest submission interval was5.612 seconds. No spot order or BNB trade
+was submitted. At the pre-resume checkpoint, all priced non-BNB symbol residuals
+were below5 USDT (maximum4.88344); three unpriced historical fragments of5e-9
+AMZNX/HOODX/METAX remained untouched. Open orders were zero.
+
+All eight prior services, including the signal, were restored. The seven native
+binary PIDs are Viz800500, persist801270, engine803309, pre_trade803614,
+account_monitor803896, dashboard806697 and signal806797; Config PID799918.
+Persistence remains CPU15; all other original affinity masks were retained.
+All live flag values were off/0 and Viz continued publishing fresh account data.
+After automatic signals resumed, new ARIA, XPIN and INX exposures were observed;
+the manual alignment checkpoint is not a claim of a continuously flat active
+strategy. No additional manual hedge was raced against live trading.
+
+The same four formerly hot processes totaled7.16% CPU in a30-second post-start
+sample, versus243.4% in the earlier8-second sample. A subsequent30-second Redis
+trace counted29 sync calls with maximum6242 µs, compared with the earlier
+1.202-second sync/1.196-second journal CPU wait. Workload windows and binaries
+also differ, so these are operational observations rather than a controlled
+benchmark. No new Manager bound-account Redis failure was seen in this
+post-start observation. Manager's CPU24 analysis contention is a separate risk.
+
+All145 sampled host config fingerprints matched except the authorized FR04
+env.sh change. All179 sampled other long-lived protected process identities and
+CPU masks matched. Two independently running finite NAV sync_history tasks,
+PIDs768508/770707, disappeared; their exit statuses are unavailable and the raw
+audit retains these exceptions. Neither NAV lifecycle nor its files were changed.
+
+The Redis cumulative ERR counter was6 at13:37/13:40, versus1 in the earlier
+audit; NOPERM stayed1 and delayed fsync stayed3. No new corresponding failed
+command was identifiable in INFO commandstats, and ERR did not grow between
+those two checks. redis-py8.0.1 is installed and includes an auto maintenance
+notification handshake unsupported by Redis7.4, but the five individual errors
+were not traced to clients; do not present that candidate explanation as proven.
+
+The exact binaries, manifests, per-order receipts, audit exceptions and rollback
+files are under host-only
+`/home/ubuntu/gate_fr_arb04/backups/fast-poll-off-20261114T1314Z/` and local ignored
+`/home/fanghaizhou/mkt_signal/data/ops/gate_fr04_fast_poll_20261114/`.
