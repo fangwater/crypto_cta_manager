@@ -52,6 +52,7 @@ async fn rebuild(state: &WebState, source: &SourceConfig) -> Result<Vec<daily::D
     );
     let (through_ms, timelines) = {
         let cache = state.cache.read().await;
+        let cache = cache.report()?;
         (
             cache.dashboard.generated_at_us / 1000 - cache.dashboard.generation_duration_ms as i64,
             cache.nav_timelines.clone(),

@@ -1155,6 +1155,8 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let (_dir, mut state, source_id, _, _) = super::super::tests::timeline_test_state(90);
+        // Existing strategy POSTs must work while the first NAV build is pending.
+        state.cache.write().await.loaded = None;
         let _server = Server(
             Command::new(std::env::var("EXEC_REDIS_TEST_SERVER_BIN").unwrap())
                 .args([

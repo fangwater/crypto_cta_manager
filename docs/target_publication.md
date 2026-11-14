@@ -101,3 +101,36 @@ hashes and partially populated hashes recover without a service restart; failed
 sources are retried independently. Other venues do not inherit these Binance
 defaults. Invalid existing values remain errors rather than being overwritten.
 This maintenance does not join target publication or contact an exchange API.
+
+## Redis deadlines and reconnect recovery
+
+`redis.request_timeout_secs` is one deadline for waiting for the serialized
+connection, connecting (including the Redis handshake), and all commands plus
+readback in that operation. The heartbeat uses the same deadline. Immutable
+settings are read outside the connection mutex so checking the timeout cannot
+itself wait indefinitely. A failed transport or elapsed operation clears the
+connection while still holding that mutex; it does not reacquire the mutex
+after failure. A request that times out waiting for the mutex sends no command.
+
+Redis-rs connection and response timeouts are also explicit. Connection creation
+does not hide retry backoff inside the mutex. A later request or heartbeat opens
+a fresh connection; Manager does not retry or replay an old target inside the
+failed operation. A timeout after dispatch still has an unknown Redis outcome,
+so the confirmation/acknowledgement rules above continue to apply.
+
+## Startup and analysis readiness
+
+Manager loads account-mode results, publication permissions and sessions, targets,
+bindings, order templates and fees before opening HTTP. It then builds the first
+NAV generation on the background refresh worker. Target publication uses the
+prepared catalog and does not wait for that reconstruction. Until a complete
+generation exists, analysis endpoints return HTTP 503 with an explicit loading
+or unavailable response and `Retry-After`; health reports `loading` or `degraded`.
+There is no empty/partially reconstructed NAV generation. A later build failure
+retains the last good generation and the worker retries at the refresh interval.
+
+Funding/equity reconstruction workers and financial automation retain their
+previous dependency on the first complete NAV build. Fee-setting saves queue a
+coalesced background analysis refresh; they do not wait for reconstruction while
+holding the publication configuration barrier. Corrected snapshot/allocation
+fingerprints are still validated by the same full build before any NAV is served.

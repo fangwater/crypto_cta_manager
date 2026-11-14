@@ -202,19 +202,58 @@ struct ExchangeNavAccount {
     status: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct CacheState {
-    dashboard: DashboardSnapshot,
-    nav_histories: Arc<nav::NavSourceHistories>,
-    position_snapshots: Arc<nav::SourcePositionSnapshots>,
-    strategy_position_snapshots: Arc<nav::SourceStrategyPositionSnapshots>,
-    nav_timelines: Arc<nav::NavTimelineCache>,
-    theoretical_fees: Arc<BTreeMap<String, TheoreticalFeeRates>>,
-    fee_rates: Arc<BTreeMap<String, FeeRates>>,
+    loaded: Option<DashboardBuild>,
     last_attempt_at_us: i64,
     last_refresh_error: Option<String>,
 }
 
+impl CacheState {
+    fn report(&self) -> Result<&DashboardBuild> {
+        self.loaded.as_ref().ok_or_else(|| {
+            AnalysisUnavailable {
+                loading: self.last_refresh_error.is_none(),
+            }
+            .into()
+        })
+    }
+
+    fn previous(&self) -> Option<Arc<nav::NavTimelineCache>> {
+        self.loaded
+            .as_ref()
+            .map(|report| report.nav_timelines.clone())
+    }
+
+    fn complete(&mut self, result: Result<DashboardBuild>) -> Result<()> {
+        match result {
+            Ok(build) => {
+                self.loaded = Some(build);
+                self.last_refresh_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.last_refresh_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AnalysisUnavailable {
+    loading: bool,
+}
+
+impl std::fmt::Display for AnalysisUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NAV history is loading or unavailable; retry shortly")
+    }
+}
+
+impl std::error::Error for AnalysisUnavailable {}
+
+#[derive(Debug)]
 struct DashboardBuild {
     dashboard: DashboardSnapshot,
     nav_histories: Arc<nav::NavSourceHistories>,
@@ -229,6 +268,7 @@ struct DashboardBuild {
 struct WebState {
     cache: Arc<RwLock<CacheState>>,
     dashboard_refresh: Arc<tokio::sync::Mutex<()>>,
+    dashboard_reload: Arc<tokio::sync::Notify>,
     configuration_lock: Arc<RwLock<()>>,
     publication_locks: Arc<publication::PublicationLocks>,
     targets: Arc<target_state::Targets>,
@@ -420,6 +460,18 @@ where
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let Some(analysis) = self.0.downcast_ref::<AnalysisUnavailable>() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                NO_STORE,
+                [(header::RETRY_AFTER, "2")],
+                Json(serde_json::json!({
+                    "loading": analysis.loading,
+                    "error": if analysis.loading { "净值历史正在加载，请稍后重试" } else { "净值历史暂不可用，请稍后重试" },
+                })),
+            )
+                .into_response();
+        }
         if let Some(pricing) = self
             .0
             .downcast_ref::<nav::minute_marks::PricingUnavailable>()
@@ -471,7 +523,6 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         reload_notify.clone(),
     )?;
     let auto_earn = AutoEarnHub::new(&config, funds_gate, treasury_egress)?;
-    let treasury_sources = config.sources.clone();
     anyhow::ensure!(
         (1..=256).contains(&config.dashboard.compute_threads),
         "dashboard.compute_threads must be between 1 and 256"
@@ -519,46 +570,8 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let history_store =
         nav::NavHistoryStore::with_daily(nav::daily::DailyFifoStore::open(manager_db.clone())?);
     let nav_history_store = Arc::new(std::sync::Mutex::new(history_store));
-    let first_build = build_dashboard(
-        &config,
-        &pool,
-        refresh_interval_secs,
-        &live_equity,
-        &nav_history_store,
-        None,
-    )
-    .await?;
-    let cache = Arc::new(RwLock::new(CacheState {
-        last_attempt_at_us: first_build.dashboard.generated_at_us,
-        dashboard: first_build.dashboard,
-        nav_histories: first_build.nav_histories,
-        position_snapshots: first_build.position_snapshots,
-        strategy_position_snapshots: first_build.strategy_position_snapshots,
-        nav_timelines: first_build.nav_timelines,
-        theoretical_fees: first_build.theoretical_fees,
-        fee_rates: first_build.fee_rates,
-        last_refresh_error: None,
-    }));
-
-    let refresh_cache = Arc::clone(&cache);
-    let refresh_config = config.clone();
-    let refresh_pool = pool.clone();
-    let refresh_live = live_equity.clone();
-    let refresh_nav_store = Arc::clone(&nav_history_store);
+    let cache = Arc::new(RwLock::new(CacheState::default()));
     let dashboard_refresh = Arc::new(tokio::sync::Mutex::new(()));
-    let refresh_guard = dashboard_refresh.clone();
-    tokio::spawn(async move {
-        refresh_loop(
-            refresh_config,
-            refresh_pool,
-            refresh_cache,
-            refresh_live,
-            refresh_nav_store,
-            refresh_guard,
-            refresh_interval_secs,
-        )
-        .await;
-    });
 
     let configured_source_ids = config
         .sources
@@ -576,6 +589,7 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let state = WebState {
         cache,
         dashboard_refresh,
+        dashboard_reload: Arc::default(),
         configuration_lock: Arc::new(RwLock::new(())),
         publication_locks: Arc::default(),
         targets,
@@ -606,10 +620,6 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         cumulative_funding: Arc::default(),
     };
     target_state::spawn(&state);
-    spawn_funding_collectors(&state);
-    equity_history::spawn(state.clone());
-    cumulative_funding::spawn(state.clone());
-    nav_monitor::spawn(state.clone());
 
     let app = Router::new()
         .route("/api/auth/status", get(auth_status))
@@ -838,12 +848,12 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind CTA web API to {bind}"))?;
-    // Do not start financial automation until all initialization and binding succeed.
+    // All publication authorization/account-mode checks have completed. NAV is
+    // optional for publication and its first build must not delay HTTP binding.
     let persistence = state.targets.clone();
     let shutdown_persistence = persistence.clone();
+    tokio::spawn(refresh_loop(state.clone()));
     spawn_configuration_publisher(state);
-    bnb.spawn(treasury_sources.clone());
-    auto_earn.spawn(treasury_sources);
     info!(%bind, refresh_interval_secs, "CTA web API started");
 
     let result = axum::serve(
@@ -1568,8 +1578,8 @@ async fn dashboard(
     Extension(visible): Extension<VisibleSources>,
     Extension(configurable): Extension<ConfigurableSources>,
 ) -> Result<Response, ApiError> {
+    let mut dashboard = state.cache.read().await.report()?.dashboard.clone();
     let aliases = postgres::load_source_aliases(&state.pool).await?;
-    let mut dashboard = state.cache.read().await.dashboard.clone();
     dashboard
         .accounts
         .retain(|account| visible.0.contains(&account.source_id));
@@ -1710,6 +1720,10 @@ async fn list_symbols(
     };
     let (snapshots, strategy_snapshots) = {
         let cache = state.cache.read().await;
+        let cache = match cache.report() {
+            Ok(report) => report,
+            Err(error) => return ApiError(error).into_response(),
+        };
         (
             Arc::clone(&cache.position_snapshots),
             Arc::clone(&cache.strategy_position_snapshots),
@@ -1826,13 +1840,18 @@ async fn health(
     let response = HealthResponse {
         status: if cache.last_refresh_error.is_some() || target_persistence_error {
             "degraded"
+        } else if cache.loaded.is_none() {
+            "loading"
         } else {
             "ok"
         },
         source_count: crate::managed_accounts::public_ids(&state.config, &visible.0).len(),
-        generated_at_us: cache.dashboard.generated_at_us,
+        generated_at_us: cache
+            .loaded
+            .as_ref()
+            .map_or(0, |report| report.dashboard.generated_at_us),
         last_attempt_at_us: cache.last_attempt_at_us,
-        refresh_interval_secs: cache.dashboard.refresh_interval_secs,
+        refresh_interval_secs: state.refresh_interval_secs,
         last_refresh_error: cache.last_refresh_error.clone(),
         pending_target_archives,
         pending_target_mirrors,
@@ -2135,6 +2154,7 @@ async fn rebuild_timeline_snapshot(
     let started = Instant::now();
     let (nav_timelines, theoretical_fees, data_generated_at_us) = {
         let cache = state.cache.read().await;
+        let cache = cache.report()?;
         (
             Arc::clone(&cache.nav_timelines),
             Arc::clone(&cache.theoretical_fees),
@@ -2454,6 +2474,7 @@ async fn rebuild_strategy_pnl_report(
 ) -> Result<(nav::StrategyPnlReport, i64)> {
     let (timelines, data_generated_at_us) = {
         let cache = state.cache.read().await;
+        let cache = cache.report()?;
         (
             Arc::clone(&cache.nav_timelines),
             cache.dashboard.generated_at_us,
@@ -2519,6 +2540,7 @@ async fn acquisition_cost(
     };
     let (histories, fee_rates, theoretical_fees, generated_at_us) = {
         let cache = state.cache.read().await;
+        let cache = cache.report()?;
         (
             Arc::clone(&cache.nav_histories),
             Arc::clone(&cache.fee_rates),
@@ -3782,10 +3804,7 @@ async fn save_account_estimated_fee_rate(
                 estimated_fee_rate = request.estimated_fee_rate,
                 "account estimated fee rate updated"
             );
-            if let Err(error) = refresh_dashboard_cache(&state).await {
-                error!(source_id, error = %error, "dashboard refresh after fee update failed");
-                return Ok(catalog_error(error));
-            }
+            state.dashboard_reload.notify_one();
             match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
                 Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
                 Err(error) => Ok(catalog_error(error)),
@@ -3852,10 +3871,7 @@ async fn save_account_fee_rates(
                 theoretical_twap_fee_rate,
                 "account fee rates updated"
             );
-            if let Err(error) = refresh_dashboard_cache(&state).await {
-                error!(source_id, error = %error, "dashboard refresh after fee update failed");
-                return Ok(catalog_error(error));
-            }
+            state.dashboard_reload.notify_one();
             match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
                 Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
                 Err(error) => Ok(catalog_error(error)),
@@ -3892,7 +3908,12 @@ fn spawn_funding_collectors(state: &WebState) {
                     }
                     continue;
                 }
-                let history = cache.read().await.nav_histories.get(&source.id).cloned();
+                let history = cache
+                    .read()
+                    .await
+                    .report()
+                    .ok()
+                    .and_then(|report| report.nav_histories.get(&source.id).cloned());
                 let symbols = tokio::task::spawn_blocking(move || {
                     crate::analysis::run(|| {
                         history
@@ -3931,27 +3952,29 @@ fn spawn_funding_collectors(state: &WebState) {
 async fn refresh_dashboard_cache(state: &WebState) -> Result<()> {
     let _refresh = state.dashboard_refresh.lock().await;
     let attempted_at_us = unix_now_us();
-    let previous = state.cache.read().await.nav_timelines.clone();
+    let previous = {
+        let mut cache = state.cache.write().await;
+        cache.last_attempt_at_us = attempted_at_us;
+        cache.previous()
+    };
     let build = build_dashboard(
         &state.config,
         &state.pool,
         state.refresh_interval_secs,
         &state.live_equity,
         &state.nav_history_store,
-        Some(previous),
+        previous,
     )
-    .await?;
-    let mut cache = state.cache.write().await;
-    cache.last_attempt_at_us = attempted_at_us;
-    cache.dashboard = build.dashboard;
-    cache.nav_histories = build.nav_histories;
-    cache.position_snapshots = build.position_snapshots;
-    cache.strategy_position_snapshots = build.strategy_position_snapshots;
-    cache.nav_timelines = build.nav_timelines;
-    cache.theoretical_fees = build.theoretical_fees;
-    cache.fee_rates = build.fee_rates;
-    cache.last_refresh_error = None;
-    Ok(())
+    .await;
+    if let Ok(build) = &build {
+        info!(
+            source_count = build.dashboard.report.source_count,
+            fill_count = build.dashboard.report.aggregate.totals.fill_count,
+            duration_ms = build.dashboard.generation_duration_ms,
+            "refreshed CTA dashboard"
+        );
+    }
+    state.cache.write().await.complete(build)
 }
 
 #[derive(Debug, Deserialize)]
@@ -5625,57 +5648,31 @@ fn bad_request(message: String) -> Response {
         .into_response()
 }
 
-async fn refresh_loop(
-    config: AppConfig,
-    pool: PgPool,
-    cache: Arc<RwLock<CacheState>>,
-    live_equity: LiveEquityHub,
-    nav_history_store: Arc<std::sync::Mutex<nav::NavHistoryStore>>,
-    dashboard_refresh: Arc<tokio::sync::Mutex<()>>,
-    refresh_interval_secs: u64,
-) {
-    let period = Duration::from_secs(refresh_interval_secs);
-    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+async fn refresh_loop(state: WebState) {
+    let period = Duration::from_secs(state.refresh_interval_secs);
+    let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
+    let mut dependents_started = false;
     loop {
-        interval.tick().await;
-        let _refresh = dashboard_refresh.lock().await;
-        let attempted_at_us = unix_now_us();
-        let previous = cache.read().await.nav_timelines.clone();
-        match build_dashboard(
-            &config,
-            &pool,
-            refresh_interval_secs,
-            &live_equity,
-            &nav_history_store,
-            Some(previous),
-        )
-        .await
-        {
-            Ok(build) => {
-                info!(
-                    source_count = build.dashboard.report.source_count,
-                    fill_count = build.dashboard.report.aggregate.totals.fill_count,
-                    duration_ms = build.dashboard.generation_duration_ms,
-                    "refreshed CTA dashboard"
-                );
-                let mut state = cache.write().await;
-                state.last_attempt_at_us = attempted_at_us;
-                state.dashboard = build.dashboard;
-                state.nav_histories = build.nav_histories;
-                state.position_snapshots = build.position_snapshots;
-                state.strategy_position_snapshots = build.strategy_position_snapshots;
-                state.nav_timelines = build.nav_timelines;
-                state.theoretical_fees = build.theoretical_fees;
-                state.fee_rates = build.fee_rates;
-                state.last_refresh_error = None;
+        tokio::select! {
+            _ = interval.tick() => {},
+            _ = state.dashboard_reload.notified() => {},
+        }
+        match refresh_dashboard_cache(&state).await {
+            Ok(()) if !dependents_started => {
+                // Preserve the prior dependency on a complete first report for
+                // analysis workers and financial automation, without gating POSTs.
+                spawn_funding_collectors(&state);
+                equity_history::spawn(state.clone());
+                cumulative_funding::spawn(state.clone());
+                nav_monitor::spawn(state.clone());
+                state.bnb.spawn(state.config.sources.clone());
+                state.auto_earn.spawn(state.config.sources.clone());
+                dependents_started = true;
             }
+            Ok(()) => {}
             Err(error) => {
                 warn!(error = ?error, "failed to refresh CTA dashboard; retaining last good report");
-                let mut state = cache.write().await;
-                state.last_attempt_at_us = attempted_at_us;
-                state.last_refresh_error = Some(error.to_string());
             }
         }
     }
@@ -5862,9 +5859,96 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn cold_analysis_reports_loading_and_retries_without_empty_nav() {
+        let (_dir, state, id, start, end) = timeline_test_state(7);
+        state.pool.close().await;
+        let first = state.cache.write().await.loaded.take().unwrap();
+        let visible = BTreeSet::from([id.clone()]);
+        let response = dashboard(
+            State(state.clone()),
+            Query(DashboardQuery::default()),
+            Extension(VisibleSources(visible.clone())),
+            Extension(ConfigurableSources(BTreeSet::new())),
+        )
+        .await
+        .err()
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["loading"], true);
+        assert!(value.get("report").is_none());
+        let response = account_timeline(
+            State(state.clone()),
+            Query(TimelineQuery {
+                start_ms: Some(start / 1000),
+                end_ms: Some(end / 1000),
+                source_ids: Some(id),
+                include_theoretical: Some(false),
+                ..Default::default()
+            }),
+            Extension(VisibleSources(visible.clone())),
+            HeaderMap::new(),
+        )
+        .await
+        .err()
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let response = health(State(state.clone()), Extension(VisibleSources(visible)))
+            .await
+            .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["status"], "loading");
+        assert_eq!(value["generated_at_us"], 0);
+        // The closed SQL pool makes the real refresh fail before any disk replay.
+        assert!(refresh_dashboard_cache(&state).await.is_err());
+        let mut cache = state.cache.write().await;
+        assert!(cache.last_attempt_at_us > 0);
+        assert!(
+            !cache
+                .report()
+                .unwrap_err()
+                .downcast_ref::<AnalysisUnavailable>()
+                .unwrap()
+                .loading
+        );
+        assert!(cache.previous().is_none());
+        cache.complete(Ok(first)).unwrap();
+        let generation = cache.report().unwrap().dashboard.generated_at_us;
+        let previous = cache.previous().unwrap();
+        drop(cache);
+        assert!(refresh_dashboard_cache(&state).await.is_err());
+        let mut cache = state.cache.write().await;
+        assert_eq!(
+            cache.report().unwrap().dashboard.generated_at_us,
+            generation
+        );
+        assert!(Arc::ptr_eq(&cache.previous().unwrap(), &previous));
+        let retry = cache.loaded.take().unwrap();
+        cache.complete(Ok(retry)).unwrap();
+        assert!(cache.last_refresh_error.is_none());
+    }
+
+    #[tokio::test]
     async fn compact_dashboard_preserves_totals_and_counts_parent_and_execution_leg_positions() {
         let (_dir, state, id, _, _) = timeline_test_state(7);
-        let mut report = state.cache.read().await.dashboard.report.clone();
+        let mut report = state
+            .cache
+            .read()
+            .await
+            .report()
+            .unwrap()
+            .dashboard
+            .report
+            .clone();
         let mut leg = report.sources[0].clone();
         leg.source_id = "execution-leg".into();
         for symbol in &mut leg.symbols {
@@ -6098,6 +6182,7 @@ mod tests {
             );
             {
                 let mut cache = state.cache.write().await;
+                let cache = cache.loaded.as_mut().unwrap();
                 cache.nav_timelines = Arc::new(
                     nav::NavTimelineCache::build(
                         state.config.as_ref().clone(),
@@ -6239,19 +6324,21 @@ mod tests {
             .unwrap(),
         );
         let cache = Arc::new(RwLock::new(CacheState {
-            dashboard: DashboardSnapshot {
-                generated_at_us: end,
-                generation_duration_ms: 0,
-                refresh_interval_secs: 60,
-                accounts: Vec::new(),
-                report: nav_timelines.dashboard_report(),
-            },
-            nav_histories: histories,
-            position_snapshots: Arc::default(),
-            strategy_position_snapshots: Arc::default(),
-            nav_timelines,
-            theoretical_fees: Arc::default(),
-            fee_rates: Arc::default(),
+            loaded: Some(DashboardBuild {
+                dashboard: DashboardSnapshot {
+                    generated_at_us: end,
+                    generation_duration_ms: 0,
+                    refresh_interval_secs: 60,
+                    accounts: Vec::new(),
+                    report: nav_timelines.dashboard_report(),
+                },
+                nav_histories: histories,
+                position_snapshots: Arc::default(),
+                strategy_position_snapshots: Arc::default(),
+                nav_timelines,
+                theoretical_fees: Arc::default(),
+                fee_rates: Arc::default(),
+            }),
             last_attempt_at_us: end,
             last_refresh_error: None,
         }));
@@ -6267,6 +6354,7 @@ mod tests {
         let state = WebState {
             cache,
             dashboard_refresh: gate.clone(),
+            dashboard_reload: Arc::default(),
             configuration_lock: Arc::default(),
             publication_locks: Arc::default(),
             targets: Arc::default(),

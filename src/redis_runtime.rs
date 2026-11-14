@@ -4,9 +4,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
+use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tracing::{info, warn};
 
 use crate::config::{RedisSettings, SourceConfig};
@@ -96,13 +96,13 @@ pub struct ExecOrderRateLimits {
 
 #[derive(Clone)]
 pub struct RedisRuntime {
+    settings: Arc<RedisSettings>,
     inner: Arc<Mutex<RedisRuntimeInner>>,
     bnb_reserve_sources: Arc<std::sync::RwLock<std::collections::BTreeSet<String>>>,
     market_rules: Arc<std::sync::RwLock<BTreeMap<String, Arc<MarketRulesSnapshot>>>>,
 }
 
 struct RedisRuntimeInner {
-    settings: RedisSettings,
     client: redis::Client,
     connection: Option<ConnectionManager>,
     last_reconnect_error_at: Option<Instant>,
@@ -113,10 +113,10 @@ impl RedisRuntime {
         let client = redis::Client::open(settings.url.clone())
             .with_context(|| format!("invalid redis.url {}", settings.url))?;
         Ok(Self {
+            settings: Arc::new(settings),
             bnb_reserve_sources: Arc::new(std::sync::RwLock::new(Default::default())),
             market_rules: Arc::new(std::sync::RwLock::new(Default::default())),
             inner: Arc::new(Mutex::new(RedisRuntimeInner {
-                settings,
                 client,
                 connection: None,
                 last_reconnect_error_at: None,
@@ -156,15 +156,14 @@ impl RedisRuntime {
     }
 
     pub fn spawn_keepalive(&self) {
-        let inner = Arc::clone(&self.inner);
+        let runtime = self.clone();
         tokio::spawn(async move {
             loop {
-                let sleep_ms = {
-                    let mut guard = inner.lock().await;
-                    let retry_ms = guard.settings.reconnect_interval_ms.max(100);
-                    match keep_connection_alive(&mut guard).await {
-                        Ok(true) => 5_000,
-                        Ok(false) | Err(_) => retry_ms,
+                let sleep_ms = match runtime.keepalive().await {
+                    Ok(()) => 5_000,
+                    Err(error) => {
+                        warn!(error = %error, "Manager Redis keepalive failed; reconnecting");
+                        runtime.settings.reconnect_interval_ms.max(100)
                     }
                 };
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
@@ -306,12 +305,9 @@ impl RedisRuntime {
         let runtime_targets =
             filter_runtime_target_signals(order_parameters, symbol_order_parameters, targets);
         let family = order_parameters.algorithm.family();
-        let timeout = Duration::from_secs(self.request_timeout_secs().await);
-
-        let stored = {
-            let mut inner = self.inner.lock().await;
-            let connection = inner.connection().await?;
-            tokio::time::timeout(timeout, async {
+        let (mut inner, deadline) = self.lock_for_request().await?;
+        let stored = tokio::time::timeout_at(deadline, async {
+            let connection = inner.connection(&self.settings).await?;
                 let mut pipe = redis::pipe();
                 pipe.atomic();
                 let mut confirmations = Vec::new();
@@ -545,9 +541,8 @@ impl RedisRuntime {
                     }
                 }
                 Ok(serde_json::json!({"updated_at_us": updated_at_us, "symbol_overrides": merged_overrides}))
-            })
-            .await
-        };
+        })
+        .await;
 
         match stored {
             Ok(Ok(stored)) => {
@@ -580,15 +575,15 @@ impl RedisRuntime {
             }
             Ok(Err(error)) => {
                 if is_redis_transport_error(&error) {
-                    self.mark_broken().await;
+                    inner.connection = None;
                 }
                 Err(error)
             }
             Err(_) => {
-                self.mark_broken().await;
+                inner.connection = None;
                 bail!(
                     "Redis request timed out after {}s",
-                    self.request_timeout_secs().await
+                    self.settings.request_timeout_secs
                 )
             }
         }
@@ -602,70 +597,67 @@ impl RedisRuntime {
     ) -> Result<()> {
         validate_strategy_name(strategy_name).map_err(anyhow::Error::msg)?;
         let markets = crate::exec_routing::markets(source)?;
-        let timeout = Duration::from_secs(self.request_timeout_secs().await);
-        let removed = {
-            let mut inner = self.inner.lock().await;
-            let connection = inner.connection().await?;
-            tokio::time::timeout(timeout, async {
-                let mut pipe = redis::pipe();
-                pipe.atomic();
-                for venue in &markets {
-                    let mut scoped_source = source.clone();
-                    scoped_source.venue = venue.clone();
-                    let source = &scoped_source;
-                    let prefix = format!(
-                        "{}:{}:{}:",
-                        source.id,
-                        source.venue,
-                        family.redis_namespace()
-                    );
-                    let index_key = format!("{prefix}strategy_names");
-                    let removed_key = format!("{prefix}removed_strategy_names");
-                    let mut names = decode_strategy_names(
-                        connection.get::<_, Option<String>>(&index_key).await?,
-                        "strategy index",
-                    )?;
-                    let mut removed = decode_strategy_names(
-                        connection.get::<_, Option<String>>(&removed_key).await?,
-                        "removed strategy index",
-                    )?;
-                    names.retain(|name| name != strategy_name);
-                    if !removed.iter().any(|name| name == strategy_name) {
-                        removed.push(strategy_name.to_string());
-                        removed.sort();
-                    }
-                    pipe.set(
-                        &index_key,
-                        serde_json::to_string(&names)
-                            .context("failed to encode Exec strategy index")?,
-                    )
-                    .set(
-                        &removed_key,
-                        serde_json::to_string(&removed)
-                            .context("failed to encode removed Exec strategy index")?,
-                    );
+        let (mut inner, deadline) = self.lock_for_request().await?;
+        let removed = tokio::time::timeout_at(deadline, async {
+            let connection = inner.connection(&self.settings).await?;
+            let mut pipe = redis::pipe();
+            pipe.atomic();
+            for venue in &markets {
+                let mut scoped_source = source.clone();
+                scoped_source.venue = venue.clone();
+                let source = &scoped_source;
+                let prefix = format!(
+                    "{}:{}:{}:",
+                    source.id,
+                    source.venue,
+                    family.redis_namespace()
+                );
+                let index_key = format!("{prefix}strategy_names");
+                let removed_key = format!("{prefix}removed_strategy_names");
+                let mut names = decode_strategy_names(
+                    connection.get::<_, Option<String>>(&index_key).await?,
+                    "strategy index",
+                )?;
+                let mut removed = decode_strategy_names(
+                    connection.get::<_, Option<String>>(&removed_key).await?,
+                    "removed strategy index",
+                )?;
+                names.retain(|name| name != strategy_name);
+                if !removed.iter().any(|name| name == strategy_name) {
+                    removed.push(strategy_name.to_string());
+                    removed.sort();
                 }
-                let _: () = pipe
-                    .query_async(connection)
-                    .await
-                    .context("failed to request Exec strategy removal")?;
-                Ok(())
-            })
-            .await
-        };
+                pipe.set(
+                    &index_key,
+                    serde_json::to_string(&names)
+                        .context("failed to encode Exec strategy index")?,
+                )
+                .set(
+                    &removed_key,
+                    serde_json::to_string(&removed)
+                        .context("failed to encode removed Exec strategy index")?,
+                );
+            }
+            let _: () = pipe
+                .query_async(connection)
+                .await
+                .context("failed to request Exec strategy removal")?;
+            Ok(())
+        })
+        .await;
         match removed {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
                 if is_redis_transport_error(&error) {
-                    self.mark_broken().await;
+                    inner.connection = None;
                 }
                 Err(error)
             }
             Err(_) => {
-                self.mark_broken().await;
+                inner.connection = None;
                 bail!(
                     "Redis request timed out after {}s",
-                    self.request_timeout_secs().await
+                    self.settings.request_timeout_secs
                 )
             }
         }
@@ -697,83 +689,80 @@ impl RedisRuntime {
         update: Option<(i32, i32)>,
     ) -> Result<ExecOrderRateLimits> {
         let key = exec_risk_params_key(source);
-        let timeout = Duration::from_secs(self.request_timeout_secs().await);
-        let loaded = {
-            let mut inner = self.inner.lock().await;
-            let connection = inner.connection().await?;
-            tokio::time::timeout(timeout, async {
-                let defaults = default_exec_order_rate_limits(source);
-                if defaults.is_none()
-                    && !connection
-                        .exists::<_, bool>(&key)
-                        .await
-                        .with_context(|| format!("check Redis Exec risk params key {key}"))?
-                {
-                    bail!("Redis Exec risk params hash does not exist: {key}");
-                }
-                let mut pipe = redis::pipe();
-                pipe.atomic();
-                // HSETNX preserves explicit settings (including zero) and any
-                // concurrent operator write. Never replace a whole risk hash.
-                if let Some((limit_per_min, limit_10s)) = defaults {
-                    pipe.cmd("HSETNX")
-                        .arg(&key)
-                        .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
-                        .arg(limit_per_min)
-                        .ignore()
-                        .cmd("HSETNX")
-                        .arg(&key)
-                        .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD)
-                        .arg(limit_10s)
-                        .ignore();
-                }
-                if let Some((limit_per_min, limit_10s)) = update {
-                    pipe.cmd("HSET")
-                        .arg(&key)
-                        .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
-                        .arg(limit_per_min)
-                        .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD)
-                        .arg(limit_10s)
-                        .ignore();
-                }
-                pipe.cmd("HMGET")
+        let (mut inner, deadline) = self.lock_for_request().await?;
+        let loaded = tokio::time::timeout_at(deadline, async {
+            let connection = inner.connection(&self.settings).await?;
+            let defaults = default_exec_order_rate_limits(source);
+            if defaults.is_none()
+                && !connection
+                    .exists::<_, bool>(&key)
+                    .await
+                    .with_context(|| format!("check Redis Exec risk params key {key}"))?
+            {
+                bail!("Redis Exec risk params hash does not exist: {key}");
+            }
+            let mut pipe = redis::pipe();
+            pipe.atomic();
+            // HSETNX preserves explicit settings (including zero) and any
+            // concurrent operator write. Never replace a whole risk hash.
+            if let Some((limit_per_min, limit_10s)) = defaults {
+                pipe.cmd("HSETNX")
                     .arg(&key)
                     .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
-                    .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD);
-                let (values,): (Vec<Option<String>>,) = pipe
-                    .query_async(connection)
-                    .await
-                    .with_context(|| format!("load Redis Exec order rate limits key {key}"))?;
-                if values.len() != 2 {
-                    bail!("Redis Exec order rate limit response has invalid field count");
-                }
-                Ok(ExecOrderRateLimits {
-                    source_id: source.id.clone(),
-                    exec_order_rate_limit_per_min: parse_exec_order_rate_limit(
-                        values[0].as_deref(),
-                        EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD,
-                    )?,
-                    exec_order_rate_limit_10s: parse_exec_order_rate_limit(
-                        values[1].as_deref(),
-                        EXEC_ORDER_RATE_LIMIT_10S_FIELD,
-                    )?,
-                })
+                    .arg(limit_per_min)
+                    .ignore()
+                    .cmd("HSETNX")
+                    .arg(&key)
+                    .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD)
+                    .arg(limit_10s)
+                    .ignore();
+            }
+            if let Some((limit_per_min, limit_10s)) = update {
+                pipe.cmd("HSET")
+                    .arg(&key)
+                    .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
+                    .arg(limit_per_min)
+                    .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD)
+                    .arg(limit_10s)
+                    .ignore();
+            }
+            pipe.cmd("HMGET")
+                .arg(&key)
+                .arg(EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD)
+                .arg(EXEC_ORDER_RATE_LIMIT_10S_FIELD);
+            let (values,): (Vec<Option<String>>,) = pipe
+                .query_async(connection)
+                .await
+                .with_context(|| format!("load Redis Exec order rate limits key {key}"))?;
+            if values.len() != 2 {
+                bail!("Redis Exec order rate limit response has invalid field count");
+            }
+            Ok(ExecOrderRateLimits {
+                source_id: source.id.clone(),
+                exec_order_rate_limit_per_min: parse_exec_order_rate_limit(
+                    values[0].as_deref(),
+                    EXEC_ORDER_RATE_LIMIT_PER_MIN_FIELD,
+                )?,
+                exec_order_rate_limit_10s: parse_exec_order_rate_limit(
+                    values[1].as_deref(),
+                    EXEC_ORDER_RATE_LIMIT_10S_FIELD,
+                )?,
             })
-            .await
-        };
+        })
+        .await;
         match loaded {
             Ok(Ok(limits)) => Ok(limits),
             Ok(Err(error)) => {
                 if is_redis_transport_error(&error) {
-                    self.mark_broken().await;
+                    inner.connection = None;
                 }
                 Err(error)
             }
             Err(_) => {
-                self.mark_broken().await;
+                inner.connection = None;
                 bail!(
                     "Redis Exec order rate limit request timed out after {}s",
-                    self.request_timeout_secs().await
+                    self.settings.request_timeout_secs
                 )
             }
         }
@@ -786,83 +775,82 @@ impl RedisRuntime {
         source: &SourceConfig,
     ) -> Result<ExecTargetSnapshot> {
         let markets = crate::exec_routing::markets(source)?;
-        let timeout = Duration::from_secs(self.request_timeout_secs().await);
-        let loaded = {
-            let mut inner = self.inner.lock().await;
-            let connection = inner.connection().await?;
-            tokio::time::timeout(timeout, async {
-                let mut snapshot = ExecTargetSnapshot::default();
-                for venue in &markets {
-                    for family in [ExecutionFamily::BatchExec, ExecutionFamily::ChaseExec] {
-                        let prefix = format!(
-                            "{}:{}:{}:",
-                            source.id,
-                            venue,
-                            family.redis_namespace()
-                        );
-                        let index_key = format!("{prefix}strategy_names");
-                        let names = decode_strategy_names(
-                            connection.get::<_, Option<String>>(&index_key).await?,
-                            "strategy index",
+        let (mut inner, deadline) = self.lock_for_request().await?;
+        let loaded = tokio::time::timeout_at(deadline, async {
+            let connection = inner.connection(&self.settings).await?;
+            let mut snapshot = ExecTargetSnapshot::default();
+            for venue in &markets {
+                for family in [ExecutionFamily::BatchExec, ExecutionFamily::ChaseExec] {
+                    let prefix = format!("{}:{}:{}:", source.id, venue, family.redis_namespace());
+                    let index_key = format!("{prefix}strategy_names");
+                    let names = decode_strategy_names(
+                        connection.get::<_, Option<String>>(&index_key).await?,
+                        "strategy index",
+                    )?;
+                    for name in &names {
+                        let config_key = format!("{prefix}{name}");
+                        let raw = connection
+                            .get::<_, Option<String>>(&config_key)
+                            .await?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "{} strategy config missing in Redis: {name}",
+                                    family.redis_namespace()
+                                )
+                            })?;
+                        let stored: serde_json::Value =
+                            serde_json::from_str(&raw).with_context(|| {
+                                format!(
+                                    "{} Redis config is not valid JSON: {name}",
+                                    family.redis_namespace()
+                                )
+                            })?;
+                        let strategy = decode_exec_strategy_target_state(
+                            family.redis_namespace(),
+                            name,
+                            &stored,
                         )?;
-                        for name in &names {
-                            let config_key = format!("{prefix}{name}");
-                            let raw = connection
-                                .get::<_, Option<String>>(&config_key)
-                                .await?
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "{} strategy config missing in Redis: {name}",
-                                        family.redis_namespace()
-                                    )
-                                })?;
-                            let stored: serde_json::Value =
-                                serde_json::from_str(&raw).with_context(|| {
-                                    format!(
-                                        "{} Redis config is not valid JSON: {name}",
-                                        family.redis_namespace()
-                                    )
-                                })?;
-                            let strategy = decode_exec_strategy_target_state(
-                                family.redis_namespace(),
-                                name,
-                                &stored,
-                            )?;
-                            for (symbol, qty) in &strategy.targets {
-                                *snapshot
-                                    .aggregate_targets
-                                    .entry(symbol.clone())
-                                    .or_insert(0.0) += qty;
+                        for (symbol, qty) in &strategy.targets {
+                            *snapshot
+                                .aggregate_targets
+                                .entry(symbol.clone())
+                                .or_insert(0.0) += qty;
+                        }
+                        if let Some(existing) = snapshot.strategies.get_mut(name) {
+                            anyhow::ensure!(
+                                existing.family == strategy.family,
+                                "Exec strategy is indexed by multiple execution families: {name}"
+                            );
+                            existing.updated_at_us =
+                                existing.updated_at_us.min(strategy.updated_at_us);
+                            for (symbol, qty) in strategy.targets {
+                                anyhow::ensure!(
+                                    existing.targets.insert(symbol.clone(), qty).is_none(),
+                                    "Exec target is duplicated across markets: {name}/{symbol}"
+                                );
                             }
-                            if let Some(existing) = snapshot.strategies.get_mut(name) {
-                                anyhow::ensure!(existing.family == strategy.family, "Exec strategy is indexed by multiple execution families: {name}");
-                                existing.updated_at_us = existing.updated_at_us.min(strategy.updated_at_us);
-                                for (symbol, qty) in strategy.targets {
-                                    anyhow::ensure!(existing.targets.insert(symbol.clone(), qty).is_none(), "Exec target is duplicated across markets: {name}/{symbol}");
-                                }
-                            } else {
-                                snapshot.strategies.insert(name.clone(), strategy);
-                            }
+                        } else {
+                            snapshot.strategies.insert(name.clone(), strategy);
                         }
                     }
                 }
-                Ok(snapshot)
-            })
-            .await
-        };
+            }
+            Ok(snapshot)
+        })
+        .await;
         match loaded {
             Ok(Ok(snapshot)) => Ok(snapshot),
             Ok(Err(error)) => {
                 if is_redis_transport_error(&error) {
-                    self.mark_broken().await;
+                    inner.connection = None;
                 }
                 Err(error)
             }
             Err(_) => {
-                self.mark_broken().await;
+                inner.connection = None;
                 bail!(
                     "Redis request timed out after {}s",
-                    self.request_timeout_secs().await
+                    self.settings.request_timeout_secs
                 )
             }
         }
@@ -885,22 +873,19 @@ impl RedisRuntime {
 
         let key = format!("{}:{}:market_rules", source.id, source.venue);
         let encoded = serde_json::to_string(snapshot).context("encode market-rules snapshot")?;
-        let timeout = Duration::from_secs(self.request_timeout_secs().await);
-        let stored = {
-            let mut inner = self.inner.lock().await;
-            let connection = inner.connection().await?;
-            tokio::time::timeout(timeout, async {
-                connection
-                    .set::<_, _, ()>(&key, &encoded)
-                    .await
-                    .with_context(|| format!("write Redis market-rules key {key}"))?;
-                connection
-                    .get::<_, Option<String>>(&key)
-                    .await
-                    .with_context(|| format!("confirm Redis market-rules key {key}"))
-            })
-            .await
-        };
+        let (mut inner, deadline) = self.lock_for_request().await?;
+        let stored = tokio::time::timeout_at(deadline, async {
+            let connection = inner.connection(&self.settings).await?;
+            connection
+                .set::<_, _, ()>(&key, &encoded)
+                .await
+                .with_context(|| format!("write Redis market-rules key {key}"))?;
+            connection
+                .get::<_, Option<String>>(&key)
+                .await
+                .with_context(|| format!("confirm Redis market-rules key {key}"))
+        })
+        .await;
 
         match stored {
             Ok(Ok(Some(stored))) if stored == encoded => {
@@ -915,15 +900,15 @@ impl RedisRuntime {
             Ok(Ok(None)) => bail!("Redis market-rules key missing after write: {key}"),
             Ok(Err(error)) => {
                 if is_redis_transport_error(&error) {
-                    self.mark_broken().await;
+                    inner.connection = None;
                 }
                 Err(error)
             }
             Err(_) => {
-                self.mark_broken().await;
+                inner.connection = None;
                 bail!(
                     "Redis market-rules request timed out after {}s",
-                    self.request_timeout_secs().await
+                    self.settings.request_timeout_secs
                 )
             }
         }
@@ -960,13 +945,36 @@ impl RedisRuntime {
             .map(Some)
     }
 
-    async fn request_timeout_secs(&self) -> u64 {
-        self.inner.lock().await.settings.request_timeout_secs
+    async fn lock_for_request(
+        &self,
+    ) -> Result<(MutexGuard<'_, RedisRuntimeInner>, tokio::time::Instant)> {
+        // One deadline covers queueing, connecting and I/O. Reading the timeout
+        // must not itself wait behind the connection being timed out.
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.settings.request_timeout_secs);
+        let inner = tokio::time::timeout_at(deadline, self.inner.lock())
+            .await
+            .context("Redis connection lock wait timed out")?;
+        Ok((inner, deadline))
     }
 
-    async fn mark_broken(&self) {
-        let mut inner = self.inner.lock().await;
-        inner.connection = None;
+    async fn keepalive(&self) -> Result<()> {
+        let (mut inner, deadline) = self.lock_for_request().await?;
+        let result = tokio::time::timeout_at(deadline, async {
+            let connection = inner.connection(&self.settings).await?;
+            redis::cmd("PING")
+                .query_async::<String>(connection)
+                .await
+                .context("Manager Redis keepalive failed")?;
+            Ok(())
+        })
+        .await
+        .context("Manager Redis keepalive timed out")
+        .and_then(|result| result);
+        if result.is_err() {
+            inner.connection = None;
+        }
+        result
     }
 }
 
@@ -1002,22 +1010,6 @@ fn decode_exec_strategy_target_state(
     })
 }
 
-async fn keep_connection_alive(inner: &mut RedisRuntimeInner) -> Result<bool> {
-    let url = inner.settings.url.clone();
-    let connection = match inner.connection().await {
-        Ok(connection) => connection,
-        Err(error) => return Err(error),
-    };
-    match redis::cmd("PING").query_async::<String>(connection).await {
-        Ok(_) => Ok(true),
-        Err(error) => {
-            warn!(url = %url, error = %error, "Manager Redis keepalive failed; reconnecting");
-            inner.connection = None;
-            Err(error).context("Manager Redis keepalive failed")
-        }
-    }
-}
-
 fn is_redis_transport_error(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -1025,11 +1017,18 @@ fn is_redis_transport_error(error: &anyhow::Error) -> bool {
 }
 
 impl RedisRuntimeInner {
-    async fn connection(&mut self) -> Result<&mut ConnectionManager> {
+    async fn connection(&mut self, settings: &RedisSettings) -> Result<&mut ConnectionManager> {
         if self.connection.is_none() {
-            match ConnectionManager::new(self.client.clone()).await {
+            let timeout = Duration::from_secs(settings.request_timeout_secs);
+            // Retry on the next bounded request/heartbeat rather than hide
+            // backoff and an unbounded handshake behind the shared mutex.
+            let config = ConnectionManagerConfig::new()
+                .set_number_of_retries(0)
+                .set_connection_timeout(timeout)
+                .set_response_timeout(timeout);
+            match ConnectionManager::new_with_config(self.client.clone(), config).await {
                 Ok(connection) => {
-                    info!(url = %self.settings.url, "Manager Redis long connection ready");
+                    info!("Manager Redis long connection ready");
                     self.connection = Some(connection);
                     self.last_reconnect_error_at = None;
                 }
@@ -1037,11 +1036,10 @@ impl RedisRuntimeInner {
                     let now = Instant::now();
                     let should_log = self.last_reconnect_error_at.is_none_or(|previous| {
                         now.duration_since(previous)
-                            >= Duration::from_millis(self.settings.reconnect_interval_ms)
+                            >= Duration::from_millis(settings.reconnect_interval_ms)
                     });
                     if should_log {
                         warn!(
-                            url = %self.settings.url,
                             error = %error,
                             "Manager Redis reconnect failed; will retry on next publish"
                         );
@@ -1236,6 +1234,7 @@ mod tests {
     struct RedisTestServer {
         child: std::process::Child,
         dir: tempfile::TempDir,
+        port: u16,
     }
 
     impl Drop for RedisTestServer {
@@ -1253,31 +1252,12 @@ mod tests {
         SourceConfig,
     ) {
         use std::net::TcpListener;
-        use std::process::{Command, Stdio};
         let dir = tempfile::tempdir().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let executable = std::env::var("EXEC_REDIS_TEST_SERVER_BIN")
-            .expect("set the isolated test server binary");
-        let child = Command::new(executable)
-            .args([
-                "--bind",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
-                "--save",
-                "",
-                "--appendonly",
-                "no",
-                "--dir",
-                dir.path().to_str().unwrap(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let server = RedisTestServer { child, dir };
+        let child = start_test_redis(dir.path(), port);
+        let server = RedisTestServer { child, dir, port };
         let url = format!("redis://127.0.0.1:{port}/0");
         let client = redis::Client::open(url.clone()).unwrap();
         let mut connection = None;
@@ -1300,6 +1280,185 @@ mod tests {
         ))
         .unwrap();
         (server, runtime, connection, source)
+    }
+
+    fn start_test_redis(dir: &std::path::Path, port: u16) -> std::process::Child {
+        use std::process::{Command, Stdio};
+        let executable = std::env::var("EXEC_REDIS_TEST_SERVER_BIN")
+            .expect("set the isolated test server binary");
+        Command::new(executable)
+            .args([
+                "--bind",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+                "--dir",
+                dir.to_str().unwrap(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn reconnect_test_source() -> SourceConfig {
+        toml::from_str(
+            "id='reconnect_fixture'\naccount='fixture'\nvenue='binance-futures'\nrocksdb_path='/fixture/persist_manager'\n",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn redis_request_deadline_includes_waiting_for_connection_lock() {
+        let runtime = RedisRuntime::connect(RedisSettings {
+            url: "redis://127.0.0.1:1/0".into(),
+            request_timeout_secs: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let guard = runtime.inner.lock().await;
+        let source = reconnect_test_source();
+        let result = tokio::time::timeout(
+            Duration::from_millis(2500),
+            runtime.load_exec_order_rate_limits(&source),
+        )
+        .await;
+        drop(guard);
+        assert!(
+            result.is_ok(),
+            "Redis lock wait escaped the request deadline"
+        );
+        assert!(result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn redis_request_deadline_includes_stalled_connection_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let runtime = RedisRuntime::connect(RedisSettings {
+            url: format!("redis://{address}/0"),
+            request_timeout_secs: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let source = reconnect_test_source();
+        let result = tokio::time::timeout(
+            Duration::from_millis(2500),
+            runtime.load_exec_order_rate_limits(&source),
+        )
+        .await;
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "Redis handshake escaped the request deadline"
+        );
+        assert!(result.unwrap().is_err());
+        assert!(
+            runtime.inner.try_lock().is_ok(),
+            "Redis connection lock leaked"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires EXEC_REDIS_TEST_SERVER_BIN pointing to a local redis-server binary"]
+    async fn redis_reconnect_recovers_after_unresponsive_heartbeat() {
+        let (_server, runtime, mut control, source) = isolated_redis().await;
+        let runtime = RedisRuntime::connect(RedisSettings {
+            request_timeout_secs: 1,
+            ..runtime.settings.as_ref().clone()
+        })
+        .unwrap();
+        runtime.keepalive().await.unwrap();
+        let _: () = redis::cmd("CLIENT")
+            .arg("PAUSE")
+            .arg(2_000)
+            .arg("ALL")
+            .query_async(&mut control)
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(2500), runtime.keepalive())
+            .await
+            .expect("heartbeat escaped its deadline");
+        assert!(result.is_err());
+        assert!(runtime.inner.try_lock().unwrap().connection.is_none());
+        tokio::time::sleep(Duration::from_millis(1250)).await;
+        runtime.keepalive().await.unwrap();
+        runtime.load_exec_order_rate_limits(&source).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires EXEC_REDIS_TEST_SERVER_BIN pointing to a local redis-server binary"]
+    async fn redis_reconnect_publishes_after_server_restart_without_replaying_old_targets() {
+        let (mut server, runtime, _control, source) = isolated_redis().await;
+        let runtime = RedisRuntime::connect(RedisSettings {
+            request_timeout_secs: 1,
+            ..runtime.settings.as_ref().clone()
+        })
+        .unwrap();
+        let parameters = valid_parameters();
+        let targets = |qty| {
+            BTreeMap::from([(
+                "BTCUSDT".to_owned(),
+                TargetPosition {
+                    qty,
+                    signal: 0,
+                    clear: false,
+                },
+            )])
+        };
+        runtime
+            .publish_strategy_inner(
+                &source,
+                "reconnect",
+                &parameters,
+                &BTreeMap::new(),
+                &targets(0.1),
+            )
+            .await
+            .unwrap();
+        server.child.kill().unwrap();
+        server.child.wait().unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(2500),
+            runtime.publish_strategy_inner(
+                &source,
+                "reconnect",
+                &parameters,
+                &BTreeMap::new(),
+                &targets(0.2),
+            ),
+        )
+        .await
+        .expect("failed publication escaped its deadline");
+        assert!(result.is_err());
+        server.child = start_test_redis(server.dir.path(), server.port);
+        for attempt in 0..100 {
+            if runtime.keepalive().await.is_ok() {
+                break;
+            }
+            assert!(attempt < 99, "Redis did not reconnect after restart");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        runtime
+            .publish_strategy_inner(
+                &source,
+                "reconnect",
+                &parameters,
+                &BTreeMap::new(),
+                &targets(0.3),
+            )
+            .await
+            .unwrap();
+        let actual = runtime.load_exec_target_snapshot(&source).await.unwrap();
+        assert_eq!(actual.strategies["reconnect"].targets["BTCUSDT"], 0.3);
     }
 
     #[tokio::test]
