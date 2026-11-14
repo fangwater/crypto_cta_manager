@@ -124,3 +124,73 @@ zero restarts since cutover. Gateway target requests since 10:52:38 comprised
 12,203 HTTP 200 and five HTTP 502; the latest failure remained 11:55:09. The
 configuration, immutable snapshot and 180 long-lived-service checks passed again,
 with only the explicitly retained finite-task exception above.
+
+## Follow-up: CPU starvation delays the shared filesystem journal
+
+Read-only BPF observation from approximately 12:32–12:51 established a concrete
+cause of slow Redis fsync: the filesystem journal and its active writers lack
+CPU time on the overloaded housekeeping pool. This is not evidence of a new
+attack or a Redis command error. No trading process, CPU binding, Redis setting
+or database was changed for this investigation.
+
+The host has only CPUs 0–47 online. CPUs 48–95 are offline SMT siblings, so a
+configured mask `0-5,48-95` gives a process only six usable CPUs. Boot isolates
+6–47 and puts default IRQ affinity on 0–5. The root ext4 filesystem, including
+Redis AOF, Manager and Exec files, is on the same EBS-backed partition.
+`jbd2/nvme0n1p1-8` PID845 is restricted to 0–5; Redis and its AOF worker retain
+CPU28. All six housekeeping CPUs were approximately fully occupied in the CPU
+sample, while CPU28 was about 97% idle.
+
+Observed causal paths:
+
+| UTC | Observation | Measured delay |
+| --- | --- | --- |
+| 12:35:01 | Redis fdatasync / its `jbd2_log_wait_commit` / file-data wait | 711002 / 708371 / 2610 µs |
+| 12:38:24 | RX03 exec-pre-trade PID3016803 holds transaction154829981 while updating file metadata; that transaction waits in its lock phase | 1642938 / 1453955 µs |
+| 12:44:52 | Redis fdatasync / journal wait / PID845 runnable but waiting for CPU | 1202319 / 1200566 / 1195906 µs |
+| 12:47:49 | trade04 exec-pre-trade PID1505836 holds transaction154833895 while writing stderr; its runnable wait / blocked time | 427987 total / 426685 runnable / 1287 blocked µs |
+| 12:47:58 | RX01 exec-pre-trade PID3934756 runnable wait | 2748120 µs |
+
+The 12:44:52 sample is particularly direct: almost all of Redis's 1.202-second
+sync coincides with the journal thread waiting 1.196 seconds for CPU. Other
+writers also block the journal: the stderr sample spent over 99% of its handle
+lifetime ready to run, rather than performing disk I/O. The captured stack is
+`file_update_time_flags -> ext4_dirty_inode -> __ext4_journal_start_sb` inside
+an ordinary buffered write. A thread descheduled with a journal handle prevents
+that shared transaction from committing. Pinning only the Redis userspace
+threads does not isolate this dependency.
+
+An 8.085-second process CPU sample found Gate FR04 consuming approximately
+2.43 cores of the six-core pool: pre_trade 83.7%, dashboard 73.6%, trade_engine 48.9%
+and trade_signal 37.2%. The Binance futures IPC proxy used another 65.6%, with
+rolling metrics, depth, other execution processes and system work sharing the
+remainder. This identifies competing consumers, not a claim that one account
+alone caused every stall or that each high-CPU process is functionally broken.
+The Manager process on CPU24 also used approximately 99% in this sample, and
+its async worker had a separately measured 942559 µs runnable wait. That is an
+additional publication-latency risk.
+
+Redis still had 376 keys, no expiring keys, healthy AOF writes and unchanged
+ERR1/NOPERM1 counters. No new bound-account publication failure was seen in the
+12:30 onward observation at this point. These traces establish the slow-fsync
+mechanism, but the earlier 11:18 and 11:55 HTTP502s lack simultaneous kernel traces;
+do not claim a complete per-request attribution of those historical failures.
+
+The corrective direction is CPU allocation: reserve enough online physical CPU
+capacity for housekeeping/journal work, move heavy application consumers out of
+the six-core pool, and reduce contention between Manager analysis and publication.
+Review current dedicated-core ownership before selecting new assignments; offline
+48–95 cannot supply capacity. Do not weaken AOF durability, raise request timeouts
+to conceal the issue, or assume another Redis version isolates the filesystem.
+
+Host-only evidence uses `storage.txt`, `journal-handles.txt`, `journal-cpu.txt`,
+`scheduler.txt`, `flow.txt`, `tcp-rootcause.txt`, `ping-rootcause.jsonl` and
+`cpu-consumers-effective.json` in the existing backup directory. Initial handle
+off-CPU classification in `journal-scheduling.txt` did not separate sleep from
+post-wakeup runnable time; use the corrected `journal-cpu.txt` for that split.
+The earlier failed pointer-filter prototype is also superseded. Diagnostic
+tracers were stopped explicitly after collection; production services were kept
+running throughout. An independent 15-minute PING observer completed 17445
+requests without a socket error, with a 1402 ms maximum command round trip and
+1707 ms maximum sampling wakeup delay. The wakeup delay is recorded separately
+so observer scheduling stalls are not mistaken for Redis command execution time.
