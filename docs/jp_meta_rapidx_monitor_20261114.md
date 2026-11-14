@@ -176,12 +176,14 @@ ERR1/NOPERM1 counters. No new bound-account publication failure was seen in the
 mechanism, but the earlier 11:18 and 11:55 HTTP502s lack simultaneous kernel traces;
 do not claim a complete per-request attribution of those historical failures.
 
-The corrective direction is CPU allocation: reserve enough online physical CPU
-capacity for housekeeping/journal work, move heavy application consumers out of
-the six-core pool, and reduce contention between Manager analysis and publication.
-Review current dedicated-core ownership before selecting new assignments; offline
-48–95 cannot supply capacity. Do not weaken AOF durability, raise request timeouts
-to conceal the issue, or assume another Redis version isolates the filesystem.
+First reconcile the FR polling-mode difference described below before deciding
+how much CPU reassignment is necessary. Reserve enough online physical CPU capacity
+for housekeeping/journal work, move remaining heavy application consumers out of
+the six-core pool as needed, and reduce contention between Manager analysis and
+publication. Review current dedicated-core ownership before selecting new
+assignments; offline48–95 cannot supply capacity. Do not weaken AOF durability,
+raise request timeouts to conceal the issue, or assume another Redis version
+isolates the filesystem.
 
 Host-only evidence uses `storage.txt`, `journal-handles.txt`, `journal-cpu.txt`,
 `scheduler.txt`, `flow.txt`, `tcp-rootcause.txt`, `ping-rootcause.jsonl` and
@@ -194,3 +196,29 @@ running throughout. An independent 15-minute PING observer completed 17445
 requests without a socket error, with a 1402 ms maximum command round trip and
 1707 ms maximum sampling wakeup delay. The wakeup delay is recorded separately
 so observer scheduling stalls are not mistaken for Redis command execution time.
+
+### FR idle-mode audit after operator clarification
+
+At 13:02 UTC, a read-only audit checked all44 pre_trade, trade_engine,
+trade_signal and fr_signal_dashboard processes across11 running FR deployments.
+Only Gate FR04's four processes explicitly enabled fast polling. Its host env.sh
+has `ENABLE_IPC_FAST_POLL=1`; all four running processes also contain that value,
+and trade_engine additionally has lowercase `enable_ipc_fast_poll=1`. Other
+deployments explicitly disable it or omit it with the code's disabled default.
+Gate FR05 also has an enabled value in its file, but no matching active processes
+were found in this audit; a file alone is not evidence of active load.
+
+FR04 startup logs confirm `fast_poll=true`, pre_trade `spin_iters=1024` with
+`idle_policy=yield`, and trade_engine `router_idle_spin_iters=64`. In this mode,
+Tokio `yield_now` lets other async tasks run but does not impose an OS-thread
+sleep or a CPU quota. With fast polling disabled, empty polls sleep for1 ms.
+Sleep is an idle policy: sustained useful work can still consume CPU. The
+dashboard initializes the same trade_signal market channels and inherits their
+polling policy; its one-second HTTP snapshot refresh is not its only activity.
+
+The operator's earlier FR load reduction therefore exists and is reflected in
+other live deployments; FR04 currently retains a different mode. Why that
+setting was retained is not established. The immediate configuration question
+should be resolved before assuming that moving cores is the only remedy.
+No env.sh, flag, trading behavior or process lifecycle was changed in this audit.
+Sanitized local evidence: `artifacts/redis_rootcause_20261114/fr_poll_modes.json`.
