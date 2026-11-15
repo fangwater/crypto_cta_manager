@@ -913,25 +913,28 @@ fn check_position(
             if gap.abs() <= tolerance {
                 continue;
             }
-            // Dust-valued gaps are residuals, not mismatches.
-            let implied_price = valued_qty_by_symbol
-                .get(symbol)
-                .filter(|qty| **qty > f64::EPSILON)
-                .map(|qty| usdt_value_by_symbol.get(symbol).copied().unwrap_or(0.0) / *qty);
-            if implied_price
-                .is_some_and(|price| gap.abs() * price <= monitor.position_residual_usdt)
-            {
-                continue;
-            }
-            let live_order_qty = live_order_abs_by_symbol.get(symbol).copied().unwrap_or(0.0);
-            if live_order_qty > tolerance {
-                continue;
-            }
             let accepted_residual = accepted_residual_by_symbol
                 .get(symbol)
                 .copied()
                 .unwrap_or(0.0);
-            if (gap - accepted_residual).abs() <= tolerance {
+            let unexplained_gap = gap - accepted_residual;
+            if unexplained_gap.abs() <= tolerance {
+                continue;
+            }
+            // Evaluate dust after removing Exec-confirmed completion residuals.
+            // Several sub-minimum strategy tails can add to a large account gap
+            // while leaving only a small unexplained difference.
+            let implied_price = valued_qty_by_symbol
+                .get(symbol)
+                .filter(|qty| **qty > f64::EPSILON)
+                .map(|qty| usdt_value_by_symbol.get(symbol).copied().unwrap_or(0.0) / *qty);
+            if implied_price.is_some_and(|price| {
+                unexplained_gap.abs() * price <= monitor.position_residual_usdt
+            }) {
+                continue;
+            }
+            let live_order_qty = live_order_abs_by_symbol.get(symbol).copied().unwrap_or(0.0);
+            if live_order_qty > tolerance {
                 continue;
             }
             // BatchExec can have no exchange-live order between short batches.
@@ -2593,6 +2596,86 @@ mod tests {
                 .iter()
                 .any(|issue| issue.key.contains("account:DOGEUSDT"))
         );
+    }
+
+    #[test]
+    fn position_check_prices_only_the_gap_left_after_accepted_strategy_residuals() {
+        let source = test_source("binance-futures");
+        let mut monitor = MonitorConfig::default();
+        let now_us = unix_time_us();
+        let old_ms = now_us / 1_000 - (monitor.execution_grace_secs as i64 + 10) * 1_000;
+        // el01 trade07, 2026-11-15: several individually unexecutable tails
+        // total about 224 USDT, plus a separate approximately 9 USDT gap.
+        let samples = [
+            (0.3663306083713464, 0.366191377070428, ""),
+            (-1.0006212559161034, -1.0014192524844143, "exchange_minimum"),
+            (-0.9041937044985076, -0.9049533498359664, "exchange_minimum"),
+            (1.0924198251159454, 1.0924198251159454, "target_reached"),
+            (-1.251933076099866, -1.2529039002874165, "exchange_minimum"),
+            (-1.6787135383224716, -1.6796429417053604, "exchange_minimum"),
+            (2.0947111413494808, 2.0947111413494808, "target_reached"),
+        ];
+        let rows = samples
+            .iter()
+            .enumerate()
+            .map(|(index, &(current, target, reason))| {
+                let mut row = position_row(
+                    &format!("cta_{index}"),
+                    "BTCUSDT",
+                    current,
+                    target,
+                    0.0,
+                    0.0,
+                    Some(-1.282),
+                    old_ms,
+                );
+                row.current_usdt = Some(current * 64_703.55);
+                row.execution_complete = !reason.is_empty();
+                row.completion_reason = reason.to_string();
+                row
+            })
+            .collect();
+        let mut snapshot = ExecStateSnapshot {
+            source_id: source.id.clone(),
+            snapshot_ts_ms: now_us / 1_000,
+            position_ready: true,
+            rows,
+        };
+        let configured = target_snapshot(BTreeMap::from([(
+            "BTCUSDT".to_string(),
+            samples.iter().map(|(_, target, _)| target).sum(),
+        )]));
+        let account_issue = |snapshot: &ExecStateSnapshot, monitor: &MonitorConfig| {
+            check_position(&source, monitor, snapshot, Some(&configured), now_us)
+                .into_iter()
+                .any(|issue| issue.key.contains("account:BTCUSDT"))
+        };
+        assert!(!account_issue(&snapshot, &monitor));
+
+        // A different small-residual policy still applies after the deduction.
+        monitor.position_residual_usdt = 5.0;
+        assert!(account_issue(&snapshot, &monitor));
+        monitor.position_residual_usdt = 50.0;
+
+        // Do not mask an independent, material account discrepancy.
+        for row in &mut snapshot.rows {
+            row.account_position_qty = Some(-1.284);
+        }
+        assert!(account_issue(&snapshot, &monitor));
+        for row in &mut snapshot.rows {
+            row.account_position_qty = Some(-1.282);
+        }
+
+        // An unknown mark cannot turn an unexplained quantity into known dust.
+        for row in &mut snapshot.rows {
+            row.current_usdt = None;
+        }
+        assert!(account_issue(&snapshot, &monitor));
+        for row in &mut snapshot.rows {
+            row.current_usdt = row.current_qty.map(|qty| qty * 64_703.55);
+            row.completion_reason = "symbol_not_tradable".to_string();
+        }
+        assert!(account_issue(&snapshot, &monitor));
     }
 
     #[test]
