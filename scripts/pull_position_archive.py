@@ -67,8 +67,15 @@ def remote(host, action, before=None, data=None, output=subprocess.PIPE):
         argv += ["--before", before]
     if action == "commit":
         argv += ["--receipt", "-"]
+    transport = host.get("transport", "ssh")
+    if transport == "local":
+        command = argv
+    elif transport == "ssh":
+        command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host["ssh"], shlex.join(argv)]
+    else:
+        raise ValueError("transport must be ssh or local")
     return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host["ssh"], shlex.join(argv)],
+        command,
         input=None if data is None else json.dumps(data).encode(),
         stdout=output, check=False, timeout=7200,
     )
@@ -130,7 +137,7 @@ def prepare_directory(host, root, status):
     else:
         if status["floor"] != [1, 0]:
             raise RuntimeError("source already pruned; restore the existing local identity/receipt chain first")
-        durable_json(identity, {"identity": status["identity"], "ssh": host["ssh"]})
+        durable_json(identity, {"identity": status["identity"], "ssh": host.get("ssh", "local")})
     return directory
 
 

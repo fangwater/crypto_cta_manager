@@ -172,6 +172,12 @@ class ManualArchiveTests(unittest.TestCase):
         self.assertEqual(self.calls, ["inspect"])
         self.assertFalse(new_root.exists())
 
+    def test_local_transport_uses_same_client_without_opening_the_database(self):
+        host = {**self.host, "transport": "local"}
+        with patch.object(pull.subprocess, "run", return_value=subprocess.CompletedProcess([],0,b"{}")) as run:
+            pull.remote(host, "compact", self.before)
+        self.assertEqual(run.call_args.args[0], ["/bin/client","compact","--socket","/private/socket","--before",self.before])
+
     def test_date_is_exclusive_shanghai_midnight_and_canonical(self):
         expected = datetime.datetime(2026, 9, 30, 16, tzinfo=datetime.timezone.utc)
         self.assertEqual(pull.date_boundary("2026-10-01"), int(expected.timestamp()) * 1000000)

@@ -43,6 +43,35 @@ enum Action {
         #[arg(long)]
         before: String,
     },
+    /// Diagnostic only: sample immutable original records through a read-only secondary.
+    RehearsalSample {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        secondary: PathBuf,
+    },
+    /// Restore a sample into a NEW isolated test root, never a live store.
+    RehearsalPrepare {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Serve owner commands ONLY on a marked isolated rehearsal copy.
+    RehearsalServe {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        socket: PathBuf,
+    },
+    RehearsalProof {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        start_us: i64,
+        #[arg(long)]
+        end_us: i64,
+    },
     /// Local only: restore raw signals into an independent backup RocksDB.
     Verify {
         #[arg(long)]
@@ -84,6 +113,26 @@ fn main() -> Result<()> {
                 serde_json::from_reader(std::fs::File::open(receipt)?)?
             };
             (socket, Command::Commit { receipt: value })
+        }
+        Action::RehearsalSample { db, secondary } => {
+            retention::rehearsal::sample(&db, &secondary, &mut std::io::stdout().lock())?;
+            return Ok(());
+        }
+        Action::RehearsalPrepare { file, root } => {
+            println!("{}", retention::rehearsal::prepare(&file, &root)?);
+            return Ok(());
+        }
+        Action::RehearsalServe { db, socket } => {
+            retention::rehearsal::serve(&db, &socket)?;
+            return Ok(());
+        }
+        Action::RehearsalProof {
+            db,
+            start_us,
+            end_us,
+        } => {
+            println!("{}", retention::rehearsal::proof(&db, start_us, end_us)?);
+            return Ok(());
         }
         Action::Verify { file, restore } => {
             let receipt = retention::verify_restore(

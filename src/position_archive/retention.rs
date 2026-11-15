@@ -612,6 +612,7 @@ pub fn verify_restore(input: impl Read, destination: &Path) -> Result<Receipt> {
 }
 
 mod control;
+pub mod rehearsal;
 pub use control::{Command, Reply, client, start_socket};
 
 #[cfg(test)]

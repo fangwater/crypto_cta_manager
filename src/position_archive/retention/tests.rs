@@ -327,3 +327,48 @@ fn manual_socket_exports_backup_then_owner_commits_and_compacts_once() {
     assert_eq!(archive.retention_floor(), before);
     assert_eq!(archive.scan_from(before.0).unwrap().len(), 2);
 }
+
+#[test]
+fn real_record_rehearsal_preserves_retained_inventory_and_never_mutates_source() {
+    let root = tempfile::tempdir().unwrap();
+    let primary = root.path().join("primary");
+    let archive = PositionArchive::open(ManagerDb::open(&primary).unwrap()).unwrap();
+    let now = crate::kline::now_us();
+    let day = 86_400_000_000;
+    for (age, qty) in [(60, 1.), (20, 2.), (1, 3.)] {
+        let ts = now - age * day;
+        archive
+            .append(
+                ts,
+                &strategy(ts, qty),
+                vec![],
+                vec![published_account("source", "binding", 1.)],
+            )
+            .unwrap();
+    }
+    let mut sample = Vec::new();
+    rehearsal::sample(&primary, &root.path().join("secondary"), &mut sample).unwrap();
+    assert_eq!(archive.retention_status().sealed, (1, 0));
+    assert_eq!(archive.retention_floor(), (1, 0));
+    assert!(rehearsal::serve(&primary, &root.path().join("bad.sock")).is_err());
+    let file = root.path().join("sample.gz");
+    std::fs::write(&file, &sample).unwrap();
+    let prepared = rehearsal::prepare(&file, &root.path().join("isolated")).unwrap();
+    let sampled_receipt: Receipt = serde_json::from_value(prepared["receipt"].clone()).unwrap();
+    assert!(archive.commit_receipt(&sampled_receipt, now).is_err());
+    let working = std::path::PathBuf::from(prepared["working"].as_str().unwrap());
+    let before = rehearsal::proof(&working, now - 30 * day, now).unwrap();
+    assert_eq!(before["retained_signals"], serde_json::json!(2));
+    assert_eq!(before["source_bindings"], serde_json::json!(1));
+    let lab = PositionArchive::open(ManagerDb::open(&working).unwrap()).unwrap();
+    let cutoff = (now - 40 * day, 0);
+    let mut backup = Vec::new();
+    lab.export_prefix(&mut backup, cutoff, now).unwrap();
+    let receipt = verify_restore(backup.as_slice(), &root.path().join("verified-backup")).unwrap();
+    lab.commit_receipt(&receipt, now).unwrap();
+    lab.compact_archived(cutoff).unwrap();
+    drop(lab);
+    let after = rehearsal::proof(&working, now - 30 * day, now).unwrap();
+    assert_eq!(before, after);
+    assert_eq!(archive.scan_from(1).unwrap().len(), 3);
+}

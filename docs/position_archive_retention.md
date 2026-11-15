@@ -255,3 +255,54 @@ Manager process start identities and host TOML hashes were preserved. These are
 read-only previews, not selected cleanup ranges. No live owner endpoint was
 enabled and no live backup/seal, prefix deletion or compaction was performed.
 Detailed local evidence is in `artifacts/manual_position_archive_20261115/`.
+
+
+## Real-record isolated trial, 2026-11-15
+
+The operator requested a trial without yet selecting an exact live reclamation
+scope. The test used the running el01 Manager's real signal records through a
+read-only, SST-pinning secondary. Sampling was bounded to day/edge records
+(128 MiB cap), not a copy of the complete production history. The temporary
+source secondary and staged diagnostic binary were removed after verification.
+Source Manager PID 2471569/start identity, its TOML hash and its installed archive
+client were unchanged. Source floor/sealed remained `(1, 0)` with no receipt.
+No live endpoint was enabled and no live signal was sealed, deleted or compacted.
+
+A new powerleader rehearsal root restored the sample and created a separate
+writable checkpoint. Both copies have explicit identity-bound rehearsal markers.
+`rehearsal-serve` refuses an unmarked database, preventing accidental use of the
+production path. It uses the same owner socket/export/commit/compact implementation.
+The manual Python script also supports `transport = "local"` for a same-machine
+owner; existing remote hosts retain their SSH transport. The test exercised the
+actual script, CLI, socket, gzip, restore and RocksDB operations, without mocked
+backup or deletion responses.
+
+Trial scope and results:
+
+- Real sample: 1,520 records, 11,604,595 raw frame bytes, 2,754,928 gzip bytes.
+- Example cutoff: 2026-10-01 00:00 UTC+08:00, on the isolated copy only.
+- Backed up and removed from that copy: 720 records / 4,259,861 raw frame bytes.
+- Independent compressed backup: 880,210 bytes; restore into a second new DB
+  returned the exact same count, range, chain and SHA-256 receipt.
+- Retained 30-day sample: 544 signals, 25 source/binding entries and 1,436
+  cumulative source/symbol entries. Original signal-byte hashes and opening/end
+  reconstructed inventory hashes matched exactly before and after cold restart.
+- Working-copy live signal SST size: 5,164,565 → 3,378,925 bytes. This is an
+  isolated CF measurement, not reclaimed production space; the reference copy
+  deliberately preserves the original test data on NVMe.
+- Reclamation without a saved backup was rejected. A second writable opener was
+  rejected while the isolated owner held its DB lock. Backup alone retained all
+  original rows; repeating `--reclaim` preserved the same floor and receipt.
+
+This validates the real-record sample's reconstruction inputs and the full
+maintenance flow. It does **not** assert equality of all production NAV curves,
+fees, slippage or full-history account holdings; no complete priced production
+query was replayed. Synthetic retained-month priced-curve tests remain separate.
+
+Evidence root (private, powerleader NVMe):
+`/mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager_archives/trial-1115-133747/`.
+`result.json`, before/after proofs, independent recovery receipt and source
+before/after/cleanup records preserve the checks. The isolated owner process was
+stopped. Live Manager and trading processes were not restarted. Thirteen focused
+Rust retention tests, twelve Python tests, all-target compilation and the release
+archive-client build passed for the diagnostic additions.
