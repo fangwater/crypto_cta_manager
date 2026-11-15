@@ -129,8 +129,9 @@ can still rebuild the retained suffix once.
 
 A lost commit reply or an interrupted/failed compaction can be retried with the
 same `--reclaim` command. An already reclaimed prefix is not deleted again;
-compaction is still requested. Manager rejects compaction beyond its verified
-reclaimed boundary. Backup manifests remain available after success. A single
+compaction is still requested. Manager flushes the WAL durably before reclaiming
+SST space, including a retry after a previously visible commit reported a sync
+error. It rejects compaction beyond its verified reclaimed boundary. Backup manifests remain available after success. A single
 local flock serializes manual backup/reclaim jobs.
 
 If powerleader disconnects before deletion, source originals remain. If it
@@ -219,3 +220,38 @@ in the earlier automatic design. One full-prefix backup/commit and unconditional
 retriable compaction now address those paths. Scheduled failure/lag alerts are
 not part of this manual workflow; commands report failures with nonzero exits
 and preserve recovery manifests. Operators must still watch live free space.
+
+
+## Manual tooling validation, 2026-11-15
+
+`cargo fmt --check`, `cargo check --all-targets`, full `cargo test` and release
+builds passed. The full crate reported 552 passing tests, 17 ignored library
+tests and 19 ignored operator/integration checks. Twelve focused retention tests
+include a real Unix-socket export/verify/status/commit/compact exchange, live
+write-lock exclusion with read-only planning, exact date-boundary preservation,
+current-target/head recovery, CF isolation and warm/cold financial equivalence.
+Eleven Python tests cover preview-only defaults, separate whole-prefix backup
+and reclamation, failed transfers/verifiers, source identity/range changes,
+lost commit replies and retrying compaction after deletion.
+
+The manual script and verifier were installed in powerleader's private backup
+`bin/` directory, and its host catalog gained explicit absolute Manager DB paths.
+Both obsolete local systemd units were disabled and removed only after their
+contents matched the earlier repository templates exactly. No scheduler remains
+for this feature. Previous tools/config are preserved privately under
+`manual-tooling-20261115/` on the selected NVMe backup filesystem.
+
+The date-aware read-only client was checksum-verified and atomically installed
+on el01 and jp-meta; exact `.next-20261115-manual` staging paths were removed by
+rename. A default preview for `--before 2026-10-01` succeeded on each host:
+
+| Host | Eligible SST estimate for this example date | Preserved Manager PID |
+| --- | ---: | ---: |
+| el01 | 7,552,147,548 bytes | 2471569 |
+| jp-meta | 5,199,402,942 bytes | 438574 |
+
+Both source floors remain `(1, 0)` and both have no committed archive receipt.
+Manager process start identities and host TOML hashes were preserved. These are
+read-only previews, not selected cleanup ranges. No live owner endpoint was
+enabled and no live backup/seal, prefix deletion or compaction was performed.
+Detailed local evidence is in `artifacts/manual_position_archive_20261115/`.

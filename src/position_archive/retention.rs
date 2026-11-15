@@ -410,6 +410,10 @@ impl PositionArchive {
             before.1 == 0 && before.0 > 1 && before <= floor,
             "compact is only allowed inside a verified, already reclaimed range"
         );
+        // A failed WAL sync can leave a visible committed receipt. Before SST
+        // reclamation, durably confirm BOTH the deletion and its default-CF
+        // checkpoint, including retries that skipped an already-visible commit.
+        self.db.db().flush_wal(true)?;
         let cf = self
             .db
             .db()
