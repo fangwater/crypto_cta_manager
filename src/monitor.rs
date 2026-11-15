@@ -11,7 +11,7 @@ use hmac::{Hmac, Mac};
 use iceoryx2::prelude::*;
 use iceoryx2::service::ipc;
 use reqwest::{Client, StatusCode, Url};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
@@ -596,6 +596,17 @@ async fn check_source(
         issues.extend(check_orders(&source, &monitor, &records, now_us));
     }
 
+    match redis.load_exec_leverage_guard(&source).await {
+        Ok(Some(status)) => issues.extend(check_leverage_guard(&source, &status, now_us)),
+        Ok(None) => {} // Other Exec deployments have not enabled this worker.
+        Err(error) => issues.push(issue(
+            "leverage",
+            "diagnostics",
+            &source,
+            format!("杠杆退避状态读取失败: {error:#}"),
+        )),
+    }
+
     match source.exec_viz_origin() {
         None => issues.push(issue(
             "position",
@@ -644,6 +655,76 @@ async fn check_source(
         issues,
         snapshot: position_snapshot,
     }
+}
+
+#[derive(Deserialize)]
+struct LeverageGuardStatus {
+    updated_at_us: i64,
+    error: Option<String>,
+    symbols: BTreeMap<String, LeverageSymbolStatus>,
+}
+
+#[derive(Deserialize)]
+struct LeverageSymbolStatus {
+    leverage: u8,
+    max_notional: f64,
+    required_notional: f64,
+    error: Option<String>,
+}
+
+fn check_leverage_guard(
+    source: &SourceConfig,
+    raw: &serde_json::Value,
+    now_us: i64,
+) -> Vec<MonitorIssue> {
+    let status: LeverageGuardStatus = match serde_json::from_value(raw.clone()) {
+        Ok(status) => status,
+        Err(_) => {
+            return vec![issue(
+                "leverage",
+                "invalid",
+                source,
+                "杠杆退避状态格式错误，无法确认自动保护",
+            )];
+        }
+    };
+    if status.updated_at_us <= 0
+        || status.updated_at_us > now_us + 5_000_000
+        || now_us.saturating_sub(status.updated_at_us) > 180_000_000
+    {
+        return vec![issue(
+            "leverage",
+            "stale",
+            source,
+            "杠杆退避检查超过 180 秒未更新，请检查 Exec 风控工作线程",
+        )];
+    }
+    let mut issues = Vec::new();
+    if let Some(error) = status.error {
+        issues.push(issue(
+            "leverage",
+            "worker",
+            source,
+            format!("杠杆自动退避检查失败: {error}"),
+        ));
+    }
+    for (symbol, row) in status.symbols {
+        if let Some(error) = row.error {
+            issues.push(issue(
+                "leverage",
+                &format!("blocked:{symbol}"),
+                source,
+                format!(
+                    "{symbol} 杠杆退避受阻（当前 {} 倍，目标风险金额 {:.2}，限额 {:.2}）: {error}",
+                    row.leverage, row.required_notional, row.max_notional
+                ),
+            ));
+        } else if (3..=4).contains(&row.leverage) {
+            issues.push(issue("leverage", &format!("fallback:{symbol}:{}", row.leverage), source,
+                format!("{symbol} 已使用 {} 倍退避档位（优先 5 倍，最低 3 倍），限额 {:.2}，目标风险金额 {:.2}；保持当前档位", row.leverage, row.max_notional, row.required_notional)));
+        }
+    }
+    issues
 }
 
 fn check_orders(
@@ -1524,6 +1605,7 @@ impl DingTalkSender {
             .json(&payload)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .context("DingTalk webhook request failed")?;
         let status = response.status();
         let body = response
@@ -1680,6 +1762,77 @@ mod tests {
             archive: Default::default(),
             sources: vec![test_source("binance-futures")],
         }
+    }
+
+    #[test]
+    fn leverage_guard_reports_fallback_blocked_stale_and_isolated_accounts() {
+        let source = test_source("binance-futures");
+        let now = 1_794_715_950_000_000_i64;
+        let mut raw = serde_json::json!({"updated_at_us": now, "error":null, "symbols": {
+            "ONEUSDT":{"leverage":4,"max_notional":200000.,"required_notional":55200.,"error":null},
+            "BTCUSDT":{"leverage":5,"max_notional":10000000.,"required_notional":85000.,"error":null}
+        }});
+        let issues = check_leverage_guard(&source, &raw, now);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].source_id, source.id);
+        assert!(issues[0].message.contains("4 倍"));
+        assert!(issues[0].message.contains("ONEUSDT"));
+        let mut tracker = AlertTracker::default();
+        let start = Instant::now();
+        let pending = tracker.pending(&issues, start, 60);
+        assert_eq!(pending.len(), 1);
+        // A failed send is not acknowledged, so it remains pending next poll.
+        assert_eq!(
+            tracker
+                .pending(&issues, start + Duration::from_secs(1), 60)
+                .len(),
+            1
+        );
+        tracker.mark_sent(&pending, start);
+        assert!(
+            tracker
+                .pending(&issues, start + Duration::from_secs(2), 60)
+                .is_empty()
+        );
+        raw["symbols"]["ONEUSDT"]["leverage"] = serde_json::json!(3);
+        raw["symbols"]["ONEUSDT"]["error"] = serde_json::json!("insufficient margin");
+        assert!(
+            check_leverage_guard(&source, &raw, now)[0]
+                .message
+                .contains("受阻")
+        );
+        assert!(
+            check_leverage_guard(&source, &raw, now + 181_000_000)[0]
+                .key
+                .contains("stale")
+        );
+        raw["updated_at_us"] = serde_json::json!(now + 10_000_000);
+        assert!(
+            check_leverage_guard(&source, &raw, now)[0]
+                .key
+                .contains("stale")
+        );
+        assert!(
+            check_leverage_guard(&source, &serde_json::json!({}), now)[0]
+                .key
+                .contains("invalid")
+        );
+    }
+
+    #[test]
+    fn leverage_guard_default_five_is_quiet_and_worker_errors_are_visible() {
+        let source = test_source("binance-futures");
+        let raw = serde_json::json!({"updated_at_us":1000000,"error":null,"symbols":{
+            "BTCUSDT":{"leverage":5,"max_notional":100000.,"required_notional":100.,"error":null}
+        }});
+        assert!(check_leverage_guard(&source, &raw, 1000000).is_empty());
+        let mut failed = raw;
+        failed["error"] = serde_json::json!("signature rejected");
+        assert!(
+            check_leverage_guard(&source, &failed, 1000000)[0]
+                .message
+                .contains("signature rejected")
+        );
     }
 
     fn test_source(venue: &str) -> SourceConfig {

@@ -768,6 +768,32 @@ impl RedisRuntime {
         }
     }
 
+    /// Read-only diagnostics published by the opt-in Exec leverage worker.
+    pub(crate) async fn load_exec_leverage_guard(
+        &self,
+        source: &SourceConfig,
+    ) -> Result<Option<serde_json::Value>> {
+        if source.venue != "binance-futures" {
+            return Ok(None);
+        }
+        let (mut inner, deadline) = self.lock_for_request().await?;
+        let loaded = tokio::time::timeout_at(deadline, async {
+            let connection = inner.connection(&self.settings).await?;
+            let key = format!("{}:{}:exec_leverage_guard", source.id, source.venue);
+            let raw: Option<String> = connection.get(key).await?;
+            raw.map(|s| serde_json::from_str(&s).context("invalid Exec leverage diagnostics"))
+                .transpose()
+        })
+        .await;
+        match loaded {
+            Ok(result) => result,
+            Err(_) => {
+                inner.connection = None;
+                bail!("Exec leverage diagnostics Redis timeout");
+            }
+        }
+    }
+
     /// Load both the account aggregate and the per-strategy versions that Exec
     /// must acknowledge in its Viz state.
     pub(crate) async fn load_exec_target_snapshot(
