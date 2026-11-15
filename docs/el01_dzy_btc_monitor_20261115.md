@@ -200,9 +200,10 @@ read-only; it does not set leverage, mutate Redis or submit/cancel orders.
 Exec publishes one current source/venue-scoped Redis diagnostic document at
 `binance_exec_trade07:binance-futures:exec_leverage_guard`. The monitor reports
 4x/3x settings, blocked initialization/adjustments and source-level query errors;
-updates older than 180 seconds raise a stale-worker alarm. Existing transition,
-repeat, recovery and pending failed-send retries apply. A successful lower
-setting remains a monitored condition and is not sent on every poll. This is a
+updates older than 180 seconds raise a stale-worker alarm. The initial release
+applied transition/repeat/recovery to successful lower settings as well; the
+operator subsequently requested one-time informational notices, as recorded below.
+Actual faults retain pending failed-send retries and repeat/recovery. This is a
 risk response with an approximately 60-second detection cycle, not a guarantee
 that the first exchange rejection can never occur.
 
@@ -251,3 +252,34 @@ one condition: the intended ONEUSDT 4x setting, with no other source faults.
 No DingTalk send failures were observed; the dry-run itself sends no messages.
 The automatic POST fallback paths were exercised with HTTP fixtures, without
 manufacturing rejected live orders or changing another live symbol's leverage.
+
+## Successful fallback notification policy
+
+The operator clarified that a successful 4x/3x fallback should not generate
+continuing alarms. Manager commit `81f460f` marks these settings as information:
+one `[通知]` per observed level transition, no periodic repeats, no recovery
+notice when that informational setting disappears, and no contribution to the
+heartbeat's unresolved-fault count. A later 4x → 3x transition generates one
+new notice. Failed delivery remains pending until acknowledged. Tracking is
+process-local, so a monitor restart observes the current setting once again.
+
+Blocked fallback, insufficient margin, source-query errors, invalid diagnostics
+and stale worker updates remain ordinary alarms with repeat/recovery semantics.
+The Exec policy, margin checks and 5x/4x/3x levels are unchanged. Only the
+standalone monitor binary needs replacement and restart for this clarification.
+
+All 35 monitor tests passed, including day-long simulated stable settings,
+notification retries, 4x → 3x transitions, fault repeats/recovery, heartbeat
+counts and the actual `[通知]` message prefix. Formatting, binary check and the
+local release build passed. A pre-replacement monitor binary/log backup was
+verified as `before-leverage-notice-only.tar.gz` in the NVMe incident archive.
+
+The full-source dry-run on the exact staged release returned `0 issue(s),
+1 notification(s)`, identifying ONEUSDT 4x with a `[通知]` prefix. The verified
+monitor SHA-256 is
+`3a5186d574c6d5936caf1c631b22f0e8e5cd43c9121d95b413358e39596ddeec`.
+It was atomically installed and restarted through `start_monitor.sh` at
+04:41:45 UTC, PID `1427452`. Only the monitor identity changed among 94
+captured processes; the other 93, including pre-trade PID `1252324`, and all
+15 captured TOML hashes were preserved. The live worker remains healthy and
+strategy/account quantity additivity still passes for all represented symbols.
