@@ -25,6 +25,9 @@ mod performance_tests;
 #[cfg(test)]
 #[path = "theoretical_nav/retention_tests.rs"]
 mod retention_tests;
+#[cfg(test)]
+#[path = "theoretical_nav/storage_migration_tests.rs"]
+mod storage_migration_tests;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct TheoreticalNavPoint {

@@ -186,14 +186,9 @@ fn exec_column_family_blocks_sealing_before_any_mutation() {
     let root = tempfile::tempdir().unwrap();
     let db = ManagerDb::open(root.path()).unwrap();
     db.ensure_column_family("uniform_orders").unwrap();
-    let archive = PositionArchive::open(db).unwrap();
-    assert!(
-        archive
-            .export_prefix(&mut Vec::new(), cutoff(NOW), NOW)
-            .is_err()
-    );
-    assert_eq!(archive.retention_status().sealed, (1, 0));
-    assert!(archive.db.db().get(META).unwrap().is_none());
+    assert!(PositionArchive::open(db.clone()).is_err());
+    assert!(db.db().get(META).unwrap().is_none());
+    assert!(db.db().get(storage::FORMAT_KEY).unwrap().is_none());
 }
 
 #[test]
@@ -371,4 +366,84 @@ fn real_record_rehearsal_preserves_retained_inventory_and_never_mutates_source()
     let after = rehearsal::proof(&working, now - 30 * day, now).unwrap();
     assert_eq!(before, after);
     assert_eq!(archive.scan_from(1).unwrap().len(), 3);
+    let mut tail = Vec::new();
+    rehearsal::sample_with_options(
+        &primary,
+        &root.path().join("tail-secondary"),
+        &mut tail,
+        false,
+        2,
+    )
+    .unwrap();
+    let tail_path = root.path().join("tail-restored");
+    let tail_receipt = verify_restore(tail.as_slice(), &tail_path).unwrap();
+    assert_eq!(tail_receipt.count, 2);
+    let tail_archive = PositionArchive::open(ManagerDb::open(&tail_path).unwrap()).unwrap();
+    assert_eq!(
+        tail_archive.scan_from(1).unwrap(),
+        archive.scan_from(1).unwrap()[1..]
+    );
+}
+
+#[test]
+fn explicit_json_backup_restore_then_migration_can_continue_the_current_binary_receipt_chain() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("legacy");
+    let db = ManagerDb::open(&source).unwrap();
+    let cf = db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
+    let message = super::super::storage_tests::message(1_700_000_000_000_001, 0.12345678901234567);
+    let key = manager_db::encode_seq_key(message.received_at_us, 0).unwrap();
+    let json = serde_json::to_vec(&message).unwrap();
+    let parsed: PositionUpdateMsg = serde_json::from_slice(&json).unwrap();
+    db.db().put_cf(&cf, key, &json).unwrap();
+    let mut legacy = Vec::new();
+    rehearsal::sample_with_format(&source, &root.path().join("secondary"), &mut legacy, true)
+        .unwrap();
+    let restored = root.path().join("restored");
+    let old = verify_json_restore(legacy.as_slice(), &restored).unwrap();
+    assert!(verify_restore(legacy.as_slice(), &root.path().join("wrong-reader")).is_err());
+    super::super::migration::migrate_json(&restored, &root.path().join("original-json"), false)
+        .unwrap();
+    assert!(verify_json_restore(legacy.as_slice(), &restored).is_err());
+    let next = super::super::storage_tests::message(message.received_at_us + 10, 0.25);
+    let header = Header {
+        identity: old.identity.clone(),
+        from: old.to,
+        to: (next.received_at_us + 1, 0),
+        previous: Some(old.sha256.clone()),
+        boundary: Boundary::default(),
+    };
+    let bytes = encode_header(&header).unwrap();
+    let key = manager_db::encode_seq_key(next.received_at_us, 0).unwrap();
+    let value = codec::encode(&next).unwrap();
+    let mut hash = Sha256::new();
+    hash.update(&bytes);
+    hash_frame(&mut hash, &key, &value);
+    let receipt = Receipt {
+        identity: header.identity,
+        from: header.from,
+        to: header.to,
+        previous: header.previous,
+        count: 1,
+        raw_bytes: 20 + value.len() as u64,
+        sha256: hex::encode(hash.finalize()),
+    };
+    let mut out = GzEncoder::new(Vec::new(), Compression::fast());
+    out.write_all(MAGIC).unwrap();
+    write_blob(&mut out, &bytes).unwrap();
+    out.write_all(&key).unwrap();
+    write_blob(&mut out, &value).unwrap();
+    out.write_all(&[0; 12]).unwrap();
+    write_blob(&mut out, &[]).unwrap();
+    write_blob(&mut out, &serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let chunk = out.finish().unwrap();
+    assert_eq!(
+        verify_restore(chunk.as_slice(), &restored).unwrap(),
+        receipt
+    );
+    let archive = PositionArchive::open(ManagerDb::open(&restored).unwrap()).unwrap();
+    assert_eq!(
+        rmp_serde::to_vec(&archive.scan_from(1).unwrap()).unwrap(),
+        rmp_serde::to_vec(&vec![parsed, next]).unwrap()
+    );
 }

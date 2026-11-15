@@ -40,7 +40,8 @@ reuses an old name. The original catalog creation time identifies that row.
 PG mirror failures are logged and retried; they do not change a successful Exec
 HTTP response. Normal target acknowledgements do not wait for the mirror.
 
-The eventually written RocksDB `position_updates` history remains the target input for theoretical
+The eventually written RocksDB `position_updates` history uses the compact
+Protobuf target contract and remains the target input for theoretical
 TWAP/VWAP, with frozen shares, projection and fees. One `position_current:<name>`
 key in the existing default column family holds its recoverable current target
 and catalog identity. Startup overlays a newer RocksDB target on the PG mirror
@@ -53,7 +54,9 @@ the Exec writes. They wait for their archive event only in the background before
 enriching it. Their actual observation timestamps remain attached; they are
 not represented as observations made at target receipt. Snapshot timeout or
 missing enrichment stays unknown and cannot delay a live target. The theoretical
-target reader already excludes these factual observations.
+target reader reads only targets, without loading the separate factual CFs.
+See [position_archive_storage.md](position_archive_storage.md) for the snapshot
+dictionary/replacement layout and explicit offline JSON migration requirement.
 
 Configuration remains durable in PostgreSQL. Startup must load a complete
 permission/order/binding/fee snapshot and session cache before opening target admission.

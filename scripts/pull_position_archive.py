@@ -211,7 +211,7 @@ def reclaim(host, root, before, verifier):
         raise RuntimeError("live prefix changed; manual reconciliation required")
     # Always compact, including a retry after a lost commit reply or failed compact.
     # Manager only accepts a boundary inside its already verified reclaimed prefix.
-    print(f"{host['name']}: asking Manager to compact position_updates before {before}", flush=True)
+    print(f"{host['name']}: asking Manager to compact verified signal ranges before {before}", flush=True)
     checked_remote(host, "compact", before)
     durable_json(directory / f"before-{before}.reclaimed.json", {
         "before": before, "completed_at_us": time.time_ns() // 1000, "receipt": receipt,

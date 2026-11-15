@@ -1,7 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Mutex, RwLock};
 
+pub mod codec;
+pub mod migration;
 pub mod retention;
+mod storage;
+#[cfg(test)]
+mod storage_tests;
 
 use anyhow::{Context, Result, bail};
 use rocksdb::{Direction, IteratorMode};
@@ -179,6 +184,7 @@ struct TargetWrites {
 
 pub struct PositionArchive {
     db: ManagerDb,
+    storage: storage::Storage,
     last_key: Mutex<(i64, u32)>,
     target_writes: Mutex<TargetWrites>,
     retention: Mutex<retention::RetentionState>,
@@ -194,6 +200,7 @@ impl PositionArchive {
 
     pub fn open(db: ManagerDb) -> Result<Self> {
         db.ensure_column_family(POSITION_UPDATES_CF)?;
+        storage::ensure_current(&db)?;
         let retention = retention::RetentionState::load(&db)?;
         let last_key = latest_key(&db)?.unwrap_or((0, 0)).max(retention.head);
         info!(
@@ -205,6 +212,7 @@ impl PositionArchive {
         );
         Ok(Self {
             db,
+            storage: storage::Storage::default(),
             last_key: Mutex::new(last_key),
             target_writes: Mutex::new(TargetWrites::default()),
             retention: Mutex::new(retention),
@@ -264,24 +272,50 @@ impl PositionArchive {
     /// Enrichment never changes the received target, shares, fees or target index revision.
     pub fn enrich_factual_positions(
         &self,
-        mut message: PositionUpdateMsg,
+        message: PositionUpdateMsg,
         positions: Vec<SourceFactualPositions>,
     ) -> Result<()> {
         let _sequence = self.last_key.lock().unwrap();
         if (message.received_at_us, message.seq) < self.retention.lock().unwrap().sealed {
             return Ok(());
         }
-        message.factual_positions = positions.into_iter().map(archive_source).collect();
         let handle = self
             .db
             .db()
             .cf_handle(POSITION_UPDATES_CF)
             .context("position_updates column family disappeared")?;
-        self.db.db().put_cf(
-            &handle,
-            manager_db::encode_seq_key(message.received_at_us, message.seq)?,
-            serde_json::to_vec(&message)?,
+        let key = manager_db::encode_seq_key(message.received_at_us, message.seq)?;
+        let target = codec::decode(
+            &self
+                .db
+                .db()
+                .get_cf(&handle, key)?
+                .context("enrichment target is missing")?,
         )?;
+        anyhow::ensure!(
+            target.strategy.strategy_name == message.strategy.strategy_name,
+            "enrichment strategy identity mismatch"
+        );
+        // Retain the established JSON parsing boundary for newly observed data,
+        // without reserializing or rewriting the immutable frozen target.
+        let positions: Vec<_> = positions.into_iter().map(archive_source).collect();
+        let positions: Vec<ArchivedSourcePositions> =
+            serde_json::from_slice(&serde_json::to_vec(&positions)?)?;
+        let mut batch = rocksdb::WriteBatch::default();
+        let pending = self.storage.stage_positions(
+            &self.db,
+            key,
+            &target.strategy.strategy_name,
+            &positions,
+            &mut batch,
+        )?;
+        match self.db.db().write(batch) {
+            Ok(()) => self.storage.published(pending),
+            Err(error) => {
+                self.storage.clear_cache();
+                return Err(error.into());
+            }
+        }
         Ok(())
     }
 
@@ -332,7 +366,7 @@ impl PositionArchive {
                 if cursor.0 != received_at_us {
                     break;
                 }
-                let message = decode_msg(&value)?;
+                let message = self.storage.complete(&self.db, &key, &value)?;
                 if message.strategy.strategy_name == strategy.strategy_name
                     && message.strategy.updated_at_us == strategy.updated_at_us
                 {
@@ -379,10 +413,11 @@ impl PositionArchive {
             factual_positions,
             published_accounts,
         );
-        let key = manager_db::encode_seq_key(received_at_us, seq)?;
-        let value = serde_json::to_vec(&msg).context("failed to encode position update message")?;
+        // Match the historical disk JSON parser's numeric interpretation. Do not
+        // change serde_json features or reparse existing binary records.
+        let msg: PositionUpdateMsg = serde_json::from_slice(&serde_json::to_vec(&msg)?)?;
         let mut batch = rocksdb::WriteBatch::default();
-        batch.put_cf(&handle, key, value);
+        let pending = self.storage.stage(&self.db, &msg, &mut batch, true)?;
         if let Some(identity) = current_identity {
             batch.put(
                 format!("position_current:{}", strategy.strategy_name),
@@ -391,12 +426,17 @@ impl PositionArchive {
         }
         let mut options = rocksdb::WriteOptions::default();
         options.set_sync(current_identity.is_some());
-        self.db.db().write_opt(batch, &options).with_context(|| {
+        let written = self.db.db().write_opt(batch, &options).with_context(|| {
             format!(
                 "failed to append position update {} seq {seq}",
                 strategy.strategy_name
             )
-        })?;
+        });
+        if let Err(error) = written {
+            self.storage.clear_cache();
+            return Err(error);
+        }
+        self.storage.published(pending);
         self.record_append(&mut last, (received_at_us, seq))?;
         Ok(msg)
     }
@@ -436,6 +476,7 @@ impl PositionArchive {
     }
 
     pub fn latest(&self) -> Result<Option<PositionUpdateMsg>> {
+        let _retention = self.retention_read();
         let handle = self
             .db
             .db()
@@ -443,7 +484,7 @@ impl PositionArchive {
             .context("position_updates column family disappeared")?;
         let mut iter = self.db.db().iterator_cf(&handle, IteratorMode::End);
         match iter.next() {
-            Some(Ok((_, value))) => decode_msg(&value).map(Some),
+            Some(Ok((key, value))) => self.storage.complete(&self.db, &key, &value).map(Some),
             Some(Err(error)) => Err(error).context("failed to read latest position update"),
             None => Ok(None),
         }
@@ -470,8 +511,8 @@ impl PositionArchive {
             .db()
             .iterator_cf(&handle, IteratorMode::From(&start, Direction::Forward));
         for item in iter {
-            let (_, value) = item.context("failed to iterate position updates")?;
-            out.push(decode_msg(&value)?);
+            let (key, value) = item.context("failed to iterate position updates")?;
+            out.push(self.storage.complete(&self.db, &key, &value)?);
         }
         Ok(out)
     }
@@ -499,37 +540,23 @@ impl PositionArchive {
         end_received_at_us: i64,
         mut visit: impl FnMut(PositionUpdateMsg) -> Result<()>,
     ) -> Result<()> {
-        #[derive(Deserialize)]
-        struct TargetUpdate {
-            msg_type: String,
-            schema_version: u32,
-            received_at_us: i64,
-            seq: u32,
-            strategy: PositionStrategy,
-            #[serde(default)]
-            published_accounts: Vec<ArchivedPublishedAccount>,
-        }
         fn decode_batch(batch: &[((i64, u32), Box<[u8]>)]) -> Result<Vec<PositionUpdateMsg>> {
             use rayon::prelude::*;
             crate::analysis::run(|| {
                 batch
                     .par_iter()
                     .map(|(cursor, value)| {
-                        let message: TargetUpdate = serde_json::from_slice(value)
+                        let message = codec::decode(value)
                             .context("failed to decode archived execution targets")?;
                         anyhow::ensure!(
                             (message.received_at_us, message.seq) == *cursor,
                             "archived target timestamp does not match its key"
                         );
-                        Ok(PositionUpdateMsg {
-                            msg_type: message.msg_type,
-                            schema_version: message.schema_version,
-                            received_at_us: message.received_at_us,
-                            seq: message.seq,
-                            strategy: message.strategy,
-                            published_accounts: message.published_accounts,
-                            factual_positions: Vec::new(),
-                        })
+                        anyhow::ensure!(
+                            message.factual_positions.is_empty(),
+                            "target record contains inline factual data"
+                        );
+                        Ok(message)
                     })
                     .collect()
             })
@@ -573,8 +600,7 @@ impl PositionArchive {
         Ok(())
     }
 
-    /// Returns one raw JSON page from the position-update CF without rewriting
-    /// individual stored messages.
+    /// Preserve the external JSON contract while reading split binary records.
     pub fn raw_json_page(&self, after: Option<(i64, u32)>, limit: usize) -> Result<Vec<u8>> {
         self.raw_json_page_for_sources(after, limit, None, None)
     }
@@ -624,8 +650,7 @@ impl PositionArchive {
             if after.is_some_and(|after| cursor <= after) {
                 continue;
             }
-            let mut message: PositionUpdateMsg = serde_json::from_slice(&value)
-                .context("position update archive contains invalid JSON")?;
+            let mut message = self.storage.complete(&self.db, &key, &value)?;
             if let Some(allowed_strategy_names) = allowed_strategy_names
                 && !allowed_strategy_names.contains(&message.strategy.strategy_name)
             {
@@ -660,7 +685,7 @@ impl PositionArchive {
 }
 
 fn decode_msg(bytes: &[u8]) -> Result<PositionUpdateMsg> {
-    serde_json::from_slice(bytes).context("failed to decode position update message")
+    codec::decode(bytes)
 }
 
 fn latest_key(db: &ManagerDb) -> Result<Option<(i64, u32)>> {
@@ -854,16 +879,16 @@ mod tests {
                 vec![account],
             )
             .unwrap();
-        let mut stored = serde_json::to_value(&first).unwrap();
-        // Theory ignores the snapshot payload, even a legacy schema unknown to
-        // today's factual-position decoder. The stored message stays untouched.
-        stored["factual_positions"] = serde_json::json!({"legacy_snapshot": [1, 2, 3]});
+        let stored = codec::encode(&first).unwrap();
+        // Theory never reads the separate observation payload, even if that
+        // diagnostic data is corrupt. The stored target stays untouched.
         let handle = db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
+        let observations = db.db().cf_handle(storage::OBSERVATIONS_CF).unwrap();
         db.db()
             .put_cf(
-                &handle,
+                &observations,
                 manager_db::encode_seq_key(100, 0).unwrap(),
-                serde_json::to_vec(&stored).unwrap(),
+                b"corrupt observation payload",
             )
             .unwrap();
         // The end bound must stop before decoding any later record.
@@ -871,7 +896,7 @@ mod tests {
             .put_cf(
                 &handle,
                 manager_db::encode_seq_key(101, 0).unwrap(),
-                b"invalid JSON",
+                b"invalid Protobuf",
             )
             .unwrap();
         let mut read = Vec::new();
@@ -889,13 +914,10 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(
-                &db.db()
-                    .get_cf(&handle, manager_db::encode_seq_key(100, 0).unwrap())
-                    .unwrap()
-                    .unwrap()
-            )
-            .unwrap(),
+            db.db()
+                .get_cf(&handle, manager_db::encode_seq_key(100, 0).unwrap())
+                .unwrap()
+                .unwrap(),
             stored
         );
     }

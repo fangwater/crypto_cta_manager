@@ -307,10 +307,14 @@ pub fn benchmark(file: &Path, root: &Path) -> Result<serde_json::Value> {
     let original = ManagerDb::open(&root.join("original-json"))?;
     let canonical = ManagerDb::open(&root.join("canonical-json"))?;
     let protobuf = ManagerDb::open(&root.join("protobuf"))?;
+    let compact = ManagerDb::open(&root.join("compact-pb"))?;
+    storage::ensure_current(&compact)?;
+    let storage = storage::Storage::default();
     let dbs = [&original, &canonical, &protobuf];
     let mut batches: [rocksdb::WriteBatch; 3] = Default::default();
     let mut bytes = [0u64; 3];
     let mut count = 0u64;
+    let mut typed_hash = Sha256::new();
     let mut reader = GzDecoder::new(std::io::BufReader::new(std::fs::File::open(file)?));
     let mut magic = [0; 16];
     reader.read_exact(&mut magic)?;
@@ -326,7 +330,9 @@ pub fn benchmark(file: &Path, root: &Path) -> Result<serde_json::Value> {
             ensure!(value.is_empty(), "invalid terminator");
             break;
         }
-        let msg = validate_message(&key, &value)?;
+        let msg = super::super::migration::decode_json(&key, &value)?;
+        typed_hash.update(&key);
+        typed_hash.update(rmp_serde::to_vec(&msg)?);
         let normalized = serde_json::to_vec(&msg)?;
         let encoded = Record::from(&msg).encode_to_vec();
         let decoded = PositionUpdateMsg::try_from(Record::decode(encoded.as_slice())?)?;
@@ -339,6 +345,10 @@ pub fn benchmark(file: &Path, root: &Path) -> Result<serde_json::Value> {
             batches[i].put_cf(&cf, key, data);
             bytes[i] += data.len() as u64;
         }
+        let mut batch = rocksdb::WriteBatch::default();
+        let pending = storage.stage(&compact, &msg, &mut batch, true)?;
+        compact.db().write(batch)?;
+        storage.published(pending);
         hash_frame(&mut hash, &key, &value);
         count += 1;
     }
@@ -365,12 +375,102 @@ pub fn benchmark(file: &Path, root: &Path) -> Result<serde_json::Value> {
             .property_int_value_cf(&cf, "rocksdb.live-sst-files-size")?
             .context("missing SST size")?;
     }
+    let mut compact_sst = BTreeMap::new();
+    let mut compact_raw = 0u64;
+    for name in [
+        POSITION_UPDATES_CF,
+        storage::OBSERVATIONS_CF,
+        storage::SNAPSHOTS_CF,
+    ] {
+        let cf = compact.db().cf_handle(name).unwrap();
+        compact.db().flush_cf(&cf)?;
+        compact
+            .db()
+            .compact_range_cf(&cf, None::<&[u8]>, None::<&[u8]>);
+        compact_sst.insert(
+            name,
+            compact
+                .db()
+                .property_int_value_cf(&cf, "rocksdb.live-sst-files-size")?
+                .context("missing compact SST size")?,
+        );
+        for row in compact.db().iterator_cf(&cf, IteratorMode::Start) {
+            compact_raw += row?.1.len() as u64;
+        }
+    }
+    let cold = storage::Storage::default();
+    let mut read_hash = Sha256::new();
+    let cf = compact.db().cf_handle(POSITION_UPDATES_CF).unwrap();
+    for row in compact.db().iterator_cf(&cf, IteratorMode::Start) {
+        let (key, value) = row?;
+        let message = cold.complete(&compact, &key, &value)?;
+        read_hash.update(&key);
+        read_hash.update(rmp_serde::to_vec(&message)?);
+    }
+    ensure!(
+        typed_hash.finalize() == read_hash.finalize(),
+        "split-storage cold read changed typed history"
+    );
+    #[derive(Deserialize)]
+    struct TargetOnly {
+        msg_type: String,
+        schema_version: u32,
+        received_at_us: i64,
+        seq: u32,
+        strategy: PositionStrategy,
+        #[serde(default)]
+        published_accounts: Vec<ArchivedPublishedAccount>,
+    }
+    let mut target_scans = BTreeMap::new();
+    let mut expected = None;
+    for (name, db) in [("json", &original), ("compact_pb", &compact)] {
+        let cf = db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
+        let mut durations = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            let mut hash = Sha256::new();
+            for row in db.db().iterator_cf(&cf, IteratorMode::Start) {
+                let (_, bytes) = row?;
+                let message = if name == "json" {
+                    let t: TargetOnly = serde_json::from_slice(&bytes)?;
+                    PositionUpdateMsg {
+                        msg_type: t.msg_type,
+                        schema_version: t.schema_version,
+                        received_at_us: t.received_at_us,
+                        seq: t.seq,
+                        strategy: t.strategy,
+                        published_accounts: t.published_accounts,
+                        factual_positions: Vec::new(),
+                    }
+                } else {
+                    codec::decode(&bytes)?
+                };
+                hash.update(rmp_serde::to_vec(&message)?);
+            }
+            let digest = hex::encode(hash.finalize());
+            if let Some(expected) = &expected {
+                ensure!(
+                    expected == &digest,
+                    "target scan changed theoretical inputs"
+                );
+            } else {
+                expected = Some(digest);
+            }
+            durations.push(start.elapsed().as_micros() as u64);
+        }
+        durations.sort_unstable();
+        target_scans.insert(name, durations[2]);
+    }
+    let compact_total = compact_sst.values().sum::<u64>();
     Ok(
         serde_json::json!({"sample_only":true,"records":count,"typed_roundtrip_equal":true,
         "raw_value_bytes":{"original_json":bytes[0],"canonical_json":bytes[1],"protobuf":bytes[2]},
         "lz4_signal_sst_bytes":{"original_json":sst[0],"canonical_json":sst[1],"protobuf":sst[2]},
         "protobuf_sst_reduction_vs_original":1.-sst[2] as f64/sst[0] as f64,
-        "protobuf_sst_reduction_vs_canonical":1.-sst[2] as f64/sst[1] as f64}),
+        "protobuf_sst_reduction_vs_canonical":1.-sst[2] as f64/sst[1] as f64,
+        "compact_pb":{"raw_value_bytes":compact_raw,"lz4_sst_bytes_by_cf":compact_sst,"lz4_sst_bytes_total":compact_total,
+            "sst_reduction_vs_original":1.-compact_total as f64/sst[0] as f64,"cold_typed_readback_equal":true},
+        "target_scan_decode_and_hash_median_us":target_scans,"theoretical_input_scan_equal":true}),
     )
 }
 

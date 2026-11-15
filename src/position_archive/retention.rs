@@ -281,6 +281,14 @@ impl PositionArchive {
                 !value.is_empty() && value.len() as u64 <= MAX_VALUE,
                 "invalid archive record size"
             );
+            // Backups are self-contained PB messages; they never depend on a
+            // surviving snapshot parent or dictionary outside the export.
+            let message = self.storage.complete(&self.db, &key, &value)?;
+            let value = codec::encode(&message)?;
+            ensure!(
+                value.len() as u64 <= MAX_VALUE,
+                "expanded archive record exceeds limit"
+            );
             if !visit(&key, &value)? {
                 break;
             }
@@ -377,17 +385,8 @@ impl PositionArchive {
         next.floor = receipt.to;
         next.boundary = boundary;
         next.receipt = Some(receipt.clone());
-        let cf = self
-            .db
-            .db()
-            .cf_handle(POSITION_UPDATES_CF)
-            .context("missing archive CF")?;
         let mut batch = rocksdb::WriteBatch::default();
-        batch.delete_range_cf(
-            &cf,
-            manager_db::encode_seq_key(receipt.from.0, receipt.from.1)?,
-            manager_db::encode_seq_key(receipt.to.0, receipt.to.1)?,
-        );
+        storage::Storage::delete_prefix(&self.db, &mut batch, receipt.from, receipt.to)?;
         batch.put(META, rmp_serde::to_vec(&next)?);
         let result = self.db.db().write_opt(batch, &sync_options());
         // A WAL sync error can follow a visible atomic commit. Keep RAM aligned
@@ -402,6 +401,7 @@ impl PositionArchive {
             writes.retention_revision = writes.revision;
         }
         result.context("archive retention WAL sync")?;
+        self.storage.clear_cache();
         Ok(())
     }
     pub fn compact_archived(&self, before: Cursor) -> Result<()> {
@@ -414,20 +414,32 @@ impl PositionArchive {
         // reclamation, durably confirm BOTH the deletion and its default-CF
         // checkpoint, including retries that skipped an already-visible commit.
         self.db.db().flush_wal(true)?;
-        let cf = self
-            .db
-            .db()
-            .cf_handle(POSITION_UPDATES_CF)
-            .context("missing archive CF")?;
         let mut options = rocksdb::CompactOptions::default();
         options.set_exclusive_manual_compaction(false);
         options.set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::ForceOptimized);
-        self.db.db().compact_range_cf_opt(
-            &cf,
-            Some(manager_db::encode_seq_key(1, 0)?),
-            Some(manager_db::encode_seq_key(before.0, before.1)?),
-            &options,
-        );
+        for name in [
+            POSITION_UPDATES_CF,
+            storage::OBSERVATIONS_CF,
+            storage::SNAPSHOTS_CF,
+        ] {
+            let cf = self.db.db().cf_handle(name).context("missing signal CF")?;
+            let (start, end) = if name == storage::SNAPSHOTS_CF {
+                (
+                    storage::day_key(0).to_vec(),
+                    storage::day_key(before.0).to_vec(),
+                )
+            } else {
+                (
+                    manager_db::encode_seq_key(1, 0)?.to_vec(),
+                    manager_db::encode_seq_key(before.0, before.1)?.to_vec(),
+                )
+            };
+            if start < end {
+                self.db
+                    .db()
+                    .compact_range_cf_opt(&cf, Some(start), Some(end), &options);
+            }
+        }
         Ok(())
     }
 }
@@ -460,19 +472,44 @@ pub fn inspect(path: &Path, before: Cursor, now: i64) -> Result<serde_json::Valu
             .map(|(key, _)| manager_db::decode_seq_key(&key).context("invalid archive key"))
             .transpose()
     };
-    let eligible = if before > state.floor {
-        let start = manager_db::encode_seq_key(state.floor.0, state.floor.1)?;
-        let end = manager_db::encode_seq_key(before.0, before.1)?;
-        db.get_approximate_sizes_cf(cf, &[Range::new(&start, &end)])[0]
-    } else {
-        0
-    };
+    let mut eligible = 0;
+    let mut sst = BTreeMap::new();
+    for name in [
+        POSITION_UPDATES_CF,
+        storage::OBSERVATIONS_CF,
+        storage::SNAPSHOTS_CF,
+    ] {
+        let Some(handle) = db.cf_handle(name) else {
+            continue;
+        };
+        sst.insert(
+            name,
+            db.property_int_value_cf(handle, "rocksdb.live-sst-files-size")?
+                .context("missing SST size")?,
+        );
+        if before > state.floor {
+            let (start, end) = if name == storage::SNAPSHOTS_CF {
+                (
+                    storage::day_key(0).to_vec(),
+                    storage::day_key(before.0).to_vec(),
+                )
+            } else {
+                (
+                    manager_db::encode_seq_key(state.floor.0, state.floor.1)?.to_vec(),
+                    manager_db::encode_seq_key(before.0, before.1)?.to_vec(),
+                )
+            };
+            if start < end {
+                eligible += db.get_approximate_sizes_cf(handle, &[Range::new(&start, &end)])[0];
+            }
+        }
+    }
     Ok(serde_json::json!({
         "identity":state.identity, "floor":state.floor, "sealed":state.sealed,
         "eligible_before":cutoff(now), "requested_before":before,
         "last_receipt":state.receipt, "first":edge(IteratorMode::Start)?, "last":edge(IteratorMode::End)?,
         "estimated_messages":db.property_int_value_cf(cf, "rocksdb.estimate-num-keys")?,
-        "archive_sst_bytes":db.property_int_value_cf(cf, "rocksdb.live-sst-files-size")?,
+        "archive_sst_bytes":sst.values().sum::<u64>(),"archive_sst_bytes_by_cf":sst,
         "eligible_sst_bytes_approx":eligible
     }))
 }
@@ -480,6 +517,14 @@ pub fn inspect(path: &Path, before: Cursor, now: i64) -> Result<serde_json::Valu
 /// Restore exact original bytes into a local, dedicated backup store and read
 /// them back before issuing a receipt. No Exec store is accepted as a destination.
 pub fn verify_restore(input: impl Read, destination: &Path) -> Result<Receipt> {
+    verify_restore_with(input, destination, false)
+}
+/// Explicitly restore pre-migration JSON into a dedicated offline backup DB.
+/// Complete the old receipt chain before calling migrate-json on that copy.
+pub fn verify_json_restore(input: impl Read, destination: &Path) -> Result<Receipt> {
+    verify_restore_with(input, destination, true)
+}
+fn verify_restore_with(input: impl Read, destination: &Path, legacy_json: bool) -> Result<Receipt> {
     ensure!(
         !destination.exists() || destination.join("POSITION_ARCHIVE_BACKUP").is_file(),
         "restore destination is not an archive backup store"
@@ -512,6 +557,16 @@ pub fn verify_restore(input: impl Read, destination: &Path) -> Result<Receipt> {
         file.sync_all()?;
     }
     let db = ManagerDb::open(destination)?;
+    if legacy_json {
+        ensure!(
+            db.db().get(storage::FORMAT_KEY)?.is_none()
+                && db.db().get(storage::MIGRATING_KEY)?.is_none(),
+            "legacy importer requires a JSON-only offline destination"
+        );
+    } else {
+        storage::ensure_current(&db)?;
+    }
+    let storage = storage::Storage::default();
     let cf = db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
     if let Some(previous) = &header.previous {
         let saved = db
@@ -549,11 +604,31 @@ pub fn verify_restore(input: impl Read, destination: &Path) -> Result<Receipt> {
             cursor >= header.from && cursor < header.to && previous.is_none_or(|p| cursor > p),
             "unordered archive records"
         );
-        validate_message(&key, &value)?;
-        if let Some(existing) = db.db().get_cf(&cf, key)? {
-            ensure!(existing == value, "conflicting backup record");
+        let message = if legacy_json {
+            super::migration::decode_json(&key, &value)?
         } else {
+            validate_message(&key, &value)?
+        };
+        if !legacy_json {
+            ensure!(
+                codec::encode(&message)? == value,
+                "backup message is not canonical PB"
+            );
+        }
+        if let Some(existing) = db.db().get_cf(&cf, key)? {
+            let existing = if legacy_json {
+                existing
+            } else {
+                codec::encode(&storage.complete(&db, &key, &existing)?)?
+            };
+            ensure!(existing == value, "conflicting backup record");
+        } else if legacy_json {
             db.db().put_cf(&cf, key, &value)?;
+        } else {
+            let mut batch = rocksdb::WriteBatch::default();
+            let pending = storage.stage(&db, &message, &mut batch, true)?;
+            db.db().write(batch)?;
+            storage.published(pending);
         }
         hash_frame(&mut hash, &key, &value);
         previous = Some(cursor);
@@ -595,6 +670,11 @@ pub fn verify_restore(input: impl Read, destination: &Path) -> Result<Receipt> {
         if manager_db::decode_seq_key(&key).context("invalid backup key")? >= header.to {
             break;
         }
+        let value = if legacy_json {
+            value.into_vec()
+        } else {
+            codec::encode(&storage.complete(&db, &key, &value)?)?
+        };
         hash_frame(&mut readback, &key, &value);
         read_count += 1;
     }

@@ -11,6 +11,27 @@ const SAMPLE_LIMIT: usize = 128 * 1024 * 1024;
 /// The existing archive codec is used ONLY as a diagnostic dataset. Incomplete
 /// samples cannot pass the live owner's complete-prefix receipt validation.
 pub fn sample(primary: &Path, secondary: &Path, output: &mut impl Write) -> Result<()> {
+    sample_with_format(primary, secondary, output, false)
+}
+pub fn sample_with_format(
+    primary: &Path,
+    secondary: &Path,
+    output: &mut impl Write,
+    legacy_json: bool,
+) -> Result<()> {
+    sample_with_options(primary, secondary, output, legacy_json, 0)
+}
+pub fn sample_with_options(
+    primary: &Path,
+    secondary: &Path,
+    output: &mut impl Write,
+    legacy_json: bool,
+    tail_records: usize,
+) -> Result<()> {
+    ensure!(
+        tail_records <= 10_000,
+        "tail sample exceeds 10000-record limit"
+    );
     use rocksdb::{DB, Options};
     let primary = primary.canonicalize()?;
     ensure!(
@@ -37,13 +58,26 @@ pub fn sample(primary: &Path, secondary: &Path, output: &mut impl Write) -> Resu
             )),
         "sampling requires a Manager signal store, never Exec"
     );
-    let db = DB::open_cf_as_secondary(
-        &options,
-        &primary,
-        &secondary,
-        ["default", POSITION_UPDATES_CF],
-    )?;
+    // Never pin the large unrelated candle/order-analysis CFs just to sample
+    // signals. Legacy sources need only targets; current sources also need the
+    // observation references and their snapshot bodies.
+    let selected = families
+        .iter()
+        .filter(|f| {
+            matches!(f.as_str(), "default" | POSITION_UPDATES_CF)
+                || (!legacy_json
+                    && matches!(f.as_str(), storage::OBSERVATIONS_CF | storage::SNAPSHOTS_CF))
+        })
+        .collect::<Vec<_>>();
+    let db = DB::open_cf_as_secondary(&options, &primary, &secondary, &selected)?;
     let cf = db.cf_handle(POSITION_UPDATES_CF).unwrap();
+    if !legacy_json {
+        ensure!(
+            db.get(storage::FORMAT_KEY)?.as_deref() == Some(storage::FORMAT),
+            "use --legacy-json explicitly for a legacy source"
+        );
+    }
+    let storage = storage::Storage::default();
     let identity = std::fs::read_to_string(primary.join("IDENTITY"))?
         .trim()
         .to_owned();
@@ -75,38 +109,57 @@ pub fn sample(primary: &Path, secondary: &Path, output: &mut impl Write) -> Resu
     let mut bytes = 0usize;
     let mut insert = |key: Box<[u8]>, value: Box<[u8]>| -> Result<()> {
         if !selected.contains_key(key.as_ref()) {
+            let value = if legacy_json {
+                super::super::migration::decode_json(&key, &value)?;
+                value.into_vec()
+            } else {
+                codec::encode(&storage.complete_with(
+                    &|name, key| {
+                        let cf = db.cf_handle(name).context("missing sample CF")?;
+                        Ok(db.get_cf(cf, key)?)
+                    },
+                    &key,
+                    &value,
+                )?)?
+            };
             bytes = bytes
                 .checked_add(key.len() + value.len())
                 .context("sample overflow")?;
             ensure!(bytes <= SAMPLE_LIMIT, "sample exceeds 128 MiB cap");
-            validate_message(&key, &value)?;
-            selected.insert(key.into_vec(), value.into_vec());
+            selected.insert(key.into_vec(), value);
         }
         Ok(())
     };
-    for mode in [IteratorMode::Start, IteratorMode::End] {
-        for row in db.iterator_cf(cf, mode).take(64) {
+    if tail_records > 0 {
+        for row in db.iterator_cf(cf, IteratorMode::End).take(tail_records) {
             let (key, value) = row?;
             insert(key, value)?;
         }
-    }
-    const DAY: i64 = 86_400_000_000;
-    for day in first.0.div_euclid(DAY)..=last.0.div_euclid(DAY) {
-        let key = manager_db::encode_seq_key((day * DAY).max(1), 0)?;
-        for row in db
-            .iterator_cf(cf, IteratorMode::From(&key, Direction::Forward))
-            .take(16)
-        {
-            let (key, value) = row?;
-            if manager_db::decode_seq_key(&key)
-                .context("bad sample key")?
-                .0
-                .div_euclid(DAY)
-                != day
-            {
-                break;
+    } else {
+        for mode in [IteratorMode::Start, IteratorMode::End] {
+            for row in db.iterator_cf(cf, mode).take(64) {
+                let (key, value) = row?;
+                insert(key, value)?;
             }
-            insert(key, value)?;
+        }
+        const DAY: i64 = 86_400_000_000;
+        for day in first.0.div_euclid(DAY)..=last.0.div_euclid(DAY) {
+            let key = manager_db::encode_seq_key((day * DAY).max(1), 0)?;
+            for row in db
+                .iterator_cf(cf, IteratorMode::From(&key, Direction::Forward))
+                .take(16)
+            {
+                let (key, value) = row?;
+                if manager_db::decode_seq_key(&key)
+                    .context("bad sample key")?
+                    .0
+                    .div_euclid(DAY)
+                    != day
+                {
+                    break;
+                }
+                insert(key, value)?;
+            }
         }
     }
     let header = state.header(to);
@@ -155,6 +208,13 @@ fn marked(db: &Path) -> Result<()> {
 
 /// Restore original sampled bytes, then create an independent writable checkpoint.
 pub fn prepare(sample: &Path, root: &Path) -> Result<serde_json::Value> {
+    prepare_with_format(sample, root, false)
+}
+pub fn prepare_with_format(
+    sample: &Path,
+    root: &Path,
+    legacy_json: bool,
+) -> Result<serde_json::Value> {
     use std::os::unix::fs::PermissionsExt;
     ensure!(
         root.is_absolute() && !root.exists(),
@@ -163,7 +223,13 @@ pub fn prepare(sample: &Path, root: &Path) -> Result<serde_json::Value> {
     std::fs::create_dir(root)?;
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
     let reference = root.join("reference");
-    let receipt = verify_restore(File::open(sample)?, &reference)?;
+    let receipt = if legacy_json {
+        let receipt = verify_json_restore(File::open(sample)?, &reference)?;
+        super::super::migration::migrate_json(&reference, &root.join("original-json"), false)?;
+        receipt
+    } else {
+        verify_restore(File::open(sample)?, &reference)?
+    };
     let db = ManagerDb::open(&reference)?;
     let working = root.join("working");
     rocksdb::checkpoint::Checkpoint::new(db.db())?.create_checkpoint(&working)?;

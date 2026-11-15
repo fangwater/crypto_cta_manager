@@ -1,0 +1,84 @@
+syntax = "proto3";
+package cta.archive;
+
+// The sole serving/storage contract. JSON is only an explicit legacy import.
+message Record {
+  repeated string strings = 1;
+  uint32 msg_type = 2;
+  uint32 original_schema_metadata = 3;
+  sint64 received_at_us = 4;
+  uint32 seq = 5;
+  Strategy strategy = 6;
+  repeated Account accounts = 7;
+  // Self-contained exports include these; live target records never do.
+  repeated InlineSnapshot factual = 8;
+}
+message Target {
+  uint32 symbol = 1;
+  optional double qty = 2;
+  sint32 signal = 3;
+  bool clear = 4;
+}
+message StringPair { uint32 key = 1; uint32 value = 2; }
+message Strategy {
+  uint32 name = 1;
+  sint64 updated_at_us = 2;
+  repeated Target targets = 3;
+  repeated StringPair overrides = 4;
+}
+message Rate { uint32 quote = 1; optional double value = 2; }
+message Matched {
+  uint32 key = 1;
+  uint32 symbol = 2;
+  optional double source_multiplier = 3;
+  optional double target_multiplier = 4;
+  optional double quantity_multiplier = 5;
+}
+message Projection {
+  sint64 fetched_at_us = 1;
+  repeated Target targets = 2;
+  repeated Matched matched = 3;
+  repeated StringPair filtered = 4;
+}
+message Account {
+  uint32 source_id = 1;
+  uint32 binding = 2;
+  optional double shares = 3;
+  Projection projection = 4;
+  optional double fee = 5;
+  repeated Rate quote_fees = 6;
+  optional double taker_fee = 7;
+  repeated Rate quote_taker_fees = 8;
+  optional double legacy_leverage = 9;
+}
+// Packed doubles retain every IEEE-754 bit, including signed zero. Presence is
+// independent of numeric zero; the bitmap indexes quantities, not symbols.
+message PositionValues {
+  repeated double quantities = 1 [packed = true];
+  bytes usdt_presence = 2;
+  repeated double usdt = 3 [packed = true];
+}
+message InlineSnapshot {
+  uint32 source_id = 1;
+  sint64 ts_ms = 2;
+  bool ready = 3;
+  repeated uint32 symbols = 4 [packed = true];
+  PositionValues values = 5;
+}
+message Observations { repeated Observation entries = 1; }
+message Observation {
+  string source_id = 1;
+  sint64 ts_ms = 2;
+  bool ready = 3;
+  bytes blob = 4;
+}
+// All parents belong to the same Shanghai day and source/strategy namespace. A full
+// baseline has no parent and carries every symbol. A delta inherits symbols
+// and replaces changed slots with absolute values; it never sums f64 deltas.
+message SnapshotBlob {
+  bytes base = 1;
+  uint32 depth = 2;
+  repeated string symbols = 3;
+  repeated uint32 changed = 4 [packed = true];
+  PositionValues values = 5;
+}

@@ -11,6 +11,33 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Back up an exclusively owned original DB, without converting its records.
+    BackupJson {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        backup: PathBuf,
+    },
+    /// Read-only verification of an original checkpoint copied to powerleader.
+    VerifyJsonBackup {
+        #[arg(long)]
+        db: PathBuf,
+    },
+    /// Read-only deployment compatibility check; never initializes or converts data.
+    CheckStorage {
+        #[arg(long)]
+        db: PathBuf,
+    },
+    /// Explicit offline replacement; verifies a complete original DB backup first.
+    MigrateJson {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        backup: PathBuf,
+        /// Reclaim obsolete JSON SSTs only after the backup and full equality check.
+        #[arg(long)]
+        compact: bool,
+    },
     /// Read-only inspection; no owner socket or maintenance enablement needed.
     Inspect {
         #[arg(long)]
@@ -56,6 +83,12 @@ enum Action {
         db: PathBuf,
         #[arg(long)]
         secondary: PathBuf,
+        /// Read JSON only for an explicitly selected legacy source.
+        #[arg(long)]
+        legacy_json: bool,
+        /// Sample only a contiguous recent suffix (max 10000, still diagnostic only).
+        #[arg(long, default_value_t = 0)]
+        tail_records: usize,
     },
     /// Restore a sample into a NEW isolated test root, never a live store.
     RehearsalPrepare {
@@ -63,6 +96,8 @@ enum Action {
         file: PathBuf,
         #[arg(long)]
         root: PathBuf,
+        #[arg(long)]
+        legacy_json: bool,
     },
     /// Serve owner commands ONLY on a marked isolated rehearsal copy.
     RehearsalServe {
@@ -86,10 +121,51 @@ enum Action {
         #[arg(long)]
         restore: PathBuf,
     },
+    /// Restore original JSON backups offline; use migrate-json after the chain.
+    VerifyJson {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        restore: PathBuf,
+    },
 }
 fn main() -> Result<()> {
     let args = Args::parse();
     let (socket, command) = match args.command {
+        Action::BackupJson { db, backup } => {
+            println!(
+                "{}",
+                crypto_cta_manager::position_archive::migration::backup_json(&db, &backup)?
+            );
+            return Ok(());
+        }
+        Action::VerifyJsonBackup { db } => {
+            println!(
+                "{}",
+                crypto_cta_manager::position_archive::migration::verify_json_backup(&db)?
+            );
+            return Ok(());
+        }
+        Action::CheckStorage { db } => {
+            println!(
+                "{}",
+                crypto_cta_manager::position_archive::migration::check_storage(&db)?
+            );
+            return Ok(());
+        }
+        Action::MigrateJson {
+            db,
+            backup,
+            compact,
+        } => {
+            println!(
+                "{}",
+                crypto_cta_manager::position_archive::migration::migrate_json(
+                    &db, &backup, compact
+                )?
+            );
+            return Ok(());
+        }
         Action::Inspect { db, before } => {
             let plan = retention::inspect(
                 &db,
@@ -125,12 +201,30 @@ fn main() -> Result<()> {
             println!("{}", retention::codec_bench::benchmark(&file, &root)?);
             return Ok(());
         }
-        Action::RehearsalSample { db, secondary } => {
-            retention::rehearsal::sample(&db, &secondary, &mut std::io::stdout().lock())?;
+        Action::RehearsalSample {
+            db,
+            secondary,
+            legacy_json,
+            tail_records,
+        } => {
+            retention::rehearsal::sample_with_options(
+                &db,
+                &secondary,
+                &mut std::io::stdout().lock(),
+                legacy_json,
+                tail_records,
+            )?;
             return Ok(());
         }
-        Action::RehearsalPrepare { file, root } => {
-            println!("{}", retention::rehearsal::prepare(&file, &root)?);
+        Action::RehearsalPrepare {
+            file,
+            root,
+            legacy_json,
+        } => {
+            println!(
+                "{}",
+                retention::rehearsal::prepare_with_format(&file, &root, legacy_json)?
+            );
             return Ok(());
         }
         Action::RehearsalServe { db, socket } => {
@@ -143,6 +237,16 @@ fn main() -> Result<()> {
             end_us,
         } => {
             println!("{}", retention::rehearsal::proof(&db, start_us, end_us)?);
+            return Ok(());
+        }
+        Action::VerifyJson { file, restore } => {
+            println!(
+                "{}",
+                serde_json::to_string(&retention::verify_json_restore(
+                    std::fs::File::open(file)?,
+                    &restore
+                )?)?
+            );
             return Ok(());
         }
         Action::Verify { file, restore } => {

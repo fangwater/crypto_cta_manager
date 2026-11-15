@@ -5,7 +5,12 @@ There is no automatic retention job, host iteration or scheduled compaction.
 The earlier hourly service/timer templates have been removed. Powerleader's
 previously staged timer remains disabled; no live signal pruning has occurred.
 
-Only Manager's `position_updates` column family is eligible. Current targets,
+The current compact implementation covers Manager's `position_updates`,
+`position_observations` and `position_snapshots` signal column families. See
+[`position_archive_storage.md`](position_archive_storage.md) for its explicit
+JSON migration and backup contract. Existing hosts still require a separately
+authorized coordinated rollout; no live migration was run during development.
+Current targets,
 Exec orders/fills, PostgreSQL snapshots, funding, FIFO and Kline maintenance
 are independent. Factual 60D/90D/ALL NAV history is unaffected. Older raw signal
 browsing and signal-dependent analysis require the offline archive after pruning.
@@ -29,8 +34,8 @@ Compaction alone does not delete records by date. The required sequence is:
 1. Preview the exact prefix and approximate size, without any mutation.
 2. Stream and restore/verify a complete backup; retain all live original records.
 3. Explicitly request reclamation: Manager verifies the same prefix again,
-   atomically saves its boundary checkpoint and deletes that prefix, then compacts
-   only the already reclaimed `position_updates` range.
+   atomically saves its boundary checkpoint and deletes that prefix and obsolete
+   snapshot blocks, then compacts only the three already reclaimed signal CF ranges.
 
 ## Exact date semantics
 
@@ -97,7 +102,11 @@ exclude unflushed data and do not promise immediate space reclamation.
 
 A backup seals the selected old prefix: late factual enrichment skips it and
 historical insertions into it fail closed. Normal current publications continue.
-Original JSON bytes and 12-byte keys are neither converted nor deduplicated.
+The 12-byte signal keys remain unchanged. The current owner exports complete,
+self-contained canonical PB messages assembled from targets and observations;
+snapshot references never escape the source. Original JSON survives in the
+explicit migration backup and earlier gzip archives. The gzip backup preserves
+its exact exported frame bytes, without cross-message dependencies.
 The entire date prefix is streamed as one gzip file without making a duplicate
 export on the live host or loading the whole range into memory. Header/frame
 sizes remain bounded. A failed stream is retried from the start of that date

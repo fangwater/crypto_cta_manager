@@ -362,8 +362,15 @@ not self-registered: `/api/auth/register` only bootstraps the very first
 administrator, and afterwards admins create users through
 `POST /api/auth/users`. Each
 accepted
-`POST /api/catalog/position-strategies` is appended as one JSON message in
-column family `position_updates`. The message includes the POST body, each
+`POST /api/catalog/position-strategies` is appended as one immutable Protobuf target
+record in column family `position_updates`; HTTP publication/query remains JSON.
+Manager stores factual observations separately in `position_observations` and
+day-local, content-addressed `position_snapshots`, with packed doubles and bounded
+absolute-value replacement chains. Explicit offline `cta_position_archive
+migrate-json` verifies a complete original backup before converting JSON; normal
+startup must never auto-migrate or accept mixed JSON/PB records. Preserve the
+existing JSON numeric parsing boundary and immutable financial fingerprints.
+See `docs/position_archive_storage.md`. The message includes the POST body, each
 active bound account's then-current `shares`. Factual positions from each
 source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty` are enriched
 asynchronously after Exec publication, with their own observation timestamps. Published qty
