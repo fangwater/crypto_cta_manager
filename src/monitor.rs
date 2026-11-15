@@ -46,6 +46,8 @@ pub struct MonitorIssue {
     pub message: String,
     /// Delay the first notification while a transient condition settles.
     pub initial_delay_secs: u64,
+    /// Send once per observed transition, without repeat/recovery or fault counts.
+    pub informational: bool,
 }
 
 impl MonitorIssue {
@@ -56,7 +58,13 @@ impl MonitorIssue {
             category: category.to_string(),
             message: message.into(),
             initial_delay_secs: 0,
+            informational: false,
         }
+    }
+
+    fn notification_only(mut self) -> Self {
+        self.informational = true;
+        self
     }
 
     fn with_initial_delay(mut self, seconds: u64) -> Self {
@@ -721,7 +729,7 @@ fn check_leverage_guard(
             ));
         } else if (3..=4).contains(&row.leverage) {
             issues.push(issue("leverage", &format!("fallback:{symbol}:{}", row.leverage), source,
-                format!("{symbol} 已使用 {} 倍退避档位（优先 5 倍，最低 3 倍），限额 {:.2}，目标风险金额 {:.2}；保持当前档位", row.leverage, row.max_notional, row.required_notional)));
+                format!("{symbol} 已使用 {} 倍退避档位（优先 5 倍，最低 3 倍），限额 {:.2}，目标风险金额 {:.2}；保持当前档位", row.leverage, row.max_notional, row.required_notional)).notification_only());
         }
     }
     issues
@@ -1189,6 +1197,7 @@ struct PendingNotice {
     key: String,
     message: String,
     recovery: bool,
+    informational: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1226,6 +1235,7 @@ const MIN_REPEAT_ALERT_SECS: u64 = 30;
 #[derive(Debug, Default)]
 struct AlertState {
     active: bool,
+    informational: bool,
     visible: bool,
     first_seen: Option<Instant>,
     last_sent: Option<Instant>,
@@ -1258,6 +1268,7 @@ impl AlertTracker {
                 state.first_seen = Some(now);
             }
             state.active = true;
+            state.informational = issue.informational;
             state.recovery_pending = false;
             state.visible = state.first_seen.is_none_or(|first_seen| {
                 now.duration_since(first_seen) >= Duration::from_secs(issue.initial_delay_secs)
@@ -1265,14 +1276,15 @@ impl AlertTracker {
             if !state.visible {
                 continue;
             }
-            let due = state
-                .last_sent
-                .is_none_or(|last_sent| now.duration_since(last_sent) >= repeat);
+            let due = state.last_sent.is_none_or(|last_sent| {
+                !issue.informational && now.duration_since(last_sent) >= repeat
+            });
             if due {
                 pending.push(PendingNotice {
                     key: issue.key.clone(),
                     message: issue.message.clone(),
                     recovery: false,
+                    informational: issue.informational,
                 });
             }
         }
@@ -1280,7 +1292,7 @@ impl AlertTracker {
             if !state.active || current_keys.contains(key.as_str()) {
                 continue;
             }
-            if state.last_sent.is_none() {
+            if state.informational || state.last_sent.is_none() {
                 *state = AlertState::default();
                 continue;
             }
@@ -1294,6 +1306,7 @@ impl AlertTracker {
                     key: key.clone(),
                     message: format!("问题已恢复: {detail}"),
                     recovery: true,
+                    informational: false,
                 });
             }
         }
@@ -1312,6 +1325,7 @@ impl AlertTracker {
                 state.message.clear();
             } else {
                 state.active = true;
+                state.informational = notice.informational;
                 state.last_sent = Some(now);
                 state.recovery_pending = false;
                 state.message = notice.message.clone();
@@ -1323,7 +1337,12 @@ impl AlertTracker {
     fn active_count(&self, channel: NoticeChannel) -> usize {
         self.states
             .iter()
-            .filter(|(key, state)| state.active && state.visible && channel_for_key(key) == channel)
+            .filter(|(key, state)| {
+                state.active
+                    && state.visible
+                    && !state.informational
+                    && channel_for_key(key) == channel
+            })
             .count()
     }
 }
@@ -1538,6 +1557,8 @@ impl DingTalkSender {
         for notice in notices.iter().take(30) {
             let prefix = if notice.recovery {
                 "[恢复]"
+            } else if notice.informational {
+                "[通知]"
             } else {
                 "[告警]"
             };
@@ -1547,7 +1568,7 @@ impl DingTalkSender {
             content.push('\n');
         }
         if notices.len() > 30 {
-            content.push_str(&format!("另有 {} 条告警未展开\n", notices.len() - 30));
+            content.push_str(&format!("另有 {} 条消息未展开\n", notices.len() - 30));
         }
         if content.len() > 4_000 {
             let mut end = 3_980;
@@ -1678,9 +1699,21 @@ fn print_dry_run(issues: &[MonitorIssue]) {
         println!("CTA monitor: OK");
         return;
     }
-    println!("CTA monitor: {} issue(s)", issues.len());
+    let notifications = issues.iter().filter(|issue| issue.informational).count();
+    println!(
+        "CTA monitor: {} issue(s), {notifications} notification(s)",
+        issues.len() - notifications
+    );
     for issue in issues {
-        println!("{} [{}] {}", issue.key, issue.category, issue.message);
+        let kind = if issue.informational {
+            "通知"
+        } else {
+            "告警"
+        };
+        println!(
+            "{} [{kind}] [{}] {}",
+            issue.key, issue.category, issue.message
+        );
     }
 }
 
@@ -1816,6 +1849,88 @@ mod tests {
             check_leverage_guard(&source, &serde_json::json!({}), now)[0]
                 .key
                 .contains("invalid")
+        );
+    }
+
+    #[test]
+    fn leverage_fallback_notifies_once_without_fault_counts_or_recovery() {
+        let source = test_source("binance-futures");
+        let now_us = 1_794_715_950_000_000_i64;
+        let mut raw = serde_json::json!({"updated_at_us":now_us,"error":null,"symbols":{
+            "ONEUSDT":{"leverage":4,"max_notional":200000.,"required_notional":55200.,"error":null}
+        }});
+        let mut tracker = AlertTracker::default();
+        let start = Instant::now();
+        let issues = check_leverage_guard(&source, &raw, now_us);
+        let notices = tracker.pending(&issues, start, 60);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].informational);
+        assert_eq!(notices[0].channel(), NoticeChannel::Order);
+        assert_eq!(tracker.active_count(NoticeChannel::Order), 0);
+        // Failed delivery is retried even far beyond the normal repeat interval.
+        assert_eq!(
+            tracker
+                .pending(&issues, start + Duration::from_secs(120), 60)
+                .len(),
+            1
+        );
+        tracker.mark_sent(&notices, start);
+        raw["symbols"]["ONEUSDT"]["required_notional"] = serde_json::json!(60000.);
+        let issues = check_leverage_guard(&source, &raw, now_us);
+        assert!(
+            tracker
+                .pending(&issues, start + Duration::from_secs(86400), 60)
+                .is_empty()
+        );
+        assert_eq!(tracker.active_count(NoticeChannel::Order), 0);
+
+        // A new successful level is a new notification, without a fake recovery for 4x.
+        raw["symbols"]["ONEUSDT"]["leverage"] = serde_json::json!(3);
+        let issues = check_leverage_guard(&source, &raw, now_us);
+        let notices = tracker.pending(&issues, start + Duration::from_secs(86401), 60);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].informational && !notices[0].recovery);
+        assert!(notices[0].message.contains("3 倍"));
+        tracker.mark_sent(&notices, start + Duration::from_secs(86401));
+        assert!(
+            tracker
+                .pending(&[], start + Duration::from_secs(86402), 60)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn leverage_margin_failures_still_repeat_and_recover_after_notification() {
+        let source = test_source("binance-futures");
+        let now_us = 1_794_715_950_000_000_i64;
+        let mut raw = serde_json::json!({"updated_at_us":now_us,"error":null,"symbols":{
+            "ONEUSDT":{"leverage":3,"max_notional":500000.,"required_notional":600000.,"error":"insufficient available margin"}
+        }});
+        let start = Instant::now();
+        let mut tracker = AlertTracker::default();
+        let issues = check_leverage_guard(&source, &raw, now_us);
+        let notices = tracker.pending(&issues, start, 60);
+        assert_eq!(notices.len(), 1);
+        assert!(!notices[0].informational);
+        assert_eq!(tracker.active_count(NoticeChannel::Order), 1);
+        tracker.mark_sent(&notices, start);
+        assert_eq!(
+            tracker
+                .pending(&issues, start + Duration::from_secs(61), 60)
+                .len(),
+            1
+        );
+        raw["symbols"]["ONEUSDT"]["error"] = serde_json::Value::Null;
+        let recovered = check_leverage_guard(&source, &raw, now_us);
+        let notices = tracker.pending(&recovered, start + Duration::from_secs(62), 60);
+        assert_eq!(notices.iter().filter(|n| n.recovery).count(), 1);
+        assert_eq!(notices.iter().filter(|n| n.informational).count(), 1);
+        tracker.mark_sent(&notices, start + Duration::from_secs(62));
+        assert_eq!(tracker.active_count(NoticeChannel::Order), 0);
+        assert!(
+            tracker
+                .pending(&recovered, start + Duration::from_secs(86400), 60)
+                .is_empty()
         );
     }
 
@@ -2837,11 +2952,13 @@ mod tests {
             key: "market:binance-futures:any:global".to_string(),
             message: "market".to_string(),
             recovery: false,
+            informational: false,
         };
         let order = PendingNotice {
             key: "orders:stale:trade01".to_string(),
             message: "order".to_string(),
             recovery: false,
+            informational: false,
         };
         assert_eq!(market.channel(), NoticeChannel::Market);
         assert_eq!(order.channel(), NoticeChannel::Order);
@@ -2959,6 +3076,27 @@ mod tests {
     }
 
     #[test]
+    fn successful_leverage_fallback_uses_notification_prefix() {
+        let sender = DingTalkSender {
+            client: Client::new(),
+            webhook_url: Url::parse("https://example.test/hook").unwrap(),
+            secret: None,
+            at_mobiles: Vec::new(),
+            is_at_all: false,
+            host_tag: "el01".to_string(),
+        };
+        let notice = PendingNotice {
+            key: "leverage:fallback:ONEUSDT:4:trade07".to_string(),
+            message: "ONEUSDT 已使用 4 倍退避档位".to_string(),
+            recovery: false,
+            informational: true,
+        };
+        let content = sender.notice_content(&[notice]);
+        assert!(content.contains("[通知] ONEUSDT 已使用 4 倍退避档位"));
+        assert!(!content.contains("[告警]") && !content.contains("[恢复]"));
+    }
+
+    #[test]
     fn long_unicode_notice_is_truncated_on_a_character_boundary() {
         let sender = DingTalkSender {
             client: Client::new(),
@@ -2972,6 +3110,7 @@ mod tests {
             let notice = PendingNotice {
                 key: "test".to_string(),
                 recovery: false,
+                informational: false,
                 message: format!("{}{}", "a".repeat(padding), "订单状态未知".repeat(400)),
             };
             let content = sender.notice_content(&[notice]);
