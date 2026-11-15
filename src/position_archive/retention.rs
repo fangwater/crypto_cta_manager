@@ -611,6 +611,7 @@ pub fn verify_restore(input: impl Read, destination: &Path) -> Result<Receipt> {
     Ok(receipt)
 }
 
+pub mod codec_bench;
 mod control;
 pub mod rehearsal;
 pub use control::{Command, Reply, client, start_socket};

@@ -306,3 +306,58 @@ before/after/cleanup records preserve the checks. The isolated owner process was
 stopped. Live Manager and trading processes were not restarted. Thirteen focused
 Rust retention tests, twelve Python tests, all-target compilation and the release
 archive-client build passed for the diagnostic additions.
+
+## JSON versus Protobuf size experiment (2026-11-15)
+
+`cta_position_archive rehearsal-codec --file SAMPLE --root NEW_ABSOLUTE_DIR`
+compares encodings using a previously exported gzip sample. It creates three
+isolated Manager databases with identical signal keys and the normal LZ4 options:
+original JSON bytes, JSON reserialized through the current typed parser, and an
+experimental typed Protobuf encoding. It flushes and compacts each signal CF and
+reports actual live SST bytes. The output directory must be new. This command
+does not open a live database or change the production archive encoder/decoder.
+
+The experiment used the real el01 sample from the rehearsal above. A second
+input retained the 800 sampled records since 2026-10-01 00:00 UTC+08:00. This is
+a diagnostic subset, not a production backup or deletion receipt. Sizes below
+are exact bytes; MB comparisons use decimal units.
+
+| Sample | Encoding | Uncompressed value bytes | LZ4 signal SST bytes |
+| --- | --- | ---: | ---: |
+| Recent 800 records | Original JSON | 7,328,734 | 3,379,346 |
+| Recent 800 records | Reserialized JSON | 7,323,815 | 3,376,170 |
+| Recent 800 records | Experimental Protobuf | 3,402,124 | 2,074,704 |
+| All 1,520 records | Original JSON | 11,574,195 | 5,164,592 |
+| All 1,520 records | Reserialized JSON | 11,573,203 | 5,162,824 |
+| All 1,520 records | Experimental Protobuf | 5,549,146 | 3,129,021 |
+
+For the recent sample, Protobuf reduces raw values by 53.6% and actual LZ4 SST
+bytes by 38.6% versus original JSON. The full sample's SST reduction is 39.4%.
+Reserializing JSON alone produces negligible savings, so the observed difference
+comes from encoding rather than dropping known fields. These are small el01
+samples, not measurements of the full production LSM or jp-meta; the percentages
+must not be treated as guaranteed savings on the combined production databases.
+
+Every record is parsed with the existing `serde_json` behavior, encoded and
+decoded, then compared using exact MessagePack serialization of the typed
+message. The private experimental schema includes factual snapshots, targets,
+clear instructions, signals, frozen shares and fees, projections, source IDs,
+timestamps and legacy leverage. It uses doubles and explicit scalar presence
+where needed to preserve signed zero and optional values. A focused unit test
+also covers signed zero, tiny quantities, absent USDT values, clear targets,
+fee maps and matched-contract projections. Equality applies to the current
+typed interpretation; it does not preserve original JSON spelling or unknown
+JSON fields. Original sample bytes remain separate and unchanged.
+
+Production still stores JSON. Adopting a binary format would require recoverable
+original-byte backups, a coordinated replacement of every archive reader/writer
+and maintenance tool, and financial-result validation including immutable
+fingerprints. The experiment does not change global JSON number parsing, add
+production format negotiation, or authorize a rewrite. Protobuf also retains
+each repeated full factual snapshot: reducing that repetition is a separate
+storage design change. Manual date-based archival remains useful for bounding
+history growth regardless of encoding.
+
+Evidence in the same private NVMe root: `codec-all-result.json`,
+`codec-recent-result.json`, `codec-all/` and `codec-recent/`. Focused precision
+tests, archive-client compilation and its release build passed.

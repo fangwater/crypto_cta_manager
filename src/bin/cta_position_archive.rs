@@ -43,6 +43,13 @@ enum Action {
         #[arg(long)]
         before: String,
     },
+    /// Isolated experiment only; does not change the live JSON storage format.
+    RehearsalCodec {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        root: PathBuf,
+    },
     /// Diagnostic only: sample immutable original records through a read-only secondary.
     RehearsalSample {
         #[arg(long)]
@@ -113,6 +120,10 @@ fn main() -> Result<()> {
                 serde_json::from_reader(std::fs::File::open(receipt)?)?
             };
             (socket, Command::Commit { receipt: value })
+        }
+        Action::RehearsalCodec { file, root } => {
+            println!("{}", retention::codec_bench::benchmark(&file, &root)?);
+            return Ok(());
         }
         Action::RehearsalSample { db, secondary } => {
             retention::rehearsal::sample(&db, &secondary, &mut std::io::stdout().lock())?;
