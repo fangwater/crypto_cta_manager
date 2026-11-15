@@ -10,10 +10,6 @@ use std::sync::{Arc, RwLockReadGuard};
 
 const META: &str = "position_archive_retention";
 const MAGIC: &[u8; 16] = b"CTA-SIGNAL-GZIP\0";
-#[cfg(not(test))]
-const CHUNK_BYTES: u64 = 64 * 1024 * 1024;
-#[cfg(test)]
-const CHUNK_BYTES: u64 = 16 * 1024;
 const MAX_VALUE: u64 = 64 * 1024 * 1024;
 const MAX_HEADER: usize = 64 * 1024 * 1024;
 pub type Cursor = (i64, u32);
@@ -27,19 +23,43 @@ pub fn predecessor(cursor: Cursor) -> Option<Cursor> {
         None
     }
 }
-fn successor(cursor: Cursor) -> Result<Cursor> {
-    Ok(if cursor.1 == u32::MAX {
-        (cursor.0.checked_add(1).context("cursor overflow")?, 0)
-    } else {
-        (cursor.0, cursor.1 + 1)
-    })
-}
 pub fn cutoff(now: i64) -> Cursor {
     const DAY: i64 = 86_400_000_000;
     (
         ((now - 30 * DAY).div_euclid(DAY) * DAY - 600_000_000).max(1),
         0,
     )
+}
+
+/// The supplied date is an exclusive midnight boundary in UTC+08:00.
+pub fn date_boundary(date: &str) -> Result<Cursor> {
+    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .context("before must be YYYY-MM-DD (UTC+08:00)")?;
+    ensure!(
+        parsed.format("%Y-%m-%d").to_string() == date,
+        "before must be YYYY-MM-DD"
+    );
+    let us = parsed
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_micros()
+        .checked_sub(8 * 3_600_000_000)
+        .context("date boundary overflow")?;
+    ensure!(us > 1, "date boundary must be after the Unix epoch");
+    Ok((us, 0))
+}
+
+fn validate_before(before: Cursor, now: i64) -> Result<()> {
+    ensure!(
+        before.1 == 0 && before.0 > 1,
+        "invalid exclusive date boundary"
+    );
+    ensure!(
+        before <= cutoff(now),
+        "requested date would remove retained monthly signals; choose an earlier date"
+    );
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -100,9 +120,12 @@ impl RetentionState {
         let identity = std::fs::read_to_string(db.path().join("IDENTITY"))?
             .trim()
             .to_string();
+        Self::decode(identity, db.db().get(META)?.as_deref())
+    }
+    fn decode(identity: String, bytes: Option<&[u8]>) -> Result<Self> {
         ensure!(!identity.is_empty(), "missing Manager store identity");
-        if let Some(bytes) = db.db().get(META)? {
-            let state: Self = rmp_serde::from_slice(&bytes)?;
+        if let Some(bytes) = bytes {
+            let state: Self = rmp_serde::from_slice(bytes)?;
             ensure!(
                 state.identity == identity && state.floor <= state.sealed,
                 "archive identity/range mismatch"
@@ -208,7 +231,8 @@ impl PositionArchive {
             last_receipt: state.receipt.clone(),
         }
     }
-    fn seal(&self, now: i64) -> Result<RetentionState> {
+    fn seal(&self, before: Cursor, now: i64) -> Result<RetentionState> {
+        validate_before(before, now)?;
         ensure!(
             !self.db.column_families()?.iter().any(|name| matches!(
                 name.as_str(),
@@ -219,7 +243,7 @@ impl PositionArchive {
         let head = self.last_key.lock().unwrap();
         let mut state = self.retention.lock().unwrap();
         let mut next = state.clone();
-        next.sealed = next.sealed.max(cutoff(now));
+        next.sealed = next.sealed.max(before);
         next.head = next.head.max(*head);
         self.db
             .db()
@@ -263,23 +287,14 @@ impl PositionArchive {
         }
         Ok(())
     }
-    /// Returns false once the currently eligible prefix has been fully offloaded.
-    pub fn export_chunk(&self, output: &mut impl Write, now: i64) -> Result<bool> {
-        let state = self.seal(now)?;
-        if state.floor >= state.sealed {
+    /// Stream the complete chosen prefix. Backup first, then one atomic prune;
+    /// large ranges are streamed with bounded memory, never staged on the live disk.
+    pub fn export_prefix(&self, output: &mut impl Write, before: Cursor, now: i64) -> Result<bool> {
+        let state = self.seal(before, now)?;
+        if state.floor >= before {
             return Ok(false);
         }
-        let mut size = 0;
-        let mut to = state.sealed;
-        self.visit_range(state.floor, state.sealed, |key, value| {
-            size += 20 + value.len() as u64;
-            if size >= CHUNK_BYTES {
-                to = successor(manager_db::decode_seq_key(key).unwrap())?;
-                return Ok(false);
-            }
-            Ok(true)
-        })?;
-        let header = state.header(to);
+        let header = state.header(before);
         let bytes = encode_header(&header)?;
         let mut hash = Sha256::new();
         hash.update(&bytes);
@@ -389,11 +404,12 @@ impl PositionArchive {
         result.context("archive retention WAL sync")?;
         Ok(())
     }
-    pub fn compact_archived(&self) -> Result<()> {
+    pub fn compact_archived(&self, before: Cursor) -> Result<()> {
         let floor = self.retention_floor();
-        if floor == (1, 0) {
-            return Ok(());
-        }
+        ensure!(
+            before.1 == 0 && before.0 > 1 && before <= floor,
+            "compact is only allowed inside a verified, already reclaimed range"
+        );
         let cf = self
             .db
             .db()
@@ -405,11 +421,56 @@ impl PositionArchive {
         self.db.db().compact_range_cf_opt(
             &cf,
             Some(manager_db::encode_seq_key(1, 0)?),
-            Some(manager_db::encode_seq_key(floor.0, floor.1)?),
+            Some(manager_db::encode_seq_key(before.0, before.1)?),
             &options,
         );
         Ok(())
     }
+}
+
+/// Read-only plan, including the exact requested range and approximate SST bytes.
+pub fn inspect(path: &Path, before: Cursor, now: i64) -> Result<serde_json::Value> {
+    use rocksdb::{DB, Options, Range};
+    validate_before(before, now)?;
+    let mut options = Options::default();
+    options.set_max_open_files(128);
+    let families = DB::list_cf(&options, path)?;
+    ensure!(
+        families.iter().any(|f| f == POSITION_UPDATES_CF)
+            && !families.iter().any(|f| matches!(
+                f.as_str(),
+                "uniform_orders" | "order_updates" | "trade_updates"
+            )),
+        "expected Manager store, refuse Exec database"
+    );
+    let db = DB::open_cf_for_read_only(&options, path, families, false)?;
+    let cf = db.cf_handle(POSITION_UPDATES_CF).unwrap();
+    let identity = std::fs::read_to_string(path.join("IDENTITY"))?
+        .trim()
+        .to_string();
+    let state = RetentionState::decode(identity, db.get(META)?.as_deref())?;
+    let edge = |mode| -> Result<Option<Cursor>> {
+        db.iterator_cf(cf, mode)
+            .next()
+            .transpose()?
+            .map(|(key, _)| manager_db::decode_seq_key(&key).context("invalid archive key"))
+            .transpose()
+    };
+    let eligible = if before > state.floor {
+        let start = manager_db::encode_seq_key(state.floor.0, state.floor.1)?;
+        let end = manager_db::encode_seq_key(before.0, before.1)?;
+        db.get_approximate_sizes_cf(cf, &[Range::new(&start, &end)])[0]
+    } else {
+        0
+    };
+    Ok(serde_json::json!({
+        "identity":state.identity, "floor":state.floor, "sealed":state.sealed,
+        "eligible_before":cutoff(now), "requested_before":before,
+        "last_receipt":state.receipt, "first":edge(IteratorMode::Start)?, "last":edge(IteratorMode::End)?,
+        "estimated_messages":db.property_int_value_cf(cf, "rocksdb.estimate-num-keys")?,
+        "archive_sst_bytes":db.property_int_value_cf(cf, "rocksdb.live-sst-files-size")?,
+        "eligible_sst_bytes_approx":eligible
+    }))
 }
 
 /// Restore exact original bytes into a local, dedicated backup store and read

@@ -3,14 +3,14 @@ verifier = "/mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager_archives/bin/cta_
 
 [[hosts]]
 name = "el01"
-enabled = false
 ssh = "cta_exec_bridge"
+db = "/home/el01/crypto_cta_manager/db"
 binary = "/home/el01/crypto_cta_manager/bin/cta_position_archive"
 socket = "/home/el01/crypto_cta_manager/archive-control/position.sock"
 
 [[hosts]]
 name = "jp-meta"
-enabled = false
 ssh = "jp-meta-elvpn"
+db = "/home/ubuntu/crypto_cta_manager/db"
 binary = "/home/ubuntu/crypto_cta_manager/bin/cta_position_archive"
 socket = "/home/ubuntu/crypto_cta_manager/archive-control/position.sock"

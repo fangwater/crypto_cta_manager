@@ -126,7 +126,7 @@ async fn pruning_and_cold_restart_keep_exact_deltas_carry_and_dormant_markets() 
     let mut total = 0;
     loop {
         let mut bytes = Vec::new();
-        if !archive.export_chunk(&mut bytes, now).unwrap() {
+        if !archive.export_prefix(&mut bytes, cutoff(now), now).unwrap() {
             break;
         }
         let receipt = verify_restore(bytes.as_slice(), &backup.path().join("db")).unwrap();
@@ -315,7 +315,7 @@ async fn retained_month_curves_are_identical_with_boundary_only_holdings() {
     }
     let backup = tempfile::tempdir().unwrap();
     let mut bytes = Vec::new();
-    archive.export_chunk(&mut bytes, now).unwrap();
+    archive.export_prefix(&mut bytes, cutoff(now), now).unwrap();
     let receipt = verify_restore(bytes.as_slice(), &backup.path().join("db")).unwrap();
     archive.commit_receipt(&receipt, now).unwrap();
     // A new cache exercises checkpoint loading and cannot use old curve results.

@@ -15,6 +15,9 @@ enum Action {
     Inspect {
         #[arg(long)]
         db: PathBuf,
+        /// Exclusive date, YYYY-MM-DD at 00:00 UTC+08:00.
+        #[arg(long)]
+        before: String,
     },
     Status {
         #[arg(long)]
@@ -23,6 +26,9 @@ enum Action {
     Export {
         #[arg(long)]
         socket: PathBuf,
+        /// Exclusive date, YYYY-MM-DD at 00:00 UTC+08:00.
+        #[arg(long)]
+        before: String,
     },
     Commit {
         #[arg(long)]
@@ -33,6 +39,9 @@ enum Action {
     Compact {
         #[arg(long)]
         socket: PathBuf,
+        /// Only compact a verified, reclaimed prefix before this date (UTC+08:00).
+        #[arg(long)]
+        before: String,
     },
     /// Local only: restore raw signals into an independent backup RocksDB.
     Verify {
@@ -45,13 +54,28 @@ enum Action {
 fn main() -> Result<()> {
     let args = Args::parse();
     let (socket, command) = match args.command {
-        Action::Inspect { db } => {
-            inspect(&db)?;
+        Action::Inspect { db, before } => {
+            let plan = retention::inspect(
+                &db,
+                retention::date_boundary(&before)?,
+                crypto_cta_manager::kline::now_us(),
+            )?;
+            println!("{}", serde_json::to_string(&plan)?);
             return Ok(());
         }
         Action::Status { socket } => (socket, Command::Status),
-        Action::Export { socket } => (socket, Command::Export),
-        Action::Compact { socket } => (socket, Command::Compact),
+        Action::Export { socket, before } => (
+            socket,
+            Command::Export {
+                before_us: retention::date_boundary(&before)?.0,
+            },
+        ),
+        Action::Compact { socket, before } => (
+            socket,
+            Command::Compact {
+                before_us: retention::date_boundary(&before)?.0,
+            },
+        ),
         Action::Commit { socket, receipt } => {
             // stdin avoids remote temporary receipt files.
             let value: Receipt = if receipt.as_os_str() == "-" {
@@ -74,42 +98,5 @@ fn main() -> Result<()> {
     if !retention::client(&socket, &command, &mut std::io::stdout().lock())? {
         std::process::exit(3);
     }
-    Ok(())
-}
-
-fn inspect(path: &std::path::Path) -> Result<()> {
-    use crypto_cta_manager::manager_db::{POSITION_UPDATES_CF, decode_seq_key, encode_seq_key};
-    use rocksdb::{DB, IteratorMode, Options, Range};
-    let mut options = Options::default();
-    options.set_max_open_files(128);
-    let families = DB::list_cf(&options, path)?;
-    anyhow::ensure!(
-        families.iter().any(|f| f == POSITION_UPDATES_CF)
-            && !families.iter().any(|f| f == "uniform_orders"),
-        "expected Manager store, refuse Exec database"
-    );
-    let db = DB::open_cf_for_read_only(&options, path, families, false)?;
-    let cf = db.cf_handle(POSITION_UPDATES_CF).unwrap();
-    let boundary = |mode| -> Result<_> {
-        db.iterator_cf(cf, mode)
-            .next()
-            .transpose()?
-            .map(|(key, _)| decode_seq_key(&key).context("invalid archive key"))
-            .transpose()
-    };
-    let before = retention::cutoff(crypto_cta_manager::kline::now_us());
-    let start = encode_seq_key(1, 0)?;
-    let end = encode_seq_key(before.0, before.1)?;
-    println!(
-        "{}",
-        serde_json::json!({
-            "identity": std::fs::read_to_string(path.join("IDENTITY"))?.trim(),
-            "first": boundary(IteratorMode::Start)?, "last": boundary(IteratorMode::End)?,
-            "eligible_before": before,
-            "estimated_messages": db.property_int_value_cf(cf, "rocksdb.estimate-num-keys")?,
-            "archive_sst_bytes": db.property_int_value_cf(cf, "rocksdb.live-sst-files-size")?,
-            "eligible_sst_bytes_approx": db.get_approximate_sizes_cf(cf, &[Range::new(&start, &end)])[0]
-        })
-    );
     Ok(())
 }

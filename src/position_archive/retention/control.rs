@@ -3,9 +3,9 @@ use super::*;
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     Status,
-    Export,
+    Export { before_us: i64 },
     Commit { receipt: Receipt },
-    Compact,
+    Compact { before_us: i64 },
 }
 #[derive(Serialize, Deserialize)]
 pub struct Reply {
@@ -90,54 +90,7 @@ pub fn start_socket(
                 let Ok(mut stream) = connection else {
                     continue;
                 };
-                let result = (|| -> Result<()> {
-                    use std::io::BufRead;
-                    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-                    stream.set_write_timeout(Some(std::time::Duration::from_secs(120)))?;
-                    let mut request = Vec::new();
-                    std::io::BufReader::new(&stream)
-                        .take(64 * 1024)
-                        .read_until(b'\n', &mut request)?;
-                    ensure!(
-                        request.last() == Some(&b'\n'),
-                        "incomplete/oversized maintenance request"
-                    );
-                    let command: Command = serde_json::from_slice(&request)?;
-                    match command {
-                        Command::Status => reply(
-                            &mut stream,
-                            &Reply::success(Some(archive.retention_status())),
-                        )?,
-                        Command::Export => {
-                            let now = crate::kline::now_us();
-                            can_seal(cutoff(now))?;
-                            let state = archive.seal(now)?;
-                            if state.floor >= state.sealed {
-                                let mut response = Reply::success(None);
-                                response.empty = true;
-                                reply(&mut stream, &response)?;
-                            } else {
-                                reply(&mut stream, &Reply::success(None))?;
-                                archive.export_chunk(&mut stream, now)?;
-                            }
-                        }
-                        Command::Commit { receipt } => {
-                            archive.commit_receipt(&receipt, crate::kline::now_us())?;
-                            reply(
-                                &mut stream,
-                                &Reply::success(Some(archive.retention_status())),
-                            )?;
-                        }
-                        Command::Compact => {
-                            archive.compact_archived()?;
-                            reply(
-                                &mut stream,
-                                &Reply::success(Some(archive.retention_status())),
-                            )?;
-                        }
-                    }
-                    Ok(())
-                })();
+                let result = serve_connection(&archive, &mut stream, &can_seal);
                 if let Err(error) = result {
                     tracing::warn!(error = %error, "position archive maintenance failed");
                     let _ = reply(
@@ -152,6 +105,51 @@ pub fn start_socket(
                 }
             }
         })?;
+    Ok(())
+}
+
+pub(super) fn serve_connection(
+    archive: &PositionArchive,
+    stream: &mut std::os::unix::net::UnixStream,
+    can_seal: &impl Fn(Cursor) -> Result<()>,
+) -> Result<()> {
+    use std::io::BufRead;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(120)))?;
+    let mut request = Vec::new();
+    std::io::BufReader::new(&*stream)
+        .take(64 * 1024)
+        .read_until(b'\n', &mut request)?;
+    ensure!(
+        request.last() == Some(&b'\n'),
+        "incomplete/oversized maintenance request"
+    );
+    let command: Command = serde_json::from_slice(&request)?;
+    match command {
+        Command::Status => reply(stream, &Reply::success(Some(archive.retention_status())))?,
+        Command::Export { before_us } => {
+            let now = crate::kline::now_us();
+            let before = (before_us, 0);
+            validate_before(before, now)?;
+            can_seal(before)?;
+            if archive.retention_floor() >= before {
+                let mut response = Reply::success(None);
+                response.empty = true;
+                reply(stream, &response)?;
+            } else {
+                reply(stream, &Reply::success(None))?;
+                archive.export_prefix(stream, before, now)?;
+            }
+        }
+        Command::Commit { receipt } => {
+            archive.commit_receipt(&receipt, crate::kline::now_us())?;
+            reply(stream, &Reply::success(Some(archive.retention_status())))?;
+        }
+        Command::Compact { before_us } => {
+            archive.compact_archived((before_us, 0))?;
+            reply(stream, &Reply::success(Some(archive.retention_status())))?;
+        }
+    }
     Ok(())
 }
 
@@ -176,7 +174,7 @@ pub fn client(path: &Path, command: &Command, output: &mut impl Write) -> Result
     if response.empty {
         return Ok(false);
     }
-    if matches!(command, Command::Export) {
+    if matches!(command, Command::Export { .. }) {
         std::io::copy(&mut reader, output)?;
     } else {
         serde_json::to_writer(&mut *output, &response)?;

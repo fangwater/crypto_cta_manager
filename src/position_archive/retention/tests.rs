@@ -43,7 +43,11 @@ fn verified_backup_precedes_prune_and_restart_preserves_head_and_current() {
         .append(ts, &strategy(ts, 0.7), vec![], vec![])
         .unwrap();
     let mut output = Vec::new();
-    assert!(archive.export_chunk(&mut output, NOW).unwrap());
+    assert!(
+        archive
+            .export_prefix(&mut output, cutoff(NOW), NOW)
+            .unwrap()
+    );
     assert_eq!(archive.scan_from(0).unwrap().len(), 2);
     let receipt = verify_restore(output.as_slice(), &backup.path().join("db")).unwrap();
     assert_eq!(
@@ -60,7 +64,7 @@ fn verified_backup_precedes_prune_and_restart_preserves_head_and_current() {
     assert_eq!(archive.scan_from(0).unwrap().len(), 2);
     archive.commit_receipt(&receipt, NOW).unwrap();
     archive.commit_receipt(&receipt, NOW).unwrap();
-    archive.compact_archived().unwrap();
+    archive.compact_archived(cutoff(NOW)).unwrap();
     assert_eq!(
         archive
             .db
@@ -90,7 +94,11 @@ fn verified_backup_precedes_prune_and_restart_preserves_head_and_current() {
     let reopened = PositionArchive::open(ManagerDb::open(live.path()).unwrap()).unwrap();
     assert_eq!(reopened.latest_cursor(), (ts, 1));
     assert_eq!(reopened.retention_status().last_receipt, Some(receipt));
-    assert!(!reopened.export_chunk(&mut Vec::new(), NOW).unwrap());
+    assert!(
+        !reopened
+            .export_prefix(&mut Vec::new(), cutoff(NOW), NOW)
+            .unwrap()
+    );
     reopened
         .append(NOW, &strategy(NOW, 3.0), vec![], vec![])
         .unwrap();
@@ -104,7 +112,7 @@ fn truncated_corrupt_trailing_and_conflicting_backups_cannot_issue_receipts() {
         .append(100, &strategy(100, 1.0), vec![], vec![])
         .unwrap();
     let mut bytes = Vec::new();
-    archive.export_chunk(&mut bytes, NOW).unwrap();
+    archive.export_prefix(&mut bytes, cutoff(NOW), NOW).unwrap();
     for length in [0, 15, bytes.len() / 2, bytes.len() - 1] {
         assert!(verify_restore(&bytes[..length], &backup.path().join("truncated")).is_err());
     }
@@ -138,20 +146,21 @@ fn empty_prefix_advances_only_with_verified_receipt_and_chain_is_enforced() {
     let backup = tempfile::tempdir().unwrap();
     let archive = PositionArchive::open(ManagerDb::open(live.path()).unwrap()).unwrap();
     let mut bytes = Vec::new();
-    archive.export_chunk(&mut bytes, NOW).unwrap();
+    archive.export_prefix(&mut bytes, cutoff(NOW), NOW).unwrap();
     let first = verify_restore(bytes.as_slice(), &backup.path().join("db")).unwrap();
     assert_eq!(first.count, 0);
     archive.commit_receipt(&first, NOW).unwrap();
     let later = NOW + 86_400_000_000;
     let mut bytes = Vec::new();
-    archive.export_chunk(&mut bytes, later).unwrap();
+    archive
+        .export_prefix(&mut bytes, cutoff(later), later)
+        .unwrap();
     let second = verify_restore(bytes.as_slice(), &backup.path().join("db")).unwrap();
     assert_eq!(second.previous, Some(first.sha256.clone()));
     let missing_chain = tempfile::tempdir().unwrap();
     assert!(verify_restore(bytes.as_slice(), &missing_chain.path().join("db")).is_err());
     archive.commit_receipt(&second, later).unwrap();
     assert!(archive.commit_receipt(&first, later).is_err());
-    assert_eq!(successor((100, u32::MAX)).unwrap(), (101, 0));
 }
 #[test]
 fn owner_socket_refuses_shared_directory_and_occupied_file() {
@@ -178,7 +187,143 @@ fn exec_column_family_blocks_sealing_before_any_mutation() {
     let db = ManagerDb::open(root.path()).unwrap();
     db.ensure_column_family("uniform_orders").unwrap();
     let archive = PositionArchive::open(db).unwrap();
-    assert!(archive.export_chunk(&mut Vec::new(), NOW).is_err());
+    assert!(
+        archive
+            .export_prefix(&mut Vec::new(), cutoff(NOW), NOW)
+            .is_err()
+    );
     assert_eq!(archive.retention_status().sealed, (1, 0));
     assert!(archive.db.db().get(META).unwrap().is_none());
+}
+
+#[test]
+fn manual_date_is_exclusive_and_retained_month_cannot_be_removed() {
+    let date = date_boundary("2026-10-01").unwrap();
+    assert_eq!(
+        date.0,
+        chrono::DateTime::parse_from_rfc3339("2026-09-30T16:00:00Z")
+            .unwrap()
+            .timestamp_micros()
+    );
+    for value in [
+        "2026-1-1",
+        "2026-02-30",
+        "2026-10-01T00:00:00Z",
+        "1969-12-31",
+    ] {
+        assert!(date_boundary(value).is_err());
+    }
+    let live = tempfile::tempdir().unwrap();
+    let archive = PositionArchive::open(ManagerDb::open(live.path()).unwrap()).unwrap();
+    assert!(
+        archive
+            .export_prefix(&mut Vec::new(), (NOW, 0), NOW)
+            .is_err()
+    );
+    assert_eq!(archive.retention_status().sealed, (1, 0));
+    assert!(archive.db.db().get(META).unwrap().is_none());
+    assert!(archive.compact_archived((200, 0)).is_err());
+}
+
+#[test]
+fn complete_manual_prefix_is_backed_up_before_one_commit_and_boundary_records_survive() {
+    let live = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    let archive = PositionArchive::open(ManagerDb::open(live.path()).unwrap()).unwrap();
+    for ts in 100..400 {
+        archive
+            .append(ts, &strategy(ts, ts as f64), vec![], vec![])
+            .unwrap();
+    }
+    archive
+        .append(400, &strategy(400, 400.), vec![], vec![])
+        .unwrap();
+    archive
+        .append(400, &strategy(400, 401.), vec![], vec![])
+        .unwrap();
+    let mut output = Vec::new();
+    archive.export_prefix(&mut output, (400, 0), NOW).unwrap();
+    assert_eq!(archive.scan_from(0).unwrap().len(), 302);
+    let receipt = verify_restore(output.as_slice(), &backup.path().join("db")).unwrap();
+    assert_eq!(receipt.count, 300);
+    assert_eq!(receipt.to, (400, 0));
+    assert!(receipt.raw_bytes > 16 * 1024);
+    archive.commit_receipt(&receipt, NOW).unwrap();
+    assert_eq!(archive.retention_floor(), (400, 0));
+    assert_eq!(archive.scan_from(400).unwrap().len(), 2);
+    assert!(archive.compact_archived((401, 0)).is_err());
+    archive.compact_archived((400, 0)).unwrap();
+    assert_eq!(archive.scan_from(400).unwrap().len(), 2);
+}
+
+#[test]
+fn live_owner_holds_write_lock_but_manual_planning_can_open_read_only() {
+    let live = tempfile::tempdir().unwrap();
+    let db = ManagerDb::open(live.path()).unwrap();
+    let archive = PositionArchive::open(db.clone()).unwrap();
+    archive
+        .append(100, &strategy(100, 1.), vec![], vec![])
+        .unwrap();
+    assert!(ManagerDb::open(live.path()).is_err());
+    let plan = inspect(live.path(), (200, 0), NOW).unwrap();
+    assert_eq!(plan["requested_before"], serde_json::json!([200, 0]));
+    assert_eq!(plan["floor"], serde_json::json!([1, 0]));
+    assert!(db.db().get(META).unwrap().is_none());
+    assert_eq!(archive.scan_from(0).unwrap().len(), 1);
+}
+
+#[test]
+fn manual_socket_exports_backup_then_owner_commits_and_compacts_once() {
+    use std::os::unix::net::UnixListener;
+    let live = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    let archive =
+        Arc::new(PositionArchive::open(ManagerDb::open(&live.path().join("db")).unwrap()).unwrap());
+    let before = cutoff(crate::kline::now_us());
+    archive
+        .append(before.0 - 1, &strategy(before.0 - 1, 1.), vec![], vec![])
+        .unwrap();
+    archive
+        .append(before.0, &strategy(before.0, 2.), vec![], vec![])
+        .unwrap();
+    let socket = live.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let owner = archive.clone();
+    let serving = std::thread::spawn(move || {
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            control::serve_connection(&owner, &mut stream, &|_| Ok(())).unwrap();
+        }
+    });
+    let mut compressed = Vec::new();
+    client(
+        &socket,
+        &Command::Export {
+            before_us: before.0,
+        },
+        &mut compressed,
+    )
+    .unwrap();
+    let receipt = verify_restore(compressed.as_slice(), &backup.path().join("restored")).unwrap();
+    assert_eq!(receipt.count, 1);
+    let mut status = Vec::new();
+    client(&socket, &Command::Status, &mut status).unwrap();
+    let status: Reply = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status.status.unwrap().floor, (1, 0));
+    // New publications after the backup survive the subsequent prefix deletion.
+    archive
+        .append(before.0 + 1, &strategy(before.0 + 1, 3.), vec![], vec![])
+        .unwrap();
+    client(&socket, &Command::Commit { receipt }, &mut Vec::new()).unwrap();
+    client(
+        &socket,
+        &Command::Compact {
+            before_us: before.0,
+        },
+        &mut Vec::new(),
+    )
+    .unwrap();
+    serving.join().unwrap();
+    assert_eq!(archive.retention_floor(), before);
+    assert_eq!(archive.scan_from(before.0).unwrap().len(), 2);
 }
