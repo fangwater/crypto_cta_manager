@@ -131,6 +131,15 @@ admission. After accepting new binary-format events, preserve that newer DB and
 plan/verify recovery of its new suffix before returning to an older checkpoint;
 the original checkpoint alone cannot contain those later accepted signals.
 
+Before switching binaries, preserve the currently running owner and the installed
+archive/analysis tools on powerleader NVMe. Record their hashes, sizes, modes and
+which candidate helpers were previously absent; verify the saved owner matches
+the running executable. Restore that original set on rollback. Remove a helper
+introduced only by this candidate only when its current hash still matches the
+candidate manifest, so a PB-only helper is not left reading the restored JSON DB.
+Preserve the existing service unit, drop-ins, host TOML and actual process CPU
+affinity during the format rollout.
+
 ## Manual date-based backup/reclamation
 
 The existing manual date script remains the operator workflow; no automatic
@@ -242,3 +251,11 @@ Final validation: 563 library tests and 18 binary tests passed, with 17 existing
 library/operator benchmarks and 19 isolated-PostgreSQL tests ignored; the 12
 manual-workflow Python tests passed. Formatting, all-target compilation, shell
 syntax and the complete release build passed. No frontend or SQL schema changed.
+
+Pre-migration rollback preparation also saved five installed binaries from each
+host under the private evidence root's `rollback-binaries/`. Both running Manager
+executables matched their saved copies, all copied hashes matched, and source
+process/configuration identities stayed unchanged. `nav_cached_marks` was absent
+on both hosts and is recorded as a newly introduced helper for rollback handling.
+Each saved original archive client successfully inspected the preserved original
+JSON checkpoint locally. These steps did not migrate a live DB or restart a service.
