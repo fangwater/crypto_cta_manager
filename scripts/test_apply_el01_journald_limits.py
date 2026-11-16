@@ -13,6 +13,11 @@ spec.loader.exec_module(limits)
 
 
 class JournalLimitsTests(unittest.TestCase):
+    def setUp(self):
+        reporter = patch.object(limits, "progress")
+        self.progress = reporter.start()
+        self.addCleanup(reporter.stop)
+
     def test_archive_preserves_closed_binary_journal_exactly(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -54,6 +59,60 @@ class JournalLimitsTests(unittest.TestCase):
                     self.assertRaises(RuntimeError):
                 limits.archive([journal], root / "missing.tar.gz")
             self.assertTrue(journal.exists())
+
+    def test_rotation_header_change_retries_then_verifies_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            journal = root / "system@old.journal"
+            journal.write_bytes(b"before delayed journal header update")
+            original_run = limits.run
+            compressions = []
+
+            def change_after_tar(*args, **kwargs):
+                result = original_run(*args, **kwargs)
+                if args[0] == "tar":
+                    compressions.append(True)
+                    if len(compressions) == 1:
+                        journal.write_bytes(b"after delayed journal header update")
+                return result
+
+            with patch.object(limits, "JOURNALS", root), \
+                    patch.object(limits, "run", side_effect=change_after_tar), \
+                    patch.object(limits.time, "sleep"):
+                proof = limits.archive([journal], root / "saved.tar.gz")
+            self.assertEqual(len(compressions), 2)
+            self.assertEqual(proof["members"][journal.name],
+                             limits.hashlib.sha256(journal.read_bytes()).hexdigest())
+            self.assertFalse((root / "saved.tar.gz.partial").exists())
+
+    def test_continuous_source_change_stops_without_verified_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            journal = root / "system@old.journal"
+            journal.write_bytes(b"journal")
+            original_run = limits.run
+            compressions = []
+
+            def always_change_after_tar(*args, **kwargs):
+                result = original_run(*args, **kwargs)
+                if args[0] == "tar":
+                    compressions.append(True)
+                    with journal.open("ab") as output:
+                        output.write(b"changing")
+                return result
+
+            with patch.object(limits, "JOURNALS", root), \
+                    patch.object(limits, "run", side_effect=always_change_after_tar), \
+                    patch.object(limits.time, "sleep"), \
+                    self.assertRaisesRegex(RuntimeError, "bounded retries"):
+                limits.archive([journal], root / "saved.tar.gz")
+            self.assertEqual(len(compressions), 3)
+            self.assertFalse((root / "saved.tar.gz").exists())
+
+    def test_command_timeout_reaps_child_and_reports_progress(self):
+        with self.assertRaisesRegex(RuntimeError, "exceeded"):
+            limits.run("/usr/bin/python3", "-c", "import time; time.sleep(30)", timeout=0.05)
+        self.progress.assert_called()
 
 
 if __name__ == "__main__":

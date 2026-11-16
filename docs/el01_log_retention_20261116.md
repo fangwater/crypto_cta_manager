@@ -43,10 +43,12 @@ The backup is on el01, not a powerleader copy. Local operational evidence is at:
 
 ## Prepared only: journald
 
-The el01 account belongs to `sudo`, but the SSH session has no usable sudo
-authentication cache. Noninteractive sudo returns `a password is required`.
+The el01 account belongs to `sudo`, but the automation SSH session has no usable
+sudo authentication cache. Noninteractive sudo returns `a password is required`.
 Group membership alone does not supply authentication. **The journald policy
-has not been installed.** No system logging service was restarted.
+has not been installed.** The first operator-authenticated execution exited
+during post-rotation backup verification (see below); it did not restart the
+system logging service.
 
 `scripts/apply_el01_journald_limits.py` is staged at the same relative path
 under `/home/el01/crypto_cta_manager` and passed its source-host preview. Its
@@ -80,7 +82,33 @@ No automatic backup-removal or remote pull schedule is enabled.
 
 ## Validation
 
-Nine focused Python tests passed, including actual Linux hole punching with an
+Twelve focused Python tests passed, including actual Linux hole punching with an
 open non-append writer, protected recent-tail data, WAL/path/link rejection,
 closed binary-journal backup integrity, and conflicting journald settings.
 `systemd-analyze verify` passed for the log service and timer. No Rust changed.
+
+## First authenticated attempt and repair
+
+The operator authenticated successfully. The attempt began at approximately
+12:55:51 UTC and exited during verification of `closed-after-0.tar.gz` with
+`journal archive content mismatch`. No limit drop-in existed afterward and
+journald retained PID 3108055. Existing backup files are preserved, including
+the earlier, successfully verified closed-journal archive. No new vacuum ran.
+
+The original code assumed files were immediately immutable after rotation.
+Its pre-copy SHA-256 and copied bytes disagreed. A delayed journal-header update
+around rotation is consistent with this race; the error alone does not prove
+which field changed. The repaired script requires the pre-copy source hash,
+archived contents and post-copy source hash to all agree. It retries source
+changes at most three times and stops on corruption or persistent changes.
+An incomplete current-attempt archive is removed only when retrying; previous
+attempts' backup directories are preserved. Limits are installed only after all
+required archives have passed verification.
+
+Progress now reports each stage and a heartbeat every ten seconds for long
+commands. Commands have bounded waits and terminate their subprocess group on
+timeout/interruption. Archive verification streams the tar instead of scanning
+and seeking back through gzip. Installation rollback also handles Ctrl+C.
+New tests reproduce a changing source, persistent changes and a command timeout.
+The operator must rerun the same authenticated command to apply the repaired
+script; staging the repair does not itself modify journald policy.

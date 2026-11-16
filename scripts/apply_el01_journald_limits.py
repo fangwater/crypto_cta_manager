@@ -12,10 +12,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 
 
 MACHINE_ID = "0d5f31f57aa742f3a86c2a7382d6d0a8"
@@ -29,18 +31,50 @@ PROTECTED_NAMES = (
 )
 
 
-def run(*args, data=None):
+def progress(stage, **fields):
+    print(json.dumps({"stage": stage, **fields}), flush=True)
+
+
+def run(*args, data=None, timeout=300):
     # Capture diagnostics: journal text can contain private application data.
-    result = subprocess.run(args, input=data, capture_output=True, check=False)
-    if result.returncode:
-        raise RuntimeError(f"{args[0]} failed (exit {result.returncode}); diagnostics suppressed")
-    return result.stdout.decode()
+    # Report long-running work without exposing captured command output.
+    started = time.monotonic()
+    with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, start_new_session=True) as process:
+        pending = data
+        try:
+            while True:
+                try:
+                    output, _ = process.communicate(input=pending, timeout=min(10, timeout))
+                    break
+                except subprocess.TimeoutExpired:
+                    pending = None
+                    elapsed = time.monotonic() - started
+                    progress("command_running", command=args[0], elapsed_secs=round(elapsed))
+                    if elapsed >= timeout:
+                        raise RuntimeError(f"{args[0]} exceeded {timeout}s; no further steps run")
+        except BaseException:
+            # Stop tar and its compression child together on timeout/Ctrl+C.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            raise
+        if process.returncode:
+            raise RuntimeError(f"{args[0]} failed (exit {process.returncode}); diagnostics suppressed")
+        return output.decode()
 
 
 def digest(stream):
     value = hashlib.sha256()
+    count, last_report = 0, time.monotonic()
     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
         value.update(chunk)
+        count += len(chunk)
+        if time.monotonic() - last_report >= 10:
+            progress("hashing", processed_bytes=count)
+            last_report = time.monotonic()
     return value.hexdigest()
 
 
@@ -106,31 +140,57 @@ def archived_files():
     return sorted(result)
 
 
-def archive(paths, destination):
-    if not paths:
-        return None
-    expected = {}
+def fingerprints(paths):
+    result = {}
     for path in paths:
         with path.open("rb") as source:
-            expected[path.name] = digest(source)
-    run("tar", "--create", "--use-compress-program=gzip -1", "--file", str(destination),
-        "--directory", str(JOURNALS), "--null", "--files-from", "-",
-        data=b"\0".join(os.fsencode(path.name) for path in paths) + b"\0")
-    run("gzip", "--test", str(destination))
-    with tarfile.open(destination, "r:gz") as saved:
-        members = saved.getmembers()
-        if len(members) != len(expected) or {m.name for m in members} != set(expected):
+            result[path.name] = digest(source)
+    return result
+
+
+def archive(paths, destination, attempts=3):
+    if not paths:
+        return None
+    for attempt in range(1, attempts + 1):
+        progress("archive_hash_sources", file_count=len(paths), attempt=attempt)
+        expected = fingerprints(paths)
+        partial = destination.with_name(destination.name + ".partial")
+        if partial.exists() or destination.exists():
+            raise RuntimeError("refusing to overwrite an existing journal backup")
+        progress("archive_compress", file_count=len(paths), attempt=attempt)
+        run("tar", "--create", "--use-compress-program=gzip -1", "--file", str(partial),
+            "--directory", str(JOURNALS), "--null", "--files-from", "-",
+            data=b"\0".join(os.fsencode(path.name) for path in paths) + b"\0")
+        progress("archive_verify", file_count=len(paths), attempt=attempt)
+        run("gzip", "--test", str(partial))
+        actual = {}
+        # Stream once instead of scanning the compressed tar and seeking back.
+        with tarfile.open(partial, "r|gz") as saved:
+            for member in saved:
+                if not member.isfile() or member.name in actual or member.name not in expected:
+                    raise RuntimeError("unexpected or duplicate journal archive member")
+                with saved.extractfile(member) as source:
+                    actual[member.name] = digest(source)
+        if set(actual) != set(expected):
             raise RuntimeError("journal archive member mismatch")
-        for member in members:
-            if not member.isfile():
-                raise RuntimeError("unexpected archive member type")
-            with saved.extractfile(member) as source:
-                if digest(source) != expected[member.name]:
-                    raise RuntimeError("journal archive content mismatch")
-    with destination.open("rb") as source:
-        os.fsync(source.fileno())
-        checksum = digest(source)
-    return {"path": str(destination), "sha256": checksum, "members": expected}
+        after = fingerprints(paths)
+        if actual == expected == after:
+            with partial.open("rb") as source:
+                os.fsync(source.fileno())
+                checksum = digest(source)
+            os.replace(partial, destination)
+            progress("archive_verified", file_count=len(paths), attempt=attempt)
+            return {"path": str(destination), "sha256": checksum, "members": expected}
+        if expected == after:
+            raise RuntimeError("journal backup differs from stable source; no limits installed")
+        # Rotation can complete before journald finishes updating file headers.
+        # Retry only source changes; never accept a mismatched backup.
+        progress("archive_source_changed", changed_files=sum(
+            expected[name] != after[name] for name in expected), attempt=attempt)
+        if attempt == attempts:
+            raise RuntimeError("journals remained unstable after bounded retries; no limits installed")
+        partial.unlink()
+        time.sleep(1)
 
 
 def replace_config(payload, mode=0o644):
@@ -179,6 +239,7 @@ def main():
 
 
 def apply():
+    progress("preflight")
     before = protected()
     old = None
     old_mode = 0o644
@@ -200,6 +261,7 @@ def apply():
         raise RuntimeError("journal backup parent must be private and root-owned")
     backup = base / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     backup.mkdir(mode=0o700)
+    progress("backup_started", backup=str(backup))
     save(backup / "before.json", {"protected": before, "drop_in_existed": old is not None,
          "drop_in_mode": old_mode, "disk_usage": usage_before, "available_bytes": available})
     if old is not None:
@@ -211,6 +273,7 @@ def apply():
     paths = archived_files()
     backups = [archive(paths, backup / "closed-before.tar.gz")]
     backed = {p.name for p in paths}
+    progress("journal_sync_and_rotate")
     run("journalctl", "--sync")
     run("journalctl", "--rotate")
     for attempt in range(3):
@@ -226,13 +289,16 @@ def apply():
         raise RuntimeError("protected application state changed before installation")
     CONFIG.parent.mkdir(mode=0o755, exist_ok=True)
     try:
+        progress("install_limits")
         replace_config(LIMITS)
         effective = run("systemd-analyze", "cat-config", "systemd/journald.conf")
         verify_limits(effective)
         save(backup / "effective-config.json", {"text": effective})
         # A single restart preserves systemd's logging stream descriptors.
+        progress("restart_journald")
         run("systemctl", "restart", "systemd-journald.service")
         run("systemctl", "is-active", "--quiet", "systemd-journald.service")
+        progress("vacuum_archived_journals")
         run("journalctl", "--directory", str(JOURNALS), "--vacuum-size=1G", "--vacuum-time=7days")
         run("journalctl", "--sync")
         after = protected()
@@ -243,7 +309,8 @@ def apply():
         print(json.dumps(result), flush=True)
         if before != after:
             raise RuntimeError("protected application state changed; inspect saved result")
-    except Exception:
+    except BaseException:
+        progress("restore_previous_limits")
         if old is None:
             CONFIG.unlink(missing_ok=True)
         else:
