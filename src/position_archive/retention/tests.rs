@@ -1,6 +1,30 @@
 use super::*;
 use crate::order_config::TargetPosition;
 const NOW: i64 = 100 * 86_400_000_000;
+
+#[test]
+fn thirty_day_analysis_keeps_three_additional_days_before_reclamation() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-16T04:00:00Z")
+        .unwrap()
+        .timestamp_micros();
+    let safe = date_boundary("2026-10-14").unwrap();
+    let too_recent = date_boundary("2026-10-15").unwrap();
+    assert!(validate_before(safe, now).is_ok());
+    assert!(validate_before(too_recent, now).is_err());
+    assert!(validate_before(cutoff(now), now).is_ok());
+    assert!(cutoff(now).0 <= now - 33 * 86_400_000_000 - 600_000_000);
+
+    let live = tempfile::tempdir().unwrap();
+    let archive = PositionArchive::open(ManagerDb::open(live.path()).unwrap()).unwrap();
+    assert!(
+        archive
+            .export_prefix(&mut Vec::new(), too_recent, now)
+            .is_err()
+    );
+    assert_eq!(archive.retention_status().sealed, (1, 0));
+    assert!(archive.db.db().get(META).unwrap().is_none());
+    assert!(inspect(live.path(), too_recent, now).is_err());
+}
 fn strategy(ts: i64, qty: f64) -> PositionStrategy {
     PositionStrategy {
         strategy_name: "alpha".into(),

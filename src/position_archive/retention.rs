@@ -25,8 +25,11 @@ pub fn predecessor(cursor: Cursor) -> Option<Cursor> {
 }
 pub fn cutoff(now: i64) -> Cursor {
     const DAY: i64 = 86_400_000_000;
+    const ANALYSIS_DAYS: i64 = 30;
+    const REDUNDANCY_DAYS: i64 = 3;
     (
-        ((now - 30 * DAY).div_euclid(DAY) * DAY - 600_000_000).max(1),
+        ((now - (ANALYSIS_DAYS + REDUNDANCY_DAYS) * DAY).div_euclid(DAY) * DAY - 600_000_000)
+            .max(1),
         0,
     )
 }
@@ -57,7 +60,7 @@ fn validate_before(before: Cursor, now: i64) -> Result<()> {
     );
     ensure!(
         before <= cutoff(now),
-        "requested date would remove retained monthly signals; choose an earlier date"
+        "requested date would remove retained 33-day signals; choose an earlier date"
     );
     Ok(())
 }

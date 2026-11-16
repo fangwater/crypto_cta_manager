@@ -13,6 +13,12 @@ At the November 16 inspection, both stores still had floor/sealed `(1, 0)` and
 no archive receipt. The example boundary below is **exclusive October 15, 2026,
 00:00 Asia/Shanghai**, retaining more than the required recent 30 days:
 
+The operator subsequently requested a three-day redundancy window. New owner
+builds enforce **33 days plus the existing execution guard**. For a November 16
+run, the proposed boundary is now **October 14, 00:00 Asia/Shanghai**. The table
+and candidate hashes below describe the earlier October 15 preview/package;
+that package must be replaced by a verified 33-day candidate before deployment.
+
 | Host | Manager database | Approximate eligible SST bytes |
 | --- | --- | ---: |
 | el01 | `/home/el01/crypto_cta_manager/db` | 12,734,910,348 (11.86 GiB) |
@@ -96,11 +102,38 @@ retain the checkpoint-aware JSON owner. Returning to the old checkpoint-unaware
 owner requires a separately verified restoration of the reclaimed prefix; the
 old executable alone is insufficient for correct theoretical reconstruction.
 
+## Reduce the one-time restart interruption
+
+Finish uploads, candidate checksum checks, executable/log/config preservation
+and configuration preparation before stopping Manager. Stop/start only one host
+at a time. Before stopping, require a healthy, empty archive backlog; normal
+graceful shutdown closes admission and drains accepted archive work (currently
+up to ten seconds). Keep the existing service stop resources and do not force
+kill a process to shorten the window. Start the replacement immediately; begin
+bulk archival only after publication readiness has been verified.
+
+Current startup already runs account-mode verification with concurrency four
+and starts NAV/history warming after binding the API. Keep required account-mode
+and publication-permission checks. A systemd `active` state alone does not prove
+publication readiness; observe the API/catalog and archive health before
+declaring the interruption over. No measured upper bound for the live restart
+has been established.
+
+Exec, Redis and the monitor remain running with their current targets. Requests
+sent during the Manager gap can fail. The generic `manager_publish_client.py`
+currently has no automatic request retry, and arbitrary POST retries do not
+guarantee ordered, duplicate-free history after an ambiguous response. If every
+signal must survive the gap, coordinate an upstream queue/ordered-delivery
+barrier first, with safe handling of uncertain acknowledgements. Do not claim
+this exists merely because the Manager drains its own already accepted queue.
+Otherwise choose a quiet publisher interval and report failed requests rather
+than promising an invisible restart.
+
 ## Keep growth bounded
 
 One reclamation releases accumulated history; it does not cap subsequent growth.
-Repeat the explicit-date procedure, retaining at least 30 days plus the execution
-buffer. Weekly manual runs retain roughly 30–37 days plus the buffer. Older
+Repeat the explicit-date procedure, retaining at least 33 days plus the execution
+buffer. Weekly manual runs retain roughly 33–40 days plus the buffer. Older
 signals remain on powerleader NVMe. When powerleader is unavailable, retain
 original records and retry later. No continuously connected peer is required.
 No timer or automatic date selection has been installed; this preserves the

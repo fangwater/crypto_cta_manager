@@ -50,9 +50,10 @@ For example, `--before 2026-10-01` excludes all records on/after
 2026-10-01 00:00 Beijing time (2026-09-30 16:00 UTC). All same-timestamp sequence
 numbers at the boundary are retained. Retrying never extends the date to today.
 
-Manager rejects a date that would remove its retained monthly history. The
-maximum safe boundary is UTC midnight at least 30 days ago minus ten minutes
-for execution schedules and signal matching. An older manually chosen date
+Manager preserves the 30-day analysis window plus three additional days. It
+rejects a date that would remove this retained 33-day history. The maximum safe
+boundary is UTC midnight at least 33 days ago minus ten minutes for execution
+schedules and signal matching. An older manually chosen date
 retains more history. Without another manual run, retention grows rather than
 advancing automatically.
 
