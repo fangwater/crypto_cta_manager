@@ -62,11 +62,51 @@ private powerleader NVMe archive, with each member hash independently checked:
 
 `before-monitor.tar.gz` preserves only those three explicit files and its
 manifest; no environment/credential file was included. The pre-change footprint
-records 112 protected process identities and 49 configuration hashes. Detailed
+records 112 process identities and 49 configuration hashes. Detailed
 diagnostics are in the local ignored `artifacts/leverage_alerts_20261116/`.
 
-Deployment must first run the exact staged candidate with the complete host
-configuration using `--once --dry-run`, then replace only `bin/cta_monitor` and
-restart it through the existing Manager-root `start_monitor.sh`. The config,
-Manager, Exec, Redis, Viz and other trading processes must retain their baseline
-identities/settings. Deployment results are recorded below after verification.
+## Deployment and live verification
+
+Source commit `762a25c` was pushed to `origin/main`. The exact staged binary was
+SHA-256 verified and ran against the complete, unchanged host configuration with
+`--once --dry-run`: zero faults and one ONEUSDT 4x informational notice. Only
+`bin/cta_monitor` was then replaced atomically, and the existing Manager-root
+`start_monitor.sh` restarted that process at 02:59:28 UTC (10:59:28 Shanghai).
+
+The new monitor is PID `169681`, with start ticks `999802655` and SHA-256
+`46e840cf243a6092960510868b370e24cc3b0c0f2f91d297a8b62dd953ac7c5d`.
+Exactly one monitor instance was present. All 96 other protected application
+process identities and CPU affinities, all 49 configuration hashes, and the
+Manager RocksDB identity were unchanged. In particular, Manager remained PID
+`2471569` and trade07 pre-trade remained PID `1252324`.
+
+The initial broad process comparison also included transient PostgreSQL children
+and failed when two had exited. A later comparison saw one additional baseline
+child exit and two new children. The evidence does not retain the departed
+children's precise roles, so it cannot establish their exact causes of exit.
+PostgreSQL's master PID `509018`, all six original main/background children, and
+every surviving baseline PostgreSQL identity retained their start ticks and
+affinities. These deltas are recorded explicitly in `deployment-proof.json`;
+this is not a claim that every PostgreSQL PID stayed unchanged.
+
+Logs through 03:08:12 UTC covered approximately 8 minutes 44 seconds after
+restart. There was exactly one successful initial ONEUSDT fallback notification
+at 02:59:40.989444 UTC, with no further notice, fault or recovery sends and no
+send-error log entries. Seven read-only guard samples over the final two minutes
+covered three distinct guard updates: no source/symbol errors, ONEUSDT always
+4x with a 200,000 USDT cap, and observation ages between 9.9 and 51.2 seconds.
+The monitor start identity and executable hash remained unchanged throughout.
+This bounded observation supports the deployment check; regression tests cover
+the slow-I/O and transient-evidence cases that were not induced on the live host.
+
+The private NVMe incident archive retains `install.json`, `after.json`,
+`after-final.json`, `deployment-proof.json`, `live-observation.json` and cleanup
+proof. After verifying the original binary inside the NVMe backup again, the
+exact temporary remote rollback file
+`bin/cta_monitor.rollback.20261116024557Z` was deleted and its absence checked.
+The staging path had already been consumed by the atomic replacement. The
+verified NVMe original-program/log backup remains available for rollback.
+
+No trading process, Manager, Viz, Redis or PostgreSQL service was restarted.
+No exchange leverage, target quantity, account binding, Exec store or live
+position-archive format was changed.
