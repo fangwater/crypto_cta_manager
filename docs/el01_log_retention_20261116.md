@@ -82,7 +82,7 @@ No automatic backup-removal or remote pull schedule is enabled.
 
 ## Validation
 
-Twelve focused Python tests passed, including actual Linux hole punching with an
+Seventeen focused Python tests passed, including actual Linux hole punching with an
 open non-append writer, protected recent-tail data, WAL/path/link rejection,
 closed binary-journal backup integrity, and conflicting journald settings.
 `systemd-analyze verify` passed for the log service and timer. No Rust changed.
@@ -112,3 +112,34 @@ and seeking back through gzip. Installation rollback also handles Ctrl+C.
 New tests reproduce a changing source, persistent changes and a command timeout.
 The operator must rerun the same authenticated command to apply the repaired
 script; staging the repair does not itself modify journald policy.
+
+## Process-guard correction
+
+The next operator-authenticated attempt passed archive verification and then
+exited at `protected application state changed before installation`. This
+guard runs before drop-in installation and service restart. A subsequent check
+still found no drop-in and the original journald PID 3108055.
+
+The original guard compared every matching PostgreSQL process, including
+connection backends and workers, as a fixed service identity. Those children
+normally start and exit while Manager continues serving requests. The corrected
+guard records PostgreSQL, Nginx and Redis children separately when their parent
+is the same executable. Their primary processes remain protected by PID,
+executable path and start time. Every matching Manager/Exec process remains
+strict, including an Exec child process. Manager configuration hash and RocksDB
+identity also remain strict. A missing/restarted primary, an Exec restart,
+PID reuse, added protected service or Manager data change still aborts.
+
+A read-only source comparison against the application-policy snapshot found
+only PostgreSQL process changes (eight removed, seven added); Manager config
+and DB identity matched. The corrected snapshot contained 79 strict service
+processes and 14 auxiliary children. A separate 15-second source observation
+passed the corrected guard with no protected service/data changes.
+
+Both guards persist a complete sanitized before/after diff in the backup
+directory and report service changes explicitly. Successful results are emitted
+only after the final guard passes. Tests cover service-child replacement,
+primary/Exec restart and data changes, plus the complete archive/install/verify
+flow with connection churn and rollback after an actual protected-state change.
+This correction does not itself install the journald limit; authenticated
+execution remains required.

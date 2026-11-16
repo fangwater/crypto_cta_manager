@@ -24,11 +24,13 @@ MACHINE_ID = "0d5f31f57aa742f3a86c2a7382d6d0a8"
 ROOT = Path("/home/el01/crypto_cta_manager")
 JOURNALS = Path("/var/log/journal") / MACHINE_ID
 CONFIG = Path("/etc/systemd/journald.conf.d/90-crypto-cta-log-limits.conf")
+BACKUP_ROOT = Path("/var/backups/crypto-cta-manager-journald")
 LIMITS = b"[Journal]\nSystemMaxUse=1G\nSystemKeepFree=10G\nMaxRetentionSec=7day\nSystemMaxFileSize=64M\n"
 PROTECTED_NAMES = (
     "cta_web", "cta_monitor", "trade_engine", "exec-pre-trade", "persist_manager",
     "viz_server", "config_server", "account_monitor", "redis-server", "postgres", "nginx",
 )
+MULTIPROCESS_SERVICES = {"postgres", "nginx", "redis-server"}
 
 
 def progress(stage, **fields):
@@ -107,8 +109,27 @@ def verify_limits(effective):
         raise RuntimeError("another journald setting overrides the approved limits")
 
 
+def split_processes(rows):
+    """Protect service roots; record replaceable service children separately.
+
+    PostgreSQL starts/exits connection and worker processes during normal use.
+    Nginx/Redis likewise manage child workers. Their master identities remain
+    strict, as do every matching Manager/Exec process and the Manager data.
+    """
+    by_pid = {row[0]: row for row in rows}
+    stable, auxiliary = [], []
+    for pid, executable, started, parent in rows:
+        parent_row = by_pid.get(parent)
+        name = Path(executable.removesuffix(" (deleted)")).name
+        if name in MULTIPROCESS_SERVICES and parent_row and parent_row[1] == executable:
+            auxiliary.append([pid, executable, started, parent])
+        else:
+            stable.append([pid, executable, started])
+    return sorted(stable), sorted(auxiliary)
+
+
 def protected():
-    processes = []
+    rows = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
@@ -117,16 +138,47 @@ def protected():
             if not any(name in Path(executable).name for name in PROTECTED_NAMES):
                 continue
             fields = (entry / "stat").read_text().rsplit(") ", 1)[1].split()
-            processes.append([int(entry.name), executable, fields[19]])
+            rows.append([int(entry.name), executable, fields[19], int(fields[1])])
         except (OSError, IndexError):
             continue
     with (ROOT / "config/cta-manager.toml").open("rb") as source:
         config_digest = digest(source)
+    processes, auxiliary = split_processes(rows)
     return {
-        "processes": sorted(processes),
+        "processes": processes,
+        "auxiliary_processes": auxiliary,
         "manager_config_sha256": config_digest,
         "manager_identity": (ROOT / "db/IDENTITY").read_text().strip(),
     }
+
+
+def protected_diff(before, after):
+    removed = [row for row in before["processes"] if row not in after["processes"]]
+    added = [row for row in after["processes"] if row not in before["processes"]]
+    changed = [key for key in ("manager_config_sha256", "manager_identity")
+               if before[key] != after[key]]
+    old_aux, new_aux = before.get("auxiliary_processes", []), after.get("auxiliary_processes", [])
+    return {"unchanged": not (removed or added or changed),
+            "processes_removed": removed, "processes_added": added, "data_changed": changed,
+            "auxiliary_removed": [row for row in old_aux if row not in new_aux],
+            "auxiliary_added": [row for row in new_aux if row not in old_aux]}
+
+
+def check_protected(before, backup, phase):
+    after = protected()
+    diff = protected_diff(before, after)
+    save(backup / f"protected-{phase}.json", {"after": after, "diff": diff})
+    progress("check_application_services", phase=phase,
+             unchanged=diff["unchanged"], service_processes=len(before["processes"]),
+             auxiliary_added=len(diff["auxiliary_added"]),
+             auxiliary_removed=len(diff["auxiliary_removed"]))
+    if not diff["unchanged"]:
+        # These rows contain only PID/executable/start time, never command lines.
+        progress("application_state_changed", phase=phase,
+                 processes_removed=diff["processes_removed"],
+                 processes_added=diff["processes_added"], data_changed=diff["data_changed"])
+        raise RuntimeError(f"protected service or Manager data changed ({phase}); see saved diff")
+    return after
 
 
 def archived_files():
@@ -211,6 +263,16 @@ def replace_config(payload, mode=0o644):
         temporary.unlink(missing_ok=True)
 
 
+def create_backup_directory():
+    BACKUP_ROOT.mkdir(mode=0o700, exist_ok=True)
+    info = BACKUP_ROOT.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+        raise RuntimeError("journal backup parent must be private and root-owned")
+    backup = BACKUP_ROOT / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup.mkdir(mode=0o700)
+    return backup
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
@@ -254,13 +316,7 @@ def apply():
     maximum_backup = sum(p.stat().st_size for p in JOURNALS.iterdir())
     if available < 10 * 1024**3 + 2 * maximum_backup:
         raise RuntimeError("insufficient journal backup headroom above 10 GiB reserve")
-    base = Path("/var/backups/crypto-cta-manager-journald")
-    base.mkdir(mode=0o700, exist_ok=True)
-    info = base.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
-        raise RuntimeError("journal backup parent must be private and root-owned")
-    backup = base / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    backup.mkdir(mode=0o700)
+    backup = create_backup_directory()
     progress("backup_started", backup=str(backup))
     save(backup / "before.json", {"protected": before, "drop_in_existed": old is not None,
          "drop_in_mode": old_mode, "disk_usage": usage_before, "available_bytes": available})
@@ -285,8 +341,7 @@ def apply():
     if any(p.name not in backed for p in archived_files()):
         raise RuntimeError("journals rotate too quickly; limits were not installed")
     save(backup / "archives-verified.json", [b for b in backups if b])
-    if protected() != before:
-        raise RuntimeError("protected application state changed before installation")
+    check_protected(before, backup, "before-install")
     CONFIG.parent.mkdir(mode=0o755, exist_ok=True)
     try:
         progress("install_limits")
@@ -301,14 +356,13 @@ def apply():
         progress("vacuum_archived_journals")
         run("journalctl", "--directory", str(JOURNALS), "--vacuum-size=1G", "--vacuum-time=7days")
         run("journalctl", "--sync")
-        after = protected()
+        after = check_protected(before, backup, "after-install")
         result = {"applied": True, "backup": str(backup), "disk_usage_before": usage_before,
             "disk_usage_after": run("journalctl", "--directory", str(JOURNALS), "--disk-usage").strip(),
-            "protected_processes": len(before["processes"]), "protected_state_unchanged": before == after}
+            "protected_processes": len(before["processes"]), "protected_state_unchanged": True,
+            "auxiliary_processes_observed": len(after["auxiliary_processes"])}
         save(backup / "result.json", result)
         print(json.dumps(result), flush=True)
-        if before != after:
-            raise RuntimeError("protected application state changed; inspect saved result")
     except BaseException:
         progress("restore_previous_limits")
         if old is None:
