@@ -315,6 +315,29 @@ pub fn once(
     reclaim: bool,
     now_us: i64,
 ) -> Result<PullResult> {
+    once_inner(config, host, run, reclaim, now_us, true)
+}
+
+/// Explicit operator invocations may drain a backlog without a daemon cooldown.
+/// This does not change or enable the separately selected watch cadence.
+pub fn operator_once(
+    config: &PullConfig,
+    host: &PullHost,
+    run: bool,
+    reclaim: bool,
+    now_us: i64,
+) -> Result<PullResult> {
+    once_inner(config, host, run, reclaim, now_us, false)
+}
+
+fn once_inner(
+    config: &PullConfig,
+    host: &PullHost,
+    run: bool,
+    reclaim: bool,
+    now_us: i64,
+    enforce_interval: bool,
+) -> Result<PullResult> {
     config.validate()?;
     ensure!(
         !reclaim || run,
@@ -398,7 +421,7 @@ pub fn once(
     );
     result.segment = Some(s.id.clone());
     let attempt = directory.join("last-attempt.json");
-    if attempt.exists() {
+    if enforce_interval && attempt.exists() {
         let old: Attempt = json_file(&attempt)?;
         if now_us.saturating_sub(old.at_us) < (config.interval_secs * 1_000_000) as i64 {
             result.deferred = true;

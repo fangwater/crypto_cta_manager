@@ -1,6 +1,8 @@
-# Hourly archival with powerleader-initiated cold-store transfer
+# Minute-batched local archival with operator-controlled public SCP pull
 
-Operator direction, 2026-11-16: maintenance frequency must be hourly or slower.
+Latest operator direction, 2026-11-16: Manager maintenance may run once per
+minute with a strict record cap; powerleader pull is controlled explicitly by
+the operator. This supersedes the earlier hourly Manager policy.
 Manager briefly uses a local cold store for archival; powerleader actively
 requests a durable source-side package, pulls verified old files and
 initiates removal of the source cold data. This supersedes the proposed direct
@@ -28,7 +30,7 @@ this does not promise zero disk I/O or instant physical file reclamation.
 
 ## Manager's local archival task
 
-- Minimum interval 3,600 seconds; default one hour. Do not open cold stores on
+- Minimum/default Manager interval 60 seconds; default at most 1,000 records. Do not open cold stores on
   every signal, cache writable cold handles globally or run overlapping jobs.
 - Start only after sustained low load: inspect Manager's actual CPU affinity,
   storage pressure and publication/archive backlog, not only host-wide CPU.
@@ -67,15 +69,15 @@ the verified hot originals and the hot progress cursor together. If the cold
 write succeeded but hot cleanup did not, retry the same keys idempotently,
 reject conflicting destination data and never skip the unconfirmed prefix.
 
-Batch caps and hourly cadence must support the actual incoming record/byte
-rate, with headroom for catching up existing history. A single small batch per
-hour below the arrival rate would continue growing the hot backlog. Measure
+Batch caps and the configured Manager cadence must support the actual incoming record/byte
+rate, with headroom for catching up existing history. A bounded batch whose throughput stays
+below the arrival rate would continue growing the hot backlog. Measure
 arrival and archival throughput/oldest-pending age before selecting limits;
 do not promise bounded storage from a count limit alone.
 
 ## Powerleader's independent task
 
-- Run hourly or slower, staggered from Manager's local archival task. Acquire
+- Run only when the operator invokes the local Rust pull command. Acquire
   the same source maintenance lock/lease; if busy, skip rather than pile up
   writers. The lease must survive independent restarts safely.
 - Act through SSH/source-side helpers for the source filesystem. Do not mount
@@ -134,23 +136,29 @@ On the source host, opt in using its existing Manager TOML:
 ```toml
 [archive.cold]
 root = "/home/el01/crypto_cta_manager/cold-signals"
-interval_secs = 3600
-quiet_secs = 120
+interval_secs = 60
+quiet_secs = 30
 max_cpu_percent = 35.0
 max_io_pressure_percent = 1.0
+min_free_bytes = 10737418240
 
 [archive.cold.limits]
-max_records = 20000
+max_records = 1000
 max_bytes = 67108864
+
+[archive.cold.reclaim]
+max_input_bytes = 16777216
+max_files = 4
 ```
 
 The root must be separate from hot/Exec stores, including resolved symlinks.
 The cold directory is private (0700). The worker samples the busiest CPU in
 Manager's actual affinity and Linux I/O PSI; missing telemetry or outstanding
 archive persistence blocks maintenance. A dedicated low-priority thread runs
-one attempt, with a persisted hourly attempt marker. It never explicitly forces
-hot compaction. Hot space becomes physically free through normal RocksDB
-compaction, so deletion is not an immediate disk-space guarantee.
+one attempt with a persisted minute interval across restarts. Initial sampling
+and 30 seconds of sustained quiet are required before the first attempt.
+Each attempt also permits at most one small hot reclamation operation. See
+[minute maintenance verification](position_archive_minute_maintenance_20261116.md).
 
 Health exposes `cold_archive`: running/deferred/error state, recent count/bytes,
 oldest hot timestamp, expired age and estimated hot key count. Batch selection
@@ -170,12 +178,16 @@ set -a
 set +a
 cta_archive_pull --config /absolute/private/archive-pull/powerleader.toml --host el01
 cta_archive_pull --config /absolute/private/archive-pull/powerleader.toml --host el01 --run
-cta_archive_pull --config /absolute/private/archive-pull/powerleader.toml --host el01 --run --reclaim-source --watch
+cta_archive_pull --config /absolute/private/archive-pull/powerleader.toml --host el01 --run --reclaim-source --max-segments 1440
 ```
 
-Default invocation is a source inventory preview. One run handles at most one
-segment; `--watch` waits at least an hour between attempts. Start a separate
-host-selected process for jp-meta. No scheduler is installed automatically.
+Default invocation previews source inventory. A manual run handles one segment
+unless `--max-segments N` explicitly selects a finite batch (maximum 4096);
+manual invocations do not inherit a daemon cooldown. Each segment still passes
+independent durable verification before its exact source deletion. Select
+jp-meta explicitly for that host. No pull process, timer or schedule is enabled
+by Manager. The existing optional `--watch` requires explicit operator invocation
+and retains its separately configured hourly-or-slower interval.
 The dedicated Rust executable uses numeric **public IPv4 only**, `ssh -F
 /dev/null`, strict host-key checks, no ProxyJump/ProxyCommand, no forwarding and
 no private/default-route fallback. Endpoint values live in a private environment
@@ -190,7 +202,7 @@ self-contained RocksDB gzip bundle under `.packages/YYYY-MM-DD/<segment-id>/`,
 fsyncs and publishes `original.rocks.gz` with `package.json` atomically. This is
 local export work under low CPU/I/O priority. Subsequent network attempts reuse
 the file and its length/SHA-256 without rereading/exporting RocksDB. Manager's
-hourly one-WriteBatch limit is unchanged: a daily folder can contain several
+one-WriteBatch-per-attempt limit remains: a daily folder can contain several
 bounded files, without constructing a huge daily database write.
 
 The Rust pull binary invokes **SCP/SFTP over the fixed numeric public IP** for
@@ -218,3 +230,37 @@ activity and terminal state. Queue-position estimates are diagnostic and are
 not inputs to Manager's core FIFO NAV. On non-colo el01, queue estimates and
 receive latency are particularly sensitive to network/report delays; they do
 not invalidate factual exchange fills. No Exec family is purged by this feature.
+
+
+## Small hot reclamation and disk headroom
+
+After a maintenance attempt, process at most one signal column family/range.
+Prefer whole obsolete non-L0 SST removal through RocksDB's own API, with a
+closed group of no more than four overlapping files wholly below the verified
+retention boundary. This operation rewrites no data. Unknown, L0 or boundary-
+straddling overlap prevents this fast path. PB target/observation/snapshot CFs
+rotate between attempts; JSON stores process only `position_updates`.
+
+For small manual range compaction, include full transitive SST overlaps across
+all levels plus the entire observed memtable footprint in a conservative
+16 MiB / four-file preflight. Larger work is skipped; existing background
+compaction continues. Never compact the full database, default CF, Kline or
+Exec stores. Active archive readers/background compaction defer reclamation;
+manual compaction is nonexclusive and never requests a level move. The observed
+input budget is not a hard CPU/time/physical-I/O limit: RocksDB works in SSTs,
+can expand work at file boundaries, and metadata can change concurrently.
+
+Before new cold copies, require at least `min_free_bytes` (default 10 GiB)
+plus four times the maximum WriteBatch bytes on both hot and cold filesystems.
+Before small compaction, reserve four times its input budget in addition to the
+same minimum. Failed/unknown disk telemetry stops new copies. Fully obsolete
+file removal can still free space without creating a replacement SST.
+The status includes the last reclamation action, observed input, duration,
+defer reason and error. All signal readers clamp to the durable retention floor
+so obsolete physical versions cannot re-enter theory/checkpoint replay.
+
+These controls limit maintenance-induced pressure. They do not bound all future
+hot writes if the operator never pulls cold data: a stopped copy task can leave
+hot history growing. Source-side package generation is separate from this
+Manager disk check. Free capacity and successful manual backup/reclamation must
+still be maintained; no unconditional never-full guarantee is made.

@@ -16,22 +16,31 @@ pub struct Settings {
     pub max_cpu_percent: f64,
     pub max_io_pressure_percent: f64,
     pub limits: BatchLimits,
+    pub reclaim: reclaim::Settings,
+    pub min_free_bytes: u64,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             root: PathBuf::new(),
-            interval_secs: 3600,
-            quiet_secs: 120,
+            interval_secs: 60,
+            quiet_secs: 30,
             max_cpu_percent: 35.,
             max_io_pressure_percent: 1.,
             limits: BatchLimits::default(),
+            reclaim: reclaim::Settings::default(),
+            min_free_bytes: space::DEFAULT_MIN_FREE_BYTES,
         }
     }
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
         self.limits.validate()?;
+        self.reclaim.validate()?;
+        ensure!(
+            self.min_free_bytes <= 1024 * 1024 * 1024 * 1024 * 1024,
+            "invalid disk reserve"
+        );
         ensure!(
             self.root.is_absolute()
                 && self
@@ -41,9 +50,9 @@ impl Settings {
             "cold.root must be an absolute path without parent components"
         );
         ensure!(
-            (3600..=31 * 86400).contains(&self.interval_secs)
+            (60..=31 * 86400).contains(&self.interval_secs)
                 && (30..=3600).contains(&self.quiet_secs),
-            "cold interval must be hourly or slower, with a bounded quiet period"
+            "cold interval must be at least one minute, with a bounded quiet period"
         );
         ensure!(
             self.max_cpu_percent.is_finite()
@@ -70,11 +79,13 @@ pub struct Status {
     pub io_pressure_percent: Option<f64>,
     pub deferred_reason: Option<String>,
     pub last_error: Option<String>,
+    pub hot_reclaim: Option<reclaim::Report>,
 }
 pub(crate) struct State {
     pub settings: Settings,
     pub root: ColdRoot,
     pub status: Mutex<Status>,
+    pub reclaim_cursor: std::sync::atomic::AtomicUsize,
 }
 impl State {
     pub fn open(db: &ManagerDb, settings: Settings) -> Result<Self> {
@@ -111,6 +122,7 @@ impl State {
         Ok(Self {
             settings,
             root,
+            reclaim_cursor: std::sync::atomic::AtomicUsize::new(0),
             status: Mutex::new(Status {
                 last_attempt_us: last,
                 ..Default::default()
@@ -128,7 +140,7 @@ fn successor(k: Cursor) -> Result<Cursor> {
 }
 
 impl PositionArchive {
-    /// At most one cold DB transaction; no forced hot compaction.
+    /// At most one cold transaction and one small hot reclamation per attempt.
     pub fn archive_cold_once(&self, now_us: i64) -> Result<Option<Segment>> {
         let state = self
             .cold
@@ -142,16 +154,22 @@ impl PositionArchive {
         if status.last_attempt_us.is_some_and(|t| {
             now_us.saturating_sub(t) < state.settings.interval_secs as i64 * 1_000_000
         }) {
-            status.deferred_reason = Some("hourly interval".into());
+            status.deferred_reason = Some("configured maintenance interval".into());
             return Ok(None);
         }
-        self.db
-            .db()
-            .put_opt(LAST_ATTEMPT, now_us.to_be_bytes(), &sync_options())?;
+        if let Err(error) =
+            self.db
+                .db()
+                .put_opt(LAST_ATTEMPT, now_us.to_be_bytes(), &sync_options())
+        {
+            status.last_error = Some(error.to_string());
+            return Err(error.into());
+        }
         status.last_attempt_us = Some(now_us);
         status.running = true;
         drop(status);
         let result = self.archive_cold_inner(now_us);
+        let reclaim = self.reclaim_hot_once();
         let cf = self.db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
         let oldest = self
             .db
@@ -169,6 +187,7 @@ impl PositionArchive {
             .flatten();
         let mut status = state.status.lock().unwrap();
         status.running = false;
+        status.hot_reclaim = Some(reclaim);
         status.oldest_hot_received_at_us = oldest;
         status.expired_hot_age_secs =
             oldest.map(|t| retention::cutoff(now_us).0.saturating_sub(t).max(0) / 1_000_000);
@@ -210,6 +229,11 @@ impl PositionArchive {
         if original.floor >= before {
             return Ok(None);
         }
+        // Reserve space for both hot/cold copies, WAL/SST flushes and temporary
+        // files. A deferred copy still allows metadata-only old SST reclamation.
+        let temporary = (cold.settings.limits.max_bytes as u64).saturating_mul(4);
+        space::require(self.db.path(), cold.settings.min_free_bytes, temporary)?;
+        space::require(cold.root.path(), cold.settings.min_free_bytes, temporary)?;
         let mut rows = Vec::new();
         let mut bytes = 0;
         let mut day = None;
@@ -532,11 +556,13 @@ pub fn lower_priority() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     const DAY: i64 = 86_400_000_000;
-    const NOW: i64 = 100 * DAY;
-    fn setup(legacy: bool) -> (tempfile::TempDir, PositionArchive, Vec<(Cursor, Vec<u8>)>) {
+    pub(crate) const NOW: i64 = 100 * DAY;
+    pub(crate) fn setup(
+        legacy: bool,
+    ) -> (tempfile::TempDir, PositionArchive, Vec<(Cursor, Vec<u8>)>) {
         let temp = tempfile::tempdir().unwrap();
         let db = ManagerDb::open(&temp.path().join("hot")).unwrap();
         let (mut rows, _, _) = super::super::tests::records(10 * DAY, 5);
@@ -615,7 +641,7 @@ mod tests {
             .unwrap()
     }
     #[test]
-    fn json_and_pb_archive_bounded_oldest_prefix_with_durable_hourly_cadence() {
+    fn json_and_pb_archive_bounded_oldest_prefix_with_durable_minute_cadence() {
         for legacy in [true, false] {
             let (temp, a, originals) = setup(legacy);
             assert_eq!(a.hot_format(), if legacy { "json" } else { "protobuf" });
@@ -642,8 +668,8 @@ mod tests {
                 Some(settings),
             )
             .unwrap();
-            assert!(a.archive_cold_once(NOW + 3_599_000_000).unwrap().is_none());
-            let next = a.archive_cold_once(NOW + 3_600_000_000).unwrap().unwrap();
+            assert!(a.archive_cold_once(NOW + 59_000_000).unwrap().is_none());
+            let next = a.archive_cold_once(NOW + 60_000_000).unwrap().unwrap();
             assert_eq!(
                 (next.first, next.last, next.count),
                 (originals[2].0, originals[3].0, 2)
@@ -770,5 +796,85 @@ mod tests {
             .unwrap();
         drop(guard);
         assert!(handle.join().unwrap().unwrap().is_some());
+    }
+
+    #[test]
+    fn one_minute_defaults_validate_and_low_disk_retains_unsealed_originals() {
+        let settings = Settings::default();
+        assert_eq!(settings.interval_secs, 60);
+        assert_eq!(settings.limits.max_records, 1000);
+        assert!(
+            Settings {
+                interval_secs: 59,
+                ..settings.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        let (_temp, mut archive, original) = setup(true);
+        archive.cold.as_mut().unwrap().settings.min_free_bytes = 1 << 50;
+        assert!(archive.archive_cold_once(NOW).is_err());
+        assert_eq!(archive.retention_status().sealed, (1, 0));
+        assert!(
+            archive
+                .cold
+                .as_ref()
+                .unwrap()
+                .root
+                .pending()
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            archive
+                .cold_status()
+                .unwrap()
+                .last_error
+                .unwrap()
+                .contains("disk headroom")
+        );
+        assert_eq!(archive.scan_from(0).unwrap().len(), original.len());
+        archive.cold.as_mut().unwrap().settings.min_free_bytes = 0;
+        assert_eq!(
+            archive
+                .archive_cold_once(NOW + 60_000_000)
+                .unwrap()
+                .unwrap()
+                .count,
+            2
+        );
+    }
+
+    #[test]
+    fn public_readers_never_replay_physical_rows_below_the_verified_floor() {
+        let (_temp, archive, rows) = setup(true);
+        archive.archive_cold_once(NOW).unwrap().unwrap();
+        // Simulate an obsolete older version surviving physical SST reclamation.
+        let cf = archive.db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
+        for (key, value) in &rows[..2] {
+            archive
+                .db
+                .db()
+                .put_cf(
+                    &cf,
+                    encode_seq_key(key.0, key.1).unwrap(),
+                    serde_json::to_vec(&codec::decode(value).unwrap()).unwrap(),
+                )
+                .unwrap();
+        }
+        let mut seen = vec![];
+        archive
+            .visit_target_updates_through(NOW, |m| {
+                seen.push((m.received_at_us, m.seq));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            seen,
+            rows[2..].iter().map(|(key, _)| *key).collect::<Vec<_>>()
+        );
+        let page: Vec<PositionUpdateMsg> =
+            serde_json::from_slice(&archive.raw_json_page(None, 100).unwrap()).unwrap();
+        assert_eq!(page.len(), rows.len() - 2);
     }
 }

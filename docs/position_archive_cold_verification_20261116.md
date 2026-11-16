@@ -1,5 +1,9 @@
 # Cold archive and public file pull verification, 2026-11-16
 
+This records the earlier `d8b1491` candidate. The subsequent minute-batched
+Manager and operator-controlled pull changes are documented in
+[minute maintenance verification](position_archive_minute_maintenance_20261116.md).
+
 The Rust implementation follows the operator's final instruction: export and
 verify a file locally on the source, then SCP the completed file over public IP.
 It does not stream a live RocksDB export over the transfer connection. Packages

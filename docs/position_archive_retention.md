@@ -1,9 +1,9 @@
 # Manual position signal backup and RocksDB reclamation
 
 The operator's latest automatic-storage direction is recorded in
-[the hourly local-cold and powerleader pull design](position_archive_cold_design.md).
+[the local-cold and operator-controlled powerleader pull design](position_archive_cold_design.md).
 The Rust cold worker and `cta_archive_pull` are implemented separately from the
-manual workflow below; no live hourly timer has been enabled.
+manual workflow below; no live timer has been enabled.
 
 For the immediate accumulation problem on the currently deployed JSON stores,
 see [the prepared JSON-only online reclamation plan](position_archive_accumulation_20261116.md).

@@ -373,9 +373,14 @@ existing JSON numeric parsing boundary and immutable financial fingerprints.
 By operator instruction on 2026-11-16, optional `[archive.cold]` may keep an
 existing all-JSON hot store writing JSON, without a bulk format migration.
 Retain 33 days plus the execution guard in hot storage; move the oldest expired
-prefix into at most one count/byte-bounded PB cold WriteBatch hourly or slower,
+prefix into at most one count/byte-bounded PB cold WriteBatch per minute (latest
+operator instruction; default 1,000 records, 64 MiB),
 only after sustained low CPU/I/O and no archive persistence backlog. Close cold
-handles after each batch. Source-side helpers export verified, closed files
+handles after each batch. At most one small hot-CF reclamation runs per attempt:
+prefer whole expired SST deletion; small range compaction preflights full overlap
+and memtable bytes, skipping oversized work. Keep disk headroom checks and
+33-day checkpoints. Powerleader pull is explicitly operator-controlled; Manager
+must not schedule or initiate network transfers. Source-side helpers export verified, closed files
 locally under Shanghai-date folders before network transfer. The dedicated
 powerleader `cta_archive_pull` uses pinned public IPv4 SCP, verifies durable local
 restores, then reclaims only the exact expired source cold segment/package.

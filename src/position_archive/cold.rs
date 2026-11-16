@@ -12,7 +12,9 @@ use std::path::{Component, Path, PathBuf};
 pub mod manager;
 pub mod package;
 pub mod pull;
+pub mod reclaim;
 pub mod rehearsal;
+pub mod space;
 pub mod wire;
 
 pub type Cursor = (i64, u32);
@@ -46,7 +48,7 @@ pub struct BatchLimits {
 impl Default for BatchLimits {
     fn default() -> Self {
         Self {
-            max_records: 20_000,
+            max_records: 1_000,
             max_bytes: 64 * 1024 * 1024,
         }
     }

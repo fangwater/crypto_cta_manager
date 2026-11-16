@@ -22,6 +22,9 @@ struct Args {
     /// Repeat at the configured hourly-or-slower interval.
     #[arg(long, requires = "run")]
     watch: bool,
+    /// Operator-controlled finite batch; default one segment. Does not start a timer.
+    #[arg(long, requires = "run", conflicts_with = "watch", value_parser = clap::value_parser!(u32).range(1..=4096))]
+    max_segments: Option<u32>,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,8 +34,25 @@ async fn main() -> Result<()> {
     ensure!(a.config.is_absolute(), "pull config must be absolute");
     if a.watch {
         pull::watch(c, a.host, a.reclaim_source).await
+    } else if a.max_segments.is_some_and(|n| n > 1) {
+        let mut results = Vec::new();
+        for _ in 0..a.max_segments.unwrap() {
+            let r = pull::operator_once(
+                &c,
+                &h,
+                true,
+                a.reclaim_source,
+                crypto_cta_manager::kline::now_us(),
+            )?;
+            if r.segment.is_none() {
+                break;
+            }
+            results.push(r);
+        }
+        println!("{}", serde_json::to_string_pretty(&results)?);
+        Ok(())
     } else {
-        let r = pull::once(
+        let r = pull::operator_once(
             &c,
             &h,
             a.run,

@@ -58,18 +58,22 @@ reconnect_interval_ms = 500
 # [archive]
 # socket = "/absolute/manager/root/archive-control/position.sock"
 
-# Optional hourly expired-signal archival. Retains >=33 days + execution guard
-# in hot storage; powerleader's separate cta_archive_pull verifies/reclaims cold.
+# Optional minute-batched local archival. Retains >=33 days + execution guard
+# in hot storage; the operator invokes powerleader's separate cta_archive_pull.
 # Existing JSON hot stores remain JSON; only expired cold records become PB.
 # [archive.cold]
 # root = "/absolute/manager/root/cold-signals"
-# interval_secs = 3600
-# quiet_secs = 120
+# interval_secs = 60
+# quiet_secs = 30
 # max_cpu_percent = 35.0
 # max_io_pressure_percent = 1.0
+# min_free_bytes = 10737418240
 # [archive.cold.limits]
-# max_records = 20000
+# max_records = 1000
 # max_bytes = 67108864
+# [archive.cold.reclaim]
+# max_input_bytes = 16777216
+# max_files = 4
 
 [kline]
 # Enable only after assigning a dedicated non-trading market-data egress.

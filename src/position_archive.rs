@@ -566,7 +566,14 @@ impl PositionArchive {
             .context("position_updates column family disappeared")?;
         let mut iter = self.db.db().iterator_cf(&handle, IteratorMode::End);
         match iter.next() {
-            Some(Ok((key, value))) => self.complete(&key, &value).map(Some),
+            Some(Ok((key, value))) => {
+                if manager_db::decode_seq_key(&key).context("invalid archive key")?
+                    < self.retention_floor()
+                {
+                    return Ok(None);
+                }
+                self.complete(&key, &value).map(Some)
+            }
             Some(Err(error)) => Err(error).context("failed to read latest position update"),
             None => Ok(None),
         }
@@ -577,8 +584,9 @@ impl PositionArchive {
             bail!("position update scan start must not be negative");
         }
         let _retention = self.retention_read();
+        let floor = self.retention_floor();
         anyhow::ensure!(
-            start_received_at_us.max(1) >= self.retention_floor().0,
+            start_received_at_us.max(1) >= floor.0,
             "requested position signals are in the offline archive"
         );
         let handle = self
@@ -594,6 +602,9 @@ impl PositionArchive {
             .iterator_cf(&handle, IteratorMode::From(&start, Direction::Forward));
         for item in iter {
             let (key, value) = item.context("failed to iterate position updates")?;
+            if manager_db::decode_seq_key(&key).context("invalid archive key")? < floor {
+                continue;
+            }
             out.push(self.complete(&key, &value)?);
         }
         Ok(out)
@@ -687,8 +698,9 @@ impl PositionArchive {
             .db()
             .cf_handle(POSITION_UPDATES_CF)
             .context("position_updates column family disappeared")?;
-        let start =
-            manager_db::encode_seq_key(after.map_or(1, |key| key.0), after.map_or(0, |key| key.1))?;
+        let floor = self.retention_floor();
+        let start_key = after.unwrap_or((1, 0)).max(floor);
+        let start = manager_db::encode_seq_key(start_key.0, start_key.1)?;
         let mut batch = Vec::with_capacity(256);
         let mut batch_bytes = 0;
         for item in self
@@ -752,16 +764,12 @@ impl PositionArchive {
             .context("position_updates column family disappeared")?;
         let mut output = Vec::from(&b"["[..]);
         let mut first = true;
-        let start = after
-            .map(|(received_at_us, seq)| manager_db::encode_seq_key(received_at_us.max(1), seq))
-            .transpose()?;
-        let iter = match start.as_ref() {
-            Some(key) => self
-                .db
-                .db()
-                .iterator_cf(&handle, IteratorMode::From(key, Direction::Forward)),
-            None => self.db.db().iterator_cf(&handle, IteratorMode::Start),
-        };
+        let start = after.unwrap_or((1, 0)).max(self.retention_floor());
+        let start = manager_db::encode_seq_key(start.0.max(1), start.1)?;
+        let iter = self
+            .db
+            .db()
+            .iterator_cf(&handle, IteratorMode::From(&start, Direction::Forward));
         let mut count = 0;
         for item in iter {
             let (key, value) = item.context("failed to iterate position updates")?;

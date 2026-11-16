@@ -1,6 +1,6 @@
 # Address live JSON signal accumulation before format migration
 
-The [implemented hourly cold-store workflow](position_archive_cold_design.md) records the
+The [implemented local cold-store workflow](position_archive_cold_design.md) records the
 operator's desired automatic architecture. The candidate documented here is
 only the earlier manual interim option; it must not be deployed as if it
 implemented local cold storage or powerleader-driven automatic maintenance.

@@ -686,6 +686,7 @@ dependencies = [
  "hmac 0.12.1",
  "iceoryx2",
  "im",
+ "libc",
  "prost",
  "prost-build",
  "prost-types",

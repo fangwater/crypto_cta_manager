@@ -16,6 +16,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 hex = "0.4"
 hmac = "0.12"
 iceoryx2 = "0.8.1"
+libc = "0.2"
 rocksdb = { version = "0.25", default-features = false, features = ["lz4"] }
 redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
 rayon = "1.11"
