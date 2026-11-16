@@ -1,7 +1,8 @@
 syntax = "proto3";
 package cta.archive;
 
-// The sole serving/storage contract. JSON is only an explicit legacy import.
+// The sole binary storage contract. JSON may coexist only during an explicitly
+// marked, resumable legacy import/conversion.
 message Record {
   repeated string strings = 1;
   uint32 msg_type = 2;

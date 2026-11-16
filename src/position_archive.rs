@@ -4,6 +4,7 @@ use std::sync::{Mutex, RwLock};
 pub mod codec;
 pub mod cold;
 pub mod migration;
+pub mod online;
 pub mod retention;
 mod storage;
 #[cfg(test)]
@@ -191,6 +192,7 @@ pub struct PositionArchive {
     retention: Mutex<retention::RetentionState>,
     retention_gate: RwLock<()>,
     legacy_json: bool,
+    converting_json: bool,
     cold: Option<cold::manager::State>,
 }
 
@@ -210,7 +212,25 @@ impl PositionArchive {
         settings: Option<cold::manager::Settings>,
     ) -> Result<Self> {
         db.ensure_column_family(POSITION_UPDATES_CF)?;
-        let legacy_json = settings.is_some()
+        let allow_conversion = settings
+            .as_ref()
+            .is_some_and(|s| s.hot_conversion.is_some());
+        let conversion = online::load(&db)?;
+        let active_conversion = conversion.as_ref().is_some_and(|p| !p.completed);
+        anyhow::ensure!(
+            !active_conversion || allow_conversion,
+            "unfinished hot conversion requires archive.cold.hot_conversion"
+        );
+        anyhow::ensure!(
+            db.db().get(storage::MIGRATING_KEY)?.is_none(),
+            "interrupted offline migration must be resumed explicitly"
+        );
+        // Validate destination/identity before enabling a format transition.
+        let cold = settings
+            .clone()
+            .map(|s| cold::manager::State::open(&db, s))
+            .transpose()?;
+        let json_store = settings.is_some()
             && db.db().get(storage::FORMAT_KEY)?.is_none()
             && db.db().cf_handle(POSITION_UPDATES_CF).is_some_and(|cf| {
                 db.db()
@@ -218,7 +238,11 @@ impl PositionArchive {
                     .next()
                     .is_some()
             });
-        if legacy_json {
+        let legacy_json = json_store && !allow_conversion;
+        let converting_json = active_conversion || (json_store && allow_conversion);
+        if json_store && allow_conversion {
+            online::start(&db)?;
+        } else if legacy_json {
             anyhow::ensure!(
                 db.db().get(storage::MIGRATING_KEY)?.is_none(),
                 "cannot cold-archive an interrupted format migration"
@@ -230,14 +254,20 @@ impl PositionArchive {
                     migration::decode_json(&k, &v)?;
                 }
             }
+        } else if active_conversion {
+            anyhow::ensure!(
+                db.db().get(storage::MIGRATING_KEY)?.is_none(),
+                "interrupted offline migration"
+            );
+            storage::families(&db)?;
         } else {
             storage::ensure_current(&db)?;
         }
         let retention = retention::RetentionState::load(&db)?;
-        let cold = settings
-            .map(|s| cold::manager::State::open(&db, s))
-            .transpose()?;
         let last_key = latest_key(&db)?.unwrap_or((0, 0)).max(retention.head);
+        if let Some(state) = &cold {
+            state.status.lock().unwrap().hot_conversion = online::load(&db)?;
+        }
         info!(
             path = %db.path().display(),
             cf = POSITION_UPDATES_CF,
@@ -253,12 +283,13 @@ impl PositionArchive {
             retention: Mutex::new(retention),
             retention_gate: RwLock::new(()),
             legacy_json,
+            converting_json,
             cold,
         })
     }
 
     fn complete(&self, key: &[u8], value: &[u8]) -> Result<PositionUpdateMsg> {
-        if self.legacy_json {
+        if self.legacy_json || (self.converting_json && online::is_json(value)) {
             migration::decode_json(key, value)
         } else {
             self.storage.complete(&self.db, key, value)
@@ -270,7 +301,18 @@ impl PositionArchive {
     }
 
     pub fn hot_format(&self) -> &'static str {
-        if self.legacy_json { "json" } else { "protobuf" }
+        if self.legacy_json {
+            "json"
+        } else if self.converting_json
+            && online::load(&self.db)
+                .ok()
+                .flatten()
+                .is_some_and(|p| !p.completed)
+        {
+            "converting_json"
+        } else {
+            "protobuf"
+        }
     }
 
     pub fn append(
@@ -338,30 +380,38 @@ impl PositionArchive {
             .cf_handle(POSITION_UPDATES_CF)
             .context("position_updates column family disappeared")?;
         let key = manager_db::encode_seq_key(message.received_at_us, message.seq)?;
-        if self.legacy_json {
-            let bytes = self
-                .db
-                .db()
-                .get_cf(&handle, key)?
-                .context("legacy enrichment target is missing")?;
+        let bytes = self
+            .db
+            .db()
+            .get_cf(&handle, key)?
+            .context("enrichment target is missing")?;
+        if self.legacy_json || (self.converting_json && online::is_json(&bytes)) {
             let mut target = migration::decode_json(&key, &bytes)?;
             anyhow::ensure!(
                 target.strategy.strategy_name == message.strategy.strategy_name,
                 "legacy enrichment identity mismatch"
             );
             target.factual_positions = positions.into_iter().map(archive_source).collect();
+            if self.converting_json {
+                let observed = std::mem::take(&mut target.factual_positions);
+                target.factual_positions = serde_json::from_slice(&serde_json::to_vec(&observed)?)?;
+                let mut batch = rocksdb::WriteBatch::default();
+                let pending = self.storage.stage(&self.db, &target, &mut batch, true)?;
+                match self.db.db().write(batch) {
+                    Ok(()) => self.storage.published(pending),
+                    Err(error) => {
+                        self.storage.clear_cache();
+                        return Err(error.into());
+                    }
+                }
+                return Ok(());
+            }
             self.db
                 .db()
                 .put_cf(&handle, key, serde_json::to_vec(&target)?)?;
             return Ok(());
         }
-        let target = codec::decode(
-            &self
-                .db
-                .db()
-                .get_cf(&handle, key)?
-                .context("enrichment target is missing")?,
-        )?;
+        let target = codec::decode(&bytes)?;
         anyhow::ensure!(
             target.strategy.strategy_name == message.strategy.strategy_name,
             "enrichment strategy identity mismatch"
@@ -544,17 +594,20 @@ impl PositionArchive {
         &self,
         revision: u64,
         stable_cursor: Option<(i64, u32)>,
-    ) -> (u64, bool) {
+    ) -> (u64, bool, bool) {
         let writes = self.target_writes.lock().unwrap();
-        let invalidated = revision < writes.retention_revision
-            || stable_cursor.is_some_and(|cursor| {
-                revision < writes.discarded_late_revision
-                    || writes
-                        .late
-                        .iter()
-                        .any(|(change, key)| *change > revision && *key <= cursor)
-            });
-        (writes.revision, invalidated)
+        let invalidated = stable_cursor.is_some_and(|cursor| {
+            revision < writes.discarded_late_revision
+                || writes
+                    .late
+                    .iter()
+                    .any(|(change, key)| *change > revision && *key <= cursor)
+        });
+        (
+            writes.revision,
+            invalidated,
+            revision < writes.retention_revision,
+        )
     }
 
     pub fn latest(&self) -> Result<Option<PositionUpdateMsg>> {
@@ -646,40 +699,18 @@ impl PositionArchive {
         end_received_at_us: i64,
         mut visit: impl FnMut(PositionUpdateMsg) -> Result<()>,
     ) -> Result<()> {
-        #[derive(Deserialize)]
-        struct LegacyTarget {
-            msg_type: String,
-            schema_version: u32,
-            received_at_us: i64,
-            seq: u32,
-            strategy: PositionStrategy,
-            #[serde(default)]
-            published_accounts: Vec<ArchivedPublishedAccount>,
-        }
         fn decode_batch(
             batch: &[((i64, u32), Box<[u8]>)],
             legacy: bool,
+            converting: bool,
         ) -> Result<Vec<PositionUpdateMsg>> {
             use rayon::prelude::*;
             crate::analysis::run(|| {
                 batch
                     .par_iter()
                     .map(|(cursor, value)| {
-                        let message = if legacy {
-                            let m: LegacyTarget = serde_json::from_slice(value)?;
-                            PositionUpdateMsg {
-                                msg_type: m.msg_type,
-                                schema_version: m.schema_version,
-                                received_at_us: m.received_at_us,
-                                seq: m.seq,
-                                strategy: m.strategy,
-                                published_accounts: m.published_accounts,
-                                factual_positions: vec![],
-                            }
-                        } else {
-                            codec::decode(value)
-                                .context("failed to decode archived execution targets")?
-                        };
+                        let message = codec::decode_target(value, legacy, converting)
+                            .context("failed to decode archived execution targets")?;
                         anyhow::ensure!(
                             (message.received_at_us, message.seq) == *cursor,
                             "archived target timestamp does not match its key"
@@ -720,14 +751,14 @@ impl PositionArchive {
             batch_bytes += value.len();
             batch.push((cursor, value));
             if batch.len() >= 256 || batch_bytes >= 8 * 1024 * 1024 {
-                for message in decode_batch(&batch, self.legacy_json)? {
+                for message in decode_batch(&batch, self.legacy_json, self.converting_json)? {
                     visit(message)?;
                 }
                 batch.clear();
                 batch_bytes = 0;
             }
         }
-        for message in decode_batch(&batch, self.legacy_json)? {
+        for message in decode_batch(&batch, self.legacy_json, self.converting_json)? {
             visit(message)?;
         }
         Ok(())

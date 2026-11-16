@@ -245,6 +245,8 @@ try:
         if not cold.get("root"):
             raise SystemExit("archive.cold.root must be explicit")
         args.extend(["--cold-root", cold["root"]])
+        if cold.get("hot_conversion") is not None:
+            args.append("--hot-conversion")
     subprocess.run(args, check=True)
 finally:
     checker.unlink(missing_ok=True)

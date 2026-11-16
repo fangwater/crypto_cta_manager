@@ -368,8 +368,21 @@ Manager stores factual observations separately in `position_observations` and
 day-local, content-addressed `position_snapshots`, with packed doubles and bounded
 absolute-value replacement chains. Explicit offline `cta_position_archive
 migrate-json` verifies a complete original backup before converting JSON; normal
-startup must never auto-migrate or accept mixed JSON/PB records. Preserve the
+startup must never bulk-migrate records. Preserve the
 existing JSON numeric parsing boundary and immutable financial fingerprints.
+By the operator's latest instruction on 2026-11-16, explicit
+`[archive.cold.hot_conversion]` enables bounded online conversion: new signals
+use PB immediately, retained JSON records are verified and replaced at their
+original keys, and expired records continue to cold. Only a durable, validated
+conversion marker permits transitional JSON/PB reads; completed stores return
+to PB-only reads after restart. Each batch atomically commits data and cursor,
+preserves exact numerical bits, yields to publication backlog/CPU/I/O, and must
+not force a flush or compaction. Automatic manual-range compaction defaults off;
+an explicit opt-in must have an independent persisted cooldown.
+Retiring a cold prefix must also retire the disposable theoretical target index
+incrementally, preserving exact cumulative quantities; never rebuild the entire
+target history for each small retention batch. Late target insertions still
+invalidate/rebuild the index when required.
 By operator instruction on 2026-11-16, optional `[archive.cold]` may keep an
 existing all-JSON hot store writing JSON, without a bulk format migration.
 Retain 33 days plus the execution guard in hot storage; move the oldest expired

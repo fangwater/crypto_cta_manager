@@ -358,6 +358,12 @@ async fn check_retained_month_curves(automatic: bool) {
         assert_eq!(curve.execution_model, Some(model));
         original.push((model, curve));
     }
+    let indexed_before = cache.processed_messages.load(Ordering::Relaxed);
+    let revision_before = cache
+        .state
+        .lock()
+        .unwrap()
+        .query_revision(&scope, start + 60 * MINUTE_US);
     let backup = tempfile::tempdir().unwrap();
     if automatic {
         assert_eq!(archive.archive_cold_once(now).unwrap().unwrap().count, 2);
@@ -366,6 +372,36 @@ async fn check_retained_month_curves(automatic: bool) {
         archive.export_prefix(&mut bytes, cutoff(now), now).unwrap();
         let receipt = verify_restore(bytes.as_slice(), &backup.path().join("db")).unwrap();
         archive.commit_receipt(&receipt, now).unwrap();
+    }
+    // A retained prefix must not trigger another complete RocksDB target scan.
+    cache.refresh_blocking().unwrap();
+    assert_eq!(
+        cache.processed_messages.load(Ordering::Relaxed),
+        indexed_before
+    );
+    assert!(cache.state.lock().unwrap().delta_base > 0);
+    assert!(
+        cache
+            .state
+            .lock()
+            .unwrap()
+            .query_revision(&scope, start + 60 * MINUTE_US)
+            == revision_before
+    );
+    for (model, before) in &original {
+        let warm = load_timeline(
+            fees.clone(),
+            &cache,
+            &store,
+            start,
+            start + 60 * MINUTE_US,
+            &scope,
+            1000,
+            *model,
+        )
+        .await
+        .unwrap();
+        assert_eq!(&warm, before);
     }
     // A new cache exercises checkpoint loading and cannot use old curve results.
     let cold = TheoreticalTargetCache::new(config, archive);
@@ -383,5 +419,45 @@ async fn check_retained_month_curves(automatic: bool) {
         .await
         .unwrap();
         assert_eq!(after, before);
+    }
+    // New appends use absolute offsets after the front has been retired.
+    target.updated_at_us = start + 45 * MINUTE_US + 123;
+    target.targets.get_mut("BTCUSDT").unwrap().qty = 2.3;
+    cache
+        .archive
+        .append(target.updated_at_us, &target, vec![], accounts)
+        .unwrap();
+    let fresh = TheoreticalTargetCache::new(cache.config.clone(), cache.archive.clone());
+    for model in [
+        ExecutionModel::Twap5m,
+        ExecutionModel::Twap3m,
+        ExecutionModel::Vwap3m,
+        ExecutionModel::InstantTaker,
+    ] {
+        let warm = load_timeline(
+            fees.clone(),
+            &cache,
+            &store,
+            start,
+            start + 60 * MINUTE_US,
+            &scope,
+            1000,
+            model,
+        )
+        .await
+        .unwrap();
+        let rebuilt = load_timeline(
+            fees.clone(),
+            &fresh,
+            &store,
+            start,
+            start + 60 * MINUTE_US,
+            &scope,
+            1000,
+            model,
+        )
+        .await
+        .unwrap();
+        assert_eq!(warm, rebuilt);
     }
 }

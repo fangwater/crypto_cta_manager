@@ -1,5 +1,11 @@
 # Minute-batched Manager maintenance, 2026-11-16
 
+The later [progressive conversion](position_archive_progressive_conversion.md)
+adds optional in-place hot JSON conversion and PB new writes. Automatic manual
+range compaction now defaults off; explicit opt-in has an independent persisted
+cooldown (one hour by default, at least 30 minutes). It also avoids rebuilding
+the theoretical target index for every minute-sized retention movement.
+
 The operator changed the Manager cadence from hourly to once per minute and
 confirmed that powerleader pull is explicitly operator-controlled. Manager does
 only local hot-to-cold migration and reclamation of already-archived hot space.

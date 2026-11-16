@@ -11,12 +11,16 @@ use std::time::Instant;
 pub struct Settings {
     pub max_input_bytes: u64,
     pub max_files: usize,
+    pub allow_manual_compaction: bool,
+    pub compact_cooldown_secs: u64,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             max_input_bytes: 16 * 1024 * 1024,
             max_files: 4,
+            allow_manual_compaction: false,
+            compact_cooldown_secs: 3600,
         }
     }
 }
@@ -26,6 +30,10 @@ impl Settings {
             (4096..=64 * 1024 * 1024).contains(&self.max_input_bytes)
                 && (1..=16).contains(&self.max_files),
             "invalid small hot reclamation budget"
+        );
+        ensure!(
+            (1800..=31 * 86400).contains(&self.compact_cooldown_secs),
+            "manual compaction cooldown must be at least 30 minutes"
         );
         Ok(())
     }
@@ -55,6 +63,26 @@ enum Plan {
         files: usize,
         bytes: u64,
     },
+}
+fn manual_defer(
+    db: &crate::manager_db::ManagerDb,
+    settings: &Settings,
+    now: i64,
+) -> Result<Option<&'static str>> {
+    if !settings.allow_manual_compaction {
+        return Ok(Some("automatic manual compaction disabled"));
+    }
+    if let Some(last) = db.db().get(b"position_last_manual_compact_us")? {
+        let last = i64::from_be_bytes(
+            last.as_slice()
+                .try_into()
+                .context("invalid compact timestamp")?,
+        );
+        if now.saturating_sub(last) < settings.compact_cooldown_secs as i64 * 1_000_000 {
+            return Ok(Some("independent manual compaction cooldown"));
+        }
+    }
+    Ok(None)
 }
 fn keys(file: &rocksdb::LiveFile) -> Option<(&[u8], &[u8])> {
     Some((file.start_key.as_deref()?, file.end_key.as_deref()?))
@@ -218,6 +246,14 @@ impl PositionArchive {
             );
             return Ok(());
         };
+        if matches!(plan, Plan::Compact { .. }) {
+            if let Some(reason) =
+                manual_defer(&self.db, &cold.settings.reclaim, crate::kline::now_us())?
+            {
+                report.deferred_reason = Some(reason.into());
+                return Ok(());
+            }
+        }
         // Keep existing readers consistent, but never wait for a long theory
         // rebuild just to reclaim space. Publication does not take this gate.
         let Ok(_gate) = self.retention_gate.try_write() else {
@@ -271,6 +307,11 @@ impl PositionArchive {
                     cold.settings.min_free_bytes,
                     cold.settings.reclaim.max_input_bytes.saturating_mul(4),
                 )?;
+                self.db.db().put_opt(
+                    b"position_last_manual_compact_us",
+                    crate::kline::now_us().to_be_bytes(),
+                    &sync_options(),
+                )?;
                 let mut options = rocksdb::CompactOptions::default();
                 options.set_exclusive_manual_compaction(false);
                 options.set_change_level(false);
@@ -313,6 +354,81 @@ mod tests {
         }
     }
     #[test]
+    fn default_maintenance_does_not_compact_live_json_ranges() {
+        let (_temp, archive, _) = super::super::manager::tests::setup(true);
+        let cf = archive
+            .db
+            .db()
+            .cf_handle(crate::manager_db::POSITION_UPDATES_CF)
+            .unwrap();
+        archive
+            .db
+            .db()
+            .set_options_cf(&cf, &[("disable_auto_compactions", "true")])
+            .unwrap();
+        archive.db.db().flush_cf(&cf).unwrap();
+        archive
+            .archive_cold_once(super::super::manager::tests::NOW)
+            .unwrap();
+        let report = archive.cold_status().unwrap().hot_reclaim.unwrap();
+        assert_eq!(report.action, "deferred");
+        assert_eq!(
+            report.deferred_reason.as_deref(),
+            Some("automatic manual compaction disabled")
+        );
+        assert!(
+            archive
+                .db
+                .db()
+                .get(b"position_last_manual_compact_us")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn compaction_opt_in_cooldown_survives_owner_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let db = crate::manager_db::ManagerDb::open(root.path()).unwrap();
+        let now = crate::kline::now_us();
+        db.db()
+            .put_opt(
+                b"position_last_manual_compact_us",
+                now.to_be_bytes(),
+                &sync_options(),
+            )
+            .unwrap();
+        let settings = Settings {
+            allow_manual_compaction: true,
+            ..Default::default()
+        };
+        assert!(
+            manual_defer(&db, &settings, now + 60_000_000)
+                .unwrap()
+                .is_some()
+        );
+        drop(db);
+        let db = crate::manager_db::ManagerDb::open(root.path()).unwrap();
+        assert!(
+            manual_defer(&db, &settings, now + 3599_000_000)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            manual_defer(&db, &settings, now + 3600_000_000)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            Settings {
+                compact_cooldown_secs: 60,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    #[test]
     fn whole_file_reclaim_requires_an_expired_closed_overlap_group() {
         let old = file("old", 6, 10, 20, 128 << 20);
         let retained = file("recent", 0, 80, 90, 128 << 20);
@@ -345,7 +461,14 @@ mod tests {
     }
     #[test]
     fn real_small_compaction_preserves_retained_json_and_protected_cfs() {
-        let (_temp, archive, rows) = super::super::manager::tests::setup(true);
+        let (_temp, mut archive, rows) = super::super::manager::tests::setup(true);
+        archive
+            .cold
+            .as_mut()
+            .unwrap()
+            .settings
+            .reclaim
+            .allow_manual_compaction = true;
         let cf = archive
             .db
             .db()

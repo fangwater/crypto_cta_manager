@@ -1,0 +1,23 @@
+# Merge into the existing el01 config during rollout; this starts no pull job.
+[archive.cold]
+root = "/home/el01/crypto_cta_manager/cold-signals"
+interval_secs = 60
+quiet_secs = 30
+max_cpu_percent = 35.0
+max_io_pressure_percent = 1.0
+min_free_bytes = 10737418240
+
+[archive.cold.limits]
+max_records = 1000
+max_bytes = 67108864
+
+[archive.cold.hot_conversion]
+max_records = 1000
+max_bytes = 8388608
+max_work_millis = 50
+
+[archive.cold.reclaim]
+max_input_bytes = 16777216
+max_files = 4
+allow_manual_compaction = false
+compact_cooldown_secs = 3600

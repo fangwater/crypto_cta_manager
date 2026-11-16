@@ -10,6 +10,15 @@ use crate::position_archive::{
 // model. It cannot accidentally validate itself by reading the migrated store.
 #[tokio::test]
 async fn json_migration_keeps_all_priced_curves_fees_and_acquisition_inputs_exact() {
+    check_json_migration(false).await;
+}
+
+#[tokio::test]
+async fn progressive_json_conversion_keeps_mixed_and_completed_priced_curves_exact() {
+    check_json_migration(true).await;
+}
+
+async fn check_json_migration(progressive: bool) {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("legacy");
     let db = ManagerDb::open(&path).unwrap();
@@ -201,41 +210,71 @@ async fn json_migration_keeps_all_priced_curves_fees_and_acquisition_inputs_exac
     drop(cf);
     drop(marks);
     drop(db);
-    crate::position_archive::migration::migrate_json(
-        &path,
-        &root.path().join("original-backup"),
-        true,
-    )
-    .unwrap();
-    let db = ManagerDb::open(&path).unwrap();
-    let marks = KlineStore::from_db(db.clone(), kline_config).unwrap();
-    let archive = Arc::new(PositionArchive::open(db).unwrap());
-    let cold = TheoreticalTargetCache::new(config, archive);
-    for (model, before) in expected {
-        let after = load_timeline(fees.clone(), &cold, &marks, start, end, &ids, 1000, model)
-            .await
-            .unwrap();
-        assert_eq!(after, before, "priced curve changed for {model:?}");
+    if !progressive {
+        crate::position_archive::migration::migrate_json(
+            &path,
+            &root.path().join("original-backup"),
+            true,
+        )
+        .unwrap();
     }
-    for (model, strategy, deltas, carry) in acquisition {
-        let models = BTreeMap::from([(ids[0].clone(), model), (ids[1].clone(), model)]);
-        let after = cold
-            .query_inputs(
-                fees.clone(),
-                end,
-                &ids,
-                strategy,
-                None,
-                Some(start - 300_000_000),
-                models,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            after.0, deltas,
-            "acquisition inputs changed for {model:?}/{strategy:?}"
-        );
-        assert_eq!(after.1, carry);
+    let db = ManagerDb::open(&path).unwrap();
+    let archive = Arc::new(
+        PositionArchive::open_with_cold(
+            db.clone(),
+            progressive.then(|| crate::position_archive::cold::manager::Settings {
+                root: root.path().join("progressive-cold"),
+                hot_conversion: Some(crate::position_archive::online::Settings {
+                    max_records: 3,
+                    max_work_millis: 1000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        )
+        .unwrap(),
+    );
+    let marks = KlineStore::from_db(db, kline_config).unwrap();
+    for phase in 0..if progressive { 8 } else { 1 } {
+        if progressive && phase > 0 {
+            archive
+                .archive_cold_once(now_us() + phase * 60_000_000)
+                .unwrap();
+        }
+        // A fresh cache must replay every intermediate JSON/PB mixture.
+        let cold = TheoreticalTargetCache::new(config.clone(), archive.clone());
+        for (model, before) in &expected {
+            let after = load_timeline(fees.clone(), &cold, &marks, start, end, &ids, 1000, *model)
+                .await
+                .unwrap();
+            assert_eq!(
+                &after, before,
+                "priced curve changed for {model:?} at phase {phase}"
+            );
+        }
+        for (model, strategy, deltas, carry) in &acquisition {
+            let models = BTreeMap::from([(ids[0].clone(), *model), (ids[1].clone(), *model)]);
+            let after = cold
+                .query_inputs(
+                    fees.clone(),
+                    end,
+                    &ids,
+                    *strategy,
+                    None,
+                    Some(start - 300_000_000),
+                    models,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                &after.0, deltas,
+                "acquisition inputs changed for {model:?}/{strategy:?}"
+            );
+            assert_eq!(&after.1, carry);
+        }
+    }
+    if progressive {
+        assert!(archive.hot_conversion_status().unwrap().unwrap().completed);
     }
 }

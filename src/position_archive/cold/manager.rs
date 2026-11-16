@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const LAST_ATTEMPT: &[u8] = b"position_cold_last_attempt_us";
+const NEXT_HOT: &[u8] = b"position_cold_next_hot";
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
@@ -18,6 +19,7 @@ pub struct Settings {
     pub limits: BatchLimits,
     pub reclaim: reclaim::Settings,
     pub min_free_bytes: u64,
+    pub hot_conversion: Option<crate::position_archive::online::Settings>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -30,6 +32,7 @@ impl Default for Settings {
             limits: BatchLimits::default(),
             reclaim: reclaim::Settings::default(),
             min_free_bytes: space::DEFAULT_MIN_FREE_BYTES,
+            hot_conversion: None,
         }
     }
 }
@@ -37,6 +40,9 @@ impl Settings {
     pub fn validate(&self) -> Result<()> {
         self.limits.validate()?;
         self.reclaim.validate()?;
+        if let Some(settings) = &self.hot_conversion {
+            settings.validate()?;
+        }
         ensure!(
             self.min_free_bytes <= 1024 * 1024 * 1024 * 1024 * 1024,
             "invalid disk reserve"
@@ -80,6 +86,8 @@ pub struct Status {
     pub deferred_reason: Option<String>,
     pub last_error: Option<String>,
     pub hot_reclaim: Option<reclaim::Report>,
+    pub hot_conversion: Option<crate::position_archive::online::Progress>,
+    pub last_action: Option<String>,
 }
 pub(crate) struct State {
     pub settings: Settings,
@@ -157,18 +165,32 @@ impl PositionArchive {
             status.deferred_reason = Some("configured maintenance interval".into());
             return Ok(None);
         }
-        if let Err(error) =
-            self.db
-                .db()
-                .put_opt(LAST_ATTEMPT, now_us.to_be_bytes(), &sync_options())
-        {
+        let hot_turn = state.settings.hot_conversion.is_some()
+            && self.db.db().get(NEXT_HOT)?.as_deref() == Some(&[1]);
+        let mut attempt = WriteBatch::default();
+        attempt.put(LAST_ATTEMPT, now_us.to_be_bytes());
+        attempt.put(NEXT_HOT, [u8::from(!hot_turn)]);
+        if let Err(error) = self.db.db().write_opt(attempt, &sync_options()) {
             status.last_error = Some(error.to_string());
             return Err(error.into());
         }
         status.last_attempt_us = Some(now_us);
         status.running = true;
         drop(status);
-        let result = self.archive_cold_inner(now_us);
+        let mut converted = None;
+        let result = (|| -> Result<Option<Segment>> {
+            if hot_turn {
+                converted = self.convert_hot_once(now_us)?;
+                if converted.is_some() {
+                    return Ok(None);
+                }
+            }
+            let segment = self.archive_cold_inner(now_us)?;
+            if segment.is_none() && !hot_turn {
+                converted = self.convert_hot_once(now_us)?;
+            }
+            Ok(segment)
+        })();
         let reclaim = self.reclaim_hot_once();
         let cf = self.db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
         let oldest = self
@@ -188,6 +210,15 @@ impl PositionArchive {
         let mut status = state.status.lock().unwrap();
         status.running = false;
         status.hot_reclaim = Some(reclaim);
+        status.hot_conversion = self.hot_conversion_status().ok().flatten();
+        status.last_action = Some(
+            if converted.is_some() {
+                "convert_hot_json"
+            } else {
+                "archive_cold"
+            }
+            .into(),
+        );
         status.oldest_hot_received_at_us = oldest;
         status.expired_hot_age_secs =
             oldest.map(|t| retention::cutoff(now_us).0.saturating_sub(t).max(0) / 1_000_000);
@@ -203,7 +234,14 @@ impl PositionArchive {
             }
             Ok(None) => {
                 status.last_error = None;
-                status.deferred_reason = Some("no expired hot records".into());
+                status.deferred_reason = if converted.is_some() {
+                    None
+                } else {
+                    Some("no expired hot records or conversion deferred".into())
+                };
+                if converted.is_some() {
+                    status.last_completed_us = Some(now_us);
+                }
             }
             Err(e) => status.last_error = Some(e.to_string()),
         }
@@ -472,17 +510,25 @@ pub fn spawn(
             previous = current;
             let io = io_pressure().ok();
             let (pending, failed) = backlog();
+            let compaction_idle = archive
+                .db
+                .db()
+                .property_int_value("rocksdb.num-running-compactions")
+                .ok()
+                .flatten()
+                == Some(0);
             let idle = cpu.is_some_and(|v| v <= settings.max_cpu_percent)
                 && io.is_some_and(|v| v <= settings.max_io_pressure_percent)
                 && pending == 0
                 && !failed;
+            let idle = idle && compaction_idle;
             {
                 let mut s = archive.cold.as_ref().unwrap().status.lock().unwrap();
                 s.cpu_percent = cpu;
                 s.io_pressure_percent = io;
                 if !idle {
                     s.deferred_reason =
-                        Some("CPU/I/O/publication backlog or telemetry unavailable".into());
+                        Some("CPU/I/O/publication backlog/background compaction or telemetry unavailable".into());
                 }
             }
             if !idle {

@@ -88,6 +88,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if let Some(source) = &args.target_source {
+        let transition = crypto_cta_manager::position_archive::online::inspect_progress(
+            db.get(crypto_cta_manager::position_archive::online::META)?
+                .as_deref(),
+            db.get(b"position_storage")?.as_deref(),
+            std::fs::read_to_string(args.manager_db.join("IDENTITY"))?.trim(),
+        )?
+        .is_some_and(|p| !p.completed);
         ensure!(
             args.ts_us.len() == 2,
             "target scan requires start and end --ts-us"
@@ -104,7 +111,14 @@ fn main() -> Result<()> {
             if received > args.ts_us[1] {
                 break;
             }
-            let message = crypto_cta_manager::position_archive::codec::decode(&value)?;
+            let message = crypto_cta_manager::position_archive::codec::decode_target(
+                &value, false, transition,
+            )?;
+            ensure!(
+                crypto_cta_manager::manager_db::decode_seq_key(&key)
+                    == Some((message.received_at_us, message.seq)),
+                "target key/message mismatch"
+            );
             for account in &message.published_accounts {
                 if &account.source_id != source {
                     continue;

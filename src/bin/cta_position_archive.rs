@@ -60,6 +60,9 @@ enum Action {
         /// Accept existing JSON only for explicitly configured bounded cold archival.
         #[arg(long)]
         cold_root: Option<PathBuf>,
+        /// Permit only an explicitly configured, resumable hot JSON conversion.
+        #[arg(long, requires = "cold_root")]
+        hot_conversion: bool,
     },
     /// Explicit offline replacement; verifies a complete original DB backup first.
     MigrateJson {
@@ -227,13 +230,21 @@ fn main() -> Result<()> {
             );
             return Ok(());
         }
-        Action::CheckStorage { db, cold_root } => {
+        Action::CheckStorage {
+            db,
+            cold_root,
+            hot_conversion,
+        } => {
             println!(
                 "{}",
                 if let Some(root) = cold_root {
-                    crypto_cta_manager::position_archive::migration::check_storage_with_cold(
-                        &db, &root,
-                    )?
+                    if hot_conversion {
+                        crypto_cta_manager::position_archive::migration::check_storage_with_hot_conversion(&db, &root)?
+                    } else {
+                        crypto_cta_manager::position_archive::migration::check_storage_with_cold(
+                            &db, &root,
+                        )?
+                    }
                 } else {
                     crypto_cta_manager::position_archive::migration::check_storage(&db)?
                 }

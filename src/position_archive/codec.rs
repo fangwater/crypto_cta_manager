@@ -1,8 +1,48 @@
 //! One binary archive contract. Legacy JSON parsing lives only in the explicit
-//! importer; ordinary readers never guess a stored format.
+//! importer and explicitly marked online conversion; normal PB readers never
+//! guess a stored format.
 use super::*;
 use anyhow::ensure;
 use prost::Message;
+
+/// Target-only reading keeps large factual JSON payloads out of theory scans.
+/// Transitional decoding must be authorized by a validated conversion marker.
+pub fn decode_target(
+    value: &[u8],
+    legacy_json: bool,
+    converting_json: bool,
+) -> Result<PositionUpdateMsg> {
+    #[derive(Deserialize)]
+    struct JsonTarget {
+        msg_type: String,
+        schema_version: u32,
+        received_at_us: i64,
+        seq: u32,
+        strategy: PositionStrategy,
+        #[serde(default)]
+        published_accounts: Vec<ArchivedPublishedAccount>,
+    }
+    let message = if legacy_json || (converting_json && super::online::is_json(value)) {
+        let m: JsonTarget = serde_json::from_slice(value)?;
+        PositionUpdateMsg {
+            msg_type: m.msg_type,
+            schema_version: m.schema_version,
+            received_at_us: m.received_at_us,
+            seq: m.seq,
+            strategy: m.strategy,
+            published_accounts: m.published_accounts,
+            factual_positions: vec![],
+        }
+    } else {
+        decode(value)?
+    };
+    ensure!(
+        message.msg_type == MSG_TYPE && message.factual_positions.is_empty(),
+        "invalid archived target"
+    );
+    message.strategy.validate().map_err(anyhow::Error::msg)?;
+    Ok(message)
+}
 
 pub(super) mod pb {
     include!(concat!(env!("OUT_DIR"), "/cta.archive.rs"));

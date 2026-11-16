@@ -108,6 +108,13 @@ may continue, but source cold reclamation waits and capacity/backlog is exposed.
 
 ## Existing JSON and rollout
 
+The latest opt-in `[archive.cold.hot_conversion]` adds PB new writes and bounded
+in-place conversion of retained JSON without a bulk offline rewrite. See
+[progressive conversion](position_archive_progressive_conversion.md) for its
+marker, verification and limits. The JSON-only behavior below applies when this
+table is absent. Automatic manual range compaction now defaults off; explicit
+opt-in uses a persisted one-hour cooldown (minimum 30 minutes).
+
 The deployed stores remain JSON. With explicit `[archive.cold]` configuration,
 this owner selects the hot format once when opening the DB: an existing JSON
 store continues writing JSON, while an existing/fresh PB store uses split PB.
@@ -149,6 +156,8 @@ max_bytes = 67108864
 [archive.cold.reclaim]
 max_input_bytes = 16777216
 max_files = 4
+allow_manual_compaction = false
+compact_cooldown_secs = 3600
 ```
 
 The root must be separate from hot/Exec stores, including resolved symlinks.

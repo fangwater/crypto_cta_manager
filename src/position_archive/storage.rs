@@ -82,6 +82,10 @@ pub(super) fn families(db: &ManagerDb) -> Result<()> {
 }
 pub(super) fn ensure_current(db: &ManagerDb) -> Result<()> {
     ensure!(
+        super::online::load(db)?.is_none_or(|p| p.completed),
+        "active hot conversion requires the explicit conversion owner"
+    );
+    ensure!(
         !db.column_families()?.iter().any(|f| matches!(
             f.as_str(),
             "uniform_orders" | "order_updates" | "trade_updates"

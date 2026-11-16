@@ -60,7 +60,7 @@ reconnect_interval_ms = 500
 
 # Optional minute-batched local archival. Retains >=33 days + execution guard
 # in hot storage; the operator invokes powerleader's separate cta_archive_pull.
-# Existing JSON hot stores remain JSON; only expired cold records become PB.
+# Existing JSON hot stores remain JSON unless hot_conversion is explicitly set.
 # [archive.cold]
 # root = "/absolute/manager/root/cold-signals"
 # interval_secs = 60
@@ -74,6 +74,13 @@ reconnect_interval_ms = 500
 # [archive.cold.reclaim]
 # max_input_bytes = 16777216
 # max_files = 4
+# allow_manual_compaction = false
+# compact_cooldown_secs = 3600
+# Optional: new signals become PB and retained JSON is replaced in bounded batches.
+# [archive.cold.hot_conversion]
+# max_records = 1000
+# max_bytes = 8388608
+# max_work_millis = 50
 
 [kline]
 # Enable only after assigning a dedicated non-trading market-data egress.

@@ -85,7 +85,7 @@ fn readonly(path: &Path) -> Result<crate::manager_db::ManagerRocksDb> {
 /// Read-only deployment gate. A legacy or interrupted store must not have its
 /// running owner replaced by an incompatible binary before planned migration.
 pub fn check_storage(path: &Path) -> Result<serde_json::Value> {
-    check_storage_inner(path, false)
+    check_storage_inner(path, false, false)
 }
 
 /// Explicit cold mode keeps the entire hot store JSON and converts only expired
@@ -109,10 +109,40 @@ pub fn check_storage_with_cold(path: &Path, cold_root: &Path) -> Result<serde_js
             "cold source identity mismatch"
         );
     }
-    check_storage_inner(path, true)
+    check_storage_inner(path, true, false)
 }
 
-fn check_storage_inner(path: &Path, allow_json: bool) -> Result<serde_json::Value> {
+pub fn check_storage_with_hot_conversion(
+    path: &Path,
+    cold_root: &Path,
+) -> Result<serde_json::Value> {
+    super::cold::manager::Settings {
+        root: cold_root.to_owned(),
+        ..Default::default()
+    }
+    .validate()?;
+    // Reuse path/identity checks, but the active transition needs its own opt-in.
+    let hot = crate::config::resolve_storage_path(path)?;
+    let cold = crate::config::resolve_storage_path(cold_root)?;
+    ensure!(
+        cold_root.is_absolute() && !hot.starts_with(&cold) && !cold.starts_with(&hot),
+        "invalid cold path"
+    );
+    if cold_root.exists() {
+        ensure!(
+            super::cold::ColdRoot::open(cold_root)?.identity()
+                == std::fs::read_to_string(path.join("IDENTITY"))?.trim(),
+            "cold source identity mismatch"
+        );
+    }
+    check_storage_inner(path, true, true)
+}
+
+fn check_storage_inner(
+    path: &Path,
+    allow_json: bool,
+    allow_conversion: bool,
+) -> Result<serde_json::Value> {
     ensure!(path.is_absolute(), "Manager DB path must be absolute");
     if !path.exists() {
         return Ok(serde_json::json!({"storage_format":"empty","database_exists":false}));
@@ -129,6 +159,17 @@ fn check_storage_inner(path: &Path, allow_json: bool) -> Result<serde_json::Valu
         "signal migration is incomplete; finish the explicit migration before deployment"
     );
     let marked = db.get(storage::FORMAT_KEY)?;
+    let conversion = super::online::inspect_progress(
+        db.get(super::online::META)?.as_deref(),
+        marked.as_deref(),
+        std::fs::read_to_string(path.join("IDENTITY"))?.trim(),
+    )?;
+    ensure!(
+        conversion
+            .as_ref()
+            .is_none_or(|p| p.completed || allow_conversion),
+        "active hot conversion requires explicit archive.cold.hot_conversion before deployment"
+    );
     if let Some(marker) = marked {
         ensure!(marker == storage::FORMAT, "unknown signal storage format");
         ensure!(
@@ -141,7 +182,9 @@ fn check_storage_inner(path: &Path, allow_json: bool) -> Result<serde_json::Valu
             .all(|n| db.cf_handle(n).is_some()),
             "compact archive CF is missing"
         );
-        return Ok(serde_json::json!({"storage_format":"protobuf","database_exists":true}));
+        return Ok(
+            serde_json::json!({"storage_format":if conversion.as_ref().is_some_and(|p| !p.completed) {"converting_json"} else {"protobuf"},"database_exists":true}),
+        );
     }
     for name in [
         POSITION_UPDATES_CF,

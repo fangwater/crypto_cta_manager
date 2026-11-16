@@ -21,7 +21,7 @@ pub fn available(path: &Path) -> Result<u64> {
         .context("disk availability overflow")
 }
 
-pub(super) fn require(path: &Path, minimum: u64, temporary: u64) -> Result<u64> {
+pub(crate) fn require(path: &Path, minimum: u64, temporary: u64) -> Result<u64> {
     let free = available(path)?;
     let needed = minimum
         .checked_add(temporary)

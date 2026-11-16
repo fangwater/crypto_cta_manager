@@ -3,10 +3,13 @@
 The PB-native implementation stores position signals as Protobuf, separates target
 inputs from factual observations, interns repeated strings, and shares/replaces
 snapshot contents without changing their numerical precision. JSON remains the
-HTTP publish/query contract. A DB's hot format is selected once, never per row.
+HTTP publish/query contract. Normal PB stores never guess each row's format.
 Explicit `[archive.cold]` also permits an existing all-JSON hot store to retain
-JSON writes while expired records become independent PB cold segments. Converting
-the entire hot store still requires explicit offline migration/import commands.
+JSON writes while expired records become independent PB cold segments. Explicit
+`[archive.cold.hot_conversion]` additionally permits bounded online replacement
+of retained JSON and PB new writes; see
+[progressive conversion](position_archive_progressive_conversion.md). Offline
+migration/import remains available for an exclusively owned store.
 No live host has been migrated as part of developing this implementation.
 
 ## Layout and financial semantics
