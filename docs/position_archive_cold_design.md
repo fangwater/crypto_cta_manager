@@ -42,6 +42,37 @@ this does not promise zero disk I/O or instant physical file reclamation.
 - Close all writable cold handles, iterators and snapshots at batch end. Query
   access uses bounded read leases, not a permanently open cold primary handle.
 
+## Oldest-first batches
+
+The operator requires at most one cold `WriteBatch` per archival attempt, with
+a bounded record count. Also cap actual encoded batch bytes: one logical signal
+can contain many observation/snapshot KV operations. Stop at the first of the
+record limit, byte limit or destination-segment boundary. Do not write one batch
+per record, hold an unbounded batch, or span multiple cold DBs in one attempt.
+An individual record that cannot fit must remain in hot storage and report the
+limit failure; it must not be skipped or silently exceed the configured budget.
+
+Select the oldest eligible, immutable unarchived records in original
+`(received_at_us, seq)` key order. Preserve original keys and source identities;
+do not reorder by a mutable payload timestamp. Seek from the persisted cursor
+on subsequent attempts instead of rescanning the entire archive. Freeze the
+selected end key for the attempt so new arrivals cannot extend its scope.
+Late insertions/enrichment must be excluded by the owner's seal/drain barrier
+before confirming the batch immutable.
+
+The one-batch limit describes the cold destination submission. Hot deletion is
+a separate hot-DB batch after cold sync and readback confirmation; it cannot
+share an atomic `WriteBatch` across two RocksDB directories. Commit removal of
+the verified hot originals and the hot progress cursor together. If the cold
+write succeeded but hot cleanup did not, retry the same keys idempotently,
+reject conflicting destination data and never skip the unconfirmed prefix.
+
+Batch caps and hourly cadence must support the actual incoming record/byte
+rate, with headroom for catching up existing history. A single small batch per
+hour below the arrival rate would continue growing the hot backlog. Measure
+arrival and archival throughput/oldest-pending age before selecting limits;
+do not promise bounded storage from a count limit alone.
+
 ## Powerleader's independent task
 
 - Run hourly or slower, staggered from Manager's local archival task. Acquire
