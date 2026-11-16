@@ -10,19 +10,16 @@ verification, deletion and compaction then run while Manager serves new targets.
 ## Read-only scope and limits
 
 At the November 16 inspection, both stores still had floor/sealed `(1, 0)` and
-no archive receipt. The example boundary below is **exclusive October 15, 2026,
-00:00 Asia/Shanghai**, retaining more than the required recent 30 days:
-
-The operator subsequently requested a three-day redundancy window. New owner
-builds enforce **33 days plus the existing execution guard**. For a November 16
-run, the proposed boundary is now **October 14, 00:00 Asia/Shanghai**. The table
-and candidate hashes below describe the earlier October 15 preview/package;
-that package must be replaced by a verified 33-day candidate before deployment.
+no archive receipt. The operator requested a three-day redundancy window on top
+of the 30-day analysis window. The owner now enforces **33 days plus the existing
+execution guard**. For a November 16 run the proposed exclusive boundary is
+**October 14, 2026, 00:00 Asia/Shanghai**. The earlier October 15 proposal and
+30-day candidate have been superseded. Fresh read-only previews found:
 
 | Host | Manager database | Approximate eligible SST bytes |
 | --- | --- | ---: |
-| el01 | `/home/el01/crypto_cta_manager/db` | 12,734,910,348 (11.86 GiB) |
-| jp-meta | `/home/ubuntu/crypto_cta_manager/db` | 11,895,846,119 (11.08 GiB) |
+| el01 | `/home/el01/crypto_cta_manager/db` | 12,316,926,711 (11.47 GiB) |
+| jp-meta | `/home/ubuntu/crypto_cta_manager/db` | 11,435,552,098 (10.65 GiB) |
 
 These are range-size estimates, not promised physical bytes recovered. No live
 record has been sealed or removed. The installed live Managers do not contain
@@ -34,7 +31,7 @@ script must not be used for this JSON-only maintenance release.
 
 The private powerleader NVMe package is:
 
-`/mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager_archives/json-retention-20261116T034102Z/`
+`/mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager_archives/json-retention-33d-20261116T041437Z/`
 
 It contains the two matching executables, operator script/config, exact source
 patch and hashes, build/test logs, rehearsal evidence and an unapproved rollout
@@ -42,10 +39,10 @@ plan with explicit host/database/column-family/date scope. Only `cta_web` and
 `cta_position_archive` are in the executable package; no monitor or Exec binary
 is included.
 
-Build provenance is HEAD `974e2ed67fe94842c95b92987ae76c1ef3864e05` with the
+Build provenance is HEAD `b325cf4a135060d4febec7b8a3703714ef86cf8d` with the
 code/build/script changes of storage commit `3a60a5e` excluded. That retains the
 reviewed JSON maintenance implementation from `9eabf90` and later independent
-monitor fixes. The exact reverse patch SHA-256 is
+monitor fixes and the 33-day guard. The exact reverse patch SHA-256 is
 `25b140d64f4c2f2ffa968faec69f9d67bb8dd80cef5c82fe8339b64a579c8620`.
 Preparation used the existing checkout and NVMe Cargo target. Every affected
 source file and the pre-existing PB release artifacts were hash-verified after
@@ -54,10 +51,10 @@ checkout, runtime mixed-format reader or startup format conversion was added.
 
 | Binary | SHA-256 |
 | --- | --- |
-| `cta_web` | `dd3ded23cfeb406a200b15c8d8d5c93d017458cc210f22cf35624944114467b6` |
-| `cta_position_archive` | `24dc4b7efc4b1be51aa9ef4c40c87029000665c23f3f3dd07b018022f145dd57` |
+| `cta_web` | `fb9baa62d00bd001c5c192161572c14449076196804bd52dd4f3f0afd1a16fff` |
+| `cta_position_archive` | `c1c096303ba77937393c96e36f093b6e3f4ce3a39ca262db4cefc2f8bcdcd0eb` |
 
-Fresh formatting, complete Rust tests (557 library and 18 binary passes, 17
+Fresh formatting, complete Rust tests (558 library and 18 binary passes, 17
 existing library/operator checks and 19 PostgreSQL checks ignored), 12 Python
 tests and the release build passed. A new isolated run used the original 1,520
 real JSON sample records: 720 old records were backed up, restored independently
@@ -67,6 +64,11 @@ after cold restart. Missing-backup deletion and a second writable opener were
 rejected; backup alone retained the floor; reclamation retry was idempotent.
 The temporary test owner exited and its socket was removed. This sample proof
 does not establish full-production priced NAV equivalence or zero I/O impact.
+The compiled candidate CLI accepted the October 14 preview and rejected October
+15 under its real clock; the matching owner binary contains the same 33-day
+guard. A regression test confirms the too-recent export fails before sealing
+or writing retention metadata. The preceding 30-day package is marked
+superseded and must not be deployed.
 
 ## Host-specific execution after authorization
 
