@@ -41,19 +41,40 @@ The backup is on el01, not a powerleader copy. Local operational evidence is at:
 /mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager_archives/el01-log-policy-20261116T101932Z/
 ```
 
-## Prepared only: journald
+## Applied: journald
 
-The el01 account belongs to `sudo`, but the automation SSH session has no usable
-sudo authentication cache. Noninteractive sudo returns `a password is required`.
-Group membership alone does not supply authentication. **The journald policy
-has not been installed.** The first operator-authenticated execution exited
-during post-rotation backup verification (see below); it did not restart the
-system logging service.
+The final operator-authenticated execution completed successfully. The run's
+root-owned backup directory is:
 
+```text
+/var/backups/crypto-cta-manager-journald/20261116T132256.102544Z/
+```
+
+The final result reported `applied: true`, with journal usage reduced from
+**3.9G to 940.3M**. Its after-install guard passed for all **79 protected service
+processes**, with 15 auxiliary service children observed. Manager configuration
+and RocksDB identity were unchanged. Only journald was restarted; trading and
+Manager processes were preserved.
+
+Journald now maintains the 1 GiB / seven-day policy itself; the maintenance
+script does not need scheduling or repeated execution. The effective drop-in
+also reserves 10 GiB free and caps individual journal files at 64 MiB.
+
+An independent read-only follow-up at 13:26:16 UTC confirmed journald active,
+running and successful (new PID 913261), and the application-log timer enabled
+and waiting with its latest service run successful. The journal directory
+occupied 986,062,848 allocated bytes (about 940.4 MiB); the unprivileged
+`journalctl` view showed only its accessible subset. Filesystem available space
+was 39,016,464,384 bytes (about 36.34 GiB). Manager config/DB identity still
+matched. Direct reading of the root-private config directory requires root;
+effective configuration verification was performed by the successful root run.
+
+The el01 account belongs to `sudo`, but the automation SSH session lacks usable
+sudo authentication. The operator supplied authentication in their own terminal.
 `scripts/apply_el01_journald_limits.py` is staged at the same relative path
-under `/home/el01/crypto_cta_manager` and passed its source-host preview. Its
-default is read-only; `--execute` requires root and the verified el01 machine
-identity. To complete the already-authorized operation, authenticate locally:
+under `/home/el01/crypto_cta_manager`. Its default is read-only; `--execute`
+requires root and the verified el01 machine identity. The completed maintenance
+command was:
 
 ```bash
 ssh -t cta_exec_bridge 'sudo python3 /home/el01/crypto_cta_manager/scripts/apply_el01_journald_limits.py --execute'
@@ -110,8 +131,8 @@ commands. Commands have bounded waits and terminate their subprocess group on
 timeout/interruption. Archive verification streams the tar instead of scanning
 and seeking back through gzip. Installation rollback also handles Ctrl+C.
 New tests reproduce a changing source, persistent changes and a command timeout.
-The operator must rerun the same authenticated command to apply the repaired
-script; staging the repair does not itself modify journald policy.
+At this intermediate stage, authenticated execution was still needed; staging
+the repair alone did not modify journald policy. Final completion is above.
 
 ## Process-guard correction
 
@@ -141,5 +162,5 @@ directory and report service changes explicitly. Successful results are emitted
 only after the final guard passes. Tests cover service-child replacement,
 primary/Exec restart and data changes, plus the complete archive/install/verify
 flow with connection churn and rollback after an actual protected-state change.
-This correction does not itself install the journald limit; authenticated
-execution remains required.
+The final operator-authenticated execution used this corrected guard and
+successfully installed the journald limits, as recorded above.
