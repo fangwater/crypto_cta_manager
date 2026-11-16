@@ -1,5 +1,10 @@
 # Address live JSON signal accumulation before format migration
 
+The later [hourly cold-store design](position_archive_cold_design.md) records the
+operator's desired automatic architecture. The candidate documented here is
+only the earlier manual interim option; it must not be deployed as if it
+implemented local cold storage or powerleader-driven automatic maintenance.
+
 The immediate operator objective is to stop old signal records accumulating on
 the live hosts. Full JSON-to-Protobuf replacement and shadow-database migration
 are separate future work. This operation retains the deployed JSON format and

@@ -1,5 +1,10 @@
 # Manual position signal backup and RocksDB reclamation
 
+The operator's latest automatic-storage direction is recorded in
+[the hourly local-cold and powerleader pull design](position_archive_cold_design.md).
+That design is not implemented by the manual workflow below; no hourly timer
+has been enabled.
+
 For the immediate accumulation problem on the currently deployed JSON stores,
 see [the prepared JSON-only online reclamation plan](position_archive_accumulation_20261116.md).
 That package preserves JSON and does not require a full PB migration. The normal
