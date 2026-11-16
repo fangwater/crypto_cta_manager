@@ -11,6 +11,36 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Create NEW synthetic JSON hot/cold stores; never accepts existing data.
+    RehearsalCold {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// List confirmed expired cold segments; never opens a writable hot DB.
+    ColdList {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        limit: usize,
+        #[arg(long)]
+        after: Option<String>,
+    },
+    /// Export/verify a closed daily file locally before any network transfer.
+    ColdPackage {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value_t = 536870912)]
+        max_bytes: u64,
+    },
+    /// Remove exactly one independently verified expired cold segment.
+    ColdDelete {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        receipt: PathBuf,
+    },
     /// Back up an exclusively owned original DB, without converting its records.
     BackupJson {
         #[arg(long)]
@@ -27,6 +57,9 @@ enum Action {
     CheckStorage {
         #[arg(long)]
         db: PathBuf,
+        /// Accept existing JSON only for explicitly configured bounded cold archival.
+        #[arg(long)]
+        cold_root: Option<PathBuf>,
     },
     /// Explicit offline replacement; verifies a complete original DB backup first.
     MigrateJson {
@@ -131,7 +164,55 @@ enum Action {
 }
 fn main() -> Result<()> {
     let args = Args::parse();
+    if matches!(
+        &args.command,
+        Action::ColdList { .. } | Action::ColdPackage { .. } | Action::ColdDelete { .. }
+    ) {
+        crypto_cta_manager::position_archive::cold::manager::lower_priority();
+    }
     let (socket, command) = match args.command {
+        Action::RehearsalCold { root } => {
+            println!(
+                "{}",
+                crypto_cta_manager::position_archive::cold::rehearsal::prepare(&root)?
+            );
+            return Ok(());
+        }
+        Action::ColdList { root, limit, after } => {
+            anyhow::ensure!((1..=100).contains(&limit), "invalid cold inventory limit");
+            let root = crypto_cta_manager::position_archive::cold::ColdRoot::open(&root)?;
+            let segments =
+                root.list_after(crypto_cta_manager::kline::now_us(), after.as_deref(), limit)?;
+            println!("{}", serde_json::to_string(&segments)?);
+            return Ok(());
+        }
+        Action::ColdPackage {
+            root,
+            id,
+            max_bytes,
+        } => {
+            let root = crypto_cta_manager::position_archive::cold::ColdRoot::open(&root)?;
+            let package = crypto_cta_manager::position_archive::cold::package::prepare(
+                &root,
+                &id,
+                crypto_cta_manager::kline::now_us(),
+                max_bytes,
+            )?;
+            println!("{}", serde_json::to_string(&package)?);
+            return Ok(());
+        }
+        Action::ColdDelete { root, receipt } => {
+            let value: crypto_cta_manager::position_archive::cold::Segment =
+                if receipt.as_os_str() == "-" {
+                    serde_json::from_reader(std::io::stdin())?
+                } else {
+                    serde_json::from_reader(std::fs::File::open(receipt)?)?
+                };
+            let root = crypto_cta_manager::position_archive::cold::ColdRoot::open(&root)?;
+            root.delete_verified(&value, crypto_cta_manager::kline::now_us())?;
+            println!("{{\"removed\":true}}");
+            return Ok(());
+        }
         Action::BackupJson { db, backup } => {
             println!(
                 "{}",
@@ -146,10 +227,16 @@ fn main() -> Result<()> {
             );
             return Ok(());
         }
-        Action::CheckStorage { db } => {
+        Action::CheckStorage { db, cold_root } => {
             println!(
                 "{}",
-                crypto_cta_manager::position_archive::migration::check_storage(&db)?
+                if let Some(root) = cold_root {
+                    crypto_cta_manager::position_archive::migration::check_storage_with_cold(
+                        &db, &root,
+                    )?
+                } else {
+                    crypto_cta_manager::position_archive::migration::check_storage(&db)?
+                }
             );
             return Ok(());
         }

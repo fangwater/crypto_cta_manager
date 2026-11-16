@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLockReadGuard};
 
-const META: &str = "position_archive_retention";
+pub(super) const META: &str = "position_archive_retention";
 const MAGIC: &[u8; 16] = b"CTA-SIGNAL-GZIP\0";
 const MAX_VALUE: u64 = 64 * 1024 * 1024;
 const MAX_HEADER: usize = 64 * 1024 * 1024;
@@ -71,7 +71,7 @@ pub struct Boundary {
     pub(crate) cumulative: BTreeMap<(String, String), f64>,
 }
 impl Boundary {
-    fn ingest(&mut self, message: &PositionUpdateMsg) -> Result<()> {
+    pub(super) fn ingest(&mut self, message: &PositionUpdateMsg) -> Result<()> {
         for account in &message.published_accounts {
             let key = (account.source_id.clone(), account.binding_name.clone());
             let next = LatestTargets {
@@ -111,12 +111,12 @@ pub struct Receipt {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct RetentionState {
-    identity: String,
+    pub(super) identity: String,
     pub(super) head: Cursor,
     pub(super) sealed: Cursor,
-    floor: Cursor,
-    boundary: Boundary,
-    receipt: Option<Receipt>,
+    pub(super) floor: Cursor,
+    pub(super) boundary: Boundary,
+    pub(super) receipt: Option<Receipt>,
 }
 impl RetentionState {
     pub(super) fn load(db: &ManagerDb) -> Result<Self> {
@@ -254,7 +254,7 @@ impl PositionArchive {
         *state = next.clone();
         Ok(next)
     }
-    fn visit_range(
+    pub(super) fn visit_range(
         &self,
         from: Cursor,
         to: Cursor,
@@ -286,7 +286,7 @@ impl PositionArchive {
             );
             // Backups are self-contained PB messages; they never depend on a
             // surviving snapshot parent or dictionary outside the export.
-            let message = self.storage.complete(&self.db, &key, &value)?;
+            let message = self.complete(&key, &value)?;
             let value = codec::encode(&message)?;
             ensure!(
                 value.len() as u64 <= MAX_VALUE,

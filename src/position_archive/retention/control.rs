@@ -128,6 +128,10 @@ pub(super) fn serve_connection(
     match command {
         Command::Status => reply(stream, &Reply::success(Some(archive.retention_status())))?,
         Command::Export { before_us } => {
+            ensure!(
+                archive.cold.is_none(),
+                "cold archival is enabled; use the dedicated cold pull instead of direct hot reclamation"
+            );
             let now = crate::kline::now_us();
             let before = (before_us, 0);
             validate_before(before, now)?;
@@ -142,10 +146,18 @@ pub(super) fn serve_connection(
             }
         }
         Command::Commit { receipt } => {
+            ensure!(
+                archive.cold.is_none(),
+                "cold archival is enabled; direct hot-prefix commits are disabled"
+            );
             archive.commit_receipt(&receipt, crate::kline::now_us())?;
             reply(stream, &Reply::success(Some(archive.retention_status())))?;
         }
         Command::Compact { before_us } => {
+            ensure!(
+                archive.cold.is_none(),
+                "cold archival is enabled; forced hot-prefix compaction is disabled"
+            );
             archive.compact_archived((before_us, 0))?;
             reply(stream, &Reply::success(Some(archive.retention_status())))?;
         }

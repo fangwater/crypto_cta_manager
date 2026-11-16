@@ -2,8 +2,8 @@
 
 The operator's latest automatic-storage direction is recorded in
 [the hourly local-cold and powerleader pull design](position_archive_cold_design.md).
-That design is not implemented by the manual workflow below; no hourly timer
-has been enabled.
+The Rust cold worker and `cta_archive_pull` are implemented separately from the
+manual workflow below; no live hourly timer has been enabled.
 
 For the immediate accumulation problem on the currently deployed JSON stores,
 see [the prepared JSON-only online reclamation plan](position_archive_accumulation_20261116.md).
@@ -12,7 +12,8 @@ checkout and deployment gate below describe the newer PB owner; do not deploy
 that owner onto a live JSON store as part of the accumulation cleanup.
 
 Operator policy, 2026-11-15: use an explicit host and date for each manual run.
-There is no automatic retention job, host iteration or scheduled compaction.
+The manual workflow has no automatic retention job, host iteration or scheduled
+compaction. The separate opt-in cold worker is described in the linked document.
 The earlier hourly service/timer templates have been removed. Powerleader's
 previously staged timer remains disabled; no live signal pruning has occurred.
 

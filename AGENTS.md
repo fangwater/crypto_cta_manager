@@ -370,6 +370,18 @@ absolute-value replacement chains. Explicit offline `cta_position_archive
 migrate-json` verifies a complete original backup before converting JSON; normal
 startup must never auto-migrate or accept mixed JSON/PB records. Preserve the
 existing JSON numeric parsing boundary and immutable financial fingerprints.
+By operator instruction on 2026-11-16, optional `[archive.cold]` may keep an
+existing all-JSON hot store writing JSON, without a bulk format migration.
+Retain 33 days plus the execution guard in hot storage; move the oldest expired
+prefix into at most one count/byte-bounded PB cold WriteBatch hourly or slower,
+only after sustained low CPU/I/O and no archive persistence backlog. Close cold
+handles after each batch. Source-side helpers export verified, closed files
+locally under Shanghai-date folders before network transfer. The dedicated
+powerleader `cta_archive_pull` uses pinned public IPv4 SCP, verifies durable local
+restores, then reclaims only the exact expired source cold segment/package.
+Network retries reuse the exported file. Never stream RocksDB export directly
+over a lossy link or silently fall back to private IP/SSH proxies. This feature
+never cleans Exec order/report/queue stores. See `docs/position_archive_cold_design.md`.
 See `docs/position_archive_storage.md`. The message includes the POST body, each
 active bound account's then-current `shares`. Factual positions from each
 source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty` are enriched

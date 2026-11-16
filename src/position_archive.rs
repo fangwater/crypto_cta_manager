@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Mutex, RwLock};
 
 pub mod codec;
+pub mod cold;
 pub mod migration;
 pub mod retention;
 mod storage;
@@ -189,6 +190,8 @@ pub struct PositionArchive {
     target_writes: Mutex<TargetWrites>,
     retention: Mutex<retention::RetentionState>,
     retention_gate: RwLock<()>,
+    legacy_json: bool,
+    cold: Option<cold::manager::State>,
 }
 
 impl PositionArchive {
@@ -199,9 +202,41 @@ impl PositionArchive {
     }
 
     pub fn open(db: ManagerDb) -> Result<Self> {
+        Self::open_with_cold(db, None)
+    }
+
+    pub fn open_with_cold(
+        db: ManagerDb,
+        settings: Option<cold::manager::Settings>,
+    ) -> Result<Self> {
         db.ensure_column_family(POSITION_UPDATES_CF)?;
-        storage::ensure_current(&db)?;
+        let legacy_json = settings.is_some()
+            && db.db().get(storage::FORMAT_KEY)?.is_none()
+            && db.db().cf_handle(POSITION_UPDATES_CF).is_some_and(|cf| {
+                db.db()
+                    .iterator_cf(&cf, IteratorMode::Start)
+                    .next()
+                    .is_some()
+            });
+        if legacy_json {
+            anyhow::ensure!(
+                db.db().get(storage::MIGRATING_KEY)?.is_none(),
+                "cannot cold-archive an interrupted format migration"
+            );
+            let cf = db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
+            for mode in [IteratorMode::Start, IteratorMode::End] {
+                if let Some(row) = db.db().iterator_cf(&cf, mode).next() {
+                    let (k, v) = row?;
+                    migration::decode_json(&k, &v)?;
+                }
+            }
+        } else {
+            storage::ensure_current(&db)?;
+        }
         let retention = retention::RetentionState::load(&db)?;
+        let cold = settings
+            .map(|s| cold::manager::State::open(&db, s))
+            .transpose()?;
         let last_key = latest_key(&db)?.unwrap_or((0, 0)).max(retention.head);
         info!(
             path = %db.path().display(),
@@ -217,7 +252,25 @@ impl PositionArchive {
             target_writes: Mutex::new(TargetWrites::default()),
             retention: Mutex::new(retention),
             retention_gate: RwLock::new(()),
+            legacy_json,
+            cold,
         })
+    }
+
+    fn complete(&self, key: &[u8], value: &[u8]) -> Result<PositionUpdateMsg> {
+        if self.legacy_json {
+            migration::decode_json(key, value)
+        } else {
+            self.storage.complete(&self.db, key, value)
+        }
+    }
+
+    pub fn cold_status(&self) -> Option<cold::manager::Status> {
+        self.cold.as_ref().map(|s| s.status.lock().unwrap().clone())
+    }
+
+    pub fn hot_format(&self) -> &'static str {
+        if self.legacy_json { "json" } else { "protobuf" }
     }
 
     pub fn append(
@@ -285,6 +338,23 @@ impl PositionArchive {
             .cf_handle(POSITION_UPDATES_CF)
             .context("position_updates column family disappeared")?;
         let key = manager_db::encode_seq_key(message.received_at_us, message.seq)?;
+        if self.legacy_json {
+            let bytes = self
+                .db
+                .db()
+                .get_cf(&handle, key)?
+                .context("legacy enrichment target is missing")?;
+            let mut target = migration::decode_json(&key, &bytes)?;
+            anyhow::ensure!(
+                target.strategy.strategy_name == message.strategy.strategy_name,
+                "legacy enrichment identity mismatch"
+            );
+            target.factual_positions = positions.into_iter().map(archive_source).collect();
+            self.db
+                .db()
+                .put_cf(&handle, key, serde_json::to_vec(&target)?)?;
+            return Ok(());
+        }
         let target = codec::decode(
             &self
                 .db
@@ -366,7 +436,7 @@ impl PositionArchive {
                 if cursor.0 != received_at_us {
                     break;
                 }
-                let message = self.storage.complete(&self.db, &key, &value)?;
+                let message = self.complete(&key, &value)?;
                 if message.strategy.strategy_name == strategy.strategy_name
                     && message.strategy.updated_at_us == strategy.updated_at_us
                 {
@@ -415,9 +485,19 @@ impl PositionArchive {
         );
         // Match the historical disk JSON parser's numeric interpretation. Do not
         // change serde_json features or reparse existing binary records.
-        let msg: PositionUpdateMsg = serde_json::from_slice(&serde_json::to_vec(&msg)?)?;
+        let original_json = serde_json::to_vec(&msg)?;
+        let msg: PositionUpdateMsg = serde_json::from_slice(&original_json)?;
         let mut batch = rocksdb::WriteBatch::default();
-        let pending = self.storage.stage(&self.db, &msg, &mut batch, true)?;
+        let pending = if self.legacy_json {
+            batch.put_cf(
+                &handle,
+                manager_db::encode_seq_key(received_at_us, seq)?,
+                original_json,
+            );
+            None
+        } else {
+            Some(self.storage.stage(&self.db, &msg, &mut batch, true)?)
+        };
         if let Some(identity) = current_identity {
             batch.put(
                 format!("position_current:{}", strategy.strategy_name),
@@ -436,7 +516,9 @@ impl PositionArchive {
             self.storage.clear_cache();
             return Err(error);
         }
-        self.storage.published(pending);
+        if let Some(pending) = pending {
+            self.storage.published(pending);
+        }
         self.record_append(&mut last, (received_at_us, seq))?;
         Ok(msg)
     }
@@ -484,7 +566,7 @@ impl PositionArchive {
             .context("position_updates column family disappeared")?;
         let mut iter = self.db.db().iterator_cf(&handle, IteratorMode::End);
         match iter.next() {
-            Some(Ok((key, value))) => self.storage.complete(&self.db, &key, &value).map(Some),
+            Some(Ok((key, value))) => self.complete(&key, &value).map(Some),
             Some(Err(error)) => Err(error).context("failed to read latest position update"),
             None => Ok(None),
         }
@@ -512,7 +594,7 @@ impl PositionArchive {
             .iterator_cf(&handle, IteratorMode::From(&start, Direction::Forward));
         for item in iter {
             let (key, value) = item.context("failed to iterate position updates")?;
-            out.push(self.storage.complete(&self.db, &key, &value)?);
+            out.push(self.complete(&key, &value)?);
         }
         Ok(out)
     }
@@ -538,16 +620,55 @@ impl PositionArchive {
         &self,
         after: Option<(i64, u32)>,
         end_received_at_us: i64,
+        visit: impl FnMut(PositionUpdateMsg) -> Result<()>,
+    ) -> Result<()> {
+        let retention = self.retention_read();
+        self.visit_target_updates_guarded(&retention, after, end_received_at_us, visit)
+    }
+
+    // A caller reading the boundary and its suffix must hold ONE guard across
+    // both. Reacquiring an RwLock reader can deadlock behind a pending writer.
+    pub(crate) fn visit_target_updates_guarded(
+        &self,
+        _retention: &std::sync::RwLockReadGuard<'_, ()>,
+        after: Option<(i64, u32)>,
+        end_received_at_us: i64,
         mut visit: impl FnMut(PositionUpdateMsg) -> Result<()>,
     ) -> Result<()> {
-        fn decode_batch(batch: &[((i64, u32), Box<[u8]>)]) -> Result<Vec<PositionUpdateMsg>> {
+        #[derive(Deserialize)]
+        struct LegacyTarget {
+            msg_type: String,
+            schema_version: u32,
+            received_at_us: i64,
+            seq: u32,
+            strategy: PositionStrategy,
+            #[serde(default)]
+            published_accounts: Vec<ArchivedPublishedAccount>,
+        }
+        fn decode_batch(
+            batch: &[((i64, u32), Box<[u8]>)],
+            legacy: bool,
+        ) -> Result<Vec<PositionUpdateMsg>> {
             use rayon::prelude::*;
             crate::analysis::run(|| {
                 batch
                     .par_iter()
                     .map(|(cursor, value)| {
-                        let message = codec::decode(value)
-                            .context("failed to decode archived execution targets")?;
+                        let message = if legacy {
+                            let m: LegacyTarget = serde_json::from_slice(value)?;
+                            PositionUpdateMsg {
+                                msg_type: m.msg_type,
+                                schema_version: m.schema_version,
+                                received_at_us: m.received_at_us,
+                                seq: m.seq,
+                                strategy: m.strategy,
+                                published_accounts: m.published_accounts,
+                                factual_positions: vec![],
+                            }
+                        } else {
+                            codec::decode(value)
+                                .context("failed to decode archived execution targets")?
+                        };
                         anyhow::ensure!(
                             (message.received_at_us, message.seq) == *cursor,
                             "archived target timestamp does not match its key"
@@ -587,14 +708,14 @@ impl PositionArchive {
             batch_bytes += value.len();
             batch.push((cursor, value));
             if batch.len() >= 256 || batch_bytes >= 8 * 1024 * 1024 {
-                for message in decode_batch(&batch)? {
+                for message in decode_batch(&batch, self.legacy_json)? {
                     visit(message)?;
                 }
                 batch.clear();
                 batch_bytes = 0;
             }
         }
-        for message in decode_batch(&batch)? {
+        for message in decode_batch(&batch, self.legacy_json)? {
             visit(message)?;
         }
         Ok(())
@@ -650,7 +771,7 @@ impl PositionArchive {
             if after.is_some_and(|after| cursor <= after) {
                 continue;
             }
-            let mut message = self.storage.complete(&self.db, &key, &value)?;
+            let mut message = self.complete(&key, &value)?;
             if let Some(allowed_strategy_names) = allowed_strategy_names
                 && !allowed_strategy_names.contains(&message.strategy.strategy_name)
             {

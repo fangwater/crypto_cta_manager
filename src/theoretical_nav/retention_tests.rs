@@ -7,9 +7,27 @@ use crate::position_archive::{
 
 #[tokio::test]
 async fn pruning_and_cold_restart_keep_exact_deltas_carry_and_dormant_markets() {
+    check_retention_replay(false).await;
+}
+
+#[tokio::test]
+async fn automatic_cold_archival_keeps_exact_deltas_carry_and_dormant_markets() {
+    check_retention_replay(true).await;
+}
+
+async fn check_retention_replay(automatic: bool) {
     let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hot");
+    let settings = automatic.then(|| crate::position_archive::cold::manager::Settings {
+        root: dir.path().join("cold"),
+        ..Default::default()
+    });
     let archive = Arc::new(
-        PositionArchive::open(crate::manager_db::ManagerDb::open(dir.path()).unwrap()).unwrap(),
+        PositionArchive::open_with_cold(
+            crate::manager_db::ManagerDb::open(&path).unwrap(),
+            settings.clone(),
+        )
+        .unwrap(),
     );
     let mut config: AppConfig =
         toml::from_str(include_str!("../../config/cta-manager.example.toml")).unwrap();
@@ -124,14 +142,19 @@ async fn pruning_and_cold_restart_keep_exact_deltas_carry_and_dormant_markets() 
         .unwrap();
     let backup = tempfile::tempdir().unwrap();
     let mut total = 0;
-    loop {
-        let mut bytes = Vec::new();
-        if !archive.export_prefix(&mut bytes, cutoff(now), now).unwrap() {
-            break;
+    if automatic {
+        let segment = archive.archive_cold_once(now).unwrap().unwrap();
+        total += segment.count;
+    } else {
+        loop {
+            let mut bytes = Vec::new();
+            if !archive.export_prefix(&mut bytes, cutoff(now), now).unwrap() {
+                break;
+            }
+            let receipt = verify_restore(bytes.as_slice(), &backup.path().join("db")).unwrap();
+            total += receipt.count;
+            archive.commit_receipt(&receipt, now).unwrap();
         }
-        let receipt = verify_restore(bytes.as_slice(), &backup.path().join("db")).unwrap();
-        total += receipt.count;
-        archive.commit_receipt(&receipt, now).unwrap();
     }
     assert_eq!(total, 201);
     let warm = cache
@@ -154,7 +177,11 @@ async fn pruning_and_cold_restart_keep_exact_deltas_carry_and_dormant_markets() 
     drop(cache);
     drop(archive);
     let archive = Arc::new(
-        PositionArchive::open(crate::manager_db::ManagerDb::open(dir.path()).unwrap()).unwrap(),
+        PositionArchive::open_with_cold(
+            crate::manager_db::ManagerDb::open(&path).unwrap(),
+            settings,
+        )
+        .unwrap(),
     );
     let cold = TheoreticalTargetCache::new(config, archive);
     let after = cold
@@ -191,6 +218,15 @@ async fn pruning_and_cold_restart_keep_exact_deltas_carry_and_dormant_markets() 
 
 #[tokio::test]
 async fn retained_month_curves_are_identical_with_boundary_only_holdings() {
+    check_retained_month_curves(false).await;
+}
+
+#[tokio::test]
+async fn automatic_cold_archival_preserves_priced_month_curves_for_all_execution_models() {
+    check_retained_month_curves(true).await;
+}
+
+async fn check_retained_month_curves(automatic: bool) {
     use crate::kline::{DAY_US, Kline};
     let root = tempfile::tempdir().unwrap();
     let db = crate::manager_db::ManagerDb::open(&root.path().join("db")).unwrap();
@@ -229,7 +265,16 @@ async fn retained_month_curves_are_identical_with_boundary_only_holdings() {
             .save_page(symbol, start - MINUTE_US, start + 61 * MINUTE_US, &bars)
             .unwrap();
     }
-    let archive = Arc::new(PositionArchive::open(db).unwrap());
+    let archive = Arc::new(
+        PositionArchive::open_with_cold(
+            db,
+            automatic.then(|| crate::position_archive::cold::manager::Settings {
+                root: root.path().join("cold"),
+                ..Default::default()
+            }),
+        )
+        .unwrap(),
+    );
     let mut config: AppConfig =
         toml::from_str(include_str!("../../config/cta-manager.example.toml")).unwrap();
     let env = root.path().join("backend.env");
@@ -314,10 +359,14 @@ async fn retained_month_curves_are_identical_with_boundary_only_holdings() {
         original.push((model, curve));
     }
     let backup = tempfile::tempdir().unwrap();
-    let mut bytes = Vec::new();
-    archive.export_prefix(&mut bytes, cutoff(now), now).unwrap();
-    let receipt = verify_restore(bytes.as_slice(), &backup.path().join("db")).unwrap();
-    archive.commit_receipt(&receipt, now).unwrap();
+    if automatic {
+        assert_eq!(archive.archive_cold_once(now).unwrap().unwrap().count, 2);
+    } else {
+        let mut bytes = Vec::new();
+        archive.export_prefix(&mut bytes, cutoff(now), now).unwrap();
+        let receipt = verify_restore(bytes.as_slice(), &backup.path().join("db")).unwrap();
+        archive.commit_receipt(&receipt, now).unwrap();
+    }
     // A new cache exercises checkpoint loading and cannot use old curve results.
     let cold = TheoreticalTargetCache::new(config, archive);
     for (model, before) in original {

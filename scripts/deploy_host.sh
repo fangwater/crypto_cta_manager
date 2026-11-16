@@ -239,7 +239,13 @@ try:
     db = config.get("kline", {}).get("rocksdb_path")
     if not db:
         raise SystemExit("set kline.rocksdb_path explicitly before deployment")
-    subprocess.run([str(checker), "check-storage", "--db", db], check=True)
+    args = [str(checker), "check-storage", "--db", db]
+    cold = config.get("archive", {}).get("cold")
+    if cold is not None:
+        if not cold.get("root"):
+            raise SystemExit("archive.cold.root must be explicit")
+        args.extend(["--cold-root", cold["root"]])
+    subprocess.run(args, check=True)
 finally:
     checker.unlink(missing_ok=True)
 PY

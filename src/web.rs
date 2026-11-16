@@ -180,6 +180,8 @@ pub struct HealthResponse {
     pub pending_target_mirrors: usize,
     pub target_persistence_error: bool,
     pub position_archive_retained_from_us: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cold_archive: Option<crate::position_archive::cold::manager::Status>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -553,9 +555,19 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         live_equity.clone(),
         viz_snapshot.clone(),
     );
-    let position_archive = Arc::new(PositionArchive::open(manager_db.clone())?);
+    let position_archive = Arc::new(PositionArchive::open_with_cold(
+        manager_db.clone(),
+        config.archive.cold.clone(),
+    )?);
     let targets = Arc::new(target_state::Targets::default());
     targets.load(&pool, &position_archive).await?;
+    {
+        let pending = targets.clone();
+        crate::position_archive::cold::manager::spawn(position_archive.clone(), move || {
+            let (n, _, failed) = pending.persistence_status();
+            (n, failed)
+        });
+    }
     if let Some(socket) = &config.archive.socket {
         let targets = targets.clone();
         crate::position_archive::retention::start_socket(
@@ -1866,6 +1878,7 @@ async fn health(
         pending_target_mirrors,
         target_persistence_error,
         position_archive_retained_from_us: state.position_archive.retention_floor().0,
+        cold_archive: state.position_archive.cold_status(),
     };
     (NO_STORE, Json(response))
 }

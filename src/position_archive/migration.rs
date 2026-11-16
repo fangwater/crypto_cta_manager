@@ -85,6 +85,34 @@ fn readonly(path: &Path) -> Result<crate::manager_db::ManagerRocksDb> {
 /// Read-only deployment gate. A legacy or interrupted store must not have its
 /// running owner replaced by an incompatible binary before planned migration.
 pub fn check_storage(path: &Path) -> Result<serde_json::Value> {
+    check_storage_inner(path, false)
+}
+
+/// Explicit cold mode keeps the entire hot store JSON and converts only expired
+/// records into independent PB segments. This check never initializes either DB.
+pub fn check_storage_with_cold(path: &Path, cold_root: &Path) -> Result<serde_json::Value> {
+    super::cold::manager::Settings {
+        root: cold_root.to_owned(),
+        ..Default::default()
+    }
+    .validate()?;
+    let hot = crate::config::resolve_storage_path(path)?;
+    let cold = crate::config::resolve_storage_path(cold_root)?;
+    ensure!(
+        !hot.starts_with(&cold) && !cold.starts_with(&hot),
+        "cold root overlaps hot DB"
+    );
+    if cold_root.exists() {
+        ensure!(
+            super::cold::ColdRoot::open(cold_root)?.identity()
+                == std::fs::read_to_string(path.join("IDENTITY"))?.trim(),
+            "cold source identity mismatch"
+        );
+    }
+    check_storage_inner(path, true)
+}
+
+fn check_storage_inner(path: &Path, allow_json: bool) -> Result<serde_json::Value> {
     ensure!(path.is_absolute(), "Manager DB path must be absolute");
     if !path.exists() {
         return Ok(serde_json::json!({"storage_format":"empty","database_exists":false}));
@@ -121,6 +149,15 @@ pub fn check_storage(path: &Path) -> Result<serde_json::Value> {
         storage::SNAPSHOTS_CF,
     ] {
         if let Some(cf) = db.cf_handle(name) {
+            if allow_json && name == POSITION_UPDATES_CF {
+                for mode in [IteratorMode::Start, IteratorMode::End] {
+                    if let Some(row) = db.iterator_cf(&cf, mode).next() {
+                        let (key, value) = row?;
+                        decode_json(&key, &value)?;
+                    }
+                }
+                continue;
+            }
             ensure!(
                 db.iterator_cf(&cf, IteratorMode::Start)
                     .next()
@@ -129,6 +166,18 @@ pub fn check_storage(path: &Path) -> Result<serde_json::Value> {
                 "legacy or unmarked signals require explicit migrate-json before deployment; running Manager has not been changed"
             );
         }
+    }
+    if allow_json
+        && let Some(cf) = db.cf_handle(POSITION_UPDATES_CF)
+        && db
+            .iterator_cf(&cf, IteratorMode::Start)
+            .next()
+            .transpose()?
+            .is_some()
+    {
+        return Ok(
+            serde_json::json!({"storage_format":"json","database_exists":true,"cold_mode":true}),
+        );
     }
     Ok(serde_json::json!({"storage_format":"empty","database_exists":true}))
 }
@@ -455,6 +504,11 @@ mod tests {
             .put("position_current:alpha", b"unchanged current target")
             .unwrap();
         assert!(check_storage(&path).is_err());
+        assert_eq!(
+            check_storage_with_cold(&path, &root.path().join("cold")).unwrap()["storage_format"],
+            "json"
+        );
+        assert!(check_storage_with_cold(&path, &path.join("cold")).is_err());
         let kline = db.db().cf_handle("klines_1m").unwrap();
         db.db()
             .put_cf(&kline, b"sentinel", b"unchanged candles")

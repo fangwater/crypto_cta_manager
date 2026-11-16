@@ -1,12 +1,13 @@
 # Compact Manager position archive
 
-The current implementation stores position signals as Protobuf, separates target
+The PB-native implementation stores position signals as Protobuf, separates target
 inputs from factual observations, interns repeated strings, and shares/replaces
 snapshot contents without changing their numerical precision. JSON remains the
-HTTP publish/query contract. This replaces the sole live archive format; it is
-not an additional format selected per row. Legacy JSON is handled exclusively by
-explicit offline migration/import commands. No live host has been migrated as
-part of developing this implementation.
+HTTP publish/query contract. A DB's hot format is selected once, never per row.
+Explicit `[archive.cold]` also permits an existing all-JSON hot store to retain
+JSON writes while expired records become independent PB cold segments. Converting
+the entire hot store still requires explicit offline migration/import commands.
+No live host has been migrated as part of developing this implementation.
 
 ## Layout and financial semantics
 
@@ -68,7 +69,7 @@ Build the matching owner and tool together:
 cargo build --release --bin cta_web --bin cta_position_archive
 ```
 
-An existing JSON store is refused at normal startup with an explicit migration
+Without explicit `[archive.cold]`, an existing JSON store is refused at normal startup with an explicit migration
 instruction. It is not converted at startup. The offline tool must own the
 exclusive RocksDB lock; Manager must be stopped before operating on its live
 path. Never remove `LOCK`, stop Exec, or run this against an Exec store.
@@ -259,3 +260,7 @@ process/configuration identities stayed unchanged. `nav_cached_marks` was absent
 on both hosts and is recorded as a newly introduced helper for rollback handling.
 Each saved original archive client successfully inspected the preserved original
 JSON checkpoint locally. These steps did not migrate a live DB or restart a service.
+
+The opt-in [hourly cold worker](position_archive_cold_design.md) also supports
+existing hot JSON without full migration: the hot DB continues JSON writes and
+only expired records become self-contained PB cold segments.

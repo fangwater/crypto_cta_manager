@@ -285,7 +285,7 @@ impl TheoreticalTargetCache {
         let initial = !self.ready.load(Ordering::Acquire);
         let processed_before = self.processed_messages.load(Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
-        let _retention_guard = self.archive.retention_read();
+        let retention_guard = self.archive.retention_read();
         let (revision, invalidated) = self
             .archive
             .target_changes_since(state.revision, state.cursor);
@@ -335,23 +335,31 @@ impl TheoreticalTargetCache {
         // timestamp order; older late inserts explicitly invalidate the base.
         let stable_end = now_us() - 120 * 1_000_000;
         let after = state.cursor;
-        self.archive
-            .visit_target_updates_after(after, stable_end, |message| {
+        self.archive.visit_target_updates_guarded(
+            &retention_guard,
+            after,
+            stable_end,
+            |message| {
                 ingest_target(&self.config, &mut state, &message)?;
                 state.cursor = Some((message.received_at_us, message.seq));
                 self.processed_messages.fetch_add(1, Ordering::Relaxed);
                 Ok(())
-            })?;
+            },
+        )?;
         let mut tail = TargetCacheState {
             latest: state.latest.clone(),
             ..Default::default()
         };
-        self.archive
-            .visit_target_updates_after(state.cursor, now_us(), |message| {
+        self.archive.visit_target_updates_guarded(
+            &retention_guard,
+            state.cursor,
+            now_us(),
+            |message| {
                 ingest_target(&self.config, &mut tail, &message)?;
                 self.processed_messages.fetch_add(1, Ordering::Relaxed);
                 Ok(())
-            })?;
+            },
+        )?;
         state.tail_deltas = tail.deltas;
         state.tail_markets = tail.markets;
         state.revision = revision;
