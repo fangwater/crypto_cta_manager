@@ -1,5 +1,11 @@
 # Manual position signal backup and RocksDB reclamation
 
+For the immediate accumulation problem on the currently deployed JSON stores,
+see [the prepared JSON-only online reclamation plan](position_archive_accumulation_20261116.md).
+That package preserves JSON and does not require a full PB migration. The normal
+checkout and deployment gate below describe the newer PB owner; do not deploy
+that owner onto a live JSON store as part of the accumulation cleanup.
+
 Operator policy, 2026-11-15: use an explicit host and date for each manual run.
 There is no automatic retention job, host iteration or scheduled compaction.
 The earlier hourly service/timer templates have been removed. Powerleader's
