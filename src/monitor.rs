@@ -48,6 +48,8 @@ pub struct MonitorIssue {
     pub initial_delay_secs: u64,
     /// Send once per observed transition, without repeat/recovery or fault counts.
     pub informational: bool,
+    /// Stable state token; mutable details such as notional must not retrigger it.
+    pub notification_value: Option<String>,
 }
 
 impl MonitorIssue {
@@ -59,11 +61,13 @@ impl MonitorIssue {
             message: message.into(),
             initial_delay_secs: 0,
             informational: false,
+            notification_value: None,
         }
     }
 
-    fn notification_only(mut self) -> Self {
+    fn notification_only(mut self, value: impl Into<String>) -> Self {
         self.informational = true;
+        self.notification_value = Some(value.into());
         self
     }
 
@@ -381,7 +385,16 @@ pub async fn run(config: AppConfig, once: bool, dry_run: bool) -> Result<()> {
                         )
                         .await
                     {
-                        Ok(()) => tracker.mark_sent(&channel_pending, Instant::now()),
+                        Ok(()) => {
+                            tracker.mark_sent(&channel_pending, Instant::now());
+                            for notice in &channel_pending {
+                                // Keys and kinds provide a delivery audit without
+                                // logging webhook credentials or arbitrary errors.
+                                info!(channel=channel.as_str(),issue_key=%notice.key,
+                                    notice_kind=if notice.recovery {"recovery"} else if notice.informational {"notification"} else {"fault"},
+                                    "CTA monitor notice sent");
+                            }
+                        }
                         Err(error) => warn!(
                             channel = channel.as_str(),
                             error = %error,
@@ -453,7 +466,7 @@ async fn check_once(
         let monitor = config.monitor.clone();
         let viz = viz.clone();
         let redis = redis.clone();
-        tasks.spawn(async move { check_source(source, monitor, viz, redis, now_us).await });
+        tasks.spawn(async move { check_source(source, monitor, viz, redis).await });
     }
     while let Some(result) = tasks.join_next().await {
         match result {
@@ -462,7 +475,7 @@ async fn check_once(
                     &result.source,
                     &config.monitor,
                     result.snapshot.as_ref(),
-                    now_us,
+                    result.checked_at_us,
                 ) {
                     issues.push(not_ready_issue);
                 }
@@ -554,6 +567,7 @@ struct SourceCheckResult {
     source: SourceConfig,
     issues: Vec<MonitorIssue>,
     snapshot: Option<ExecStateSnapshot>,
+    checked_at_us: i64,
 }
 
 async fn check_source(
@@ -561,7 +575,6 @@ async fn check_source(
     monitor: MonitorConfig,
     viz: VizSnapshotClient,
     redis: RedisRuntime,
-    now_us: i64,
 ) -> SourceCheckResult {
     let mut issues = Vec::new();
     let mut position_snapshot = None;
@@ -601,11 +614,11 @@ async fn check_source(
             "订单 RocksDB 缺少 uniform_orders column family",
         ));
     } else {
-        issues.extend(check_orders(&source, &monitor, &records, now_us));
+        issues.extend(check_orders(&source, &monitor, &records, unix_time_us()));
     }
 
     match redis.load_exec_leverage_guard(&source).await {
-        Ok(Some(status)) => issues.extend(check_leverage_guard(&source, &status, now_us)),
+        Ok(Some(status)) => issues.extend(check_observed_leverage_guard(&source, &status)),
         Ok(None) => {} // Other Exec deployments have not enabled this worker.
         Err(error) => issues.push(issue(
             "leverage",
@@ -645,7 +658,7 @@ async fn check_source(
                         &monitor,
                         &snapshot,
                         configured.as_ref(),
-                        now_us,
+                        unix_time_us(),
                     ));
                     position_snapshot = Some(snapshot);
                 }
@@ -662,6 +675,7 @@ async fn check_source(
         source,
         issues,
         snapshot: position_snapshot,
+        checked_at_us: unix_time_us(),
     }
 }
 
@@ -680,6 +694,15 @@ struct LeverageSymbolStatus {
     error: Option<String>,
 }
 
+/// Redis and RocksDB observations may arrive seconds after a poll starts.
+/// Evaluate each fetched status against its observation time, never poll start.
+fn check_observed_leverage_guard(
+    source: &SourceConfig,
+    raw: &serde_json::Value,
+) -> Vec<MonitorIssue> {
+    check_leverage_guard(source, raw, unix_time_us())
+}
+
 fn check_leverage_guard(
     source: &SourceConfig,
     raw: &serde_json::Value,
@@ -696,15 +719,27 @@ fn check_leverage_guard(
             )];
         }
     };
-    if status.updated_at_us <= 0
-        || status.updated_at_us > now_us + 5_000_000
-        || now_us.saturating_sub(status.updated_at_us) > 180_000_000
-    {
+    if status.updated_at_us <= 0 || status.updated_at_us > now_us.saturating_add(5_000_000) {
+        return vec![issue(
+            "leverage",
+            "clock",
+            source,
+            format!(
+                "杠杆退避状态时间戳异常（更新时间 {}，本次观测时间 {}），请检查时钟",
+                status.updated_at_us, now_us
+            ),
+        )];
+    }
+    let age_us = now_us.saturating_sub(status.updated_at_us);
+    if age_us > 180_000_000 {
         return vec![issue(
             "leverage",
             "stale",
             source,
-            "杠杆退避检查超过 180 秒未更新，请检查 Exec 风控工作线程",
+            format!(
+                "杠杆退避检查超过 180 秒未更新（本次观测距更新 {:.1} 秒），请检查 Exec 风控工作线程",
+                age_us as f64 / 1_000_000.
+            ),
         )];
     }
     let mut issues = Vec::new();
@@ -728,8 +763,8 @@ fn check_leverage_guard(
                 ),
             ));
         } else if (3..=4).contains(&row.leverage) {
-            issues.push(issue("leverage", &format!("fallback:{symbol}:{}", row.leverage), source,
-                format!("{symbol} 已使用 {} 倍退避档位（优先 5 倍，最低 3 倍），限额 {:.2}，目标风险金额 {:.2}；保持当前档位", row.leverage, row.max_notional, row.required_notional)).notification_only());
+            issues.push(issue("leverage", &format!("fallback:{symbol}"), source,
+                format!("{symbol} 已使用 {} 倍退避档位（优先 5 倍，最低 3 倍），限额 {:.2}，目标风险金额 {:.2}；保持当前档位", row.leverage, row.max_notional, row.required_notional)).notification_only(row.leverage.to_string()));
         }
     }
     issues
@@ -1198,6 +1233,7 @@ struct PendingNotice {
     message: String,
     recovery: bool,
     informational: bool,
+    notification_value: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1236,6 +1272,7 @@ const MIN_REPEAT_ALERT_SECS: u64 = 30;
 struct AlertState {
     active: bool,
     informational: bool,
+    notification_value: Option<String>,
     visible: bool,
     first_seen: Option<Instant>,
     last_sent: Option<Instant>,
@@ -1276,15 +1313,20 @@ impl AlertTracker {
             if !state.visible {
                 continue;
             }
-            let due = state.last_sent.is_none_or(|last_sent| {
-                !issue.informational && now.duration_since(last_sent) >= repeat
-            });
+            let due = if issue.informational {
+                state.last_sent.is_none() || state.notification_value != issue.notification_value
+            } else {
+                state
+                    .last_sent
+                    .is_none_or(|last_sent| now.duration_since(last_sent) >= repeat)
+            };
             if due {
                 pending.push(PendingNotice {
                     key: issue.key.clone(),
                     message: issue.message.clone(),
                     recovery: false,
                     informational: issue.informational,
+                    notification_value: issue.notification_value.clone(),
                 });
             }
         }
@@ -1292,7 +1334,16 @@ impl AlertTracker {
             if !state.active || current_keys.contains(key.as_str()) {
                 continue;
             }
-            if state.informational || state.last_sent.is_none() {
+            if state.informational {
+                // Missing/unreadable/stale evidence is not a confirmed change
+                // of leverage. Preserve the last acknowledged state across it.
+                state.active = false;
+                state.visible = false;
+                state.first_seen = None;
+                state.recovery_pending = false;
+                continue;
+            }
+            if state.last_sent.is_none() {
                 *state = AlertState::default();
                 continue;
             }
@@ -1307,6 +1358,7 @@ impl AlertTracker {
                     message: format!("问题已恢复: {detail}"),
                     recovery: true,
                     informational: false,
+                    notification_value: None,
                 });
             }
         }
@@ -1326,6 +1378,7 @@ impl AlertTracker {
             } else {
                 state.active = true;
                 state.informational = notice.informational;
+                state.notification_value = notice.notification_value.clone();
                 state.last_sent = Some(now);
                 state.recovery_pending = false;
                 state.message = notice.message.clone();
@@ -1843,7 +1896,7 @@ mod tests {
         assert!(
             check_leverage_guard(&source, &raw, now)[0]
                 .key
-                .contains("stale")
+                .contains("clock")
         );
         assert!(
             check_leverage_guard(&source, &serde_json::json!({}), now)[0]
@@ -1948,6 +2001,123 @@ mod tests {
                 .message
                 .contains("signature rejected")
         );
+    }
+
+    #[test]
+    fn leverage_freshness_uses_received_observation_not_slow_poll_start() {
+        let source = test_source("binance-futures");
+        let observed = unix_time_us();
+        let poll_started = observed - 10_000_000;
+        let raw = serde_json::json!({"updated_at_us":observed-100_000,"error":null,"symbols":{
+            "ONEUSDT":{"leverage":4,"max_notional":200000.,"required_notional":19593.51,"error":null}
+        }});
+        // The old caller supplied poll_started even after awaited disk/Redis I/O.
+        let wrong = check_leverage_guard(&source, &raw, poll_started);
+        assert!(wrong[0].key.contains("clock"));
+        assert!(!wrong[0].message.contains("180"));
+        let actual = check_observed_leverage_guard(&source, &raw);
+        assert_eq!(actual.len(), 1);
+        assert!(actual[0].informational);
+        let mut stale = raw.clone();
+        stale["updated_at_us"] = serde_json::json!(observed - 181_000_000);
+        let actual = check_observed_leverage_guard(&source, &stale);
+        assert!(actual[0].key.contains("stale"));
+        assert!(actual[0].message.contains("181."));
+    }
+
+    #[test]
+    fn leverage_stale_or_unreadable_recovery_does_not_repeat_confirmed_fallback() {
+        let source = test_source("binance-futures");
+        let now_us = 1_794_715_950_000_000_i64;
+        let mut raw = serde_json::json!({"updated_at_us":now_us,"error":null,"symbols":{
+            "ONEUSDT":{"leverage":4,"max_notional":200000.,"required_notional":19593.51,"error":null}
+        }});
+        let healthy = check_leverage_guard(&source, &raw, now_us);
+        let mut tracker = AlertTracker::default();
+        let start = Instant::now();
+        let first = tracker.pending(&healthy, start, 60);
+        assert_eq!(first.len(), 1);
+        tracker.mark_sent(&first, start);
+        let mut stale = raw.clone();
+        stale["updated_at_us"] = serde_json::json!(now_us - 181_000_000);
+        let faults = [
+            check_leverage_guard(&source, &stale, now_us),
+            check_leverage_guard(&source, &serde_json::json!({}), now_us),
+            vec![issue(
+                "leverage",
+                "diagnostics",
+                &source,
+                "Redis read failed",
+            )],
+        ];
+        for (i, fault) in faults.iter().cycle().take(12).enumerate() {
+            let at = start + Duration::from_secs((i as u64 + 1) * 120);
+            let sent = tracker.pending(fault, at, 60);
+            assert_eq!(sent.len(), 1);
+            assert!(!sent[0].informational);
+            tracker.mark_sent(&sent, at);
+            let repeat = tracker.pending(fault, at + Duration::from_secs(61), 60);
+            assert_eq!(repeat.len(), 1);
+            assert!(!repeat[0].informational);
+            tracker.mark_sent(&repeat, at + Duration::from_secs(61));
+            let recovered = tracker.pending(&healthy, at + Duration::from_secs(62), 60);
+            assert_eq!(recovered.len(), 1);
+            assert!(recovered[0].recovery && !recovered[0].informational);
+            tracker.mark_sent(&recovered, at + Duration::from_secs(62));
+            assert_eq!(tracker.active_count(NoticeChannel::Order), 0);
+        }
+        raw["symbols"]["ONEUSDT"]["required_notional"] = serde_json::json!(12345.67);
+        assert!(
+            tracker
+                .pending(
+                    &check_leverage_guard(&source, &raw, now_us),
+                    start + Duration::from_secs(86400),
+                    60
+                )
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn leverage_changed_levels_notify_again_and_failed_deliveries_survive_evidence_gaps() {
+        let source = test_source("binance-futures");
+        let now_us = 1_794_715_950_000_000_i64;
+        let mut raw = serde_json::json!({"updated_at_us":now_us,"error":null,"symbols":{
+            "ONEUSDT":{"leverage":4,"max_notional":200000.,"required_notional":19593.51,"error":null}
+        }});
+        let mut tracker = AlertTracker::default();
+        let start = Instant::now();
+        let healthy = check_leverage_guard(&source, &raw, now_us);
+        let failed = tracker.pending(&healthy, start, 60);
+        assert_eq!(failed.len(), 1);
+        assert!(
+            tracker
+                .pending(&[], start + Duration::from_secs(1), 60)
+                .is_empty()
+        );
+        let retry = tracker.pending(&healthy, start + Duration::from_secs(2), 60);
+        assert_eq!(retry.len(), 1);
+        tracker.mark_sent(&retry, start + Duration::from_secs(2));
+        for (index, level) in [3, 4, 3].into_iter().enumerate() {
+            raw["symbols"]["ONEUSDT"]["leverage"] = serde_json::json!(level);
+            let current = check_leverage_guard(&source, &raw, now_us);
+            let at = start + Duration::from_secs(3 + index as u64);
+            let notices = tracker.pending(&current, at, 60);
+            assert_eq!(notices.len(), 1);
+            assert!(notices[0].informational && !notices[0].recovery);
+            assert!(notices[0].message.contains(&format!("{level} 倍")));
+            tracker.mark_sent(&notices, at);
+            assert!(tracker.pending(&current, at, 60).is_empty());
+        }
+        let mut other = source.clone();
+        other.id = "another-account".into();
+        let independent = tracker.pending(
+            &check_leverage_guard(&other, &raw, now_us),
+            start + Duration::from_secs(10),
+            60,
+        );
+        assert_eq!(independent.len(), 1);
+        assert!(independent[0].key.contains("another-account"));
     }
 
     fn test_source(venue: &str) -> SourceConfig {
@@ -2953,12 +3123,14 @@ mod tests {
             message: "market".to_string(),
             recovery: false,
             informational: false,
+            notification_value: None,
         };
         let order = PendingNotice {
             key: "orders:stale:trade01".to_string(),
             message: "order".to_string(),
             recovery: false,
             informational: false,
+            notification_value: None,
         };
         assert_eq!(market.channel(), NoticeChannel::Market);
         assert_eq!(order.channel(), NoticeChannel::Order);
@@ -3086,10 +3258,11 @@ mod tests {
             host_tag: "el01".to_string(),
         };
         let notice = PendingNotice {
-            key: "leverage:fallback:ONEUSDT:4:trade07".to_string(),
+            key: "leverage:fallback:ONEUSDT:trade07".to_string(),
             message: "ONEUSDT 已使用 4 倍退避档位".to_string(),
             recovery: false,
             informational: true,
+            notification_value: Some("4".to_string()),
         };
         let content = sender.notice_content(&[notice]);
         assert!(content.contains("[通知] ONEUSDT 已使用 4 倍退避档位"));
@@ -3111,6 +3284,7 @@ mod tests {
                 key: "test".to_string(),
                 recovery: false,
                 informational: false,
+                notification_value: None,
                 message: format!("{}{}", "a".repeat(padding), "订单状态未知".repeat(400)),
             };
             let content = sender.notice_content(&[notice]);
