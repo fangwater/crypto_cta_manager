@@ -1,4 +1,4 @@
-use super::{config::Config, cost, market_data::Feed, reader, reference};
+use super::{config::Config, cost, market_data::Feed, reader, reference, reference_data};
 use crate::{
     auth::{self, AuthUser, SourceAccess},
     strategy_catalog::{self, SavePositionStrategyRequest},
@@ -67,6 +67,7 @@ pub struct Service {
     rocks: Arc<crate::rocks_source::ReaderPool>,
     catalog_lock: Arc<tokio::sync::Mutex<()>>,
     market_data: Option<Arc<Feed>>,
+    reference_service: Option<Arc<reference_data::Feed>>,
 }
 
 impl Service {
@@ -86,6 +87,12 @@ impl Service {
             .map(Feed::new)
             .transpose()?
             .map(Arc::new);
+        let reference_service = config
+            .reference_service
+            .clone()
+            .map(reference_data::Feed::new)
+            .transpose()?
+            .map(Arc::new);
         Ok(Self {
             readers: Arc::new(
                 config
@@ -99,6 +106,7 @@ impl Service {
             rocks,
             catalog_lock: Arc::default(),
             market_data,
+            reference_service,
         })
     }
     pub fn router(self) -> Router {
@@ -111,6 +119,8 @@ impl Service {
             .route("/api/auth/users/{id}/role", put(set_role))
             .route("/api/native/sources", get(sources))
             .route("/api/native/sources/{id}/snapshot", get(snapshot))
+            .route("/api/native/sources/{id}/market", get(market_day))
+            .route("/api/native/sources/{id}/rates", get(account_rates))
             .route("/api/native/sources/{id}/cost", get(cost_report))
             .route(
                 "/api/native/sources/{id}/grants",
@@ -377,6 +387,66 @@ async fn snapshot(
 #[derive(serde::Deserialize)]
 struct CostQuery {
     trading_day: String,
+}
+
+#[derive(serde::Deserialize)]
+struct MarketQuery {
+    trading_day: String,
+    venue: String,
+    symbol: String,
+}
+async fn market_day(
+    State(s): State<Service>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<MarketQuery>,
+) -> ApiResult {
+    if !access.view.contains(&id) {
+        return Err(forbidden());
+    }
+    reference::valid_day(&query.trading_day).map_err(bad)?;
+    super::validate_market(&format!("{}:{}", query.venue, query.symbol)).map_err(bad)?;
+    let feed = s
+        .market_data
+        .as_ref()
+        .context("native market-replay is not configured")?;
+    body(
+        feed.day(
+            &query.venue,
+            &query.symbol,
+            &query.trading_day,
+            super::now_us(),
+        )
+        .await?,
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct RatesQuery {
+    venue: String,
+    symbol: String,
+    at_us: i64,
+}
+async fn account_rates(
+    State(s): State<Service>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RatesQuery>,
+) -> ApiResult {
+    if !access.view.contains(&id) {
+        return Err(forbidden());
+    }
+    super::validate_market(&format!("{}:{}", query.venue, query.symbol)).map_err(bad)?;
+    let feed = s
+        .reference_service
+        .as_ref()
+        .context("reference_service is not configured")?;
+    let rates = feed
+        .rates(&id, &query.venue, &query.symbol, query.at_us)
+        .await?;
+    body(
+        json!({"source_id":id,"at_us":query.at_us,"currency":"CNY","rates":rates,"fee_basis":"account_rate_observation"}),
+    )
 }
 
 async fn cost_report(

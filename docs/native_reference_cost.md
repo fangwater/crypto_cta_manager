@@ -3,15 +3,13 @@
 2026-11-14。国内入口新增每日参考数据、理论执行价格和真实成交成本对照。
 所有计算在 Manager 内完成，不加载交易 SDK、不访问交易柜台、不发布目标。
 
-行情来自操作员自建的 Binance Kline 兼容 HTTP 服务，已确认 `volume` 为成交手数、
-`turnover` 为人民币成交额。下面的每日 JSON 维护合约规则、交易时段、信号参考
-及显式报单关联；使用 HTTP 时可省略 `bars`，Manager 按需读取并缓存行情。
-也可用人工准备的分钟数据进行离线核验。文件不会补造实际成交或策略身份。
-
-2026-11-17 服务核对：`market_replay` 实际提供国内分钟行情 gRPC（18312）及合约、
-时段、费率 HTTP（8765）；本文件下面描述的是 Manager 当前已有的 Binance 形状
-HTTP 客户端，不表示上述原生服务已经接入。接入 gRPC 时还必须使用服务的数据水位
-和 `provisional` 判断最终分钟，不能仅按本机时钟固化当前日行情。
+行情来自独立的 `market_replay` 服务：原生分钟 gRPC（18312）提供实际到期合约的
+OHLC、单边成交手数、已含乘数的人民币成交额及数据水位。Manager 通过固定 Git
+revision 的 `cn_market_proto` 消费契约，没有相对路径或共享数据库依赖。
+每日 JSON 继续维护历史有效的费率、完整交易日时段、独立信号及显式报单关联；
+可省略 `bars` 并按需查询 gRPC，也可带人工复核的离线分钟数据。
+账户费率可单独按历史时点查询；成本报告目前仍使用每日参考包中的费用和关联。
+完整交易日历、国内净值和执行对接仍在推进，不补造实际成交或策略身份。
 
 ## 各类数据的用途
 
@@ -33,59 +31,65 @@ HTTP 客户端，不表示上述原生服务已经接入。接入 gRPC 时还必
 拆分报表。手续费统一按合约及开仓、平仓、平今、平昨规则维护和计算；实际扣费与
 估算费用仍分别标识。
 
-## 自建 HTTP 接口契约
-
-请求参数与 Binance `/fapi/v1/klines` 一致，URL 可以自行选择：
-
-```text
-GET <api_url>?symbol=SHFE%3Acu2612&interval=1m&startTime=<Unix毫秒>&endTime=<Unix毫秒>&limit=1000
-```
-
-`startTime`、`endTime` 为实际自然时间的 Unix 毫秒，含首尾。Manager 用分钟 open
-作为起点，用最后一分钟的 `open + 59999 ms` 作为终点。当前只请求 `1m`，每页
-最多 1000 根。返回 Binance 形状的二维 JSON 数组，每行至少包含以下位置：
-
-| 索引 | 内容 | 类型／单位 |
-| --- | --- | --- |
-| 0 | open time | 整数 Unix 毫秒，整分钟对齐 |
-| 1–4 | open / high / low / close | 十进制字符串或 JSON 数值，合约报价 |
-| 5 | volume | 单边、该分钟增量成交手数，尚未乘合约乘数 |
-| 6 | close time | 整数，必须等于 open time + 59999 |
-| 7 | quote volume / turnover | 单边、该分钟增量人民币成交额，已包含合约乘数 |
-| 8–11 | Binance 其他列 | 可以照常返回，当前成本计算不使用 |
-
-所以分钟成交均价为 `row[7] / row[5] / contract_multiplier`。
-数字类型与字符串类型均可用于价格和成交量，时间戳必须为 JSON 整数。
-缺失分钟直接省略；不要用上一分钟、主连价格或未完成分钟填充。
-无数据返回 `[]`，服务失败返回非 2xx 状态。没有夜盘／休市信息时，不能根据
-K 线缺口自行认定休市；交易时段仍由每日参考文件明确维护。
-
-配置示例：
+## 原生 gRPC 行情契约
 
 ```toml
 [market_data]
-api_url = "http://127.0.0.1:18311/fapi/v1/klines"
-cache_root = "/absolute/manager-owned/market-cache"
-
-[market_data.symbols]
-"SHFE:cu2612" = "SHFE:cu2612"
-"INE:sc2612" = "INE:sc2612"
+grpc_url = "http://127.0.0.1:18312"
+cache_root = "/absolute/manager-owned/native-market-cache"
 ```
 
-映射右侧是服务实际接受的 `symbol`，也可明确设置为 `cu2612`。映射不能冲突，
-Manager 始终用左侧的交易所与实际合约隔离行情，不自动转大写或换成主连。
-未配置 `[market_data]` 时不发 HTTP。没有公开 Binance 或其他 API 回退；
-HTTP 禁用环境代理和重定向，单请求超时 10 秒，共享 HTTP 并发上限 4。
+客户端调用 `cn_market.v1.CnFuturesMarket/GetMinuteBars`，显式发送交易所、原生合约、
+柜台交易日和 `include_empty_minutes=true`。保留执行记录的大小写和月份编码，
+仅在边界核对 provider 返回的 native/canonical code；不改为主连。
+合约乘数、tick、交易日、分钟顺序及 `VWAP = turnover_cny / volume_lots / multiplier`
+均校验。已有参考包的乘数或 tick 冲突时拒绝覆盖。
 
-缓存位于独立的 `cache_root/<venue>/<symbol>/<trading_day>.json`，每个合约／交易日
-一个文件。只下载信号执行窗口内缺少的已收盘分钟；同进程并发缺口合并，多个
-账户共享相同市场缓存，重启后可复用。缺失返回不写负缓存，之后查询继续补缺。
-HTTP 或某一合约失败不阻止其他合约和事实成交返回。每页先验证时段、OHLC、
-成交额与乘数，再原子更新缓存；已有分钟不会重复下载。
+未归档分钟必须带 `provisional`，且 `open_time + 60000 <= DataState.live_through_ms`
+才能进入计算，另要求本机已收盘。未追平的分钟保持缺失；零量且价格未知的分钟
+也保持缺失。`mid_price` 是分钟末中间价，provider 的 `twap` 是分钟内时均价，
+两者不代替 Manager 信号执行窗口的 TWAP／VWAP，也不用作到达价。
 
-缓存绑定接口 URL 与 HTTP symbol 的指纹，换数据源需选新的缓存目录。
-如果提供方修订了历史行情，先备份并移走对应 Manager 行情缓存文件，再重查。
-这个动作只针对 Manager 的行情缓存，不涉及执行库或不可变参考修订。
+缓存位于独立的 `cache_root/<venue>/<symbol>/<trading_day>.json`。只有 provider
+声明已归档、全部返回分钟均已完成的交易日才写持久缓存。盘中数据每次重新查询
+provider，不按本机时间永久固化；归档缺口在下一次需要该分钟时重查。同进程同日
+并发请求串行合并，已缓存的完整查询及重启后查询不重复下载。最多 4 个 gRPC 请求、
+64 个排队查询，每个响应上限 8 MiB；端点直连，无环境代理或公开行情回退。
+
+可用 SDK-free CLI 验证真实服务，无须 PostgreSQL 或执行数据库：
+
+```bash
+cn_futures_reference --config /absolute/manager.toml market \
+  --venue SHFE --symbol sn2612 --trading-day 20261117
+```
+
+登录后也可按授权账户查询 `/manager/api/native/sources/<source_id>/market`，
+参数为 `venue`、`symbol`、`trading_day`。响应明确给出水位、待完成分钟数和已定价分钟；
+此接口不推断该账户实际持仓或策略归属。
+
+## 账户费率服务
+
+```toml
+[reference_service]
+api_url = "http://127.0.0.1:8765"
+[reference_service.accounts]
+sh_dev_chuangyuan01_ctp = "chuangyuan01"
+```
+
+映射左侧是配置中稳定的 CTP `source_id`，右侧是参考服务独立维护的账户别名，
+不从账户标签或目录猜测。客户端只调用 `GET /api/v1/account-rates`，不连接柜台，
+也不写参考服务或 Manager 数据库。请求明确指定原生交易所、合约和带时区的
+`asOf`。响应的账户、合约、观察时间、回执哈希及记录哈希均检查；首条观察前
+返回空，未来观察或身份冲突拒收。不借用同品种其他合约或其他账户的费率。
+
+费用仍分开仓、平仓、平今、平昨。CTP 账户查询的 `close` 对应普通平仓费率，
+平昨使用该费率，平今使用独立的 `closeToday`；不据此推断实际成交的开平类型。
+该账户观察也返回多空保证金率及每手金额，但不是逐笔实际扣费或账户权益。
+
+CLI `cn_futures_reference ... rates --source <id> --venue SHFE --symbol sn2612
+--as-of 2026-11-17T04:00:00Z` 可独立验证。授权 HTTP 接口为
+`/manager/api/native/sources/<id>/rates?venue=SHFE&symbol=sn2612&at_us=<Unix微秒>`，
+返回 `fee_basis=account_rate_observation`，缺少历史观察时 `rates=null`。
 
 ## 每日参考文件
 
@@ -123,8 +127,8 @@ JSON 字符串。关联只用于人工参考比较，不建立或更改事实策
 
 ## 离线维护
 
-以下命令都不连接 PostgreSQL。`validate` 和 `import` 不打开执行数据库或发 HTTP；
-`report` 在启用行情配置后按需查询自建接口。
+以下命令都不连接 PostgreSQL。`validate` 和 `import` 不打开执行数据库或发网络请求；
+`report` 在启用行情配置后按需查询 market-replay gRPC。
 
 ```bash
 cargo build --release --bin cn_futures_web --bin cn_futures_reference
@@ -205,8 +209,8 @@ GET /api/native/sources/{source_id}/cost?trading_day=20261113
 2026-11-14：`cargo fmt --check`、`cargo check`（两个原生二进制）、
 `cargo test --locked` 和两个原生二进制的 release 构建通过。21 项原生测试覆盖
 乘数／方向／开平费用、夜盘和休市窗口、完整身份关联、缺失数据、原子修订、
-Binance 兼容请求、HTTP 数据单位、并发合并、缓存重启复用及缺口重试。
+原生单位、并发合并、缓存重启复用及缺口重试。
 依赖隔离 PostgreSQL 或显式基准环境的既有测试仍按原设置跳过。
 国内与 Crypto 前端均构建通过；lint 只有上游两个既有未使用声明警告。
 release 命令的示例参考校验和配置校验通过，没有启动常驻服务或加载交易 SDK。
-HTTP 验证使用本地测试服务，操作员的实际行情地址和数据尚未提供、尚未联调。
+原生 gRPC 回归使用隔离的 loopback 服务，不执行交易 SDK。真实服务联调记录单独保留。

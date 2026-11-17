@@ -82,6 +82,7 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
         secondary_root: tmp.path().join("secondary"),
         reference_root: None,
         market_data: None,
+        reference_service: None,
         sync: None,
         sync_export: None,
         recent_rows: 20,
@@ -267,6 +268,23 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
             .status(),
         StatusCode::FORBIDDEN
     );
+    for path in [
+        "/api/native/sources/sim/market?venue=SHFE&symbol=cu2612&trading_day=20261117",
+        "/api/native/sources/sim/rates?venue=SHFE&symbol=cu2612&at_us=1794895200000000",
+    ] {
+        assert_eq!(
+            get(path, &reader_cookie).send().await?.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            client
+                .get(format!("{address}{path}"))
+                .send()
+                .await?
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
     let sources = get("/api/native/sources", &cookie)
         .send()
         .await?

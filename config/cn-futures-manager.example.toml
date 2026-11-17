@@ -18,14 +18,16 @@ max_connections = 8
 # [source_viewers]
 # yida_sim01 = ["operator"]
 
-# Operator-hosted Binance-compatible minute Kline API. Never defaults to Binance.
-# volume (index 5) = single-sided lots; turnover (index 7) = single-sided CNY.
+# Native market-replay gRPC. Lots are single-sided, turnover includes multiplier.
 # [market_data]
-# api_url = "http://127.0.0.1:18311/fapi/v1/klines"
+# grpc_url = "http://127.0.0.1:18312"
 # cache_root = "/home/operator/cn_futures_cta_manager/data/market-cache"
-# [market_data.symbols]
-# "SHFE:cu2612" = "SHFE:cu2612"
-# "INE:sc2612" = "INE:sc2612"
+
+# Investor-specific CTP observations; historical requests never use future rates.
+# [reference_service]
+# api_url = "http://127.0.0.1:8765"
+# [reference_service.accounts]
+# ctp_live01 = "chuangyuan01"
 
 [[sources]]
 id = "yida_sim01"

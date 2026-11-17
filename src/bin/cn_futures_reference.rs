@@ -1,5 +1,5 @@
 //! Offline input maintenance and read-only cost reconstruction. Optional custom
-//! market-data HTTP; no SQL, exchange account API or trading SDK.
+//! native market-replay gRPC; no SQL, exchange account API or trading SDK.
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crypto_cta_manager::native_futures::{
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    about = "Maintain domestic futures reference evidence and compare execution costs using optional custom Kline HTTP; no SQL or trading SDK"
+    about = "Maintain domestic futures reference evidence and compare execution costs using native market-replay gRPC; no SQL or trading SDK"
 )]
 struct Args {
     #[arg(long, default_value = "config/cn-futures-manager.toml")]
@@ -44,6 +44,26 @@ enum Command {
         #[arg(long)]
         trading_day: String,
     },
+    /// Query provider-final native minute bars without opening an execution store.
+    Market {
+        #[arg(long)]
+        venue: String,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        trading_day: String,
+    },
+    /// Read an investor-specific fee observation known at the requested time.
+    Rates {
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        venue: String,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        as_of: String,
+    },
 }
 
 #[tokio::main]
@@ -63,6 +83,34 @@ async fn main() -> Result<()> {
     let config = Config::load(&args.config)?;
     match args.command {
         Command::Validate { .. } => unreachable!(),
+        Command::Rates {
+            source,
+            venue,
+            symbol,
+            as_of,
+        } => {
+            let settings = config
+                .reference_service
+                .context("reference_service is not configured")?;
+            let feed = crypto_cta_manager::native_futures::reference_data::Feed::new(settings)?;
+            let rates = feed
+                .rates(&source, &venue, &symbol, reference::timestamp(&as_of)?)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&rates)?);
+        }
+        Command::Market {
+            venue,
+            symbol,
+            trading_day,
+        } => {
+            let settings = config
+                .market_data
+                .context("market_data is not configured")?;
+            let day = Feed::new(settings)?
+                .day(&venue, &symbol, &trading_day, now_us())
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&day)?);
+        }
         Command::Import { input, replace } => {
             let pack = Pack::load(&input)?;
             let hash = reference::install(&config, &pack, replace)?;

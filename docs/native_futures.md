@@ -11,7 +11,7 @@
 [国内期货增量同步](cn_futures_sync.md)。TOML 显式配置 `mode = "cn_futures"`。
 原直接读取方式继续可用，Crypto 旧配置默认 `crypto`，不自动启动同步进程。
 
-2026-11-14 新增自建 Binance 兼容 Kline HTTP 接入、本地每日参考数据维护、分钟 TWAP／VWAP 和真实成交成本对照，
+已接入 market-replay 原生分钟 gRPC，支持本地每日参考数据维护、分钟 TWAP／VWAP 和真实成交成本对照，
 见[行情参考与成本复盘](native_reference_cost.md)。参考文件与执行数据库隔离；
 成本对照不建立策略事实归属，也不代表已实现国内净值或结算盈亏。
 

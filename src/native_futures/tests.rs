@@ -226,6 +226,7 @@ fn rejects_overlapping_stores_before_creating_a_secondary() {
         secondary_root: tmp.path().join("secondary"),
         reference_root: None,
         market_data: None,
+        reference_service: None,
         sync: None,
         sync_export: None,
         stale_secs: 30,

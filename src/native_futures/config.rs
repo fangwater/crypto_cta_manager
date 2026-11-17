@@ -18,6 +18,8 @@ pub struct Config {
     #[serde(default)]
     pub market_data: Option<super::market_data::Settings>,
     #[serde(default)]
+    pub reference_service: Option<super::reference_data::Settings>,
+    #[serde(default)]
     pub sync: Option<super::sync::PullSettings>,
     #[serde(default)]
     pub sync_export: Option<super::sync::ExportSettings>,
@@ -190,6 +192,16 @@ impl Config {
                     && users.iter().all(|u| !u.trim().is_empty())),
             "source_viewers requires configured sources and nonempty usernames"
         );
+        if let Some(reference) = &self.reference_service {
+            reference.validate()?;
+            ensure!(
+                reference.accounts.keys().all(|id| self
+                    .sources
+                    .iter()
+                    .any(|s| &s.id == id && s.adapter == "ctp")),
+                "reference account mappings require configured CTP source_ids"
+            );
+        }
         super::sync::validate_config(self)?;
         Ok(())
     }
