@@ -4,6 +4,7 @@ import { accountScope } from '../lib/accountScope'
 import { accountVenueLabel } from '../lib/workspace'
 import { AccountFeeEditor } from '../components/AccountFeeEditor'
 import { FundingSettingsPanel } from '../components/FundingSettingsPanel'
+import { AccountStrategySharesHistory } from '../components/AccountStrategySharesHistory'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import {
   Activity,
@@ -387,6 +388,10 @@ export function AccountOverviewPage() {
                 })}
               </div>
             )}
+          </section>
+
+          <section className="my-6">
+            <AccountStrategySharesHistory key={publicId} sourceId={publicId} revision={accountStudios} markets={markets} />
           </section>
 
           <section>

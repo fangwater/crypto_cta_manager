@@ -251,6 +251,30 @@ export interface AccountBinding {
   updated_at_us: number
 }
 
+export interface SharesChange {
+  change_id: number
+  source_id: string
+  strategy_name: string
+  initial_shares: number
+  final_shares: number
+  first_changed_at_us: number
+  last_changed_at_us: number
+  change_count: number
+  actors: { user_id: number; username: string }[]
+  origins: string[]
+}
+
+export interface SharesHistoryCursor {
+  at_us: number
+  change_id: number
+}
+
+export interface SharesHistory {
+  current: { source_id: string; strategy_name: string; shares: number }[]
+  entries: SharesChange[]
+  next_cursor: SharesHistoryCursor | null
+}
+
 export interface BindingTargetPreview {
   source_id: string
   binding_name: string

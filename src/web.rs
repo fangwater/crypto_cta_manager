@@ -762,6 +762,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .route("/api/catalog/accounts/{source_id}", get(get_account_studio))
         .route(
+            "/api/catalog/accounts/{source_id}/shares-history",
+            get(get_account_shares_history),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/funding",
             get(get_account_funding).put(save_account_funding),
         )
@@ -3630,6 +3634,29 @@ async fn get_account_studio(
     }
 }
 
+async fn get_account_shares_history(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Query(query): Query<crate::shares_history::HistoryQuery>,
+) -> Result<Response, ApiError> {
+    if let Err(error) = query.validate() {
+        return Ok(bad_request(error.to_string()));
+    }
+    let source_ids = if let Some(account) = state.config.accounts.get(&source_id) {
+        account.source_ids.clone()
+    } else {
+        if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+            return Ok(response);
+        }
+        vec![source_id]
+    };
+    Ok((
+        NO_STORE,
+        Json(crate::shares_history::list(&state.pool, &source_ids, &query).await?),
+    )
+        .into_response())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SaveAccountAliasRequest {
@@ -4500,6 +4527,7 @@ async fn save_account_binding(
         &source_id,
         &request,
         updated_at_us,
+        Some(&user),
     )
     .await
     {
@@ -4517,6 +4545,7 @@ async fn save_account_binding(
 
 async fn save_account_binding_shares(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path((source_id, binding_name)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<SaveBindingSharesRequest>,
@@ -4565,6 +4594,7 @@ async fn save_account_binding_shares(
         &binding_name,
         &request,
         updated_at_us,
+        Some(&user),
     )
     .await
     {
@@ -7242,6 +7272,35 @@ mod tests {
     }
 
     #[test]
+    fn shares_history_requires_view_permission_for_its_account() {
+        let access = auth::SourceAccess {
+            view: BTreeSet::from(["account-a".into()]),
+            configure: BTreeSet::new(),
+        };
+        for is_admin in [false, true] {
+            for (source, expected) in [
+                ("account-a", None),
+                (
+                    "account-b",
+                    Some("you are not authorized to view or configure this account"),
+                ),
+            ] {
+                let path = format!("/api/catalog/accounts/{source}/shares-history");
+                assert_eq!(
+                    request_permission_error(
+                        is_admin,
+                        true,
+                        source_id_from_path(&path),
+                        &path,
+                        &access
+                    ),
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn source_grants_allow_only_their_account_mutations() {
         let access = auth::SourceAccess {
             view: BTreeSet::from([
@@ -7565,7 +7624,7 @@ async fn save_virtual_account_response(
         }
     }
     let saved_id = match virtual_id {
-        Some(id) => virtual_accounts::save(&state.pool, id, &request, unix_now_us())
+        Some(id) => virtual_accounts::save(&state.pool, id, &request, unix_now_us(), Some(user))
             .await
             .map(|()| id.to_string()),
         None => {
@@ -7706,8 +7765,14 @@ async fn save_account_configuration(
             return Ok(bad_request(message));
         }
     }
-    match virtual_accounts::set_configuration(&state.pool, &source_id, &request, unix_now_us())
-        .await
+    match virtual_accounts::set_configuration(
+        &state.pool,
+        &source_id,
+        &request,
+        unix_now_us(),
+        Some(&user),
+    )
+    .await
     {
         Ok(()) => {
             state.configuration_notify.notify_one();

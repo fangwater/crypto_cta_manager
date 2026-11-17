@@ -328,7 +328,10 @@ async fn materialize(
     multiplier: f64,
     at: i64,
     force_publish: bool,
+    actor: Option<&crate::auth::AuthUser>,
+    origin: &str,
 ) -> Result<()> {
+    let before = crate::shares_history::capture(tx, source).await?;
     let desired = effective_bindings(bindings, multiplier)?
         .into_iter()
         .map(|b| (b.binding_name.clone(), b))
@@ -371,7 +374,7 @@ async fn materialize(
             enqueue(tx, source, &name).await?;
         }
     }
-    Ok(())
+    crate::shares_history::record(tx, before, at, actor, origin).await
 }
 
 fn validate_request(request: &SaveVirtualAccount) -> Result<()> {
@@ -424,7 +427,7 @@ pub async fn create(
         .fetch_all(&mut *tx)
         .await?;
     let id = next_virtual_id(&ids)?;
-    save_in_transaction(&mut tx, &id, request, at).await?;
+    save_in_transaction(&mut tx, &id, request, at, None).await?;
     sqlx::query("UPDATE cta_virtual_accounts SET created_by_user_id = $2 WHERE virtual_id = $1")
         .bind(&id)
         .bind(owner)
@@ -479,11 +482,17 @@ pub async fn set_managers(pool: &PgPool, id: &str, user_ids: &[i64]) -> Result<(
     Ok(())
 }
 
-pub async fn save(pool: &PgPool, id: &str, request: &SaveVirtualAccount, at: i64) -> Result<()> {
+pub async fn save(
+    pool: &PgPool,
+    id: &str,
+    request: &SaveVirtualAccount,
+    at: i64,
+    actor: Option<&crate::auth::AuthUser>,
+) -> Result<()> {
     crate::order_config::validate_strategy_name(id).map_err(anyhow::Error::msg)?;
     validate_request(request)?;
     let mut tx = begin(pool).await?;
-    save_in_transaction(&mut tx, id, request, at).await?;
+    save_in_transaction(&mut tx, id, request, at, actor).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -493,6 +502,7 @@ async fn save_in_transaction(
     id: &str,
     request: &SaveVirtualAccount,
     at: i64,
+    actor: Option<&crate::auth::AuthUser>,
 ) -> Result<()> {
     sqlx::query("INSERT INTO cta_virtual_accounts (virtual_id,name,updated_at_us) VALUES ($1,$2,$3) ON CONFLICT (virtual_id) DO UPDATE SET name = EXCLUDED.name, updated_at_us = EXCLUDED.updated_at_us")
         .bind(id).bind(request.name.trim()).bind(at).execute(&mut **tx).await?;
@@ -522,7 +532,7 @@ async fn save_in_transaction(
     for source in followers {
         let follows = load_follows(tx, &source).await?;
         let combined = combined_bindings(&follows, &expanded)?;
-        materialize(tx, &source, &combined, 1.0, at, false).await?;
+        materialize(tx, &source, &combined, 1.0, at, false, actor, "virtual").await?;
     }
     Ok(())
 }
@@ -532,6 +542,7 @@ pub async fn set_configuration(
     source: &str,
     config: &AccountConfiguration,
     at: i64,
+    actor: Option<&crate::auth::AuthUser>,
 ) -> Result<()> {
     let mut tx = begin(pool).await?;
     match config {
@@ -543,7 +554,7 @@ pub async fn set_configuration(
         }
         AccountConfiguration::Follow { follows } => {
             let bindings = load_combined_bindings(&mut tx, follows, None).await?;
-            materialize(&mut tx, source, &bindings, 1.0, at, true).await?;
+            materialize(&mut tx, source, &bindings, 1.0, at, true, actor, "follow").await?;
             sqlx::query("DELETE FROM cta_account_follows WHERE source_id = $1")
                 .bind(source)
                 .execute(&mut *tx)

@@ -22,6 +22,8 @@ import type {
   PositionStrategy,
   SavedPositionStrategy,
   SavedSymbolContractLeverage,
+  SharesHistory,
+  SharesHistoryCursor,
   AcquisitionCostSnapshot,
   TimelineSnapshot,
 } from './types'
@@ -626,6 +628,22 @@ export function saveBindingShares(
         ? { 'X-Experimental-Algorithm-Token': experimentalAlgorithmToken }
         : undefined,
     },
+  )
+}
+
+export function getAccountSharesHistory(
+  sourceId: string,
+  cursor: SharesHistoryCursor | null = null,
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams({ limit: '50' })
+  if (cursor) {
+    params.set('before_at_us', String(cursor.at_us))
+    params.set('before_id', String(cursor.change_id))
+  }
+  return requestJson<SharesHistory>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/shares-history?${params}`,
+    { signal },
   )
 }
 
