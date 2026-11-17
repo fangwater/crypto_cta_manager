@@ -613,10 +613,17 @@ async fn native_nav(
                 snapshot.projection_errors == 0,
                 "原生投影存在错误，暂停净值回放"
             );
-            let through = snapshot
-                .last_event_us
-                .context("missing execution evidence time")?;
-            Ok((nav::source::fills(&source, db, &read_anchor, end)?, through))
+            let mut through = snapshot
+                .nav_anchor_observed_us
+                .context("missing complete account observation time")?;
+            let fills = nav::source::fills(&source, db, &read_anchor, end)?;
+            // Lifecycle/heartbeat records cannot extend financial coverage while
+            // reconnect recovery is incomplete. Only account cuts or verified
+            // factual live trades establish a later usable account horizon.
+            for fill in fills.iter().filter(|fill| fill.live_origin) {
+                through = through.max(fill.received_us);
+            }
+            Ok((fills, through))
         })
     })
     .await

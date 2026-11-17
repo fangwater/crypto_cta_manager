@@ -124,7 +124,8 @@ impl Replica {
             "replication checkpoint or target hash mismatch"
         );
         ensure!(
-            page.changes.len() <= 1000 && (page.next == page.until || !page.changes.is_empty()),
+            page.changes.len() <= MAX_PAGE_RECORDS
+                && (page.next == page.until || !page.changes.is_empty()),
             "empty or oversized unfinished replication page"
         );
         let mut batch = WriteBatch::default();

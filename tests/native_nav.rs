@@ -432,6 +432,23 @@ async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_reco
             .await
             .is_err()
     );
+    event(&db, 16, BASE + 190_000_000, json!({"type":"runtime_start"}));
+    let pending: Value = client
+        .get(format!(
+            "{base}/api/native/sources/sim/nav?start_ms={}&end_ms={}",
+            BASE / 1000,
+            (BASE + 190_000_000) / 1000
+        ))
+        .header("Cookie", &cookie)
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(
+        pending["ready"], false,
+        "runtime start must not advance financial coverage: {pending}"
+    );
+    assert!(pending["summary"].is_null());
     trade(
         &db,
         18,

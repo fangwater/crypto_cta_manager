@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PAGE_RECORDS: usize = 10_000;
 const OWNER: &[u8] = b"meta/owner";
 const STATE: &[u8] = b"meta/state";
 const STAGING: &str = "cn_sync_staging";

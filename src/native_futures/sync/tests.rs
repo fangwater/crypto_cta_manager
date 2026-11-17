@@ -10,6 +10,54 @@ use std::{path::Path, sync::Arc};
 
 const TEST_TOKEN: &str = "isolated-native-sync-test-token-0001";
 
+#[tokio::test]
+async fn maximum_configured_export_pages_are_accepted_and_durable_across_collector_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut cloud, mut local) = configs(temp.path());
+    cloud.sync_export.as_mut().unwrap().batch_records = MAX_PAGE_RECORDS;
+    cloud.sync_export.as_mut().unwrap().batch_bytes = 8 * 1024 * 1024;
+    cloud.validate().unwrap();
+    let db = primary(&cloud.sources[0].rocksdb_path);
+    seed(&db);
+    let mut batch = WriteBatch::default();
+    for n in 0..MAX_PAGE_RECORDS + 17 {
+        batch.put_cf(
+            db.cf_handle(NativeCf::Events.name()).unwrap(),
+            (n as u64).to_be_bytes(),
+            b"{\"type\":\"bounded-sync-fixture\"}",
+        );
+    }
+    db.write(batch).unwrap();
+    let first = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
+    assert_eq!(first.changes.len(), MAX_PAGE_RECORDS);
+    assert!(first.next < first.until);
+    let replica = Replica::open(&local, &local.sources[0]).unwrap();
+    let mut oversized = first.clone();
+    oversized.changes.push(first.changes[0].clone());
+    assert!(replica.accept(&oversized).is_err());
+    assert_eq!(replica.status().unwrap().received_cursor, 0);
+    replica.accept(&first).unwrap();
+    replica.apply().unwrap();
+    assert!(!replica.status().unwrap().initialized);
+    drop(replica);
+    let (url, server) = serve(cloud).await;
+    local.sources[0].sync.as_mut().unwrap().url = url;
+    let replica = Arc::new(Replica::open(&local, &local.sources[0]).unwrap());
+    let state = replica.sync_once(&client(), TEST_TOKEN).await.unwrap();
+    assert_eq!(state.committed_cursor, first.until);
+    assert!(state.last_error.is_none());
+    assert_eq!(all_bytes(&replica.db), all_bytes(&db));
+    assert_eq!(
+        replica
+            .sync_once(&client(), TEST_TOKEN)
+            .await
+            .unwrap()
+            .committed_cursor,
+        state.committed_cursor
+    );
+    server.abort();
+}
+
 #[test]
 fn live_secondary_can_read_original_column_family_wal_batches() {
     use rocksdb::{AsColumnFamilyRef, WriteBatchIteratorCf};

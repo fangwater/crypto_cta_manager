@@ -24,7 +24,7 @@ export default function NavAnalysis({ sourceId, snapshot, canConfigure }: { sour
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false), [saving, setSaving] = useState(false)
   const [note, setNote] = useState('原生持仓起始快照')
-  const latest = anchors?.[0], through = snapshot?.last_event_us
+  const latest = anchors?.[0], through = snapshot?.nav_anchor_observed_us
   useEffect(() => {
     if (!sourceId) return
     const controller = new AbortController()
@@ -68,7 +68,7 @@ export default function NavAnalysis({ sourceId, snapshot, canConfigure }: { sour
       {canConfigure && <><p className="text-sm text-muted">将 {time(snapshot?.nav_anchor_observed_us)} 的事实持仓及分钟参考价保存为以后重算的固定起点，已有快照保留。执行状态：{snapshot?.status ?? '未报告'}。</p><div className="flex flex-wrap items-center gap-3"><Input aria-label="净值快照说明" value={note} onChange={e => setNote(e.target.value)} /><Button disabled={saving || !sourceId || !snapshot?.nav_anchor_observed_us || snapshot.projection_errors > 0 || !note.trim()} onClick={() => void capture()}>{saving ? '保存中…' : '建立起始快照'}</Button></div></>}
     </CardContent></Card>
     <div className="flex flex-wrap items-center gap-3"><label className="text-sm">开始（上海）<Input type="datetime-local" step="0.001" value={start} onChange={e => setStart(e.target.value)} /></label><label className="text-sm">结束（上海）<Input type="datetime-local" step="0.001" value={end} onChange={e => setEnd(e.target.value)} /></label><Button disabled={loading || !latest || !start || !end} onClick={calculate}>{loading ? '计算中…' : '计算净值'}</Button>{[1, 7, 30].map(days => <Button key={days} disabled={loading || !latest || !through} onClick={() => range(days)}>{days}D</Button>)}</div>
-    <p className="text-sm text-muted">执行证据截至 {time(through)}。结束时间超过该时刻时显示覆盖不足。</p>
+    <p className="text-sm text-muted">完整账户观察截至 {time(through)}。程序启动或心跳不会延长账户事实的覆盖时间。</p>
     {report?.reason && <Alert tone="warning">{report.reason}</Alert>}
     {report?.ready && report.summary && <>
       <p className="text-sm text-muted">本次结果：{time(report.start_us)} 至 {time(report.end_us)} · 执行证据截至 {time(report.source_through_us)}</p>
