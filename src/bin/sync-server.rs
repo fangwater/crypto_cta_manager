@@ -24,6 +24,18 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
+    /// Offline maintenance: adopt an already verified, unchanged source cut.
+    AdoptSourceCheckpoint {
+        #[arg(long)]
+        source_id: String,
+        /// Source file metadata captured before the complete verified cut.
+        #[arg(long)]
+        source_before: PathBuf,
+        #[arg(long)]
+        cursor: u64,
+        #[arg(long)]
+        sha256: String,
+    },
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,6 +55,24 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Pull { once } => sync::pull(config, once).await,
+        Command::AdoptSourceCheckpoint {
+            source_id,
+            source_before,
+            cursor,
+            sha256,
+        } => {
+            println!(
+                "{}",
+                sync::adopt_source_checkpoint(
+                    &config,
+                    &source_id,
+                    &source_before,
+                    cursor,
+                    &sha256
+                )?
+            );
+            Ok(())
+        }
         Command::Serve => {
             let bind = config
                 .sync_export

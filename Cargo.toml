@@ -17,6 +17,7 @@ hex = "0.4"
 hmac = "0.12"
 iceoryx2 = "0.8.1"
 libc = "0.2"
+librocksdb-sys = { version = "0.19", default-features = false }
 rocksdb = { version = "0.25", default-features = false, features = ["lz4"] }
 redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
 rayon = "1.11"

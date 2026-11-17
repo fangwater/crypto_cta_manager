@@ -9,6 +9,334 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
 const TEST_TOKEN: &str = "isolated-native-sync-test-token-0001";
+
+#[test]
+fn live_secondary_can_read_original_column_family_wal_batches() {
+    use rocksdb::{AsColumnFamilyRef, WriteBatchIteratorCf};
+    struct Writes(Vec<(u32, Vec<u8>, Vec<u8>)>);
+    impl WriteBatchIteratorCf for Writes {
+        fn put_cf(&mut self, id: u32, key: &[u8], value: &[u8]) {
+            self.0.push((id, key.to_vec(), value.to_vec()));
+        }
+        fn delete_cf(&mut self, _: u32, _: &[u8]) {
+            panic!("unexpected delete in fixture");
+        }
+        fn merge_cf(&mut self, _: u32, _: &[u8], _: &[u8]) {
+            panic!("unexpected merge in fixture");
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let (cloud, _) = configs(temp.path());
+    let db = primary(&cloud.sources[0].rocksdb_path);
+    seed(&db);
+    let old = db.latest_sequence_number();
+    let handle = db.cf_handle(NativeCf::Fills.name()).unwrap();
+    // The C API reads the live handle's declared ID; no storage ID is guessed.
+    let cf_id = unsafe { librocksdb_sys::rocksdb_column_family_handle_get_id(handle.inner()) };
+    let mut batch = WriteBatch::default();
+    batch.put_cf(handle, b"late-trade", b"original-value");
+    db.write(batch).unwrap();
+    let view =
+        reader::open_secondary(&cloud.sources[0], &cloud.secondary_root.join("wal")).unwrap();
+    assert_eq!(view.latest_sequence_number(), db.latest_sequence_number());
+    let mut wal = view.get_updates_since(old).unwrap();
+    let (seq, batch) = wal.next().unwrap().unwrap();
+    assert_eq!(seq, old + 1);
+    let mut writes = Writes(vec![]);
+    batch.iterate_cf(&mut writes);
+    assert_eq!(
+        writes.0,
+        vec![(cf_id, b"late-trade".to_vec(), b"original-value".to_vec())]
+    );
+    assert!(wal.next().is_none());
+    wal.status().unwrap();
+}
+
+#[test]
+fn wal_incremental_cuts_preserve_repeated_mutations_and_resume_from_exact_source_sequence() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut cloud, local) = configs(temp.path());
+    cloud.sync_export.as_mut().unwrap().batch_records = 1000;
+    let db = primary(&cloud.sources[0].rocksdb_path);
+    seed(&db);
+    let first = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
+    let replica = Replica::open(&local, &local.sources[0]).unwrap();
+    replica.accept(&first).unwrap();
+    replica.apply().unwrap();
+    // A new mutable key changes twice, including returning to an older value.
+    // Every original mutation must survive, with one final row in its CF.
+    for value in [b"first".as_slice(), b"second", b"first"] {
+        db.put_cf(
+            db.cf_handle(NativeCf::Orders.name()).unwrap(),
+            b"new-order",
+            value,
+        )
+        .unwrap();
+    }
+    let next = super::export::page(
+        &cloud,
+        &cloud.sources[0].id,
+        with_hash(
+            request(first.until, None, Some(first.store_id.clone())),
+            Some(first.until_sha256.clone()),
+        ),
+    )
+    .unwrap();
+    assert_eq!(next.changes.len(), 3);
+    replica.accept(&next).unwrap();
+    replica.apply().unwrap();
+    assert_eq!(all_bytes(&replica.db), all_bytes(&db));
+    let journal = open_owned(
+        &cloud
+            .sync_export
+            .as_ref()
+            .unwrap()
+            .journal_root
+            .join(&cloud.sources[0].id),
+        "cn_futures_sync_export",
+        &cloud.sources[0].id,
+        &[],
+    )
+    .unwrap();
+    let head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+    assert_eq!(
+        head["source_sequence"].as_u64(),
+        Some(db.latest_sequence_number())
+    );
+    assert_eq!(head["counts"], json!([1, 2, 1]));
+    drop(journal);
+    let unchanged = super::export::page(
+        &cloud,
+        &cloud.sources[0].id,
+        with_hash(
+            request(next.until, None, Some(next.store_id.clone())),
+            Some(next.until_sha256.clone()),
+        ),
+    )
+    .unwrap();
+    assert!(unchanged.changes.is_empty());
+    assert_eq!(unchanged.until, next.until);
+}
+
+#[test]
+fn wal_catches_old_evidence_conflicts_even_when_new_events_are_appended() {
+    let temp = tempfile::tempdir().unwrap();
+    let (cloud, _) = configs(temp.path());
+    let db = primary(&cloud.sources[0].rocksdb_path);
+    seed(&db);
+    let first = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
+    let mut changed = fixture()["state"].clone();
+    changed["projection_error"] = json!("rewritten");
+    let mut batch = WriteBatch::default();
+    batch.put_cf(
+        db.cf_handle(NativeCf::Events.name()).unwrap(),
+        b"evidence\x00",
+        serde_json::to_vec(&changed).unwrap(),
+    );
+    batch.put_cf(
+        db.cf_handle(NativeCf::Events.name()).unwrap(),
+        b"evidence\x01",
+        b"new event",
+    );
+    db.write(batch).unwrap();
+    let result = super::export::page(
+        &cloud,
+        &cloud.sources[0].id,
+        with_hash(
+            request(first.until, None, Some(first.store_id)),
+            Some(first.until_sha256),
+        ),
+    );
+    assert!(result.unwrap_err().to_string().contains("immutable"));
+    let journal = open_owned(
+        &cloud
+            .sync_export
+            .as_ref()
+            .unwrap()
+            .journal_root
+            .join(&cloud.sources[0].id),
+        "cn_futures_sync_export",
+        &cloud.sources[0].id,
+        &[],
+    )
+    .unwrap();
+    let head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+    assert_eq!(head["cursor"], 3);
+}
+
+#[test]
+fn a_source_sequence_gap_audits_the_fixed_view_instead_of_skipping_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let (cloud, _) = configs(temp.path());
+    let db = primary(&cloud.sources[0].rocksdb_path);
+    seed(&db);
+    let first = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
+    let path = cloud
+        .sync_export
+        .as_ref()
+        .unwrap()
+        .journal_root
+        .join(&cloud.sources[0].id);
+    let journal = open_owned(&path, "cn_futures_sync_export", &cloud.sources[0].id, &[]).unwrap();
+    let mut head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+    head["source_sequence"] = json!(1);
+    let mut batch = WriteBatch::default();
+    batch.put(b"meta/head", serde_json::to_vec(&head).unwrap());
+    write(&journal, batch).unwrap();
+    drop(journal);
+    db.put_cf(
+        db.cf_handle(NativeCf::Fills.name()).unwrap(),
+        b"another-fill",
+        b"durable-original",
+    )
+    .unwrap();
+    let next = super::export::page(
+        &cloud,
+        &cloud.sources[0].id,
+        with_hash(
+            request(first.until, None, Some(first.store_id)),
+            Some(first.until_sha256),
+        ),
+    )
+    .unwrap();
+    assert_eq!(next.changes.len(), 1);
+    assert_eq!(
+        next.changes[0].decode().unwrap(),
+        (b"another-fill".to_vec(), b"durable-original".to_vec())
+    );
+}
+
+#[test]
+fn unchanged_verified_cut_adoption_requires_earlier_source_baseline_and_receiver_hash() {
+    let temp = tempfile::tempdir().unwrap();
+    let (cloud, _) = configs(temp.path());
+    let db = primary(&cloud.sources[0].rocksdb_path);
+    seed(&db);
+    let stamps:serde_json::Map<String,Value>=std::fs::read_dir(&cloud.sources[0].rocksdb_path).unwrap().map(|entry|{
+        let e=entry.unwrap();let m=e.metadata().unwrap();
+        (e.file_name().into_string().unwrap(),json!({"size":m.len(),"mtime_ns":m.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64}))
+    }).collect();
+    let baseline = temp.path().join("before.json");
+    std::fs::write(
+        &baseline,
+        serde_json::to_vec(&json!({"execution_store_files":stamps})).unwrap(),
+    )
+    .unwrap();
+    let first = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
+    let path = cloud
+        .sync_export
+        .as_ref()
+        .unwrap()
+        .journal_root
+        .join(&cloud.sources[0].id);
+    let journal = open_owned(&path, "cn_futures_sync_export", &cloud.sources[0].id, &[]).unwrap();
+    let mut head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+    let mut cut: Value = get(&journal, &seq_key(b'B', first.until)).unwrap().unwrap();
+    head["source_sequence"] = Value::Null;
+    head["source_cf_ids"] = Value::Null;
+    cut["source_sequence"] = Value::Null;
+    cut["source_cf_ids"] = Value::Null;
+    let mut batch = WriteBatch::default();
+    batch.put(b"meta/head", serde_json::to_vec(&head).unwrap());
+    batch.put(
+        seq_key(b'B', first.until),
+        serde_json::to_vec(&cut).unwrap(),
+    );
+    write(&journal, batch).unwrap();
+    drop(journal);
+    assert!(
+        super::adopt_source_checkpoint(
+            &cloud,
+            &cloud.sources[0].id,
+            &baseline,
+            first.until,
+            &GENESIS
+        )
+        .is_err()
+    );
+    let adopted = super::adopt_source_checkpoint(
+        &cloud,
+        &cloud.sources[0].id,
+        &baseline,
+        first.until,
+        &first.until_sha256,
+    )
+    .unwrap();
+    assert_eq!(
+        adopted["source_sequence"].as_u64(),
+        Some(db.latest_sequence_number())
+    );
+    db.put_cf(
+        db.cf_handle(NativeCf::Fills.name()).unwrap(),
+        b"changed",
+        b"new value",
+    )
+    .unwrap();
+    assert!(
+        super::adopt_source_checkpoint(
+            &cloud,
+            &cloud.sources[0].id,
+            &baseline,
+            first.until,
+            &first.until_sha256
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn wal_rejects_new_event_conflicts_and_column_family_replacement_without_advancing() {
+    for replace_cf in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (cloud, _) = configs(temp.path());
+        let mut db = primary(&cloud.sources[0].rocksdb_path);
+        seed(&db);
+        let first =
+            super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
+        if replace_cf {
+            db.drop_cf(NativeCf::Fills.name()).unwrap();
+            db.create_cf(NativeCf::Fills.name(), &Options::default())
+                .unwrap();
+        } else {
+            let mut batch = WriteBatch::default();
+            let cf = db.cf_handle(NativeCf::Events.name()).unwrap();
+            batch.put_cf(cf, b"new-event", b"first evidence");
+            batch.put_cf(cf, b"new-event", b"conflicting evidence");
+            db.write(batch).unwrap();
+        }
+        let result = super::export::page(
+            &cloud,
+            &cloud.sources[0].id,
+            with_hash(
+                request(first.until, None, Some(first.store_id)),
+                Some(first.until_sha256),
+            ),
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains(if replace_cf {
+                "column families"
+            } else {
+                "immutable"
+            }),
+            "{error}"
+        );
+        let journal = open_owned(
+            &cloud
+                .sync_export
+                .as_ref()
+                .unwrap()
+                .journal_root
+                .join(&cloud.sources[0].id),
+            "cn_futures_sync_export",
+            &cloud.sources[0].id,
+            &[],
+        )
+        .unwrap();
+        let head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+        assert_eq!(head["cursor"], 3);
+    }
+}
 fn configs(root: &Path) -> (Config, Config) {
     let mut cloud: Config = toml::from_str(include_str!(
         "../../../config/cn-futures-manager.example.toml"

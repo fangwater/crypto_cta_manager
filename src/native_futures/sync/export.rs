@@ -12,6 +12,9 @@ use axum::{
 };
 use rocksdb::{DB, Direction, IteratorMode, WriteBatch};
 use std::{collections::BTreeMap, io::Read, path::Path as FsPath, sync::Arc};
+mod checkpoint;
+mod wal;
+pub use checkpoint::adopt_source_checkpoint;
 
 const HEAD: &[u8] = b"meta/head";
 const PENDING: &[u8] = b"meta/pending";
@@ -21,6 +24,10 @@ struct Head {
     cursor: u64,
     counts: [u64; 3],
     captured_at_us: i64,
+    #[serde(default)]
+    source_sequence: Option<u64>,
+    #[serde(default)]
+    source_cf_ids: Option<[u32; 3]>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct Capture {
@@ -29,6 +36,10 @@ struct Capture {
     counts: [u64; 3],
     captured_at_us: i64,
     ready: bool,
+    #[serde(default)]
+    source_sequence: Option<u64>,
+    #[serde(default)]
+    source_cf_ids: Option<[u32; 3]>,
 }
 
 #[derive(Debug)]
@@ -124,6 +135,8 @@ fn recover(db: &DB) -> Result<()> {
     head.cursor = plan.until;
     head.counts = plan.counts;
     head.captured_at_us = plan.captured_at_us;
+    head.source_sequence = plan.source_sequence;
+    head.source_cf_ids = plan.source_cf_ids;
     batch.put(HEAD, serde_json::to_vec(&head)?);
     batch.put(seq_key(b'B', head.cursor), serde_json::to_vec(&plan)?);
     batch.delete(PENDING);
@@ -148,6 +161,8 @@ fn capture(db: &DB, source: &Source, secondary: &FsPath, journal_path: &FsPath) 
             cursor: 0,
             counts: [0; 3],
             captured_at_us: 0,
+            source_sequence: None,
+            source_cf_ids: None,
         };
         let mut batch = WriteBatch::default();
         batch.put(HEAD, serde_json::to_vec(&head)?);
@@ -160,16 +175,62 @@ fn capture(db: &DB, source: &Source, secondary: &FsPath, journal_path: &FsPath) 
         "execution store changed while opening secondary"
     );
     let head = get::<Head>(db, HEAD)?.context("export head")?;
+    let source_sequence = view.latest_sequence_number();
+    let source_cf_ids = wal::column_family_ids(&view)?;
+    ensure!(
+        head.source_sequence
+            .is_none_or(|previous| previous <= source_sequence),
+        "native source sequence moved backwards"
+    );
+    ensure!(
+        head.source_cf_ids.is_none_or(|ids| ids == source_cf_ids),
+        "native source column families were replaced"
+    );
     let mut plan = Capture {
         after: head.cursor,
         until: head.cursor,
         counts: [0; 3],
         captured_at_us: crate::native_futures::now_us(),
         ready: false,
+        source_sequence: Some(source_sequence),
+        source_cf_ids: Some(source_cf_ids),
     };
     let mut start = WriteBatch::default();
     start.put(PENDING, serde_json::to_vec(&plan)?);
     write(db, start)?;
+    let incremental = if head.source_sequence.is_some() {
+        plan.counts = head.counts;
+        wal::capture(db, &view, &head, &mut plan)?
+    } else {
+        false
+    };
+    if !incremental {
+        // Discard only an unpublished incremental attempt before auditing a
+        // complete fixed source view. Its published hash index is unchanged.
+        recover(db)?;
+        plan.until = head.cursor;
+        plan.counts = [0; 3];
+        let mut start = WriteBatch::default();
+        start.put(PENDING, serde_json::to_vec(&plan)?);
+        write(db, start)?;
+        capture_full(db, &view, &head, &mut plan)?;
+    }
+    ensure!(
+        identity(&source.rocksdb_path)? == execution_id,
+        "execution store changed during export capture"
+    );
+    plan.ready = true;
+    let mut batch = WriteBatch::default();
+    batch.put(PENDING, serde_json::to_vec(&plan)?);
+    write(db, batch)?;
+    recover(db)?;
+    tracing::info!(source_id=%source.id, records=plan.counts.iter().sum::<u64>(),
+        changes=plan.until-plan.after, elapsed_ms=started.elapsed().as_millis(), incremental,
+        "captured native source view");
+    Ok(())
+}
+
+fn capture_full(db: &DB, view: &DB, head: &Head, plan: &mut Capture) -> Result<()> {
     let mut batch = WriteBatch::default();
     let mut bytes = 0;
     let mut new_keys = [0_u64; 3];
@@ -220,19 +281,7 @@ fn capture(db: &DB, source: &Source, secondary: &FsPath, journal_path: &FsPath) 
             return conflict("source records disappeared; original history must be preserved");
         }
     }
-    ensure!(
-        identity(&source.rocksdb_path)? == execution_id,
-        "execution store changed during export capture"
-    );
     write(db, batch)?;
-    plan.ready = true;
-    let mut batch = WriteBatch::default();
-    batch.put(PENDING, serde_json::to_vec(&plan)?);
-    write(db, batch)?;
-    recover(db)?;
-    tracing::info!(source_id=%source.id, records=plan.counts.iter().sum::<u64>(),
-        changes=plan.until-plan.after, elapsed_ms=started.elapsed().as_millis(),
-        "captured native source view");
     Ok(())
 }
 
@@ -394,7 +443,11 @@ impl ExportService {
         Router::new()
             .route("/api/native/sync/{id}", post(export_page))
             .with_state(self)
-            .layer(tower_http::compression::CompressionLayer::new().gzip(true))
+            .layer(
+                tower_http::compression::CompressionLayer::new()
+                    .gzip(true)
+                    .quality(tower_http::compression::CompressionLevel::Fastest),
+            )
     }
 }
 

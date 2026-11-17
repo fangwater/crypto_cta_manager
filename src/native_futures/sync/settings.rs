@@ -127,7 +127,7 @@ pub fn validate_config(config: &Config) -> Result<()> {
             "export requires a token environment name and explicit source_ids"
         );
         ensure!(
-            (1..=1000).contains(&export.batch_records)
+            (1..=10000).contains(&export.batch_records)
                 && (1024..=8 * 1024 * 1024).contains(&export.batch_bytes),
             "invalid native export batch limits"
         );

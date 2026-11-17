@@ -687,6 +687,7 @@ dependencies = [
  "iceoryx2",
  "im",
  "libc",
+ "librocksdb-sys",
  "prost",
  "prost-build",
  "prost-types",

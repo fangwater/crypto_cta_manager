@@ -6,7 +6,7 @@ mod settings;
 mod store;
 
 pub use collector::{Replica, pull};
-pub use export::ExportService;
+pub use export::{ExportService, adopt_source_checkpoint};
 pub use settings::{ExportSettings, PullSettings, Remote, validate_config};
 pub use store::{ReplicaBusy, ReplicaStatus, replica_read_lock, replica_status};
 
