@@ -6786,6 +6786,7 @@ mod tests {
     #[test]
     fn resolve_publish_source_requires_enabled_exec_config() {
         let mut config = crate::config::AppConfig {
+            mode: Default::default(),
             accounts: Default::default(),
             database: crate::config::DatabaseConfig {
                 url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),
@@ -6878,6 +6879,7 @@ mod tests {
             target_proxy: None,
         };
         let config = crate::config::AppConfig {
+            mode: Default::default(),
             accounts: Default::default(),
             database: crate::config::DatabaseConfig {
                 url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),

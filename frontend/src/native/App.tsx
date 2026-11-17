@@ -7,17 +7,19 @@ import { Card, CardContent } from '../components/ui/Card'
 import { Input, Label, Select } from '../components/ui/Field'
 import { ApiError, createAuthUser, listAuthUsers, type AuthUser } from '../api'
 import * as api from './api'
+import CostAnalysis from './CostAnalysis'
 import './native.css'
 
 const statuses: Record<string, string> = { submitted_locally: '本地已提交', rejected_locally: '本地拒绝', observed: '已见回报', observing: '观察中', waiting: '等待数据', recovering: '恢复中', disconnected: '已断线', transport_unavailable: '交易通道未就绪', blocked: '已阻断', stale: '数据延迟', stopped: '已停止', prepared: '发送前', pending: '等待回报', working: '已受理', partially_filled: '部分成交', cancel_pending: '撤单待确认', settling: '等待成交事实', filled: '已成交', cancelled: '已撤单', rejected: '已拒绝', uncertain: '发送结果不确定' }
 const offsets: Record<string, string> = { open: '开仓', close: '平仓', close_today: '平今', close_yesterday: '平昨' }
+const venues = ['SHFE', 'INE', 'DCE', 'CZCE', 'CFFEX', 'GFEX']
 const label = (value: string) => statuses[value] ?? value
 const side = (value: string) => value === 'buy' ? '买' : '卖'
 const time = (us: number | null) => us === null ? '—' : new Date(us / 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
 const money = (value: number | null) => value === null ? '—' : value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
-type Tab = 'account' | 'orders' | 'fills' | 'strategies' | 'permissions'
-const tabs: [Tab, string][] = [['account', '账户与持仓'], ['orders', '委托'], ['fills', '成交'], ['strategies', '策略'], ['permissions', '权限']]
+type Tab = 'account' | 'orders' | 'fills' | 'cost' | 'strategies' | 'permissions'
+const tabs: [Tab, string][] = [['account', '账户与持仓'], ['orders', '委托'], ['fills', '成交'], ['cost', '成本分析'], ['strategies', '策略'], ['permissions', '权限']]
 
 function Table({ headers, children }: { headers: string[]; children: ReactNode }) {
   return <div className="native-table-scroll"><table className="native-table"><thead><tr>{headers.map(h => <th key={h}>{h}</th>)}</tr></thead><tbody>{children}</tbody></table></div>
@@ -86,7 +88,11 @@ function Workspace() {
         {snapshot && <span className="text-sm text-muted">{label(snapshot.status)} · 交易日 {snapshot.trading_day ?? '—'} · 查询 {time(snapshot.read_at_us)}</span>}
       </div>
       {error && <Alert tone="error" className="mb-4">{error}{snapshot ? `；以下为上次成功读取的数据（${time(snapshot.read_at_us)}）` : ''}</Alert>}
-      {tab === 'strategies' ? <Strategies /> : tab === 'permissions' ? <Permissions source={source} /> : !snapshot ? <Card><CardContent className="py-12 text-center text-muted">{loading ? '正在读取账户记录…' : '暂无账户数据'}</CardContent></Card> : <>
+      {snapshot?.replication && <div className="mb-4 space-y-2">
+        <p className="text-sm text-muted">本地同步副本 · 最近提交 {time(snapshot.replication.last_synced_at_us)} · 源视图 {time(snapshot.replication.source_captured_at_us)}{snapshot.replication.target_cursor !== null ? ` · 待提交 ${snapshot.replication.target_cursor - snapshot.replication.committed_cursor} 条修订` : ''}</p>
+        {(snapshot.replication.last_error || snapshot.replication_stale) && <Alert tone="warning">{snapshot.replication.last_error ?? '同步数据已超过配置的新鲜度限制，请检查同步服务。'} 以下展示已提交的本地历史数据。</Alert>}
+      </div>}
+      {tab === 'strategies' ? <Strategies /> : tab === 'permissions' ? <Permissions source={source} /> : tab === 'cost' ? <CostAnalysis key={sourceId} sourceId={sourceId} tradingDay={snapshot?.trading_day} /> : !snapshot ? <Card><CardContent className="py-12 text-center text-muted">{loading ? '正在读取账户记录…' : '暂无账户数据'}</CardContent></Card> : <>
         {snapshot.reason && <Alert tone="warning" className="mb-4">{snapshot.reason}</Alert>}
         {snapshot.positions_may_lag && <Alert tone="warning" className="mb-4">已有较新的事实成交，持仓仍显示 {time(snapshot.state_observed_us)} 的快照。</Alert>}
         {tab === 'account' && <>
@@ -130,7 +136,7 @@ function Strategies() {
     <div className="flex flex-wrap items-center gap-3"><Select aria-label="策略" value={selected ? name : ''} onChange={e => choose(e.target.value)}><option value="">新建策略</option>{items.map(i => <option key={i.strategy.strategy_name}>{i.strategy.strategy_name}</option>)}</Select><Button onClick={() => choose('')}><Plus size={14} />新建</Button></div>
     <Card><CardContent className="space-y-4 py-5"><Label>策略名称<Input value={name} onChange={e => setName(e.target.value)} disabled={!!selected} /></Label>
       <p className="text-sm text-muted">目标单位为手，正数为多仓，负数为空仓。保存策略仅更新管理配置。</p>
-      {rows.map((row, index) => <div className="native-target-row" key={index}><Select aria-label="交易所" value={row.venue} disabled={!editable} onChange={e => setRows(old => old.map((r, j) => j === index ? { ...r, venue: e.target.value } : r))}><option>SHFE</option><option>INE</option></Select><Input aria-label="合约" value={row.symbol} disabled={!editable} onChange={e => setRows(old => old.map((r, j) => j === index ? { ...r, symbol: e.target.value } : r))} /><Input aria-label="目标手数" type="number" step="1" value={row.qty} disabled={!editable} onChange={e => setRows(old => old.map((r, j) => j === index ? { ...r, qty: e.target.value } : r))} /><Button aria-label="移除目标" disabled={!editable} onClick={() => setRows(old => old.filter((_, j) => j !== index))}><Trash2 size={14} /></Button></div>)}
+      {rows.map((row, index) => <div className="native-target-row" key={index}><Select aria-label="交易所" value={row.venue} disabled={!editable} onChange={e => setRows(old => old.map((r, j) => j === index ? { ...r, venue: e.target.value } : r))}>{venues.map(venue => <option key={venue}>{venue}</option>)}</Select><Input aria-label="合约" value={row.symbol} disabled={!editable} onChange={e => setRows(old => old.map((r, j) => j === index ? { ...r, symbol: e.target.value } : r))} /><Input aria-label="目标手数" type="number" step="1" value={row.qty} disabled={!editable} onChange={e => setRows(old => old.map((r, j) => j === index ? { ...r, qty: e.target.value } : r))} /><Button aria-label="移除目标" disabled={!editable} onClick={() => setRows(old => old.filter((_, j) => j !== index))}><Trash2 size={14} /></Button></div>)}
       <div className="flex gap-3"><Button disabled={!editable} onClick={() => setRows(old => [...old, { venue: 'SHFE', symbol: '', qty: '0', signal: 0 }])}><Plus size={14} />添加合约</Button><Button variant="primary" disabled={saving || !editable || !name.trim()} onClick={() => {
         setSaving(true); setError(null); setNotice('')
         const targets: api.Strategy['strategy']['targets'] = {}

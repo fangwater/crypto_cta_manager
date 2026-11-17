@@ -1,16 +1,32 @@
 # 国内期货 CTA 管理与观察
 
-最后更新：2026-11-13 UTC。
+最后更新：2026-11-17 UTC。
 
 `cn_futures_cta_manager` 从 `crypto_cta_manager` 的 `757ea71` 建立共同历史的本地 fork，分支为 `cn-futures`，`upstream` 指向原 GitHub 仓库。未改包名和既有 Crypto API；新增原生入口、读取器和页面集中在 `src/native_futures/`、`src/bin/cn_futures_web.rs`、`frontend/src/native/`。当前尚未创建或推送独立 GitHub `origin`。
 
-本阶段支持易达 SHFE / INE 的账户目录、今昨／多空持仓快照、委托、事实成交、策略目录和授权。使用原 Manager 的登录、密码／会话实现、账户授权和私有策略目录表。国内 Manager 必须使用独立 PostgreSQL 数据库、凭据变量与 secondary 目录。Cookie 名为 `cn_cta_session`，与 Crypto 的 `cta_session` 分离。
+本阶段支持易达、CTP 的账户目录、今昨／多空持仓快照、委托、事实成交、策略目录和授权，读取范围包括 SHFE、INE、DCE、CZCE、CFFEX、GFEX 六所。使用原 Manager 的登录、密码／会话实现、账户授权和私有策略目录表。国内 Manager 必须使用独立 PostgreSQL 数据库、凭据变量与 secondary 目录。Cookie 名为 `cn_cta_session`，与 Crypto 的 `cta_session` 分离。
+
+2026-11-17 默认部署方向调整为本机一个 Manager 管理多个云端实盘，云端独立
+`sync-server serve` 只读导出，本机独立 `sync-server pull` 增量写入专用副本；见
+[国内期货增量同步](cn_futures_sync.md)。TOML 显式配置 `mode = "cn_futures"`。
+原直接读取方式继续可用，Crypto 旧配置默认 `crypto`，不自动启动同步进程。
+
+2026-11-14 新增自建 Binance 兼容 Kline HTTP 接入、本地每日参考数据维护、分钟 TWAP／VWAP 和真实成交成本对照，
+见[行情参考与成本复盘](native_reference_cost.md)。参考文件与执行数据库隔离；
+成本对照不建立策略事实归属，也不代表已实现国内净值或结算盈亏。
 
 观察进程不加载 SDK、不访问交易柜台，不发目标、不报撤单。策略目标单位为**整数手**，键为 `SHFE:cu2612`、`INE:sc2612P640` 等，保留原生大小写。正数为多仓、负数为空仓。保存只更新目录；没有执行发布或自动下单路径。未接入策略事实身份前，不能因为订单曾本地提交或合约与策略目标相同而推定成交归属。
 
 ## 配置与构建
 
 复制 `config/cn-futures-manager.example.toml`，配置每个账户／执行部署唯一的 `id` 和执行进程 `flow/persist_manager` 的绝对路径。`secondary_root` 与所有执行数据库路径必须互不包含，校验会解析已有路径和父目录的符号链接。关闭的数据源不授予读取权限。可用 `source_viewers` 对管理员同样施加主机级可见性边界。
+
+每个 source 必须显式配置 `adapter = "yida"` 或 `adapter = "ctp"`；同一 Manager 可混合读取，
+同步导出端与接收端应使用相同配置。CTP 复用相同三类原生列族，不加载 SDK。
+会话保留 `ctp:<front_id>:<session_id>`，不截取 OrderRef 或合并不同会话；未知手续费和
+币种保持空值。合约保留原生大小写和月份：例如 `DCE:m2701`、`CZCE:SR701`、
+`CFFEX:IF2612`、`GFEX:lc2701`，不把郑商所三位月份扩展为四位或改为主连。
+策略目录继续接受已有 SHFE / INE 期权格式；目录保存不表示柜台支持执行该合约。
 
 ```bash
 cargo build --release --bin cn_futures_web
@@ -43,6 +59,21 @@ HTTP API 只监听 loopback，前端保留 `/manager/` 和同源 `/manager/api/`
 ## 状态机对齐
 
 执行端是订单／仓位状态的唯一维护者。Manager 的 `phase` 是读取投影，不触发下单、重试、释放冻结或账本校正。保留原始 `send_state`、`order.status`、`filled`、`reported_filled`、`cancel_pending`；上游 Crypto API 的状态字段保持原状。
+
+连接状态分别解释两种柜台的原始证据。CTP `kind=1/2` 表示连接／断线；`kind=14`
+是查询成交、`kind=16` 是可能重试的请求错误，不按易达的失效／致命事件解释。
+`recovery_checkpoint` 仍处于恢复中，只有后续状态／`reconciled` 才能更新就绪快照；
+`restart_required` 显示阻断。观察到连接恢复不会自动把旧快照标成已追平。
+
+CTP 的 Manager 回归使用合成 JSON、隔离 RocksDB 和 loopback 同步 HTTP，覆盖六所、
+原生会话、未知费用、断线恢复、增量搬运及同步重启；不代表新增实盘成交验收。
+2026-11-17：35 项原生模块回归和完整测试（668 通过、37 按原设置忽略）通过，
+`cargo fmt --check`、`cargo check --locked --all-targets` 和国内前端构建通过。
+`cn_futures_web`、`sync-server`、`cn_futures_reference` 的 release 构建及 YD／CTP
+混合来源示例的导出、接收、Manager 纯配置校验通过，未连接柜台或部署常驻进程。
+部署前已另建隔离 PostgreSQL，20 项显式集成测试通过（原生 HTTP／权限／静态网页 1 项、
+当前 schema 及显式维护 19 项）；测试集群只使用专用 socket 和临时测试数据库。
+PM2 的生产网页与进程部署方式见[部署说明](cn_futures_pm2.md)。
 
 | 观察状态 | 事实依据 | 不能据此推断 |
 | --- | --- | --- |
@@ -87,6 +118,7 @@ stateDiagram-v2
 | --- | --- |
 | `/api/native/sources` | GET 已授权账户，无存储路径 |
 | `/api/native/sources/{id}/snapshot` | GET 独立账户观察结果 |
+| `/api/native/sources/{id}/cost?trading_day=YYYYMMDD` | GET 完整交易日的真实成交成本对照 |
 | `/api/native/sources/{id}/grants` | GET / PUT 账户查看／配置授权 |
 | `/api/native/strategies` | GET 可见策略，POST 创建／保存管理配置 |
 | `/api/native/strategies/{name}/grants` | GET / PUT 私有策略授权 |

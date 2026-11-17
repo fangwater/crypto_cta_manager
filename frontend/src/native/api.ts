@@ -7,7 +7,14 @@ export interface Order { phase: string; exchange_terminal: boolean; facts_comple
   send_state: string; updated_us: number; locally_submitted: boolean;
 } }
 export interface Fill { fill: { identity: { venue: string; symbol: string; trading_day: string; trade_id: string; side: string }; system_id: string; order_ref: string; lots: number; price: number; offset: string }; commission: number | null; commission_currency: string | null; native_time: number | null; received_us: number }
+export interface ReplicaStatus {
+  initialized: boolean; applying: boolean; committed_cursor: number; received_cursor: number;
+  target_cursor: number | null; source_captured_at_us: number | null; target_captured_at_us: number | null;
+  last_synced_at_us: number | null; last_attempt_at_us: number | null; last_error: string | null;
+}
 export interface Snapshot {
+  replication: ReplicaStatus | null;
+  replication_stale: boolean;
   source_id: string; account: string; read_at_us: number; last_event_us: number | null; state_observed_us: number | null;
   status: string; snapshot_ready: boolean; snapshot_current_runtime: boolean; transport_observed_us: number | null; reported_can_trade: boolean | null; transport_ready: boolean | null;
   reason: string; trading_day: string | null; available_local_budget: number | null; positions_may_lag: boolean;
@@ -18,6 +25,32 @@ export interface Grant { user_id: number; username?: string; access_level: strin
 export interface StrategyGrants { strategy_name: string; created_by: string | null; open_visibility: boolean; grants: Grant[]; managers: { user_id: number; username: string }[] }
 export const getSources = (signal?: AbortSignal) => requestJson<Source[]>('/native/sources', { signal })
 export const getSnapshot = (id: string, signal?: AbortSignal) => requestJson<Snapshot>(`/native/sources/${encodeURIComponent(id)}/snapshot`, { signal })
+export interface CostSignal {
+  signal_id: string; venue: string; symbol: string; side: string; offset: string;
+  expected_lots: number; priced_lots: number; model: 'twap' | 'vwap'; window_minutes: number;
+  sample_open_us: number[]; sample_prices: number[]; sample_weights: number[];
+  theoretical_price: number | null; reason: string | null;
+}
+export interface CostFill {
+  venue: string; symbol: string; trading_day: string; trade_id: string;
+  session: string | null; order_ref: string | null; side: string; offset: string; lots: number;
+  actual_price: number; signal_id: string | null; theoretical_price: number | null;
+  actual_commission: number | null; commission_currency: string | null;
+  theoretical_commission_cny: number | null; price_shortfall_cny: number | null;
+  fee_shortfall_cny: number | null; total_shortfall_cny: number | null; reason: string | null;
+}
+export interface CostReport {
+  replication: ReplicaStatus | null;
+  source_id: string; trading_day: string; generated_at_us: number; reference_available: boolean;
+  reference_sha256: string | null; provenance: string | null; reason: string | null;
+  market_data_error: string | null;
+  complete: boolean; fill_count: number; priced_fill_count: number; fee_compared_fill_count: number;
+  total_lots: number; priced_lots: number; price_shortfall_cny: number | null;
+  fee_shortfall_cny: number | null; total_shortfall_cny: number | null;
+  covered_price_shortfall_cny: number | null; covered_fee_shortfall_cny: number | null;
+  signals: CostSignal[]; fills: CostFill[];
+}
+export const getCostReport = (id: string, day: string, signal?: AbortSignal) => requestJson<CostReport>(`/native/sources/${encodeURIComponent(id)}/cost?trading_day=${encodeURIComponent(day)}`, { signal })
 export const getStrategies = (signal?: AbortSignal) => requestJson<Strategy[]>('/native/strategies', { signal })
 export const saveStrategy = (name: string, targets: Strategy['strategy']['targets']) => requestJson('/native/strategies', { method: 'POST', body: { strategy_name: name, targets } })
 export const getGrants = (id: string) => requestJson<Grant[]>(`/native/sources/${encodeURIComponent(id)}/grants`)

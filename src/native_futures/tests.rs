@@ -19,6 +19,7 @@ fn source(path: &std::path::Path) -> Source {
         adapter: "yida".into(),
         rocksdb_path: path.to_owned(),
         enabled: true,
+        sync: None,
     }
 }
 fn db(path: &std::path::Path) -> DB {
@@ -127,6 +128,13 @@ fn live_primary_remains_writable_and_late_fills_mark_snapshot_lag() {
     assert_eq!(after.fills.len(), 1);
     assert!(after.positions_may_lag);
     assert_eq!(after.positions, view.positions);
+    let all_facts = reader::read_cost_facts(&source(&primary), &secondary, "20261112").unwrap();
+    assert_eq!(
+        all_facts.fills.len(),
+        2,
+        "cost reconstruction must not inherit the one-row UI limit"
+    );
+    assert_eq!(all_facts.orders.len(), 1);
     assert!(primary.join("CURRENT").exists());
 }
 
@@ -210,11 +218,16 @@ fn rejects_overlapping_stores_before_creating_a_secondary() {
     assert!(reader::read(&source(&primary), &nested, 5, 30).is_err());
     assert!(!nested.exists());
     let mut config = Config {
+        mode: crate::runtime_mode::RuntimeMode::CnFutures,
         database: crate::config::DatabaseConfig {
             url_env: "CN_TEST_DB".into(),
             max_connections: 1,
         },
         secondary_root: tmp.path().join("secondary"),
+        reference_root: None,
+        market_data: None,
+        sync: None,
+        sync_export: None,
         stale_secs: 30,
         recent_rows: 10,
         source_viewers: Default::default(),
@@ -239,6 +252,31 @@ fn native_strategy_targets_keep_contract_case_and_integer_lots() {
     assert!(web::validate_test_strategy(&request("SHFE:CU2612", 1.0)).is_err());
     assert!(web::validate_test_strategy(&request("binance-futures:BTCUSDT", 1.0)).is_err());
     assert!(super::validate_market("SHFE:cu2613").is_err());
+    for market in [
+        "DCE:m2701",
+        "CZCE:SR701",
+        "CFFEX:IF2612",
+        "CFFEX:T2612",
+        "GFEX:lc2701",
+    ] {
+        assert!(
+            web::validate_test_strategy(&request(market, -2.0)).is_ok(),
+            "{market}"
+        );
+    }
+    for market in [
+        "DCE:M2701",
+        "CZCE:sr701",
+        "CZCE:SR2701",
+        "CZCE:SR700",
+        "CFFEX:if2612",
+        "CFFEX:XX2612",
+        "GFEX:lc2713",
+        "DCE:m2701-C-3000",
+        "SHFE:铜2612",
+    ] {
+        assert!(super::validate_market(market).is_err(), "{market}");
+    }
 }
 
 use super::web;
@@ -284,4 +322,161 @@ fn later_block_disconnect_and_transport_events_override_a_ready_snapshot() {
     let view = reader::read(&source(&primary), &tmp.path().join("secondary"), 5, 30).unwrap();
     assert_eq!(view.status, "transport_unavailable");
     assert_eq!(view.transport_ready, Some(false));
+}
+
+#[test]
+fn ctp_sources_are_explicit_and_reject_unknown_adapters() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config: Config =
+        toml::from_str(include_str!("../../config/cn-futures-manager.example.toml")).unwrap();
+    config.secondary_root = temp.path().join("secondary");
+    config.sources[0] = source(&temp.path().join("execution"));
+    config.sources[0].adapter = "ctp".into();
+    assert!(config.validate().is_ok());
+    for adapter in ["CTP", "unknown", ""] {
+        config.sources[0].adapter = adapter.into();
+        assert!(config.validate().is_err());
+    }
+}
+
+#[test]
+fn ctp_reads_six_venues_without_changing_native_identities_offsets_or_unknown_fees() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = temp.path().join("execution");
+    let db = db(&primary);
+    let mut source = source(&primary);
+    source.adapter = "ctp".into();
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/ctp_native_records.json")).unwrap();
+    let mut state = fixture["state"].clone();
+    state["received_us"] = json!(super::now_us());
+    let mut positions = vec![];
+    for (venue, symbol) in [
+        ("SHFE", "sn2612"),
+        ("INE", "sc2701"),
+        ("DCE", "m2701"),
+        ("CZCE", "SR701"),
+        ("CFFEX", "IF2612"),
+        ("GFEX", "lc2701"),
+    ] {
+        let mut position = state["value"]["state"]["positions"][0].clone();
+        position["venue"] = json!(venue);
+        position["symbol"] = json!(symbol);
+        positions.push(position);
+        let mut order = fixture["order"].clone();
+        order["identity"]["venue"] = json!(venue);
+        order["order"]["request"]["venue"] = json!(venue);
+        order["order"]["request"]["symbol"] = json!(symbol);
+        put(&db, "cn_uniform_orders", venue, &order);
+        let mut fill = fixture["fill"].clone();
+        fill["fill"]["identity"]["venue"] = json!(venue);
+        fill["fill"]["identity"]["symbol"] = json!(symbol);
+        put(&db, "cn_trade_facts", venue, &fill);
+    }
+    state["value"]["state"]["positions"] = json!(positions);
+    put(&db, "cn_trading_events", "001", &state);
+    let mut other_session = fixture["order"].clone();
+    other_session["identity"]["native"]["session"] = json!("ctp:7:12");
+    other_session["order"]["key"]["session"] = json!("ctp:7:12");
+    put(&db, "cn_uniform_orders", "other-session", &other_session);
+    let view = reader::read(&source, &temp.path().join("secondary"), 20, 30).unwrap();
+    assert_eq!(view.status, "observing");
+    assert_eq!(view.positions, positions);
+    assert_eq!(view.total_orders, 7);
+    assert_eq!(view.total_fills, 6);
+    assert_eq!(view.trading_day.as_deref(), Some("20261117"));
+    for fill in &view.fills {
+        assert!(fill["commission"].is_null());
+        assert!(fill["commission_currency"].is_null());
+        assert!(fill["native_time"].is_null());
+        assert_eq!(
+            fill["fill"]["order_key"],
+            fixture["fill"]["fill"]["order_key"]
+        );
+        assert_eq!(fill["fill"]["identity"]["trade_id"], "000000008888");
+        assert_eq!(fill["fill"]["system_id"], "000000001234");
+        assert_eq!(fill["fill"]["offset"], "close_yesterday");
+        assert_eq!(fill["fill"]["lots"], 2);
+    }
+    assert!(
+        view.orders
+            .iter()
+            .all(|order| order.phase == OrderPhase::Filled)
+    );
+    assert_eq!(
+        view.orders
+            .iter()
+            .filter(|order| order.record["identity"]["native"]["session"] == "ctp:7:12")
+            .count(),
+        1
+    );
+    let facts =
+        reader::read_cost_facts(&source, &temp.path().join("cost-secondary"), "20261117").unwrap();
+    assert_eq!(facts.fills.len(), 6);
+    assert_eq!(facts.orders.len(), 7);
+}
+
+#[test]
+fn ctp_connection_recovery_and_query_events_follow_the_ctp_contract() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = temp.path().join("execution");
+    let db = db(&primary);
+    let mut source = source(&primary);
+    source.adapter = "ctp".into();
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/ctp_native_records.json")).unwrap();
+    // 14 is QUERY_TRADE; 16/error=90 is a retriable response, not Yida fatal.
+    for (index, (value, expected)) in [
+        (json!({"type":"runtime_start"}), "recovering"),
+        (fixture["state"]["value"].clone(), "observing"),
+        (json!({"type":"ctp_event","event":{"kind":14}}), "observing"),
+        (
+            json!({"type":"ctp_event","event":{"kind":16,"error_code":90}}),
+            "observing",
+        ),
+        (
+            json!({"type":"ctp_event","event":{"kind":2}}),
+            "disconnected",
+        ),
+        (json!({"type":"ctp_event","event":{"kind":1}}), "recovering"),
+        (
+            json!({"type":"recovery_checkpoint","state":fixture["state"]["value"]["state"]}),
+            "recovering",
+        ),
+        (fixture["state"]["value"].clone(), "observing"),
+        (
+            json!({"type":"restart_required","reason":"transport or control response timeout"}),
+            "blocked",
+        ),
+        (json!({"type":"runtime_stopped"}), "stopped"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put(
+            &db,
+            "cn_trading_events",
+            &format!("{index:020}"),
+            &json!({"sequence":index + 1,"received_us":super::now_us(),"projection_error":null,"value":value}),
+        );
+        let view = reader::read(&source, &temp.path().join("secondary"), 10, 30).unwrap();
+        assert_eq!(view.status, expected, "event {index}");
+        if index == 6 {
+            assert_eq!(view.state_observed_us, last_reconciled_time(&db));
+        }
+        if index == 8 {
+            assert!(view.reason.contains("timeout"));
+        }
+    }
+}
+
+fn last_reconciled_time(db: &DB) -> Option<i64> {
+    let bytes = db
+        .get_cf(
+            db.cf_handle("cn_trading_events").unwrap(),
+            format!("{:020}", 1),
+        )
+        .unwrap()
+        .unwrap();
+    serde_json::from_slice::<Value>(&bytes).unwrap()["received_us"].as_i64()
 }

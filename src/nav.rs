@@ -4770,6 +4770,7 @@ mod tests {
 
     fn app_config(sources: Vec<SourceConfig>) -> AppConfig {
         AppConfig {
+            mode: Default::default(),
             accounts: Default::default(),
             database: DatabaseConfig {
                 url_env: "CTA_NAV_TEST_DATABASE_URL_MUST_NOT_BE_READ".to_string(),
@@ -7795,6 +7796,7 @@ mod tests {
             ..source("trade01", Some(0.001))
         };
         let config = AppConfig {
+            mode: Default::default(),
             accounts: Default::default(),
             database: DatabaseConfig {
                 url_env: "CTA_NAV_TEST_DATABASE_URL_MUST_NOT_BE_READ".to_string(),

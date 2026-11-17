@@ -8,8 +8,19 @@ use std::{
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    pub mode: crate::runtime_mode::RuntimeMode,
+    #[serde(default = "default_database")]
     pub database: crate::config::DatabaseConfig,
     pub secondary_root: PathBuf,
+    /// Operator-maintained daily reference packs; never an execution store.
+    #[serde(default)]
+    pub reference_root: Option<PathBuf>,
+    #[serde(default)]
+    pub market_data: Option<super::market_data::Settings>,
+    #[serde(default)]
+    pub sync: Option<super::sync::PullSettings>,
+    #[serde(default)]
+    pub sync_export: Option<super::sync::ExportSettings>,
     #[serde(default = "default_stale_secs")]
     pub stale_secs: u64,
     #[serde(default = "default_rows")]
@@ -17,6 +28,12 @@ pub struct Config {
     #[serde(default)]
     pub source_viewers: BTreeMap<String, Vec<String>>,
     pub sources: Vec<Source>,
+}
+fn default_database() -> crate::config::DatabaseConfig {
+    crate::config::DatabaseConfig {
+        url_env: "CN_FUTURES_CTA_DATABASE_URL".into(),
+        max_connections: 8,
+    }
 }
 fn default_stale_secs() -> u64 {
     30
@@ -34,6 +51,9 @@ pub struct Source {
     pub rocksdb_path: PathBuf,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Presence explicitly identifies a Manager-owned local replica.
+    #[serde(default)]
+    pub sync: Option<super::sync::Remote>,
 }
 fn default_enabled() -> bool {
     true
@@ -76,6 +96,10 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         ensure!(
+            self.mode == crate::runtime_mode::RuntimeMode::CnFutures,
+            "native Manager and sync require mode = cn_futures"
+        );
+        ensure!(
             !self.sources.is_empty(),
             "at least one domestic source is required"
         );
@@ -92,6 +116,33 @@ impl Config {
             "database environment name and pool size are required"
         );
         let secondary = resolved(&self.secondary_root)?;
+        let reference = self.reference_root.as_deref().map(resolved).transpose()?;
+        let market_cache = self
+            .market_data
+            .as_ref()
+            .map(|m| {
+                m.validate()?;
+                resolved(&m.cache_root)
+            })
+            .transpose()?;
+        if let Some(cache) = &market_cache {
+            ensure!(
+                !cache.starts_with(&secondary) && !secondary.starts_with(cache),
+                "market cache and secondary_root must be disjoint"
+            );
+            if let Some(root) = &reference {
+                ensure!(
+                    !cache.starts_with(root) && !root.starts_with(cache),
+                    "market cache and reference_root must be disjoint"
+                );
+            }
+        }
+        if let Some(root) = &reference {
+            ensure!(
+                !root.starts_with(&secondary) && !secondary.starts_with(root),
+                "reference_root and secondary_root must be disjoint"
+            );
+        }
         let mut ids = BTreeSet::new();
         let mut paths = BTreeSet::new();
         for source in &self.sources {
@@ -105,10 +156,23 @@ impl Config {
                 "invalid or duplicate source id"
             );
             ensure!(
-                !source.account.trim().is_empty() && source.adapter == "yida",
-                "first release requires a named Yida source"
+                !source.account.trim().is_empty()
+                    && matches!(source.adapter.as_str(), "yida" | "ctp"),
+                "domestic sources require an account name and adapter = yida or ctp"
             );
             let path = resolved(&source.rocksdb_path)?;
+            if let Some(cache) = &market_cache {
+                ensure!(
+                    !cache.starts_with(&path) && !path.starts_with(cache),
+                    "market cache and execution stores must be disjoint"
+                );
+            }
+            if let Some(root) = &reference {
+                ensure!(
+                    !root.starts_with(&path) && !path.starts_with(root),
+                    "reference_root and execution stores must be disjoint"
+                );
+            }
             ensure!(
                 !path.starts_with(&secondary) && !secondary.starts_with(&path),
                 "secondary_root and execution stores must be disjoint"
@@ -126,6 +190,7 @@ impl Config {
                     && users.iter().all(|u| !u.trim().is_empty())),
             "source_viewers requires configured sources and nonempty usernames"
         );
+        super::sync::validate_config(self)?;
         Ok(())
     }
 }

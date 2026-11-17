@@ -1,8 +1,14 @@
 //! Read-only domestic execution observation; no SDK, exchange or target transport.
 pub mod config;
+pub mod cost;
+pub mod market_data;
 pub mod reader;
+pub mod reference;
 pub mod state;
+pub mod sync;
 pub mod web;
+
+pub const VENUES: [&str; 6] = ["SHFE", "INE", "DCE", "CZCE", "CFFEX", "GFEX"];
 
 pub fn now_us() -> i64 {
     std::time::SystemTime::now()
@@ -14,26 +20,51 @@ pub fn now_us() -> i64 {
 pub fn validate_market(market: &str) -> anyhow::Result<()> {
     let (venue, symbol) = market
         .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("target must be SHFE:contract or INE:contract"))?;
+        .ok_or_else(|| anyhow::anyhow!("target must be VENUE:native_contract"))?;
     anyhow::ensure!(
-        matches!(venue, "SHFE" | "INE"),
-        "unsupported Yida market: {venue}"
+        VENUES.contains(&venue),
+        "unsupported domestic-futures venue: {venue}"
     );
-    let prefix = symbol.bytes().take_while(u8::is_ascii_lowercase).count();
+    // Preserve Exec's native identifiers: CZCE uses YMM, CFFEX uses YYMM;
+    // neither case nor delivery year is inferred from a provider's query code.
+    let uppercase = matches!(venue, "CZCE" | "CFFEX");
+    let prefix = symbol
+        .bytes()
+        .take_while(|b| {
+            if uppercase {
+                b.is_ascii_uppercase()
+            } else {
+                b.is_ascii_lowercase()
+            }
+        })
+        .count();
+    let digits = if venue == "CZCE" { 3 } else { 4 };
     anyhow::ensure!(
-        (1..=3).contains(&prefix) && symbol.len() >= prefix + 4 && symbol.len() < 64,
+        symbol.is_ascii()
+            && (1..=3).contains(&prefix)
+            && symbol.len() >= prefix + digits
+            && symbol.len() < 64,
         "invalid native contract: {symbol}"
     );
-    let month = &symbol.as_bytes()[prefix..prefix + 4];
+    anyhow::ensure!(
+        venue != "CFFEX"
+            || matches!(
+                &symbol[..prefix],
+                "IF" | "IH" | "IC" | "IM" | "TS" | "TF" | "T" | "TL"
+            ),
+        "invalid CFFEX futures product: {symbol}"
+    );
+    let month = &symbol.as_bytes()[prefix..prefix + digits];
     anyhow::ensure!(
         month.iter().all(u8::is_ascii_digit)
-            && (1..=12).contains(&((month[2] - b'0') * 10 + month[3] - b'0')),
+            && (1..=12).contains(&((month[digits - 2] - b'0') * 10 + month[digits - 1] - b'0')),
         "invalid contract month: {symbol}"
     );
-    let tail = &symbol[prefix + 4..];
+    let tail = &symbol[prefix + digits..];
     anyhow::ensure!(
         tail.is_empty()
-            || (matches!(tail.as_bytes()[0], b'C' | b'P')
+            || (matches!(venue, "SHFE" | "INE")
+                && matches!(tail.as_bytes()[0], b'C' | b'P')
                 && tail.len() > 1
                 && tail[1..].bytes().all(|b| b.is_ascii_digit() || b == b'.')
                 && tail[1..]

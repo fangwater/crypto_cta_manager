@@ -74,11 +74,16 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
         )?;
     }
     let config = Config {
+        mode: crypto_cta_manager::runtime_mode::RuntimeMode::CnFutures,
         database: crypto_cta_manager::config::DatabaseConfig {
             url_env: "CN_TEST_ONLY".into(),
             max_connections: 4,
         },
         secondary_root: tmp.path().join("secondary"),
+        reference_root: None,
+        market_data: None,
+        sync: None,
+        sync_export: None,
         recent_rows: 20,
         stale_secs: 30,
         source_viewers: std::collections::BTreeMap::from([(
@@ -92,22 +97,77 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
                 adapter: "yida".into(),
                 rocksdb_path: primary.clone(),
                 enabled: true,
+                sync: None,
             },
             Source {
                 id: "hidden".into(),
                 account: "隐藏".into(),
-                adapter: "yida".into(),
+                adapter: "ctp".into(),
                 rocksdb_path: tmp.path().join("hidden"),
                 enabled: true,
+                sync: None,
             },
         ],
     };
     web::register_sources(&pool, &config).await?;
+    let catalog: Vec<(String, String)> =
+        sqlx::query_as("SELECT source_id, venue_label FROM cta_order_sources ORDER BY source_id")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(
+        catalog,
+        vec![
+            ("hidden".into(), "ctp".into()),
+            ("sim".into(), "yida".into())
+        ]
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = format!("http://{}", listener.local_addr()?);
-    let app = web::Service::new(config, pool.clone())?.router();
+    let frontend = tmp.path().join("frontend");
+    std::fs::create_dir_all(frontend.join("assets"))?;
+    std::fs::write(frontend.join("index.html"), "<title>国内期货 CTA</title>")?;
+    std::fs::write(frontend.join("assets/app.js"), "console.log('native')")?;
+    let app = web::with_frontend(web::Service::new(config, pool.clone())?.router(), &frontend)?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let client = Client::new();
+    let page = client.get(format!("{address}/manager/")).send().await?;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(page.text().await?.contains("国内期货 CTA"));
+    let asset = client
+        .get(format!("{address}/manager/assets/app.js"))
+        .send()
+        .await?;
+    assert_eq!(asset.status(), StatusCode::OK);
+    assert!(
+        asset.headers()["content-type"]
+            .to_str()?
+            .contains("javascript")
+    );
+    assert_eq!(asset.text().await?, "console.log('native')");
+    assert_eq!(
+        client
+            .get(format!("{address}/manager/api/native/sources"))
+            .send()
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .get(format!("{address}/manager/api/does-not-exist"))
+            .send()
+            .await?
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let status: Value = client
+        .get(format!("{address}/manager/api/auth/status"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(status["setup_required"], true);
     assert_eq!(
         client
             .get(format!("{address}/api/native/sources"))

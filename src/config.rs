@@ -110,6 +110,8 @@ pub fn validate_quote_fee_rates(rates: &BTreeMap<String, QuoteFeeRates>) -> Resu
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub mode: crate::runtime_mode::RuntimeMode,
     pub database: DatabaseConfig,
     /// One business account may own several independent Exec sources.
     #[serde(default)]
@@ -547,6 +549,11 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.mode != crate::runtime_mode::RuntimeMode::Crypto {
+            bail!(
+                "Crypto Manager requires mode = crypto; use the native entry point for cn_futures"
+            );
+        }
         crate::managed_accounts::validate(self)?;
         if !(60..=86400).contains(&self.funding_rates.refresh_secs)
             || self
@@ -1177,6 +1184,7 @@ mod tests {
 
     fn config_with_sources(sources: Vec<SourceConfig>) -> AppConfig {
         AppConfig {
+            mode: Default::default(),
             accounts: Default::default(),
             database: DatabaseConfig {
                 url_env: default_database_url_env(),

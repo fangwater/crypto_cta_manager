@@ -1,4 +1,4 @@
-use super::{config::Config, reader};
+use super::{config::Config, cost, market_data::Feed, reader, reference};
 use crate::{
     auth::{self, AuthUser, SourceAccess},
     strategy_catalog::{self, SavePositionStrategyRequest},
@@ -9,8 +9,8 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::{get, post, put},
+    response::{IntoResponse, Redirect, Response},
+    routing::{any, get, post, put},
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -23,6 +23,9 @@ type ApiResult = std::result::Result<Json<Value>, ApiError>;
 struct ApiError(StatusCode, String);
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        if error.downcast_ref::<super::sync::ReplicaBusy>().is_some() {
+            return Self(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
+        }
         tracing::error!(error=?error,"domestic Manager request failed");
         Self(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -62,11 +65,18 @@ pub struct Service {
     pool: PgPool,
     readers: Arc<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     catalog_lock: Arc<tokio::sync::Mutex<()>>,
+    market_data: Option<Arc<Feed>>,
 }
 
 impl Service {
     pub fn new(config: Config, pool: PgPool) -> Result<Self> {
         config.validate()?;
+        let market_data = config
+            .market_data
+            .clone()
+            .map(Feed::new)
+            .transpose()?
+            .map(Arc::new);
         Ok(Self {
             readers: Arc::new(
                 config
@@ -78,6 +88,7 @@ impl Service {
             config: Arc::new(config),
             pool,
             catalog_lock: Arc::default(),
+            market_data,
         })
     }
     pub fn router(self) -> Router {
@@ -90,6 +101,7 @@ impl Service {
             .route("/api/auth/users/{id}/role", put(set_role))
             .route("/api/native/sources", get(sources))
             .route("/api/native/sources/{id}/snapshot", get(snapshot))
+            .route("/api/native/sources/{id}/cost", get(cost_report))
             .route(
                 "/api/native/sources/{id}/grants",
                 get(source_grants).put(save_source_grants),
@@ -103,17 +115,46 @@ impl Service {
                 get(strategy_grants).put(save_strategy_grants),
             )
             .with_state(self.clone())
-            .layer(middleware::from_fn_with_state(self, authenticate))
-            .layer(tower_http::compression::CompressionLayer::new().gzip(true))
+            .route_layer(middleware::from_fn_with_state(self, authenticate))
+            .route_layer(tower_http::compression::CompressionLayer::new().gzip(true))
     }
 }
 
-pub async fn serve(config: Config, pool: PgPool, bind: SocketAddr) -> Result<()> {
+/// Mount built assets outside the API authentication middleware. Both API
+/// prefixes retain the same session/source permissions and JSON responses.
+pub fn with_frontend(api: Router, root: &std::path::Path) -> Result<Router> {
+    let root = root
+        .canonicalize()
+        .context("resolve native frontend root")?;
+    let index = root.join("index.html");
+    ensure!(
+        index.is_file(),
+        "native frontend root must contain index.html"
+    );
+    let api = api.route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }));
+    let files = tower_http::services::ServeDir::new(&root)
+        .not_found_service(tower_http::services::ServeFile::new(index));
+    Ok(Router::new()
+        .route("/", get(|| async { Redirect::temporary("/manager/") }))
+        .merge(api.clone())
+        .nest("/manager", api)
+        .nest_service("/manager", files))
+}
+
+pub async fn serve(
+    config: Config,
+    pool: PgPool,
+    bind: SocketAddr,
+    frontend_root: Option<&std::path::Path>,
+) -> Result<()> {
     ensure!(
         bind.ip().is_loopback(),
         "domestic Manager API must bind to loopback behind its own authenticated gateway"
     );
-    let app = Service::new(config, pool)?.router();
+    let mut app = Service::new(config, pool)?.router();
+    if let Some(root) = frontend_root {
+        app = with_frontend(app, root)?;
+    }
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .context("bind domestic Manager API")?;
@@ -127,8 +168,8 @@ pub async fn serve(config: Config, pool: PgPool, bind: SocketAddr) -> Result<()>
 
 pub async fn register_sources(pool: &PgPool, config: &Config) -> Result<()> {
     for source in &config.sources {
-        sqlx::query("INSERT INTO cta_order_sources(source_id,account_label,venue_label,rocksdb_path,enabled,estimated_fee_rate,maker_fee_rate,taker_fee_rate,theoretical_twap_fee_rate) VALUES($1,$2,'yida',$3,$4,0,0,0,0) ON CONFLICT(source_id) DO UPDATE SET account_label=EXCLUDED.account_label,venue_label=EXCLUDED.venue_label,rocksdb_path=EXCLUDED.rocksdb_path,enabled=EXCLUDED.enabled,updated_at=now()")
-            .bind(&source.id).bind(&source.account).bind(source.rocksdb_path.to_string_lossy().as_ref()).bind(source.enabled).execute(pool).await.context("register domestic source catalog")?;
+        sqlx::query("INSERT INTO cta_order_sources(source_id,account_label,venue_label,rocksdb_path,enabled,estimated_fee_rate,maker_fee_rate,taker_fee_rate,theoretical_twap_fee_rate) VALUES($1,$2,$3,$4,$5,0,0,0,0) ON CONFLICT(source_id) DO UPDATE SET account_label=EXCLUDED.account_label,venue_label=EXCLUDED.venue_label,rocksdb_path=EXCLUDED.rocksdb_path,enabled=EXCLUDED.enabled,updated_at=now()")
+            .bind(&source.id).bind(&source.account).bind(&source.adapter).bind(source.rocksdb_path.to_string_lossy().as_ref()).bind(source.enabled).execute(pool).await.context("register domestic source catalog")?;
     }
     Ok(())
 }
@@ -321,6 +362,73 @@ async fn snapshot(
     .await
     .map_err(anyhow::Error::from)??;
     body(observed)
+}
+
+#[derive(serde::Deserialize)]
+struct CostQuery {
+    trading_day: String,
+}
+
+async fn cost_report(
+    State(s): State<Service>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<CostQuery>,
+) -> ApiResult {
+    if !access.view.contains(&id) {
+        return Err(forbidden());
+    }
+    reference::valid_day(&query.trading_day).map_err(bad)?;
+    let source = s
+        .config
+        .sources
+        .iter()
+        .find(|source| source.enabled && source.id == id)
+        .cloned()
+        .ok_or_else(forbidden)?;
+    let config = s.config.clone();
+    let lock = s.readers[&id].clone();
+    let guard = lock.lock_owned().await;
+    let day = query.trading_day;
+    let read_day = day.clone();
+    let read_id = id.clone();
+    let (mut pack, facts, reference_error) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let _guard = guard;
+        let loaded = if config.reference_root.is_some() {
+            reference::load(&config, &read_id, &read_day)
+        } else {
+            Ok(None)
+        };
+        let (pack, error) = match loaded {
+            Ok(pack) => (pack, false),
+            Err(e) => {
+                tracing::warn!(error=?e,"domestic reference unavailable");
+                (None, true)
+            }
+        };
+        let facts =
+            reader::read_cost_facts(&source, &config.secondary_root.join(&read_id), &read_day)?;
+        Ok((pack, facts, error))
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    let mut market_error = None;
+    if let (Some(feed), Some(pack)) = (&s.market_data, &mut pack) {
+        if let Err(e) = feed.augment(pack, super::now_us()).await {
+            tracing::warn!(error=?e,"domestic market data unavailable");
+            market_error = Some("行情接口或缓存暂不可用；保留已覆盖参考与事实成交".to_owned());
+        }
+    }
+    let mut report = tokio::task::spawn_blocking(move || {
+        cost::build(&id, &day, pack.as_ref(), facts, super::now_us())
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    report.market_data_error = market_error;
+    if reference_error {
+        report.reason = Some("参考文件读取或校验失败；保留事实成交，请检查数据维护记录".into());
+    }
+    body(report)
 }
 async fn source_grants(
     State(s): State<Service>,

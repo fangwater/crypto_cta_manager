@@ -1,0 +1,25 @@
+# Cloud-only read service. No Manager PostgreSQL, trading SDK or order API.
+mode = "cn_futures"
+secondary_root = "/home/operator/cn_futures_sync/secondaries"
+
+[sync_export]
+bind = "127.0.0.1:18212"
+token_env = "CN_FUTURES_SYNC_TOKEN"
+journal_root = "/home/operator/cn_futures_sync/journals"
+source_ids = ["cn_live01", "cn_live02"]
+batch_records = 500
+batch_bytes = 4194304
+
+[[sources]]
+id = "cn_live01"
+account = "国内实盘一"
+adapter = "yida"
+rocksdb_path = "/home/operator/cn_live01/flow/persist_manager"
+enabled = true
+
+[[sources]]
+id = "cn_live02"
+account = "国内实盘二"
+adapter = "ctp"
+rocksdb_path = "/home/operator/cn_live02/flow/persist_manager"
+enabled = true

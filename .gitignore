@@ -11,6 +11,9 @@ __pycache__/
 
 # Host-only configuration and credentials (keep templates tracked)
 /config/cta-manager.toml
+/config/cn-futures-manager.toml
+/config/sync-server-export.toml
+/config/sync-server-collect.toml
 .env
 .env.*
 !.env.example
@@ -19,6 +22,7 @@ env.sh
 
 # Local runtime data, deployment outputs and diagnostic evidence
 /db/
+/data/
 /logs/
 /run/
 /archive-control/

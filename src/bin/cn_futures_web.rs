@@ -15,6 +15,9 @@ struct Args {
     config: PathBuf,
     #[arg(long, default_value = "127.0.0.1:18211")]
     bind: SocketAddr,
+    /// Serve the built native frontend at /manager/ alongside its API.
+    #[arg(long)]
+    frontend_root: Option<PathBuf>,
     /// Validate only; no database, SDK or network access.
     #[arg(long,conflicts_with_all=["snapshot","init_db"])]
     check_config: bool,
@@ -60,5 +63,5 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     web::register_sources(&pool, &config).await?;
-    web::serve(config, pool, args.bind).await
+    web::serve(config, pool, args.bind, args.frontend_root.as_deref()).await
 }
