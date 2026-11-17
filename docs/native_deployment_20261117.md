@@ -6,7 +6,7 @@ collector run under PM2 as `cn-futures-manager` / `cn-futures-sync`; the existin
 remains `sh_dev_chuangyuan01_ctp`. Crypto runtime names and entry points remain
 unchanged; the native configuration uses `mode = "cn_futures"`.
 
-Manager release `20261117T145028Z-56ad000` includes native gross-position FIFO NAV,
+Manager release `20261117T150341Z-7f726fc` includes native gross-position FIFO NAV,
 completed-minute marks, historical account-rate estimates, unified CN fee labels,
 source-scoped permissions and frozen native strategy-group netting plans.
 The independent Manager PostgreSQL database was backed up before explicitly
@@ -26,7 +26,10 @@ The live source now reports trading day `20261118`, with zero positions, orders
 and fills. The known empty-history curve is zero; this is not a nonzero live-fill
 PnL acceptance. Restart/heartbeat events cannot extend financial coverage beyond
 a complete account observation or a validated live trade. Missing coverage is
-explicitly unavailable. Actual CNY fees and causal fee estimates stay separate;
+explicitly unavailable. During a replica commit the API returns retryable 503,
+and the browser retries after two seconds without treating a temporary busy cut
+as corrupted financial evidence. A controlled public-gateway check verified
+503 during the lock and a ready zero-history result after release. Actual CNY fees and causal fee estimates stay separate;
 CN calculations/UI do not classify fees by maker/taker.
 
 Exec commit `88c3866c` implements optional native limit/FAK ctaker, explicit target
