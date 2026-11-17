@@ -1,0 +1,12 @@
+[Unit]
+Description=Bound selected Exec pre-trade text logs
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/crypto_cta_manager/scripts/maintain_pmdaemon_logs.py --log-dir %h/.pmdaemon/logs --file exec_pt_binance_exec_cta2024_902_15-error.log --file exec_pt_binance_exec_trade01-error.log --file exec_pt_binance_exec_trade02-error.log --file exec_pt_binance_exec_trade03-error.log --file exec_pt_binance_exec_trade04-error.log --file exec_pt_binance_exec_trade06-error.log --file exec_pt_binance_exec_trade07-error.log --file exec_pt_binance_exec_trade08-error.log --file exec_pt_binance_exec_trade09-error.log --file exec_pt_binance_exec_trade10-error.log --file exec_pt_binance_exec_trade11-error.log --file exec_pt_binance_exec_trade12-error.log --file exec_pt_binance_exec_trade13-error.log --file exec_pt_binance_exec_trade14-error.log --file exec_pt_binance_exec_xy_lxy21_05-error.log --max-mib 256 --keep-mib 16 --execute
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=30
+MemoryMax=64M
+NoNewPrivileges=true
+UMask=0077

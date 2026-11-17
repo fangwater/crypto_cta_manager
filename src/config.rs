@@ -6,6 +6,20 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+// Resolve existing symlinked ancestors even before a new storage root exists.
+pub(crate) fn resolve_storage_path(path: &Path) -> Result<PathBuf> {
+    anyhow::ensure!(path.is_absolute(), "storage path must be absolute");
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(path.canonicalize()?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().context("storage parent missing")?;
+            Ok(resolve_storage_path(parent)?
+                .join(path.file_name().context("storage name missing")?))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeeRates {
     pub maker: f64,
@@ -109,6 +123,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub kline: KlineConfig,
     #[serde(default)]
+    pub archive: ArchiveConfig,
+    #[serde(default)]
     pub monitor: MonitorConfig,
     #[serde(default)]
     pub treasury: TreasuryConfig,
@@ -117,6 +133,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub funding_rates: FundingRateConfig,
     pub sources: Vec<SourceConfig>,
+}
+
+/// Independent, opt-in owner-only signal retention control.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArchiveConfig {
+    pub socket: Option<PathBuf>,
+    pub cold: Option<crate::position_archive::cold::manager::Settings>,
 }
 
 /// Explicit egress selection for BFUSD and BNB asset management.
@@ -752,6 +776,30 @@ impl AppConfig {
             }
         }
         self.kline.validate()?;
+        if let Some(socket) = &self.archive.socket {
+            anyhow::ensure!(
+                socket.is_absolute() && socket.file_name().is_some(),
+                "archive.socket must be an absolute file path"
+            );
+        }
+        if let Some(cold) = &self.archive.cold {
+            cold.validate()?;
+            let resolved_cold = resolve_storage_path(&cold.root)?;
+            let resolved_hot = resolve_storage_path(&self.kline.rocksdb_path)?;
+            anyhow::ensure!(
+                !resolved_cold.starts_with(&resolved_hot)
+                    && !resolved_hot.starts_with(&resolved_cold),
+                "cold root overlaps hot DB"
+            );
+            for source in &self.sources {
+                let resolved_source = resolve_storage_path(&source.rocksdb_path)?;
+                anyhow::ensure!(
+                    !resolved_cold.starts_with(&resolved_source)
+                        && !resolved_source.starts_with(&resolved_cold),
+                    "cold root overlaps an Exec store"
+                );
+            }
+        }
         if self.sources.is_empty() {
             bail!("at least one [[sources]] entry is required");
         }
@@ -1142,6 +1190,7 @@ mod tests {
             treasury: crate::config::TreasuryConfig::default(),
             funding: Default::default(),
             funding_rates: Default::default(),
+            archive: Default::default(),
             sources,
         }
     }

@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use iceoryx2::prelude::*;
 use iceoryx2::service::ipc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::config::{AppConfig, SourceConfig};
@@ -94,6 +94,18 @@ pub struct LiveAccountReading {
     pub uni_mmr_ts_ms: Option<i64>,
     pub initial_margin_usd: Option<f64>,
     pub initial_margin_ts_ms: Option<i64>,
+    pub rapidx_financial: Option<RapidXFinancial>,
+}
+
+/// Current RapidX live financial IPC event (4020); never loaded from disk.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RapidXFinancial {
+    pub portfolio: String,
+    pub exchange: String,
+    pub published_ms: i64,
+    pub recovery_ready: bool,
+    pub accounts_observed_ms: Option<i64>,
+    pub frozen_margin: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -105,6 +117,7 @@ struct SourceLiveState {
     uni_mmr_ts_ms: Option<i64>,
     initial_margin_usd: Option<f64>,
     initial_margin_ts_ms: Option<i64>,
+    rapidx_financial: Option<RapidXFinancial>,
 }
 
 impl SourceLiveState {
@@ -146,6 +159,7 @@ impl SourceLiveState {
             uni_mmr_ts_ms: self.uni_mmr_ts_ms,
             initial_margin_usd: self.initial_margin_usd,
             initial_margin_ts_ms: self.initial_margin_ts_ms,
+            rapidx_financial: self.rapidx_financial.clone(),
         })
     }
 
@@ -310,6 +324,15 @@ fn apply_account_message(
         if expected != Some(scope) {
             return;
         }
+        if let Some(financial) = parse_rapidx_financial(payload, service, scope) {
+            if state
+                .rapidx_financial
+                .as_ref()
+                .is_none_or(|old| financial.published_ms >= old.published_ms)
+            {
+                state.rapidx_financial = Some(financial);
+            }
+        }
         if let Some(snapshot) = parse_account_equity(payload, scope, "rapidx_account_risk") {
             state.apply_account_equity(snapshot);
         }
@@ -349,6 +372,36 @@ fn apply_account_message(
             state.apply_unified_risk(ts, ratio);
         }
     }
+}
+
+fn parse_rapidx_financial(
+    payload: &[u8],
+    service: &str,
+    expected_scope: u32,
+) -> Option<RapidXFinancial> {
+    let kind = u32::from_le_bytes(payload.get(..4)?.try_into().ok()?);
+    let scope = u32::from_le_bytes(payload.get(4..8)?.try_into().ok()?);
+    let len = u32::from_le_bytes(payload.get(8..12)?.try_into().ok()?) as usize;
+    if kind != 4020 || scope != expected_scope || len > ACCOUNT_IPC_PAYLOAD - EVENT_HEADER_LEN {
+        return None;
+    }
+    let end = EVENT_HEADER_LEN.checked_add(len)?;
+    let value: RapidXFinancial =
+        serde_json::from_slice(payload.get(EVENT_HEADER_LEN..end)?).ok()?;
+    let stream = service.rsplit('/').next()?.strip_suffix("_pm")?;
+    let (exchange, portfolio) = stream
+        .strip_prefix("rapidx_binance_")
+        .map(|p| ("BINANCE", p))
+        .or_else(|| stream.strip_prefix("rapidx_okex_").map(|p| ("OKX", p)))?;
+    if portfolio.is_empty()
+        || !portfolio.bytes().all(|b| b.is_ascii_digit())
+        || value.portfolio != portfolio
+        || value.exchange != exchange
+        || value.published_ms <= 0
+    {
+        return None;
+    }
+    Some(value)
 }
 
 // Initial margin is exchange-reported collateral in use, not maintenance margin
@@ -982,5 +1035,46 @@ mod tests {
         }
         assert!(parse_initial_margin(&payload, OKEX_UNIFIED_SCOPE).is_none());
         assert!(parse_initial_margin(&payload[..offset + 3], BINANCE_STD_UM_SCOPE).is_none());
+    }
+    #[test]
+    fn rapidx_financial_ipc_is_scoped_ordered_and_disconnect_clears_readiness() {
+        let service = "rx/account_pubs/rapidx_binance_123_pm";
+        let make = |portfolio: &str, published: i64, ready: bool| {
+            let json = serde_json::to_vec(&serde_json::json!({"portfolio":portfolio,"exchange":"BINANCE",
+                "published_ms":published,"recovery_ready":ready,"accounts_observed_ms":1000,"frozen_margin":"42.5"})).unwrap();
+            let mut bytes = vec![0; ACCOUNT_IPC_PAYLOAD];
+            bytes[..4].copy_from_slice(&4020u32.to_le_bytes());
+            bytes[4..8].copy_from_slice(&BINANCE_UNIFIED_SCOPE.to_le_bytes());
+            bytes[8..12].copy_from_slice(&(json.len() as u32).to_le_bytes());
+            bytes[12..12 + json.len()].copy_from_slice(&json);
+            bytes
+        };
+        let mut state = SourceLiveState::default();
+        let mut wallets = WalletAssetAccumulator::default();
+        let mut apply = |state: &mut SourceLiveState, bytes: Vec<u8>| {
+            apply_account_message(state, &mut wallets, "binance-futures", service, &bytes)
+        };
+        apply(&mut state, make("other", 1100, true));
+        assert!(state.rapidx_financial.is_none());
+        apply(&mut state, make("123", 1100, true));
+        assert!(state.rapidx_financial.as_ref().unwrap().recovery_ready);
+        apply(&mut state, make("123", 1200, false));
+        assert!(!state.rapidx_financial.as_ref().unwrap().recovery_ready);
+        apply(&mut state, make("123", 1100, true));
+        assert!(!state.rapidx_financial.as_ref().unwrap().recovery_ready);
+        let mut malformed = make("123", 1300, true);
+        malformed[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_rapidx_financial(&malformed, service, BINANCE_UNIFIED_SCOPE).is_none());
+        assert!(
+            parse_rapidx_financial(&make("123", 1300, true), service, OKEX_UNIFIED_SCOPE).is_none()
+        );
+        assert!(
+            parse_rapidx_financial(
+                &make("123", 1300, true),
+                "rx/account_pubs/rapidx_okex_123_pm",
+                BINANCE_UNIFIED_SCOPE
+            )
+            .is_none()
+        );
     }
 }

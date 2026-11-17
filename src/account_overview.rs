@@ -369,7 +369,7 @@ impl AccountOverview {
                             let margin = if let Some(value) = ipc_margin {
                                 Some((value.0, Some(value.1), None))
                             } else {
-                                match margin_reader.get(&source).await {
+                                match margin_reader.get(&source, reading.rapidx_financial.as_ref()).await {
                                     Ok(value) => value.map(|row| (row.ts_ms, row.initial_margin, row.frozen_margin)),
                                     Err(_) => { warn!(source_id = %source.id, "read-only account margin query unavailable"); None }
                                 }

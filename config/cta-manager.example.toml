@@ -53,6 +53,35 @@ reconnect_interval_ms = 500
 # local_ip = "DEDICATED_NON_TRADING_LOCAL_IP"
 # use_account_ip_rotation = true # mutually exclusive with local_ip
 
+# Independent owner-only position-signal retention; disabled unless a socket is set.
+# Originals must be restored and verified on powerleader before receipt-gated pruning.
+# [archive]
+# socket = "/absolute/manager/root/archive-control/position.sock"
+
+# Optional minute-batched local archival. Retains >=33 days + execution guard
+# in hot storage; the operator invokes powerleader's separate cta_archive_pull.
+# Existing JSON hot stores remain JSON unless hot_conversion is explicitly set.
+# [archive.cold]
+# root = "/absolute/manager/root/cold-signals"
+# interval_secs = 60
+# quiet_secs = 30
+# max_cpu_percent = 35.0
+# max_io_pressure_percent = 1.0
+# min_free_bytes = 10737418240
+# [archive.cold.limits]
+# max_records = 1000
+# max_bytes = 67108864
+# [archive.cold.reclaim]
+# max_input_bytes = 16777216
+# max_files = 4
+# allow_manual_compaction = false
+# compact_cooldown_secs = 3600
+# Optional: new signals become PB and retained JSON is replaced in bounded batches.
+# [archive.cold.hot_conversion]
+# max_records = 1000
+# max_bytes = 8388608
+# max_work_millis = 50
+
 [kline]
 # Enable only after assigning a dedicated non-trading market-data egress.
 enabled = false

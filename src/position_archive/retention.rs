@@ -1,0 +1,703 @@
+//! Owner-only, receipt-gated retention of Manager position signals.
+use super::*;
+use crate::theoretical_nav::{LatestTargets, target_deltas, target_positions_changed};
+use anyhow::ensure;
+use flate2::{Compression, bufread::GzDecoder, write::GzEncoder};
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
+use std::path::Path;
+use std::sync::{Arc, RwLockReadGuard};
+
+pub(super) const META: &str = "position_archive_retention";
+const MAGIC: &[u8; 16] = b"CTA-SIGNAL-GZIP\0";
+const MAX_VALUE: u64 = 64 * 1024 * 1024;
+const MAX_HEADER: usize = 64 * 1024 * 1024;
+pub type Cursor = (i64, u32);
+
+pub fn predecessor(cursor: Cursor) -> Option<Cursor> {
+    if cursor.1 > 0 {
+        Some((cursor.0, cursor.1 - 1))
+    } else if cursor.0 > 1 {
+        Some((cursor.0 - 1, u32::MAX))
+    } else {
+        None
+    }
+}
+pub fn cutoff(now: i64) -> Cursor {
+    const DAY: i64 = 86_400_000_000;
+    const ANALYSIS_DAYS: i64 = 30;
+    const REDUNDANCY_DAYS: i64 = 3;
+    (
+        ((now - (ANALYSIS_DAYS + REDUNDANCY_DAYS) * DAY).div_euclid(DAY) * DAY - 600_000_000)
+            .max(1),
+        0,
+    )
+}
+
+/// The supplied date is an exclusive midnight boundary in UTC+08:00.
+pub fn date_boundary(date: &str) -> Result<Cursor> {
+    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .context("before must be YYYY-MM-DD (UTC+08:00)")?;
+    ensure!(
+        parsed.format("%Y-%m-%d").to_string() == date,
+        "before must be YYYY-MM-DD"
+    );
+    let us = parsed
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_micros()
+        .checked_sub(8 * 3_600_000_000)
+        .context("date boundary overflow")?;
+    ensure!(us > 1, "date boundary must be after the Unix epoch");
+    Ok((us, 0))
+}
+
+fn validate_before(before: Cursor, now: i64) -> Result<()> {
+    ensure!(
+        before.1 == 0 && before.0 > 1,
+        "invalid exclusive date boundary"
+    );
+    ensure!(
+        before <= cutoff(now),
+        "requested date would remove retained 33-day signals; choose an earlier date"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Boundary {
+    pub(crate) latest: BTreeMap<(String, String), LatestTargets>,
+    pub(crate) cumulative: BTreeMap<(String, String), f64>,
+}
+impl Boundary {
+    pub(super) fn ingest(&mut self, message: &PositionUpdateMsg) -> Result<()> {
+        for account in &message.published_accounts {
+            let key = (account.source_id.clone(), account.binding_name.clone());
+            let next = LatestTargets {
+                position_strategy_name: message.strategy.strategy_name.clone(),
+                // Source venue is constant for each historical source identity and
+                // is resolved from configuration when the checkpoint is loaded.
+                venue: String::new(),
+                targets: super::normalized_account_targets(message, account)?,
+                received_at_us: message.received_at_us,
+                update_seq: message.seq,
+            };
+            if target_positions_changed(self.latest.get(&key), &next) {
+                for (symbol, quantity) in target_deltas(self.latest.get(&key), &next) {
+                    let total = self
+                        .cumulative
+                        .entry((account.source_id.clone(), symbol))
+                        .or_default();
+                    *total += quantity;
+                    ensure!(total.is_finite(), "checkpoint quantity overflow");
+                }
+            }
+            self.latest.insert(key, next);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Receipt {
+    pub identity: String,
+    pub from: Cursor,
+    pub to: Cursor,
+    pub previous: Option<String>,
+    pub count: u64,
+    pub raw_bytes: u64,
+    pub sha256: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct RetentionState {
+    pub(super) identity: String,
+    pub(super) head: Cursor,
+    pub(super) sealed: Cursor,
+    pub(super) floor: Cursor,
+    pub(super) boundary: Boundary,
+    pub(super) receipt: Option<Receipt>,
+}
+impl RetentionState {
+    pub(super) fn load(db: &ManagerDb) -> Result<Self> {
+        let identity = std::fs::read_to_string(db.path().join("IDENTITY"))?
+            .trim()
+            .to_string();
+        Self::decode(identity, db.db().get(META)?.as_deref())
+    }
+    fn decode(identity: String, bytes: Option<&[u8]>) -> Result<Self> {
+        ensure!(!identity.is_empty(), "missing Manager store identity");
+        if let Some(bytes) = bytes {
+            let state: Self = rmp_serde::from_slice(bytes)?;
+            ensure!(
+                state.identity == identity && state.floor <= state.sealed,
+                "archive identity/range mismatch"
+            );
+            Ok(state)
+        } else {
+            Ok(Self {
+                identity,
+                head: (0, 0),
+                sealed: (1, 0),
+                floor: (1, 0),
+                boundary: Boundary::default(),
+                receipt: None,
+            })
+        }
+    }
+    fn header(&self, to: Cursor) -> Header {
+        Header {
+            identity: self.identity.clone(),
+            from: self.floor,
+            to,
+            previous: self.receipt.as_ref().map(|r| r.sha256.clone()),
+            boundary: self.boundary.clone(),
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct Header {
+    identity: String,
+    from: Cursor,
+    to: Cursor,
+    previous: Option<String>,
+    boundary: Boundary,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Status {
+    pub identity: String,
+    pub floor: Cursor,
+    pub sealed: Cursor,
+    pub eligible_before: Cursor,
+    pub last_receipt: Option<Receipt>,
+}
+
+fn sync_options() -> rocksdb::WriteOptions {
+    let mut options = rocksdb::WriteOptions::default();
+    options.set_sync(true);
+    options
+}
+fn encode_header(header: &Header) -> Result<Vec<u8>> {
+    let bytes = rmp_serde::to_vec(header)?;
+    ensure!(bytes.len() <= MAX_HEADER, "checkpoint header too large");
+    Ok(bytes)
+}
+fn write_blob(writer: &mut impl Write, bytes: &[u8]) -> Result<()> {
+    writer.write_all(&(bytes.len() as u64).to_be_bytes())?;
+    writer.write_all(bytes)?;
+    Ok(())
+}
+fn read_blob(reader: &mut impl Read, max: usize) -> Result<Vec<u8>> {
+    let mut length = [0; 8];
+    reader.read_exact(&mut length)?;
+    let length = u64::from_be_bytes(length);
+    ensure!(length <= max as u64, "archive frame exceeds size limit");
+    let mut bytes = vec![0; length as usize];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+fn hash_frame(hash: &mut Sha256, key: &[u8], value: &[u8]) {
+    hash.update(key);
+    hash.update((value.len() as u64).to_be_bytes());
+    hash.update(value);
+}
+fn validate_message(key: &[u8], value: &[u8]) -> Result<PositionUpdateMsg> {
+    let cursor = manager_db::decode_seq_key(key).context("invalid archived key")?;
+    let message = decode_msg(value)?;
+    ensure!(
+        cursor.0 > 0
+            && (message.received_at_us, message.seq) == cursor
+            && message.msg_type == MSG_TYPE,
+        "archive key/message identity mismatch"
+    );
+    Ok(message)
+}
+
+impl PositionArchive {
+    pub fn retention_read(&self) -> RwLockReadGuard<'_, ()> {
+        self.retention_gate.read().unwrap()
+    }
+    pub fn boundary(&self) -> (Cursor, Boundary) {
+        let state = self.retention.lock().unwrap();
+        (state.floor, state.boundary.clone())
+    }
+    pub fn retention_floor(&self) -> Cursor {
+        self.retention.lock().unwrap().floor
+    }
+    pub fn retention_status(&self) -> Status {
+        let state = self.retention.lock().unwrap();
+        Status {
+            identity: state.identity.clone(),
+            floor: state.floor,
+            sealed: state.sealed,
+            eligible_before: cutoff(crate::kline::now_us()),
+            last_receipt: state.receipt.clone(),
+        }
+    }
+    fn seal(&self, before: Cursor, now: i64) -> Result<RetentionState> {
+        validate_before(before, now)?;
+        ensure!(
+            !self.db.column_families()?.iter().any(|name| matches!(
+                name.as_str(),
+                "uniform_orders" | "order_updates" | "trade_updates"
+            )),
+            "refusing archive maintenance on an Exec store"
+        );
+        let head = self.last_key.lock().unwrap();
+        let mut state = self.retention.lock().unwrap();
+        let mut next = state.clone();
+        next.sealed = next.sealed.max(before);
+        next.head = next.head.max(*head);
+        self.db
+            .db()
+            .put_opt(META, rmp_serde::to_vec(&next)?, &sync_options())?;
+        *state = next.clone();
+        Ok(next)
+    }
+    pub(super) fn visit_range(
+        &self,
+        from: Cursor,
+        to: Cursor,
+        mut visit: impl FnMut(&[u8], &[u8]) -> Result<bool>,
+    ) -> Result<()> {
+        let cf = self
+            .db
+            .db()
+            .cf_handle(POSITION_UPDATES_CF)
+            .context("missing Manager archive CF")?;
+        let start = manager_db::encode_seq_key(from.0, from.1)?;
+        let mut options = rocksdb::ReadOptions::default();
+        options.fill_cache(false);
+        options.set_iterate_upper_bound(manager_db::encode_seq_key(to.0, to.1)?);
+        for row in self.db.db().iterator_cf_opt(
+            &cf,
+            options,
+            IteratorMode::From(&start, Direction::Forward),
+        ) {
+            let (key, value) = row?;
+            let cursor = manager_db::decode_seq_key(&key).context("invalid archive key")?;
+            ensure!(
+                cursor >= from && cursor < to,
+                "archive cursor outside range"
+            );
+            ensure!(
+                !value.is_empty() && value.len() as u64 <= MAX_VALUE,
+                "invalid archive record size"
+            );
+            // Backups are self-contained PB messages; they never depend on a
+            // surviving snapshot parent or dictionary outside the export.
+            let message = self.complete(&key, &value)?;
+            let value = codec::encode(&message)?;
+            ensure!(
+                value.len() as u64 <= MAX_VALUE,
+                "expanded archive record exceeds limit"
+            );
+            if !visit(&key, &value)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+    /// Stream the complete chosen prefix. Backup first, then one atomic prune;
+    /// large ranges are streamed with bounded memory, never staged on the live disk.
+    pub fn export_prefix(&self, output: &mut impl Write, before: Cursor, now: i64) -> Result<bool> {
+        let state = self.seal(before, now)?;
+        if state.floor >= before {
+            return Ok(false);
+        }
+        let header = state.header(before);
+        let bytes = encode_header(&header)?;
+        let mut hash = Sha256::new();
+        hash.update(&bytes);
+        let mut writer = GzEncoder::new(output, Compression::fast());
+        writer.write_all(MAGIC)?;
+        write_blob(&mut writer, &bytes)?;
+        let mut count = 0;
+        let mut raw_bytes = 0;
+        self.visit_range(header.from, header.to, |key, value| {
+            validate_message(key, value)?;
+            writer.write_all(key)?;
+            write_blob(&mut writer, value)?;
+            hash_frame(&mut hash, key, value);
+            count += 1;
+            raw_bytes += 20 + value.len() as u64;
+            Ok(true)
+        })?;
+        writer.write_all(&[0; 12])?;
+        write_blob(&mut writer, &[])?;
+        let receipt = Receipt {
+            identity: header.identity,
+            from: header.from,
+            to: header.to,
+            previous: header.previous,
+            count,
+            raw_bytes,
+            sha256: hex::encode(hash.finalize()),
+        };
+        write_blob(&mut writer, &serde_json::to_vec(&receipt)?)?;
+        writer.finish()?.flush()?;
+        Ok(true)
+    }
+    pub fn commit_receipt(&self, receipt: &Receipt, now: i64) -> Result<()> {
+        let state = self.retention.lock().unwrap().clone();
+        ensure!(
+            receipt.identity == state.identity,
+            "receipt belongs to another Manager store"
+        );
+        if state.receipt.as_ref() == Some(receipt) {
+            self.db.db().flush_wal(true)?;
+            return Ok(());
+        }
+        ensure!(
+            receipt.from == state.floor
+                && receipt.from < receipt.to
+                && receipt.to <= state.sealed
+                && receipt.to <= cutoff(now),
+            "stale/unsafe archive receipt range"
+        );
+        ensure!(
+            receipt.previous == state.receipt.as_ref().map(|r| r.sha256.clone()),
+            "receipt chain mismatch"
+        );
+        let mut hash = Sha256::new();
+        hash.update(encode_header(&state.header(receipt.to))?);
+        let mut count = 0;
+        let mut raw_bytes = 0;
+        let mut boundary = state.boundary.clone();
+        self.visit_range(receipt.from, receipt.to, |key, value| {
+            boundary.ingest(&validate_message(key, value)?)?;
+            hash_frame(&mut hash, key, value);
+            count += 1;
+            raw_bytes += 20 + value.len() as u64;
+            Ok(true)
+        })?;
+        ensure!(
+            count == receipt.count
+                && raw_bytes == receipt.raw_bytes
+                && hex::encode(hash.finalize()) == receipt.sha256,
+            "receipt digest/count mismatch; no records removed"
+        );
+        // Heavy scanning/hash/replay is complete before acquiring these short locks.
+        let _gate = self.retention_gate.write().unwrap();
+        let mut current = self.retention.lock().unwrap();
+        ensure!(
+            current.floor == state.floor && current.receipt == state.receipt,
+            "archive prefix changed; retry"
+        );
+        let mut next = current.clone();
+        next.floor = receipt.to;
+        next.boundary = boundary;
+        next.receipt = Some(receipt.clone());
+        let mut batch = rocksdb::WriteBatch::default();
+        storage::Storage::delete_prefix(&self.db, &mut batch, receipt.from, receipt.to)?;
+        batch.put(META, rmp_serde::to_vec(&next)?);
+        let result = self.db.db().write_opt(batch, &sync_options());
+        // A WAL sync error can follow a visible atomic commit. Keep RAM aligned
+        // with the database, report the error, and require a durable retry.
+        if self.db.db().get(META)?.as_deref() == Some(rmp_serde::to_vec(&next)?.as_slice()) {
+            *current = next;
+            let mut writes = self.target_writes.lock().unwrap();
+            writes.revision = writes
+                .revision
+                .checked_add(1)
+                .context("revision exhausted")?;
+            writes.retention_revision = writes.revision;
+        }
+        result.context("archive retention WAL sync")?;
+        self.storage.clear_cache();
+        Ok(())
+    }
+    pub fn compact_archived(&self, before: Cursor) -> Result<()> {
+        let floor = self.retention_floor();
+        ensure!(
+            before.1 == 0 && before.0 > 1 && before <= floor,
+            "compact is only allowed inside a verified, already reclaimed range"
+        );
+        // A failed WAL sync can leave a visible committed receipt. Before SST
+        // reclamation, durably confirm BOTH the deletion and its default-CF
+        // checkpoint, including retries that skipped an already-visible commit.
+        self.db.db().flush_wal(true)?;
+        let mut options = rocksdb::CompactOptions::default();
+        options.set_exclusive_manual_compaction(false);
+        options.set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::ForceOptimized);
+        for name in [
+            POSITION_UPDATES_CF,
+            storage::OBSERVATIONS_CF,
+            storage::SNAPSHOTS_CF,
+        ] {
+            let cf = self.db.db().cf_handle(name).context("missing signal CF")?;
+            let (start, end) = if name == storage::SNAPSHOTS_CF {
+                (
+                    storage::day_key(0).to_vec(),
+                    storage::day_key(before.0).to_vec(),
+                )
+            } else {
+                (
+                    manager_db::encode_seq_key(1, 0)?.to_vec(),
+                    manager_db::encode_seq_key(before.0, before.1)?.to_vec(),
+                )
+            };
+            if start < end {
+                self.db
+                    .db()
+                    .compact_range_cf_opt(&cf, Some(start), Some(end), &options);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Read-only plan, including the exact requested range and approximate SST bytes.
+pub fn inspect(path: &Path, before: Cursor, now: i64) -> Result<serde_json::Value> {
+    use rocksdb::{DB, Options, Range};
+    validate_before(before, now)?;
+    let mut options = Options::default();
+    options.set_max_open_files(128);
+    let families = DB::list_cf(&options, path)?;
+    ensure!(
+        families.iter().any(|f| f == POSITION_UPDATES_CF)
+            && !families.iter().any(|f| matches!(
+                f.as_str(),
+                "uniform_orders" | "order_updates" | "trade_updates"
+            )),
+        "expected Manager store, refuse Exec database"
+    );
+    let db = DB::open_cf_for_read_only(&options, path, families, false)?;
+    let cf = db.cf_handle(POSITION_UPDATES_CF).unwrap();
+    let identity = std::fs::read_to_string(path.join("IDENTITY"))?
+        .trim()
+        .to_string();
+    let state = RetentionState::decode(identity, db.get(META)?.as_deref())?;
+    let edge = |mode| -> Result<Option<Cursor>> {
+        db.iterator_cf(cf, mode)
+            .next()
+            .transpose()?
+            .map(|(key, _)| manager_db::decode_seq_key(&key).context("invalid archive key"))
+            .transpose()
+    };
+    let mut eligible = 0;
+    let mut sst = BTreeMap::new();
+    for name in [
+        POSITION_UPDATES_CF,
+        storage::OBSERVATIONS_CF,
+        storage::SNAPSHOTS_CF,
+    ] {
+        let Some(handle) = db.cf_handle(name) else {
+            continue;
+        };
+        sst.insert(
+            name,
+            db.property_int_value_cf(handle, "rocksdb.live-sst-files-size")?
+                .context("missing SST size")?,
+        );
+        if before > state.floor {
+            let (start, end) = if name == storage::SNAPSHOTS_CF {
+                (
+                    storage::day_key(0).to_vec(),
+                    storage::day_key(before.0).to_vec(),
+                )
+            } else {
+                (
+                    manager_db::encode_seq_key(state.floor.0, state.floor.1)?.to_vec(),
+                    manager_db::encode_seq_key(before.0, before.1)?.to_vec(),
+                )
+            };
+            if start < end {
+                eligible += db.get_approximate_sizes_cf(handle, &[Range::new(&start, &end)])[0];
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "identity":state.identity, "floor":state.floor, "sealed":state.sealed,
+        "eligible_before":cutoff(now), "requested_before":before,
+        "last_receipt":state.receipt, "first":edge(IteratorMode::Start)?, "last":edge(IteratorMode::End)?,
+        "estimated_messages":db.property_int_value_cf(cf, "rocksdb.estimate-num-keys")?,
+        "archive_sst_bytes":sst.values().sum::<u64>(),"archive_sst_bytes_by_cf":sst,
+        "eligible_sst_bytes_approx":eligible
+    }))
+}
+
+/// Restore exact original bytes into a local, dedicated backup store and read
+/// them back before issuing a receipt. No Exec store is accepted as a destination.
+pub fn verify_restore(input: impl Read, destination: &Path) -> Result<Receipt> {
+    verify_restore_with(input, destination, false)
+}
+/// Explicitly restore pre-migration JSON into a dedicated offline backup DB.
+/// Complete the old receipt chain before calling migrate-json on that copy.
+pub fn verify_json_restore(input: impl Read, destination: &Path) -> Result<Receipt> {
+    verify_restore_with(input, destination, true)
+}
+fn verify_restore_with(input: impl Read, destination: &Path, legacy_json: bool) -> Result<Receipt> {
+    ensure!(
+        !destination.exists() || destination.join("POSITION_ARCHIVE_BACKUP").is_file(),
+        "restore destination is not an archive backup store"
+    );
+    std::fs::create_dir_all(destination)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o700))?;
+    let mut reader = GzDecoder::new(std::io::BufReader::new(input));
+    let mut magic = [0; 16];
+    reader.read_exact(&mut magic)?;
+    ensure!(&magic == MAGIC, "invalid archive magic");
+    let bytes = read_blob(&mut reader, MAX_HEADER)?;
+    let header: Header = rmp_serde::from_slice(&bytes)?;
+    ensure!(
+        header.from >= (1, 0) && header.from < header.to && !header.identity.is_empty(),
+        "invalid archive header"
+    );
+    let marker = destination.join("POSITION_ARCHIVE_BACKUP");
+    if marker.exists() {
+        ensure!(
+            std::fs::read_to_string(&marker)? == header.identity,
+            "backup database identity mismatch"
+        );
+    } else {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)?;
+        file.write_all(header.identity.as_bytes())?;
+        file.sync_all()?;
+    }
+    let db = ManagerDb::open(destination)?;
+    if legacy_json {
+        ensure!(
+            db.db().get(storage::FORMAT_KEY)?.is_none()
+                && db.db().get(storage::MIGRATING_KEY)?.is_none(),
+            "legacy importer requires a JSON-only offline destination"
+        );
+    } else {
+        storage::ensure_current(&db)?;
+    }
+    let storage = storage::Storage::default();
+    let cf = db.db().cf_handle(POSITION_UPDATES_CF).unwrap();
+    if let Some(previous) = &header.previous {
+        let saved = db
+            .db()
+            .get(format!("archive_receipt:{previous}"))?
+            .context("preceding verified backup receipt is missing")?;
+        let saved: Receipt = serde_json::from_slice(&saved)?;
+        ensure!(
+            saved.identity == header.identity
+                && saved.to == header.from
+                && saved.sha256 == *previous,
+            "backup receipt chain/range mismatch"
+        );
+    } else {
+        ensure!(
+            header.from == (1, 0),
+            "initial backup must begin at the original archive boundary"
+        );
+    }
+    let mut hash = Sha256::new();
+    hash.update(&bytes);
+    let mut previous = None;
+    let mut count = 0;
+    let mut raw_bytes = 0;
+    loop {
+        let mut key = [0; 12];
+        reader.read_exact(&mut key)?;
+        let value = read_blob(&mut reader, MAX_VALUE as usize)?;
+        if key == [0; 12] {
+            ensure!(value.is_empty(), "invalid archive terminator");
+            break;
+        }
+        let cursor = manager_db::decode_seq_key(&key).context("invalid archive key")?;
+        ensure!(
+            cursor >= header.from && cursor < header.to && previous.is_none_or(|p| cursor > p),
+            "unordered archive records"
+        );
+        let message = if legacy_json {
+            super::migration::decode_json(&key, &value)?
+        } else {
+            validate_message(&key, &value)?
+        };
+        if !legacy_json {
+            ensure!(
+                codec::encode(&message)? == value,
+                "backup message is not canonical PB"
+            );
+        }
+        if let Some(existing) = db.db().get_cf(&cf, key)? {
+            let existing = if legacy_json {
+                existing
+            } else {
+                codec::encode(&storage.complete(&db, &key, &existing)?)?
+            };
+            ensure!(existing == value, "conflicting backup record");
+        } else if legacy_json {
+            db.db().put_cf(&cf, key, &value)?;
+        } else {
+            let mut batch = rocksdb::WriteBatch::default();
+            let pending = storage.stage(&db, &message, &mut batch, true)?;
+            db.db().write(batch)?;
+            storage.published(pending);
+        }
+        hash_frame(&mut hash, &key, &value);
+        previous = Some(cursor);
+        count += 1;
+        raw_bytes += 20 + value.len() as u64;
+    }
+    let receipt: Receipt = serde_json::from_slice(&read_blob(&mut reader, 64 * 1024)?)?;
+    let mut extra = [0; 1];
+    ensure!(reader.read(&mut extra)? == 0, "trailing archive payload");
+    // GzDecoder stops after one member. Reject any trailing compressed bytes too.
+    ensure!(
+        reader.into_inner().read(&mut extra)? == 0,
+        "trailing gzip data"
+    );
+    let expected = Receipt {
+        identity: header.identity,
+        from: header.from,
+        to: header.to,
+        previous: header.previous,
+        count,
+        raw_bytes,
+        sha256: hex::encode(hash.finalize()),
+    };
+    ensure!(receipt == expected, "archive checksum/count mismatch");
+    db.db().put(
+        format!("archive_boundary:{}", hex::encode(Sha256::digest(&bytes))),
+        &bytes,
+    )?;
+    db.db().flush_wal(true)?;
+    let mut readback = Sha256::new();
+    readback.update(&bytes);
+    let mut read_count = 0;
+    let start = manager_db::encode_seq_key(header.from.0, header.from.1)?;
+    for row in db
+        .db()
+        .iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward))
+    {
+        let (key, value) = row?;
+        if manager_db::decode_seq_key(&key).context("invalid backup key")? >= header.to {
+            break;
+        }
+        let value = if legacy_json {
+            value.into_vec()
+        } else {
+            codec::encode(&storage.complete(&db, &key, &value)?)?
+        };
+        hash_frame(&mut readback, &key, &value);
+        read_count += 1;
+    }
+    ensure!(
+        hex::encode(readback.finalize()) == receipt.sha256 && read_count == count,
+        "restored backup readback mismatch"
+    );
+    db.db().put_opt(
+        format!("archive_receipt:{}", receipt.sha256),
+        serde_json::to_vec(&receipt)?,
+        &sync_options(),
+    )?;
+    std::fs::File::open(destination)?.sync_all()?;
+    Ok(receipt)
+}
+
+pub mod codec_bench;
+mod control;
+pub mod rehearsal;
+pub use control::{Command, Reply, client, start_socket};
+
+#[cfg(test)]
+mod tests;

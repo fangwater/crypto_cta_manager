@@ -9,7 +9,7 @@ const SIGNAL_BBO_LEG_BINARY_LEN: usize = 41;
 const SIGNAL_BBO_BINARY_LEN: usize = 83;
 const UNIFORM_ORDER_TAIL_BINARY_LEN: usize = SIGNAL_BBO_BINARY_LEN + 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FillLiquidity {
     Unknown,
     Maker,

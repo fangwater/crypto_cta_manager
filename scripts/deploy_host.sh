@@ -122,11 +122,8 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
     (
         cd "$ROOT"
         cargo clean -p crypto_cta_manager
-        # JP's immutable allocation anchors use the original JSON parser. Keep
-        # the in-progress daily FIFO/float parser rollout out of that deployment.
-        feature_args=()
-        if [[ "$TARGET" == jp-meta ]]; then feature_args+=(--no-default-features); fi
-        cargo build --locked --release "${feature_args[@]}" --bin cta_web --bin cta_monitor --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot
+        # All hosts use the same bounded FIFO and exact checkpoint codec.
+        cargo build --locked --release --bin cta_web --bin cta_monitor --bin nav_rebuild --bin nav_snapshot --bin nav_strategy_snapshot --bin nav_cached_marks --bin cta_position_archive
     )
     echo "building frontend locally"
     (
@@ -142,6 +139,8 @@ require_local_file "$LOCAL_RELEASE_DIR/cta_web"
 require_local_file "$LOCAL_RELEASE_DIR/nav_rebuild"
 require_local_file "$LOCAL_RELEASE_DIR/nav_snapshot"
 require_local_file "$LOCAL_RELEASE_DIR/nav_strategy_snapshot"
+require_local_file "$LOCAL_RELEASE_DIR/nav_cached_marks"
+require_local_file "$LOCAL_RELEASE_DIR/cta_position_archive"
 require_local_file "$ROOT/frontend/dist/index.html"
 require_local_file "$DEPLOY_DIR/cta-manager.toml"
 require_local_file "$DEPLOY_DIR/crypto-cta-manager-web.service"
@@ -163,7 +162,7 @@ cleanup_local() {
 }
 trap cleanup_local EXIT
 
-BINARIES=(cta_web nav_rebuild nav_snapshot nav_strategy_snapshot)
+BINARIES=(cta_web nav_rebuild nav_snapshot nav_strategy_snapshot nav_cached_marks cta_position_archive)
 if [[ $MANAGER_ONLY -eq 0 ]]; then
     BINARIES+=(cta_monitor)
 fi
@@ -218,6 +217,39 @@ if removed:
         + ". Replace [ingestion] with [dashboard] refresh_secs before deployment; "
         "remove per-source ingestion settings. See README.md."
     )
+PY
+echo "checking signal storage compatibility before uploading/switching Manager"
+PREFLIGHT_BIN="${REMOTE_ROOT}/bin/cta_position_archive.check.${STAMP}"
+remote "install -d -m 0755 '${REMOTE_ROOT}/bin'"
+scp -q "$LOCAL_RELEASE_DIR/cta_position_archive" "${SSH_HOST}:${PREFLIGHT_BIN}"
+read -r archive_client_hash _ < <(sha256sum "$LOCAL_RELEASE_DIR/cta_position_archive")
+remote "python3 - '${REMOTE_ROOT}/config/cta-manager.toml' '${PREFLIGHT_BIN}' '${archive_client_hash}'" <<'PY'
+import hashlib
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+checker = Path(sys.argv[2])
+try:
+    if hashlib.sha256(checker.read_bytes()).hexdigest() != sys.argv[3]:
+        raise SystemExit("archive preflight upload checksum mismatch")
+    checker.chmod(0o755)
+    config = tomllib.loads(Path(sys.argv[1]).read_text())
+    db = config.get("kline", {}).get("rocksdb_path")
+    if not db:
+        raise SystemExit("set kline.rocksdb_path explicitly before deployment")
+    args = [str(checker), "check-storage", "--db", db]
+    cold = config.get("archive", {}).get("cold")
+    if cold is not None:
+        if not cold.get("root"):
+            raise SystemExit("archive.cold.root must be explicit")
+        args.extend(["--cold-root", cold["root"]])
+        if cold.get("hot_conversion") is not None:
+            args.append("--hot-conversion")
+    subprocess.run(args, check=True)
+finally:
+    checker.unlink(missing_ok=True)
 PY
 remote "install -d -m 0755 '${REMOTE_ROOT}/bin' '${REMOTE_ROOT}/config' '${REMOTE_ROOT}/${RELEASE}/manager' '${REMOTE_ROOT}/web-releases'"
 

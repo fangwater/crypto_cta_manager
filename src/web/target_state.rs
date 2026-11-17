@@ -153,6 +153,18 @@ impl Targets {
         Ok(completed)
     }
 
+    pub(super) fn ensure_archive_since(&self, before_us: i64) -> Result<()> {
+        anyhow::ensure!(
+            self.archive_pending
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|job| job.strategy.updated_at_us >= before_us),
+            "old target archive writes are pending; retry after they drain"
+        );
+        Ok(())
+    }
+
     pub fn persistence_status(&self) -> (usize, usize, bool) {
         (
             self.archive_pending.lock().unwrap().len(),
@@ -1155,6 +1167,8 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let (_dir, mut state, source_id, _, _) = super::super::tests::timeline_test_state(90);
+        // Existing strategy POSTs must work while the first NAV build is pending.
+        state.cache.write().await.loaded = None;
         let _server = Server(
             Command::new(std::env::var("EXEC_REDIS_TEST_SERVER_BIN").unwrap())
                 .args([

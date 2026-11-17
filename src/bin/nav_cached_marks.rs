@@ -88,6 +88,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if let Some(source) = &args.target_source {
+        let transition = crypto_cta_manager::position_archive::online::inspect_progress(
+            db.get(crypto_cta_manager::position_archive::online::META)?
+                .as_deref(),
+            db.get(b"position_storage")?.as_deref(),
+            std::fs::read_to_string(args.manager_db.join("IDENTITY"))?.trim(),
+        )?
+        .is_some_and(|p| !p.completed);
         ensure!(
             args.ts_us.len() == 2,
             "target scan requires start and end --ts-us"
@@ -104,20 +111,24 @@ fn main() -> Result<()> {
             if received > args.ts_us[1] {
                 break;
             }
-            let message: serde_json::Value = serde_json::from_slice(&value)?;
-            for account in message["published_accounts"]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                if account["source_id"].as_str() != Some(source) {
+            let message = crypto_cta_manager::position_archive::codec::decode_target(
+                &value, false, transition,
+            )?;
+            ensure!(
+                crypto_cta_manager::manager_db::decode_seq_key(&key)
+                    == Some((message.received_at_us, message.seq)),
+                "target key/message mismatch"
+            );
+            for account in &message.published_accounts {
+                if &account.source_id != source {
                     continue;
                 }
                 count += 1;
-                let target_map = account["target_projection"]["targets"]
-                    .as_object()
-                    .or_else(|| message["strategy"]["targets"].as_object());
-                for symbol in target_map.into_iter().flat_map(|map| map.keys()) {
+                let target_map = account
+                    .target_projection
+                    .as_ref()
+                    .map_or(&message.strategy.targets, |p| &p.targets);
+                for symbol in target_map.keys() {
                     let open = received.div_euclid(60_000_000) * 60_000_000;
                     let next = ((received + 60_000_000 - 1) / 60_000_000) * 60_000_000;
                     for minute in [open, next, next + 60_000_000, next + 120_000_000] {

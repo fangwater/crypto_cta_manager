@@ -18,8 +18,8 @@ MIB = 1024 * 1024
 def reclaim_log(
     log_dir: Path, filename: str, max_bytes: int, keep_bytes: int, execute: bool
 ) -> dict:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.log", filename):
-        raise ValueError("--file must be a single .log filename")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+-(?:error|out)\.log", filename):
+        raise ValueError("--file must be an application -error.log or -out.log filename; WAL files are forbidden")
     if not log_dir.is_absolute():
         raise ValueError("--log-dir must be absolute")
     if not 0 < keep_bytes < max_bytes:

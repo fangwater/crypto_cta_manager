@@ -616,7 +616,7 @@ export interface AcquisitionCostSnapshot {
 }
 
 export interface HealthResponse {
-  status: 'ok' | 'degraded'
+  status: 'ok' | 'degraded' | 'loading'
   source_count: number
   generated_at_us: number
   last_attempt_at_us: number

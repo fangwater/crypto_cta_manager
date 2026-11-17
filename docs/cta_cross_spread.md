@@ -156,9 +156,9 @@ browser receipts are in mkt_signal `artifacts/cross01_unified_viz_20261103/`.
 Private rollback/audit files are in
 `~/crypto_cta_manager/maintenance-backups/cross01_unified_viz_20261103T054937Z/`.
 
-Future JP Rust releases use `--no-default-features` and must pass
+All hosts use the standard release build. Candidates must pass
 `cta_web --config <candidate> --check-allocations` with the actual database.
-Build only locally and verify uploaded artifact hashes before installation.
+Build locally and verify uploaded artifact hashes before installation.
 
 Manager supports one position strategy containing venue-qualified paired USDT
 perpetual targets. For example `okex-futures:ETHUSDT` +2 and

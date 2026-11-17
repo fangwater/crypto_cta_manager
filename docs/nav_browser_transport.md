@@ -60,12 +60,3 @@ To regenerate it from the repository root:
 Tests cover exact financial doubles and time stamps, shared axes, omitted empty
 curves, carried dust, negative fees, null funding, invalid payloads, source
 authorization, gzip HTTP round trips, and theory-only updates.
-
-For the el01 rollout, its existing production source manifest and enabled
-daily-fifo parser feature are preserved. Only the NAV handler/projection and
-Protobuf/compression dependencies change. The production frontend retains its
-existing entry and page logic, replaces the NAV request function with the same
-Protobuf client, and adds the view to its fetch dependencies. That bounded
-packaging uses timelineBundleClient.ts, with its factual/theoretical merge
-tested separately. The regular frontend build uses the same decoder and request
-implementation directly.

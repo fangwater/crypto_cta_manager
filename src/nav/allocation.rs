@@ -618,6 +618,7 @@ mod tests {
                 amount_update: qty,
                 from_key_text: format!("batch_exec:{strategy}"),
                 fill_liquidity: None,
+                report_liquidity: None,
             })
         };
         let history = NavSourceHistory {

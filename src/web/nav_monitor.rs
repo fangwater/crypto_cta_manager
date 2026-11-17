@@ -77,6 +77,7 @@ async fn calculate(state: WebState, id: String, end: i64) -> Result<Monitor> {
     let allocation = ids.iter().all(|id| !state.funding.settings(id).enabled);
     {
         let cache = state.cache.read().await;
+        let cache = cache.report()?;
         anyhow::ensure!(
             cache.dashboard.generated_at_us / 1000 >= end,
             "dashboard has not reached the four-hour boundary"

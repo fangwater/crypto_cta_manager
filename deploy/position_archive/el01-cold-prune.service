@@ -1,0 +1,15 @@
+[Unit]
+Description=Discard expired el01 Manager cold signals (operator-authorized)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/crypto_cta_manager
+ExecStart=/usr/bin/python3 %h/crypto_cta_manager/scripts/prune_cold_signals.py --config %h/crypto_cta_manager/config/cta-manager.toml --binary %h/crypto_cta_manager/bin/cta_position_archive --expected-source-identity 7faca35f-ab4c-459e-abc8-5a4102458e3f --max-segments 32 --max-seconds 45 --execute --discard-without-backup
+Nice=19
+IOSchedulingClass=idle
+CPUAffinity=7
+UMask=0077
+NoNewPrivileges=true
+TimeoutStartSec=90
+StandardOutput=journal
+StandardError=journal

@@ -25,6 +25,14 @@ impl ManagerDb {
             Ok(names) if !names.is_empty() => names,
             _ => vec![DEFAULT_CF.to_string()],
         };
+        if existing.iter().any(|f| {
+            matches!(
+                f.as_str(),
+                "uniform_orders" | "order_updates" | "trade_updates"
+            )
+        }) {
+            bail!("ManagerDb must never open an Exec persist_manager store for writing");
+        }
         if !existing.iter().any(|name| name == POSITION_UPDATES_CF) {
             existing.push(POSITION_UPDATES_CF.to_string());
         }

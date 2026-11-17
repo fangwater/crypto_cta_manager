@@ -323,8 +323,17 @@ On 2026-11-12 the operator confirmed that xy_lxy21 must retain this active
 trade05 slot. The new cgy account `cta2024-902` instead received independent
 trade15 source `binance_exec_cta2024_902_15`; cgy, dzy and shaokai all hold
 account configuration and grant-management access.
-It runs observation services only because its current STANDARD account has
-Multi-Assets Mode disabled. See [deployment and verification](el01_cta2024_902_20261112.md).
+On 2026-11-14 the operator enabled its trading engine and pre-trade after
+initializing its isolated Exec risk hash and verifying STANDARD Multi-Assets
+Mode with one-way positions. Active contracts use 5x, with an explicitly
+authorized 3x exception for `哈基米USDT`, whose exchange maximum is 3x.
+Its two cgy bindings retain 0.05 shares. After the operator requested a clean
+start, pre-trade was paused and all 257 then-current positions were cleared
+through confirmed reduce-only MARKET orders. A new empty account snapshot at
+`1794635379746000` us (Shanghai 2026-11-14 13:49:39.746) defines the new NAV
+start. Exec's allocation ledger was aligned to zero before restoring execution
+of the two live strategies, each with 38 target symbols. Older records remain.
+See [deployment and verification](el01_cta2024_902_20261112.md).
 
 Manager backend `0ce67dd` fixed Treasury route resolution. Subsequent release
 `20261009T095926Z`, source `25e2776`, adds Virtual creators and delegated

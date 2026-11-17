@@ -60,6 +60,9 @@ pub(super) fn spawn(state: WebState) {
             timer.tick().await;
             let (timelines, generation, sources) = {
                 let cache = state.cache.read().await;
+                let Some(cache) = cache.loaded.as_ref() else {
+                    continue;
+                };
                 (
                     cache.nav_timelines.clone(),
                     cache.dashboard.generated_at_us,

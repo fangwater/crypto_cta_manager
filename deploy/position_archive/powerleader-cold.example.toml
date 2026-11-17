@@ -1,0 +1,30 @@
+# cta_archive_pull configuration, mode 0600. This is NOT the Python tool config.
+# Numeric PUBLIC endpoints are read from a private host-only environment file.
+backup_root = "/mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager_archives/cold-public"
+interval_secs = 3600
+operation_timeout_secs = 300
+transfer_timeout_secs = 3600
+max_bundle_bytes = 536870912
+
+[[hosts]]
+name = "el01"
+public_ip_env = "CTA_ARCHIVE_EL01_PUBLIC_IP"
+user = "el01"
+port = 22
+identity_file = "/home/fanghaizhou/.ssh/id_ed25519"
+known_hosts_file = "/home/fanghaizhou/.config/crypto-cta-manager/archive-pull/known_hosts"
+source_binary = "/home/el01/crypto_cta_manager/bin/cta_position_archive"
+cold_root = "/home/el01/crypto_cta_manager/cold-signals"
+# Pin the reviewed source DB IDENTITY, never infer it from account/host names.
+source_identity = "REPLACE_WITH_VERIFIED_MANAGER_DB_IDENTITY"
+
+[[hosts]]
+name = "jp-meta"
+public_ip_env = "CTA_ARCHIVE_JP_META_PUBLIC_IP"
+user = "ubuntu"
+port = 22
+identity_file = "/home/fanghaizhou/.ssh/aws-jp-meta.pem"
+known_hosts_file = "/home/fanghaizhou/.config/crypto-cta-manager/archive-pull/known_hosts"
+source_binary = "/home/ubuntu/crypto_cta_manager/bin/cta_position_archive"
+cold_root = "/home/ubuntu/crypto_cta_manager/cold-signals"
+source_identity = "REPLACE_WITH_VERIFIED_MANAGER_DB_IDENTITY"

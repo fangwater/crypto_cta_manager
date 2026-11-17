@@ -21,6 +21,7 @@ env.sh
 /db/
 /logs/
 /run/
+/archive-control/
 /diagnostics/
 /artifacts/
 /backups/

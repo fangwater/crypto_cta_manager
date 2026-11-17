@@ -1,0 +1,11 @@
+[Unit]
+Description=Discard expired jp-meta Manager cold signals every ten minutes
+
+[Timer]
+OnCalendar=*:0/10:00
+AccuracySec=1s
+Persistent=true
+Unit=jp-meta-cold-prune.service
+
+[Install]
+WantedBy=timers.target

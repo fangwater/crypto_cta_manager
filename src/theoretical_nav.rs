@@ -8,7 +8,7 @@ use crate::theoretical_execution::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,6 +21,13 @@ use inventory::Inventory;
 #[cfg(test)]
 #[path = "theoretical_nav/performance_tests.rs"]
 mod performance_tests;
+
+#[cfg(test)]
+#[path = "theoretical_nav/retention_tests.rs"]
+mod retention_tests;
+#[cfg(test)]
+#[path = "theoretical_nav/storage_migration_tests.rs"]
+mod storage_migration_tests;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct TheoreticalNavPoint {
@@ -128,8 +135,10 @@ impl VirtualDelta {
 
 #[derive(Default)]
 struct MarketDeltaIndex {
-    positions: Vec<usize>,
-    cumulative_quantity: Vec<f64>,
+    base_quantity: f64,
+    positions: VecDeque<usize>,
+    cumulative_quantity: VecDeque<f64>,
+    retired_count: usize,
 }
 
 type MarketKey = (String, String, String);
@@ -159,33 +168,68 @@ struct TargetCacheState {
     epoch: u64,
     cursor: Option<(i64, u32)>,
     latest: BTreeMap<(String, String), LatestTargets>,
-    deltas: Vec<VirtualDelta>,
-    tail_deltas: Vec<VirtualDelta>,
+    deltas: VecDeque<VirtualDelta>,
+    tail_deltas: VecDeque<VirtualDelta>,
+    delta_base: usize,
     markets: BTreeMap<MarketKey, MarketDeltaIndex>,
     tail_markets: BTreeMap<MarketKey, MarketDeltaIndex>,
     revision: u64,
 }
 
 impl TargetCacheState {
+    /// Retention is a physical prefix removal, not new target content. Keep the
+    /// exact cumulative values and retire each old delta once, without replay.
+    fn retire_before(&mut self, floor: (i64, u32)) -> Result<()> {
+        while self
+            .deltas
+            .front()
+            .is_some_and(|d| (d.received_at_us, d.seq) < floor)
+        {
+            let delta = self.deltas.pop_front().unwrap();
+            let market = (delta.source_id, delta.symbol, delta.venue);
+            let index = self
+                .markets
+                .get_mut(&market)
+                .context("missing retained market index")?;
+            ensure!(
+                index.positions.pop_front() == Some(self.delta_base),
+                "retained market offset mismatch"
+            );
+            index.base_quantity = index
+                .cumulative_quantity
+                .pop_front()
+                .context("missing retained prefix quantity")?;
+            index.retired_count = index
+                .retired_count
+                .checked_add(1)
+                .context("retired market count overflow")?;
+            self.delta_base = self
+                .delta_base
+                .checked_add(1)
+                .context("retained delta offset overflow")?;
+        }
+        Ok(())
+    }
     fn query_revision(&self, source_ids: &[String], end: i64) -> TargetQueryRevision {
         let selected = |market: &MarketKey| source_ids.is_empty() || source_ids.contains(&market.0);
-        let mut prefixes = self
-            .markets
-            .iter()
-            .filter(|(market, _)| selected(market))
-            .filter_map(|(market, index)| {
-                let count = index
-                    .positions
-                    .partition_point(|p| self.deltas[*p].received_at_us <= end);
-                (count != 0).then(|| (market.clone(), count))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut prefixes =
+            self.markets
+                .iter()
+                .filter(|(market, _)| selected(market))
+                .filter_map(|(market, index)| {
+                    let count = index.positions.partition_point(|p| {
+                        self.deltas[*p - self.delta_base].received_at_us <= end
+                    }) + index.retired_count;
+                    (count != 0 || clean_zero(index.base_quantity) != 0.0)
+                        .then(|| (market.clone(), count))
+                })
+                .collect::<BTreeMap<_, _>>();
         let mut has_tail = false;
         for (market, index) in &self.tail_markets {
             if selected(market)
                 && index
                     .positions
-                    .first()
+                    .front()
                     .is_some_and(|p| self.tail_deltas[*p].received_at_us <= end)
             {
                 has_tail = true;
@@ -249,7 +293,7 @@ impl TheoreticalTargetCache {
         }
         if self.ready.load(Ordering::Acquire) {
             let state = self.state.lock().unwrap();
-            let (revision, _) = self
+            let (revision, _, _) = self
                 .archive
                 .target_changes_since(state.revision, state.cursor);
             if revision == state.revision {
@@ -276,9 +320,13 @@ impl TheoreticalTargetCache {
         let initial = !self.ready.load(Ordering::Acquire);
         let processed_before = self.processed_messages.load(Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
-        let (revision, invalidated) = self
+        let retention_guard = self.archive.retention_read();
+        let (revision, late_invalidated, retained) = self
             .archive
             .target_changes_since(state.revision, state.cursor);
+        let floor = self.archive.retention_floor();
+        let invalidated =
+            late_invalidated || (retained && state.cursor.is_none_or(|cursor| cursor < floor));
         if invalidated {
             let epoch = state
                 .epoch
@@ -287,28 +335,71 @@ impl TheoreticalTargetCache {
             *state = TargetCacheState::default();
             state.epoch = epoch;
             self.ready.store(false, Ordering::Release);
+        } else if retained {
+            state.retire_before(floor)?;
+        }
+        if state.cursor.is_none() {
+            let (floor, checkpoint) = self.archive.boundary();
+            for ((source_id, binding), mut latest) in checkpoint.latest {
+                if let Some(source) = self
+                    .config
+                    .sources
+                    .iter()
+                    .find(|s| s.enabled && s.id == source_id)
+                {
+                    latest.venue = source.venue.clone();
+                    state.latest.insert((source_id, binding), latest);
+                }
+            }
+            for ((source_id, symbol), quantity) in checkpoint.cumulative {
+                if let Some(source) = self
+                    .config
+                    .sources
+                    .iter()
+                    .find(|s| s.enabled && s.id == source_id)
+                {
+                    let venue =
+                        crate::exec_routing::archived_symbol_market(&source.venue, &symbol)?
+                            .to_string();
+                    state
+                        .markets
+                        .entry((source_id, symbol, venue))
+                        .or_default()
+                        .base_quantity = quantity;
+                }
+            }
+            // The scan excludes its cursor; use the predecessor of the exclusive floor.
+            state.cursor = crate::position_archive::retention::predecessor(floor);
         }
         // Re-read the recent tail. HTTP publications commonly complete out of
         // timestamp order; older late inserts explicitly invalidate the base.
         let stable_end = now_us() - 120 * 1_000_000;
         let after = state.cursor;
-        self.archive
-            .visit_target_updates_after(after, stable_end, |message| {
+        self.archive.visit_target_updates_guarded(
+            &retention_guard,
+            after,
+            stable_end,
+            |message| {
                 ingest_target(&self.config, &mut state, &message)?;
                 state.cursor = Some((message.received_at_us, message.seq));
                 self.processed_messages.fetch_add(1, Ordering::Relaxed);
                 Ok(())
-            })?;
+            },
+        )?;
         let mut tail = TargetCacheState {
             latest: state.latest.clone(),
             ..Default::default()
         };
-        self.archive
-            .visit_target_updates_after(state.cursor, now_us(), |message| {
+        self.archive.visit_target_updates_guarded(
+            &retention_guard,
+            state.cursor,
+            now_us(),
+            |message| {
                 ingest_target(&self.config, &mut tail, &message)?;
                 self.processed_messages.fetch_add(1, Ordering::Relaxed);
                 Ok(())
-            })?;
+            },
+        )?;
         state.tail_deltas = tail.deltas;
         state.tail_markets = tail.markets;
         state.revision = revision;
@@ -384,11 +475,20 @@ impl TheoreticalTargetCache {
         let strategy = strategy.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
             let state = cache.state.lock().unwrap();
+            let _retained = cache.archive.retention_read();
+            let floor = cache.archive.retention_floor();
+            ensure!(
+                floor == (1, 0)
+                    || nav_start
+                        .or(received_start)
+                        .is_none_or(|start| start >= floor.0),
+                "requested theoretical signals are in the offline archive"
+            );
             let mut carry = CarriedInventory::new();
             let mut selected = Vec::new();
-            for (tail, markets, values) in [
-                (false, &state.markets, &state.deltas),
-                (true, &state.tail_markets, &state.tail_deltas),
+            for (tail, markets, values, base) in [
+                (false, &state.markets, &state.deltas, state.delta_base),
+                (true, &state.tail_markets, &state.tail_deltas, 0),
             ] {
                 for (market, index) in markets {
                     if !source_ids.is_empty() && !source_ids.contains(&market.0) {
@@ -396,28 +496,41 @@ impl TheoreticalTargetCache {
                     }
                     let end_index = index
                         .positions
-                        .partition_point(|position| values[*position].received_at_us <= end);
+                        .partition_point(|position| values[*position - base].received_at_us <= end);
                     let first_index = nav_start.map_or_else(
                         || {
                             received_start.map_or(0, |start| {
-                                index.positions[..end_index].partition_point(|position| {
-                                    values[*position].received_at_us < start
-                                })
+                                index
+                                    .positions
+                                    .partition_point(|position| {
+                                        values[*position - base].received_at_us < start
+                                    })
+                                    .min(end_index)
                             })
                         },
                         |start| {
-                            index.positions[..end_index].partition_point(|position| {
-                                values[*position].execution_ts_us_for(models[&market.0]) < start
-                            })
+                            index
+                                .positions
+                                .partition_point(|position| {
+                                    values[*position - base].execution_ts_us_for(models[&market.0])
+                                        < start
+                                })
+                                .min(end_index)
                         },
                     );
-                    if nav_start.is_some() && first_index > 0 {
-                        *carry.entry(market.clone()).or_default() +=
-                            index.cumulative_quantity[first_index - 1];
+                    if nav_start.is_some() {
+                        *carry.entry(market.clone()).or_default() += if first_index > 0 {
+                            index.cumulative_quantity[first_index - 1]
+                        } else {
+                            index.base_quantity
+                        };
                     }
                     selected.extend(
-                        index.positions[first_index..end_index]
+                        index
+                            .positions
                             .iter()
+                            .skip(first_index)
+                            .take(end_index - first_index)
                             .map(|position| (tail, *position)),
                     );
                 }
@@ -428,7 +541,7 @@ impl TheoreticalTargetCache {
                 let delta = if tail {
                     &state.tail_deltas[position]
                 } else {
-                    &state.deltas[position]
+                    &state.deltas[position - state.delta_base]
                 };
                 if (!source_ids.is_empty() && !source_ids.contains(&delta.source_id))
                     || strategy
@@ -484,16 +597,7 @@ fn ingest_target(
         let next = LatestTargets {
             position_strategy_name: message.strategy.strategy_name.clone(),
             venue: source.venue.clone(),
-            targets: if let Some(projection) = &account.target_projection {
-                projection
-                    .targets
-                    .iter()
-                    .filter(|(_, t)| clean_zero(t.qty) != 0.0)
-                    .map(|(symbol, target)| (symbol.clone(), clean_zero(target.qty)))
-                    .collect()
-            } else {
-                normalized_scaled_targets(message, account.effective_shares())?
-            },
+            targets: crate::position_archive::normalized_account_targets(message, account)?,
             received_at_us: message.received_at_us,
             update_seq: message.seq,
         };
@@ -512,8 +616,11 @@ fn ingest_target(
                 let venue =
                     crate::exec_routing::archived_symbol_market(&next.venue, &symbol)?.to_string();
                 let market = (source.id.clone(), symbol.clone(), venue.clone());
-                let position = state.deltas.len();
-                state.deltas.push(VirtualDelta {
+                let position = state
+                    .delta_base
+                    .checked_add(state.deltas.len())
+                    .context("target index offset overflow")?;
+                state.deltas.push_back(VirtualDelta {
                     // The shared index is model-independent. Queries resolve the
                     // source backend once and select both timing and pricing.
                     execution_model: ExecutionModel::Twap5m,
@@ -531,10 +638,15 @@ fn ingest_target(
                     target_signal,
                 });
                 let index = state.markets.entry(market).or_default();
-                index.positions.push(position);
-                index
-                    .cumulative_quantity
-                    .push(index.cumulative_quantity.last().copied().unwrap_or(0.0) + quantity);
+                index.positions.push_back(position);
+                index.cumulative_quantity.push_back(
+                    index
+                        .cumulative_quantity
+                        .back()
+                        .copied()
+                        .unwrap_or(index.base_quantity)
+                        + quantity,
+                );
             }
         }
         state.latest.insert(key, next);
@@ -641,6 +753,17 @@ pub async fn load_timeline(
         available_from_us: Some(first_complete_open(store.cutoff_us(now_us())) + MINUTE_US),
         ..Default::default()
     };
+    let retained_from = targets.archive.retention_floor().0;
+    if retained_from > 1 && start < retained_from {
+        output.available_from_us = Some(
+            output
+                .available_from_us
+                .unwrap_or(retained_from)
+                .max(retained_from),
+        );
+        output.unavailable_reason = Some("所选区间的仓位信号已归档，请查询保留区间".into());
+        return Ok(output);
+    }
     if !store.enabled() {
         output.unavailable_reason = Some("分钟 K 线理论分析未启用".into());
         return Ok(output);
@@ -727,7 +850,7 @@ pub async fn load_timeline(
     if targets.ready_for_query().await?
         && let Ok(state) = targets.state.try_lock()
     {
-        let (revision, _) = targets
+        let (revision, _, _) = targets
             .archive
             .target_changes_since(state.revision, state.cursor);
         let target_revision = state.query_revision(&sources, effective_end);
@@ -1195,16 +1318,16 @@ struct AppliedFill {
     next_lot_seq: i64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct LatestTargets {
-    position_strategy_name: String,
-    venue: String,
-    targets: BTreeMap<String, f64>,
-    received_at_us: i64,
-    update_seq: u32,
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct LatestTargets {
+    pub(crate) position_strategy_name: String,
+    pub(crate) venue: String,
+    pub(crate) targets: BTreeMap<String, f64>,
+    pub(crate) received_at_us: i64,
+    pub(crate) update_seq: u32,
 }
 
-fn normalized_scaled_targets(
+pub(crate) fn normalized_scaled_targets(
     message: &PositionUpdateMsg,
     shares: f64,
 ) -> Result<BTreeMap<String, f64>> {
@@ -1221,7 +1344,10 @@ fn normalized_scaled_targets(
     Ok(targets)
 }
 
-fn target_positions_changed(previous: Option<&LatestTargets>, next: &LatestTargets) -> bool {
+pub(crate) fn target_positions_changed(
+    previous: Option<&LatestTargets>,
+    next: &LatestTargets,
+) -> bool {
     previous.is_none_or(|previous| {
         previous.venue != next.venue || !target_maps_equal(&previous.targets, &next.targets)
     })
@@ -1236,7 +1362,10 @@ fn target_maps_equal(left: &BTreeMap<String, f64>, right: &BTreeMap<String, f64>
         })
 }
 
-fn target_deltas(previous: Option<&LatestTargets>, next: &LatestTargets) -> BTreeMap<String, f64> {
+pub(crate) fn target_deltas(
+    previous: Option<&LatestTargets>,
+    next: &LatestTargets,
+) -> BTreeMap<String, f64> {
     let empty = BTreeMap::new();
     let previous = previous.map(|value| &value.targets).unwrap_or(&empty);
     previous
@@ -1503,7 +1632,7 @@ fn downsample_points(
     sampled
 }
 
-fn clean_zero(value: f64) -> f64 {
+pub(crate) fn clean_zero(value: f64) -> f64 {
     if value.abs() <= ZERO_EPSILON {
         0.0
     } else {
@@ -1592,7 +1721,7 @@ mod tests {
             .unwrap();
         ingest_target(&config, &mut state, &archive.latest().unwrap().unwrap()).unwrap();
         assert_eq!(state.deltas.len(), 4);
-        assert_eq!(state.deltas.last().unwrap().delta_qty, -8000.0);
+        assert_eq!(state.deltas.back().unwrap().delta_qty, -8000.0);
     }
 
     #[tokio::test]
