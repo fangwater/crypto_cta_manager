@@ -26,12 +26,16 @@ pm2 save
 
 `cn-futures-sync-tunnel` 使用已有 `sh_dev` SSH 别名，将本机 `127.0.0.1:18212`
 转发至云端 loopback 导出器。可通过 `CN_FUTURES_SYNC_SSH_HOST` 更换 SSH 别名。
+同一连接将本机 Manager 反向映射至云端 `127.0.0.1:18211`，由云端 Nginx 代理
+`/manager/`；片段为 `deploy/cn_futures/nginx-manager.conf`，加入既有 server 后先
+`nginx -t`，通过后 reload。保留 URL 前缀，不改变现有 CTA 或 Viz 的路由。
 它使用心跳和 `ExitOnForwardFailure`，失败时由 PM2 重启。增加其他云端时显式增加
 独立的隧道端口、source_id 与导出 URL，不共享身份或副本。
 
 Manager 的 `--frontend-root` 提供已构建网页和同源 API，默认地址为
 `http://127.0.0.1:18211/manager/`。网页可匿名加载，数据 API 保持登录和来源权限检查。
-首次访问由操作者创建首位管理员；部署程序不创建可猜测的管理员密码。
+首次初始化管理员后再开放云端入口。部署可生成强随机初始密码并仅存入本机 0600
+的私有登录文件，操作者自行读取；不在日志或 Git 中保存密码。
 通过既有反向代理或 SSH 转发访问；API 保持 loopback。没有启动 Vite 开发服务器。
 
 ## 云端

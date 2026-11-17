@@ -30,6 +30,7 @@ module.exports = {
       args: ['-NT', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes',
         '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
         '-L', '127.0.0.1:18212:127.0.0.1:18212',
+        '-R', '127.0.0.1:18211:127.0.0.1:18211',
         process.env.CN_FUTURES_SYNC_SSH_HOST || 'sh_dev'],
       out_file: path.join(root, 'logs/cn-futures-sync-tunnel.out.log'),
       error_file: path.join(root, 'logs/cn-futures-sync-tunnel.err.log'),
