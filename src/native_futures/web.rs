@@ -631,6 +631,9 @@ async fn native_nav(
     let (fills, through) = match inputs {
         Ok(v) => v,
         Err(e) => {
+            if e.downcast_ref::<super::sync::ReplicaBusy>().is_some() {
+                return Err(e.into());
+            }
             tracing::warn!(error=?e,"native NAV source cut unavailable");
             return body(nav::Report::unavailable(
                 &id,

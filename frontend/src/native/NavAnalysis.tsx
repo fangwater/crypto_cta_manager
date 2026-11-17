@@ -8,6 +8,7 @@ import { Button } from '../components/ui/Button'
 import { Card, CardContent } from '../components/ui/Card'
 import { Input } from '../components/ui/Field'
 import * as api from './api'
+import { ApiError } from '../api'
 
 echarts.use([LineChart, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 const time = (us: number | null | undefined) => us == null ? '—' : new Date(us / 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
@@ -23,6 +24,7 @@ export default function NavAnalysis({ sourceId, snapshot, canConfigure }: { sour
   const [report, setReport] = useState<api.NavReport | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false), [saving, setSaving] = useState(false)
+  const [waitingOnSync, setWaitingOnSync] = useState(false)
   const [note, setNote] = useState('原生持仓起始快照')
   const latest = anchors?.[0], through = snapshot?.nav_anchor_observed_us
   useEffect(() => {
@@ -41,9 +43,25 @@ export default function NavAnalysis({ sourceId, snapshot, canConfigure }: { sour
     setReport(null)
     if (!query || !sourceId) return
     const controller = new AbortController()
-    setLoading(true); setError(null)
-    api.getNativeNav(sourceId, query.start, query.end, controller.signal).then(data => { if (!controller.signal.aborted) setReport(data) }).catch(e => { if (!controller.signal.aborted) setError(message(e)) }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    setLoading(true); setError(null); setWaitingOnSync(false)
+    const load = async () => {
+      let retry = false
+      try {
+        const data = await api.getNativeNav(sourceId, query.start, query.end, controller.signal)
+        if (!controller.signal.aborted) { setReport(data); setWaitingOnSync(false) }
+      } catch (e) {
+        if (!controller.signal.aborted) {
+          if (e instanceof ApiError && e.status === 503) {
+            retry = true; setWaitingOnSync(true); timer = setTimeout(() => void load(), 2000)
+          } else { setError(message(e)); setWaitingOnSync(false) }
+        }
+      } finally {
+        if (!controller.signal.aborted && !retry) setLoading(false)
+      }
+    }
+    void load()
+    return () => { controller.abort(); clearTimeout(timer) }
   }, [sourceId, query])
   const calculate = () => {
     const begin = parseTime(start), finish = parseTime(end)
@@ -64,6 +82,7 @@ export default function NavAnalysis({ sourceId, snapshot, canConfigure }: { sour
   return <div className="space-y-4">
     <p className="text-sm text-muted">净值显示所选时段的人民币盈亏变化。按多空、今昨仓及真实开平成交 FIFO 回放，持仓使用已完成分钟收盘价计价。资金出入、结算划转和账户账单费用不在本曲线内。</p>
     {error && <Alert tone="error">{error}</Alert>}
+    {waitingOnSync && <p className="text-sm text-muted">账户数据正在更新，稍后自动重试…</p>}
     <Card><CardContent className="space-y-3 py-4"><p className="text-sm">最新起始快照：{latest ? `${time(latest.snapshot_us)} · 交易日 ${latest.trading_day} · ${latest.positions.length} 条多空持仓` : anchors === null ? '正在读取…' : '尚未建立'}</p>
       {canConfigure && <><p className="text-sm text-muted">将 {time(snapshot?.nav_anchor_observed_us)} 的事实持仓及分钟参考价保存为以后重算的固定起点，已有快照保留。执行状态：{snapshot?.status ?? '未报告'}。</p><div className="flex flex-wrap items-center gap-3"><Input aria-label="净值快照说明" value={note} onChange={e => setNote(e.target.value)} /><Button disabled={saving || !sourceId || !snapshot?.nav_anchor_observed_us || snapshot.projection_errors > 0 || !note.trim()} onClick={() => void capture()}>{saving ? '保存中…' : '建立起始快照'}</Button></div></>}
     </CardContent></Card>
