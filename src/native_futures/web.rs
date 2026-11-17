@@ -1,3 +1,5 @@
+mod netting;
+
 use super::{config::Config, cost, market_data::Feed, reader, reference, reference_data};
 use crate::{
     auth::{self, AuthUser, SourceAccess},
@@ -134,6 +136,7 @@ impl Service {
                 "/api/native/strategies/{name}/grants",
                 get(strategy_grants).put(save_strategy_grants),
             )
+            .merge(netting::routes())
             .with_state(self.clone())
             .route_layer(middleware::from_fn_with_state(self, authenticate))
             .route_layer(tower_http::compression::CompressionLayer::new().gzip(true))
@@ -596,6 +599,20 @@ async fn save_strategy(
     if !user.is_admin() && !access.user_can_configure(user.user_id) {
         return Err(forbidden());
     }
+    let managed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM cta_native_netting_members WHERE strategy_name=$1)",
+    )
+    .bind(&r.strategy_name)
+    .fetch_one(&s.pool)
+    .await
+    .map_err(anyhow::Error::from)?;
+    if managed {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "该策略属于批量归因组合，请整批提交目标".into(),
+        ));
+    }
+
     body(strategy_catalog::store_position_strategy(&s.pool, &r, Some(user.user_id), now).await?)
 }
 async fn strategy_grants(

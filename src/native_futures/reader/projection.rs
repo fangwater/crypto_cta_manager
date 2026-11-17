@@ -216,6 +216,7 @@ impl Projection {
             result.available_local_budget = state.budget;
             result.positions = state.positions.clone();
             result.state_observed_us = Some(state.received);
+            result.state_evidence_sequence = Some(state.sequence);
         }
         result.snapshot_current_runtime = self.state.is_some()
             && self

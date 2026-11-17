@@ -1,7 +1,9 @@
-//! Read-only domestic execution observation; no SDK, exchange or target transport.
+//! Domestic observation and Manager-owned strategy attribution; no trading SDK or order transport.
 pub mod config;
 pub mod cost;
+pub mod evidence;
 pub mod market_data;
+pub mod netting;
 pub mod reader;
 pub mod reference;
 pub mod reference_data;
