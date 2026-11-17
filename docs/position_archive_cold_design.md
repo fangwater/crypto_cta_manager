@@ -1,5 +1,14 @@
 # Minute-batched local archival with operator-controlled public SCP pull
 
+Latest operator direction, 2026-11-17, for jp-meta and subsequently el01: expired
+cold signals are no longer needed and may be discarded without backup every ten
+minutes. Both hosts now use an independent low-priority timer and the existing
+Rust verified-deletion path; it preserves the retained reconstruction boundary and never touches hot
+or Exec databases. See [jp-meta policy](jp_meta_cold_discard_20261117.md) and
+[el01 deployment](el01_progressive_secondary_20261117.md).
+The backup/pull workflow below remains optional on these two hosts and remains the
+default wherever this explicit discard policy has not been selected.
+
 Latest operator direction, 2026-11-16: Manager maintenance may run once per
 minute with a strict record cap; powerleader pull is controlled explicitly by
 the operator. This supersedes the earlier hourly Manager policy.
@@ -7,7 +16,8 @@ Manager briefly uses a local cold store for archival; powerleader actively
 requests a durable source-side package, pulls verified old files and
 initiates removal of the source cold data. This supersedes the proposed direct
 hot-prefix reclamation as the desired automatic design. The Rust workers and dedicated pull executable are implemented in this checkout.
-They are opt-in; neither live host has been switched or scheduled.
+They are opt-in. jp-meta and el01 activated the Manager worker on 2026-11-17;
+powerleader pull remains manual, and both hosts separately schedule cold discard.
 
 ## Locations and ownership
 
@@ -21,7 +31,8 @@ The implemented policy retains the full 30 analysis days plus three redundancy
 days and the existing ten-minute execution guard in the hot DB. Only expired
 records move to cold staging. Online readers therefore do not need a cold union
 reader. NAV replay seeds from the exact retained boundary inventory/target
-checkpoint. An empty or unavailable powerleader never authorizes data loss.
+checkpoint. In backup mode, an empty or unavailable powerleader never authorizes
+data loss; the explicit host discard policies above do not require a backup.
 
 Use separately sealed cold segments within one Shanghai day, with bounded ordered ranges and
 original source/DB identities. Powerleader can then retire complete old segments
@@ -102,9 +113,11 @@ do not promise bounded storage from a count limit alone.
   remove only that verified source segment. Preserve the NVMe archive. A
   failed transfer or uncertain acknowledgement does not authorize deletion.
 
-Powerleader owns the transfer/delete schedule; Manager does not push continuously
-or require an always-on peer. When powerleader is unavailable, local archival
-may continue, but source cold reclamation waits and capacity/backlog is exposed.
+In backup mode, powerleader owns the transfer/delete schedule; Manager does not
+push continuously or require an always-on peer. When powerleader is unavailable,
+local archival may continue, but source cold reclamation waits and capacity/backlog
+is exposed. The explicitly selected discard timers operate independently of
+powerleader.
 
 ## Existing JSON and rollout
 
@@ -115,13 +128,13 @@ marker, verification and limits. The JSON-only behavior below applies when this
 table is absent. Automatic manual range compaction now defaults off; explicit
 opt-in uses a persisted one-hour cooldown (minimum 30 minutes).
 
-The deployed stores remain JSON. With explicit `[archive.cold]` configuration,
-this owner selects the hot format once when opening the DB: an existing JSON
+Without `[archive.cold.hot_conversion]`, the owner selects the hot format once
+when opening the DB with `[archive.cold]`: an existing JSON
 store continues writing JSON, while an existing/fresh PB store uses split PB.
 Both export expired records as self-contained canonical PB cold segments,
 including factual observations. There is no per-row format guessing or bulk
-startup rewrite. Full hot JSON-to-PB migration remains a separate, explicit
-offline operation. The deployment preflight accepts JSON only when cold mode
+startup rewrite. Without the progressive opt-in, full hot JSON-to-PB migration
+remains a separate, explicit offline operation. The deployment preflight accepts JSON only when cold mode
 is explicitly configured; interrupted migrations and Exec stores are rejected.
 
 No automatic timer, live cold-store writer or remote reclamation is enabled by

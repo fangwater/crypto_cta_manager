@@ -1,0 +1,9 @@
+# Preserve upstream fixture whitespace and identify the bundled dependency on GitHub.
+librocksdb-sys/** linguist-vendored -whitespace
+# Keep normal whitespace checks on the project-local patch and its provenance.
+librocksdb-sys/rocksdb/db/version_edit_handler.cc whitespace=blank-at-eol,blank-at-eof,space-before-tab
+librocksdb-sys/CTA_PATCHES.md whitespace=blank-at-eol,blank-at-eof,space-before-tab
+# Upstream Percona license headers end with a literal seven-equals separator.
+librocksdb-sys/rocksdb/utilities/transactions/lock/range/range_tree/** conflict-marker-size=32
+# The upstream Snappy README also uses that separator for a Markdown heading.
+librocksdb-sys/snappy/README.md conflict-marker-size=32

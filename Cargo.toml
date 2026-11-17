@@ -42,3 +42,7 @@ prost-types = "0.14"
 prost-build = "0.14"
 
 [dev-dependencies]
+
+[patch.crates-io]
+# Keep RocksDB 11.8.1's storage format; fix secondary recovery's dropped-CF UAF.
+librocksdb-sys = { path = "vendor/librocksdb-sys" }

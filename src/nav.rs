@@ -2344,8 +2344,8 @@ struct IncrementalSourceHistory {
     full_rebuild_required: bool,
 }
 
-/// Incremental NAV history cache. Each refresh opens every enabled source
-/// RocksDB read-only and scans only records appended after the previous
+/// Incremental NAV history cache. Each refresh catches up a reusable source
+/// secondary and scans only records appended after the previous
 /// per-column-family checkpoint, instead of rescanning full histories. The
 /// cached `NavSourceHistory` uses persistent collections, so publishing the
 /// refreshed snapshot is a cheap clone.

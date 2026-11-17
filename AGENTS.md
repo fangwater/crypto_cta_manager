@@ -142,6 +142,16 @@ never relabel old fills or targets to a newly provisioned source.
 Source paths must be absolute and two enabled sources must not point at the same RocksDB.
 Readers must not write into Exec RocksDB or require stopping a live trading
 process. Retain NAV history's read-only incremental scans and overlap window.
+By operator instruction on 2026-11-17, repeated NAV scans reuse Manager-owned
+secondary readers and incrementally catch up with each source, avoiding repeated
+full WAL recovery from reopening ordinary read-only handles. Serialize catch-up
+and multi-column-family scans to preserve a stable local view. Keep secondary
+scratch outside all live databases, select only required column families, and
+invalidate readers on source identity/directory replacement or storage errors.
+Primary compaction must not invalidate an active reader's selected SST files.
+The same-version RocksDB secondary lifetime fix lives in
+`vendor/librocksdb-sys/CTA_PATCHES.md`; keep its dropped/recreated-CF regression
+tests and do not bypass it with an unpatched external native library.
 `[dashboard].refresh_secs` controls the cached NAV report's refresh interval;
 there is no `[ingestion]` section or per-source ingestion cursor configuration.
 
@@ -400,6 +410,25 @@ restores, then reclaims only the exact expired source cold segment/package.
 Network retries reuse the exported file. Never stream RocksDB export directly
 over a lossy link or silently fall back to private IP/SSH proxies. This feature
 never cleans Exec order/report/queue stores. See `docs/position_archive_cold_design.md`.
+By the operator's latest instruction on 2026-11-17, jp-meta's confirmed expired
+cold signals may instead be discarded without a backup. The independent user
+timer `jp-meta-cold-prune.timer` runs every ten minutes, using
+`scripts/prune_cold_signals.py` and the existing Rust `cold-delete` verifier.
+Retain the 33-day execution guard, carried-inventory boundary and durable
+retirement receipts; delete only confirmed oldest-first cold segments, never
+hot/Exec files. The job is capped at 32 segments / 45 seconds, runs at low CPU/I/O
+priority on CPU 36, and persists a pending receipt before deletion for recovery.
+This explicit jp-meta discard policy supersedes backup-before-cold-deletion for
+that host. No automatic pull is enabled.
+See `docs/jp_meta_cold_discard_20261117.md`.
+The operator extended this same policy to el01 on 2026-11-17. el01 now runs the
+same PB/progressive/secondary-reader Manager and `el01-cold-prune.timer` every ten
+minutes, pinned to source identity `7faca35f-ab4c-459e-abc8-5a4102458e3f`.
+Its pruner uses CPU 7; Manager retains its existing affinity across CPUs 0–7.
+Because those CPUs also serve Exec, el01's cold CPU threshold is 75% (observed
+busiest-core baseline approximately 70%); the other count/byte/quiet/I/O/space
+limits and disabled manual compaction remain the same. No automatic pull or
+whole-DB return is scheduled. See `docs/el01_progressive_secondary_20261117.md`.
 See `docs/position_archive_storage.md`. The message includes the POST body, each
 active bound account's then-current `shares`. Factual positions from each
 source's Exec Viz `/snapshot` `exec_pre_trade_state.current_qty` are enriched

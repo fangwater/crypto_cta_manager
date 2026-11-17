@@ -4,6 +4,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use rocksdb::{DB, Direction, IteratorMode, Options};
 
+mod secondary;
+pub use secondary::{ReaderSession, configure as configure_source_readers};
+
 #[derive(Debug)]
 pub struct RawRocksRecord {
     pub key: Vec<u8>,
@@ -265,24 +268,30 @@ mod tests {
     }
 }
 
-/// Visit records without retaining raw payloads for an entire account in RAM.
-/// All column families share one read-only DB handle for this scan.
+/// Visit records through a reusable, incrementally caught-up secondary. The
+/// selected CFs share one stable view for this scan; Exec remains the sole writer.
 pub fn visit_column_families_from(
     path: &Path,
     requests: &[(String, Option<Vec<u8>>)],
     mut visit: impl FnMut(&str, &[u8], &[u8]) -> Result<()>,
 ) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
-    let options = read_only_options();
-    let names = DB::list_cf(&options, path)?;
-    let db = DB::open_cf_for_read_only(&options, path, names.clone(), false)?;
+    let requested = requests
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    secondary::read(path, &requested, |db| visit_from(db, requests, &mut visit))
+}
+
+fn visit_from(
+    db: &DB,
+    requests: &[(String, Option<Vec<u8>>)],
+    mut visit: impl FnMut(&str, &[u8], &[u8]) -> Result<()>,
+) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
     let mut heads = BTreeMap::new();
     for (name, start) in requests {
-        if !names.contains(name) {
+        let Some(cf) = db.cf_handle(name) else {
             continue;
-        }
-        let cf = db
-            .cf_handle(name)
-            .context("source column family disappeared")?;
+        };
         let mode = start.as_ref().map_or(IteratorMode::Start, |key| {
             IteratorMode::From(key, Direction::Forward)
         });

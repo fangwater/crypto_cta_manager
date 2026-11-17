@@ -3,7 +3,8 @@
 root = "/home/el01/crypto_cta_manager/cold-signals"
 interval_secs = 60
 quiet_secs = 30
-max_cpu_percent = 35.0
+# el01 shares all eight CPUs with Exec; recheck host load before changing this.
+max_cpu_percent = 75.0
 max_io_pressure_percent = 1.0
 min_free_bytes = 10737418240
 

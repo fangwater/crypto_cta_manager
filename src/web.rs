@@ -502,6 +502,21 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         anyhow::bail!("web refresh interval must be greater than zero");
     }
 
+    let reader_root = config
+        .kline
+        .rocksdb_path
+        .parent()
+        .context("Manager RocksDB has no parent")?
+        .join("run/exec-readers");
+    let mut protected = vec![config.kline.rocksdb_path.as_path()];
+    protected.extend(
+        config
+            .sources
+            .iter()
+            .map(|source| source.rocksdb_path.as_path()),
+    );
+    let _source_readers = crate::rocks_source::configure_source_readers(&reader_root, &protected)?;
+
     let database_url = config.database_url()?;
     let pool = postgres::connect(&database_url, config.database.max_connections).await?;
     postgres::register_sources(&pool, &config.sources).await?;
