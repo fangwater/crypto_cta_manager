@@ -31,10 +31,10 @@ class JpMetaPublishLayoutTests(unittest.TestCase):
             toml,
             re.M,
         )
-        self.assertEqual(
+        self.assertCountEqual(
             source_enabled,
-            [("1", "true"), ("2", "true"), ("3", "true"), ("4", "true")],
-            "jp-meta exposes its four provisioned Exec sources",
+            [(str(index), "true") for index in range(1, 7)],
+            "jp-meta exposes its six provisioned Exec sources",
         )
         self.assertIn("WorkingDirectory=/home/ubuntu/crypto_cta_manager", web)
         self.assertNotIn("Requires=postgresql.service", web)
