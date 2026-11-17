@@ -16,6 +16,7 @@ export interface Snapshot {
   replication: ReplicaStatus | null;
   replication_stale: boolean;
   source_id: string; account: string; read_at_us: number; last_event_us: number | null; state_observed_us: number | null;
+  nav_anchor_observed_us: number | null; nav_anchor_evidence_sequence: number | null;
   status: string; snapshot_ready: boolean; snapshot_current_runtime: boolean; transport_observed_us: number | null; reported_can_trade: boolean | null; transport_ready: boolean | null;
   reason: string; trading_day: string | null; available_local_budget: number | null; positions_may_lag: boolean;
   positions: Position[]; orders: Order[]; fills: Fill[]; total_orders: number; total_fills: number; projection_errors: number;
@@ -57,3 +58,23 @@ export const getGrants = (id: string) => requestJson<Grant[]>(`/native/sources/$
 export const saveGrants = (id: string, grants: Grant[]) => requestJson<Grant[]>(`/native/sources/${encodeURIComponent(id)}/grants`, { method: 'PUT', body: { grants } })
 export const getStrategyGrants = (name: string) => requestJson<StrategyGrants>(`/native/strategies/${encodeURIComponent(name)}/grants`)
 export const saveStrategyGrants = (name: string, grants: Grant[], open_visibility: boolean) => requestJson<StrategyGrants>(`/native/strategies/${encodeURIComponent(name)}/grants`, { method: 'PUT', body: { grants, open_visibility } })
+
+export interface NavAnchor {
+  source_id: string; snapshot_us: number; trading_day: string; evidence_sequence: number;
+  evidence_sha256: string; store_id: string; note: string;
+  positions: { venue: string; symbol: string; side: 'buy' | 'sell'; today: number; yesterday: number; reference_price: number; contract_multiplier: number }[];
+}
+export interface NavPoint {
+  timestamp_us: number; nav_before_fees_cny: number; realized_cny: number; floating_cny: number;
+  fees_cny: number | null; nav_after_fees_cny: number | null;
+}
+export interface NavReport {
+  source_id: string; ready: boolean; reason: string | null; currency: 'CNY'; valuation: string;
+  snapshot_us: number | null; start_us: number; end_us: number; source_through_us: number | null;
+  fees: { fill_count: number; actual_count: number; estimated_count: number; missing_count: number; actual_known_cny: number; estimated_known_cny: number };
+  summary: NavPoint | null; points: NavPoint[];
+  markets: { venue: string; symbol: string; long_lots: number; short_lots: number; realized_cny: number; floating_cny: number; nav_before_fees_cny: number }[];
+}
+export const getNavAnchors = (id: string, signal?: AbortSignal) => requestJson<NavAnchor[]>(`/native/sources/${encodeURIComponent(id)}/nav-snapshots`, { signal })
+export const captureNavAnchor = (id: string, expectedState: number, note: string) => requestJson<NavAnchor>(`/native/sources/${encodeURIComponent(id)}/nav-snapshots`, { method: 'POST', body: { expected_state_us: expectedState, note } })
+export const getNativeNav = (id: string, start: number, end: number, signal?: AbortSignal) => requestJson<NavReport>(`/native/sources/${encodeURIComponent(id)}/nav?start_ms=${start}&end_ms=${end}&max_points=1000`, { signal })

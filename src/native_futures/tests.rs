@@ -598,3 +598,36 @@ fn cached_observation_rebuilds_after_old_evidence_updates_and_directory_replacem
     assert_eq!(next.trading_day.as_deref(), Some("20261117"));
     assert!(next.positions.is_empty());
 }
+
+#[test]
+fn readonly_reconciled_inventory_remains_a_historical_anchor_after_later_execution_blocks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("exec");
+    let db = db(&primary);
+    let source = source(&primary);
+    let mut complete = fixture()["state"].clone();
+    complete["sequence"] = json!(100);
+    complete["value"]["type"] = json!("reconciled");
+    complete["value"]["state"]["ready"] = json!(false);
+    put(&db, "cn_trading_events", "001", &complete);
+    let mut blocked = complete.clone();
+    blocked["sequence"] = json!(101);
+    blocked["received_us"] = json!(complete["received_us"].as_i64().unwrap() + 1);
+    blocked["value"]["type"] = json!("state");
+    put(&db, "cn_trading_events", "002", &blocked);
+    let pool =
+        crate::rocks_source::ReaderPool::new(&tmp.path().join("pooled"), &[&primary]).unwrap();
+    let mut cache = reader::Cache::default();
+    let read = reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
+    assert!(!read.snapshot_ready);
+    assert_eq!(read.state_evidence_sequence, Some(101));
+    assert_eq!(read.nav_anchor_evidence_sequence, Some(100));
+    blocked["sequence"] = json!(102);
+    put(&db, "cn_trading_events", "003", &blocked);
+    let read = reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
+    assert_eq!(
+        read.nav_anchor_observed_us,
+        complete["received_us"].as_i64()
+    );
+    assert_eq!(read.nav_anchor_evidence_sequence, Some(100));
+}

@@ -109,6 +109,143 @@ impl Feed {
         self.load(venue, symbol, day, now_us, None).await
     }
 
+    /// Bounded on-demand valuation window, retaining provider trading days and
+    /// finalized closes. Session windows distinguish a scheduled break from a
+    /// missing active minute; no holiday or night-session date is invented.
+    pub async fn nav_prices(
+        &self,
+        venue: &str,
+        symbol: &str,
+        start_us: i64,
+        end_us: i64,
+    ) -> Result<super::nav::MarketPrices> {
+        super::validate_market(&format!("{venue}:{symbol}"))?;
+        ensure!(
+            start_us > 0 && start_us <= end_us && end_us - start_us <= 31 * 86400 * 1_000_000i64,
+            "NAV price window must be ordered and at most 31 days"
+        );
+        let _admission = self
+            .admission
+            .try_acquire()
+            .context("native market query capacity exhausted")?;
+        let _permit = self.permits.acquire().await?;
+        let mut client = CnFuturesMarketClient::new(self.channel.clone())
+            .max_decoding_message_size(8 * 1024 * 1024);
+        let mut result = super::nav::MarketPrices::default();
+        let mut begin = (start_us / 1000 - 7 * 86400 * 1000)
+            .max(0)
+            .div_euclid(60_000)
+            * 60_000;
+        let end = end_us / 1000;
+        let mut snapshot = None;
+        while begin <= end {
+            let last = (begin + 7 * 86400 * 1000 - 60_000).min(end.div_euclid(60_000) * 60_000);
+            let response = client
+                .get_minute_bars(GetMinuteBarsRequest {
+                    exchange: exchange(venue)? as i32,
+                    contract: symbol.into(),
+                    range: Some(Range::Time(cn_market_proto::TimeRange {
+                        start_ms: begin,
+                        end_ms: last,
+                    })),
+                    include_empty_minutes: true,
+                })
+                .await
+                .context("query NAV minute marks")?
+                .into_inner();
+            let contract = response.contract.context("NAV market contract missing")?;
+            let state = response
+                .data_state
+                .context("NAV market data state missing")?;
+            if let Some(previous) = &snapshot {
+                ensure!(
+                    previous == &state.session_snapshot_as_of,
+                    "session provenance changed during NAV query"
+                );
+            }
+            snapshot = Some(state.session_snapshot_as_of.clone());
+            let mut days: BTreeMap<String, Vec<_>> = BTreeMap::new();
+            for bar in response.bars {
+                ensure!(
+                    bar.open_time_ms >= begin && bar.open_time_ms <= last,
+                    "NAV minute outside requested window"
+                );
+                days.entry(bar.trading_day.to_string())
+                    .or_default()
+                    .push(bar);
+            }
+            // Validate contract identity even when the provider has no bars.
+            validate_contract(&contract, &state, venue, symbol)?;
+            ensure!(
+                result.multiplier == 0.0 || result.multiplier == contract.volume_multiple,
+                "contract multiplier changed inside NAV window"
+            );
+            result.multiplier = contract.volume_multiple;
+            for (day, bars) in days {
+                reference::valid_day(&day)?;
+                let market = convert(
+                    GetMinuteBarsResponse {
+                        contract: Some(contract.clone()),
+                        data_state: Some(state.clone()),
+                        bars,
+                    },
+                    venue,
+                    symbol,
+                    &day,
+                    super::now_us(),
+                )?;
+                for bar in market.bars {
+                    let close = reference::timestamp(&bar.open_time)? + MINUTE_US;
+                    if close <= end_us {
+                        if let Some(old) = result.closes.insert(close, bar.close) {
+                            ensure!(old == bar.close, "conflicting native NAV minute close");
+                        }
+                    }
+                }
+            }
+            ensure!(
+                result.closes.len() <= 60_000,
+                "NAV minute cache exceeds query budget"
+            );
+            begin = last + 60_000;
+        }
+        let product: String = symbol
+            .bytes()
+            .take_while(u8::is_ascii_alphabetic)
+            .map(char::from)
+            .collect();
+        let sessions = client
+            .get_trading_sessions(cn_market_proto::GetTradingSessionsRequest {
+                exchange: exchange(venue)? as i32,
+                product: product.to_ascii_uppercase(),
+            })
+            .await?
+            .into_inner();
+        ensure!(
+            snapshot.as_deref() == Some(sessions.snapshot_as_of.as_str()),
+            "NAV session snapshot differs from candle provenance"
+        );
+        let product = sessions
+            .products
+            .into_iter()
+            .find(|p| p.product.eq_ignore_ascii_case(&product))
+            .context("missing native trading sessions")?;
+        ensure!(
+            !product.windows.is_empty() && product.windows.len() <= 16,
+            "invalid native session count"
+        );
+        for window in product.windows {
+            ensure!(
+                window.begin_sec < 86400
+                    && window.end_sec <= 86400
+                    && window.begin_sec != window.end_sec,
+                "invalid native trading session"
+            );
+            result.sessions.push((window.begin_sec, window.end_sec));
+        }
+        Ok(result)
+    }
+
     pub async fn augment(&self, pack: &mut Pack, now_us: i64) -> Result<()> {
         let needed = cost::required_minutes(pack, now_us)?;
         let existing = pack
@@ -261,19 +398,12 @@ fn exchange(venue: &str) -> Result<Exchange> {
     })
 }
 
-fn convert(
-    response: GetMinuteBarsResponse,
+fn validate_contract(
+    contract: &cn_market_proto::Contract,
+    state: &cn_market_proto::DataState,
     venue: &str,
     symbol: &str,
-    day: &str,
-    now_us: i64,
-) -> Result<MarketDay> {
-    let contract = response
-        .contract
-        .context("market-replay omitted contract metadata")?;
-    let state = response
-        .data_state
-        .context("market-replay omitted data state")?;
+) -> Result<()> {
     ensure!(
         contract.exchange == exchange(venue)? as i32
             && (symbol.eq_ignore_ascii_case(&contract.native_code)
@@ -291,6 +421,23 @@ fn convert(
         state.source == "baseline_data_1min" && !state.session_snapshot_as_of.is_empty(),
         "unrecognized native market provenance"
     );
+    Ok(())
+}
+
+fn convert(
+    response: GetMinuteBarsResponse,
+    venue: &str,
+    symbol: &str,
+    day: &str,
+    now_us: i64,
+) -> Result<MarketDay> {
+    let contract = response
+        .contract
+        .context("market-replay omitted contract metadata")?;
+    let state = response
+        .data_state
+        .context("market-replay omitted data state")?;
+    validate_contract(&contract, &state, venue, symbol)?;
     ensure!(response.bars.len() <= 1500, "oversized native trading day");
     let trading_day: u32 = day.parse()?;
     let archived =

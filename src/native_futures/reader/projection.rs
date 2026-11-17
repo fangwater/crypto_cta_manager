@@ -13,6 +13,7 @@ pub(super) struct Projection {
     guard: Option<(i64, &'static str, String)>,
     runtime: Option<(bool, i64)>,
     state: Option<State>,
+    reconciled: Option<(i64, i64)>,
 }
 #[derive(Clone)]
 struct State {
@@ -101,6 +102,9 @@ pub(super) fn read(db: &DB, adapter: &str, previous: Option<&Projection>) -> Res
         next.errors += usize::from(event.projection_error.is_some());
         let value = event.value;
         let kind = value.kind;
+        if kind == "reconciled" && next.reconciled.is_none() {
+            next.reconciled = Some((event.sequence, event.received_us));
+        }
         if kind == "runtime_start" && next.latest_start.is_none() {
             next.latest_start = Some(event.sequence);
         }
@@ -197,6 +201,7 @@ pub(super) fn read(db: &DB, adapter: &str, previous: Option<&Projection>) -> Res
         next.guard = next.guard.or_else(|| old.guard.clone());
         next.runtime = next.runtime.or(old.runtime);
         next.state = next.state.or_else(|| old.state.clone());
+        next.reconciled = next.reconciled.or(old.reconciled);
     }
     Ok(next)
 }
@@ -208,6 +213,14 @@ impl Projection {
     pub fn apply(&self, result: &mut Snapshot, stale_secs: u64) {
         result.last_event_us = self.last_event_us;
         result.projection_errors = self.errors;
+        let capture = self
+            .state
+            .as_ref()
+            .filter(|s| s.ready)
+            .map(|s| (s.sequence, s.received))
+            .or(self.reconciled);
+        result.nav_anchor_observed_us = capture.map(|(_, at)| at);
+        result.nav_anchor_evidence_sequence = capture.map(|(seq, _)| seq);
         if let Some(state) = &self.state {
             result.snapshot_ready = state.ready;
             result.reported_can_trade = state.can_trade;

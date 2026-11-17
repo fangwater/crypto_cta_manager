@@ -36,6 +36,11 @@ fn fees_preserve_offsets_and_zero_without_liquidity_or_future_backfill() {
     );
     assert_eq!(rates.estimated_fee("maker", 2, 260000.0, at()), None);
     assert_eq!(
+        rates.estimated_fee("close", 2, 260000.0, at()),
+        None,
+        "generic close with different close-today rate remains ambiguous"
+    );
+    assert_eq!(
         rates.estimated_fee("open", 2, 260000.0, rates.observed_at_us - 1),
         None
     );

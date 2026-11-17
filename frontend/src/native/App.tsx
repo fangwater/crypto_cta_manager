@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Activity, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { AuthGate, useAuth } from '../components/AuthGate'
 import { Button } from '../components/ui/Button'
@@ -10,6 +10,8 @@ import * as api from './api'
 import CostAnalysis from './CostAnalysis'
 import './native.css'
 
+const NavAnalysis = lazy(() => import('./NavAnalysis'))
+
 const statuses: Record<string, string> = { submitted_locally: '本地已提交', rejected_locally: '本地拒绝', observed: '已见回报', observing: '观察中', waiting: '等待数据', recovering: '恢复中', disconnected: '已断线', transport_unavailable: '交易通道未就绪', blocked: '已阻断', stale: '数据延迟', stopped: '已停止', prepared: '发送前', pending: '等待回报', working: '已受理', partially_filled: '部分成交', cancel_pending: '撤单待确认', settling: '等待成交事实', filled: '已成交', cancelled: '已撤单', rejected: '已拒绝', uncertain: '发送结果不确定' }
 const offsets: Record<string, string> = { open: '开仓', close: '平仓', close_today: '平今', close_yesterday: '平昨' }
 const venues = ['SHFE', 'INE', 'DCE', 'CZCE', 'CFFEX', 'GFEX']
@@ -18,8 +20,8 @@ const side = (value: string) => value === 'buy' ? '买' : '卖'
 const time = (us: number | null) => us === null ? '—' : new Date(us / 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
 const money = (value: number | null) => value === null ? '—' : value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
-type Tab = 'account' | 'orders' | 'fills' | 'cost' | 'strategies' | 'permissions'
-const tabs: [Tab, string][] = [['account', '账户与持仓'], ['orders', '委托'], ['fills', '成交'], ['cost', '成本分析'], ['strategies', '策略'], ['permissions', '权限']]
+type Tab = 'account' | 'orders' | 'fills' | 'nav' | 'cost' | 'strategies' | 'permissions'
+const tabs: [Tab, string][] = [['account', '账户与持仓'], ['orders', '委托'], ['fills', '成交'], ['nav', '净值'], ['cost', '成本分析'], ['strategies', '策略'], ['permissions', '权限']]
 
 function Table({ headers, children }: { headers: string[]; children: ReactNode }) {
   return <div className="native-table-scroll"><table className="native-table"><thead><tr>{headers.map(h => <th key={h}>{h}</th>)}</tr></thead><tbody>{children}</tbody></table></div>
@@ -92,7 +94,7 @@ function Workspace() {
         <p className="text-sm text-muted">本地同步副本 · 最近提交 {time(snapshot.replication.last_synced_at_us)} · 源视图 {time(snapshot.replication.source_captured_at_us)}{snapshot.replication.target_cursor !== null ? ` · 待提交 ${snapshot.replication.target_cursor - snapshot.replication.committed_cursor} 条修订` : ''}</p>
         {(snapshot.replication.last_error || snapshot.replication_stale) && <Alert tone="warning">{snapshot.replication.last_error ?? '同步数据已超过配置的新鲜度限制，请检查同步服务。'} 以下展示已提交的本地历史数据。</Alert>}
       </div>}
-      {tab === 'strategies' ? <Strategies /> : tab === 'permissions' ? <Permissions source={source} /> : tab === 'cost' ? <CostAnalysis key={sourceId} sourceId={sourceId} tradingDay={snapshot?.trading_day} /> : !snapshot ? <Card><CardContent className="py-12 text-center text-muted">{loading ? '正在读取账户记录…' : '暂无账户数据'}</CardContent></Card> : <>
+      {tab === 'nav' ? <Suspense fallback={<p className="text-sm text-muted">正在加载净值页面…</p>}><NavAnalysis key={sourceId} sourceId={sourceId} snapshot={snapshot} canConfigure={source?.access_level === 'configure'} /></Suspense> : tab === 'strategies' ? <Strategies /> : tab === 'permissions' ? <Permissions source={source} /> : tab === 'cost' ? <CostAnalysis key={sourceId} sourceId={sourceId} tradingDay={snapshot?.trading_day} /> : !snapshot ? <Card><CardContent className="py-12 text-center text-muted">{loading ? '正在读取账户记录…' : '暂无账户数据'}</CardContent></Card> : <>
         {snapshot.reason && <Alert tone="warning" className="mb-4">{snapshot.reason}</Alert>}
         {snapshot.positions_may_lag && <Alert tone="warning" className="mb-4">已有较新的事实成交，持仓仍显示 {time(snapshot.state_observed_us)} 的快照。</Alert>}
         {tab === 'account' && <>

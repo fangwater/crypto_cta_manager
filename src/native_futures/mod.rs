@@ -3,6 +3,7 @@ pub mod config;
 pub mod cost;
 pub mod evidence;
 pub mod market_data;
+pub mod nav;
 pub mod netting;
 pub mod reader;
 pub mod reference;

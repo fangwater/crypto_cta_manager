@@ -1,6 +1,6 @@
 mod netting;
 
-use super::{config::Config, cost, market_data::Feed, reader, reference, reference_data};
+use super::{config::Config, cost, market_data::Feed, nav, reader, reference, reference_data};
 use crate::{
     auth::{self, AuthUser, SourceAccess},
     strategy_catalog::{self, SavePositionStrategyRequest},
@@ -123,6 +123,11 @@ impl Service {
             .route("/api/native/sources/{id}/snapshot", get(snapshot))
             .route("/api/native/sources/{id}/market", get(market_day))
             .route("/api/native/sources/{id}/rates", get(account_rates))
+            .route(
+                "/api/native/sources/{id}/nav-snapshots",
+                get(nav_snapshots).post(capture_nav_snapshot),
+            )
+            .route("/api/native/sources/{id}/nav", get(native_nav))
             .route("/api/native/sources/{id}/cost", get(cost_report))
             .route(
                 "/api/native/sources/{id}/grants",
@@ -452,6 +457,178 @@ async fn account_rates(
     )
 }
 
+async fn nav_snapshots(
+    State(s): State<Service>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    if !access.view.contains(&id) {
+        return Err(forbidden());
+    }
+    body(nav::store::list(&s.pool, &id).await?)
+}
+#[derive(serde::Deserialize)]
+struct CaptureNav {
+    expected_state_us: i64,
+    note: String,
+}
+async fn capture_nav_snapshot(
+    State(s): State<Service>,
+    Extension(user): Extension<AuthUser>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    Json(request): Json<CaptureNav>,
+) -> ApiResult {
+    if !access.configure.contains(&id) {
+        return Err(forbidden());
+    }
+    if request.note.trim().is_empty() || request.note.len() > 4096 {
+        return Err(bad("请填写起始快照说明，最多 4096 字节"));
+    }
+    let source = s
+        .config
+        .sources
+        .iter()
+        .find(|v| v.enabled && v.id == id)
+        .cloned()
+        .ok_or_else(forbidden)?;
+    let rocks = s.rocks.clone();
+    let lock = s.readers[&id].clone();
+    let mut cache = lock.lock_owned().await;
+    let limit = s.config.recent_rows;
+    let stale = s.config.stale_secs;
+    let candidate = tokio::task::spawn_blocking(move || {
+        reader::with_db(&rocks, &source, |db| {
+            let snapshot = cache.read(&source, db, limit, stale)?;
+            nav::source::candidate(
+                &source,
+                db,
+                &snapshot,
+                request.expected_state_us,
+                request.note,
+            )
+        })
+    })
+    .await
+    .map_err(anyhow::Error::from)?
+    .map_err(bad)?;
+    let anchor = nav::service::price_anchor(candidate, s.market_data.as_deref())
+        .await
+        .map_err(bad)?;
+    let _barrier = s.catalog_lock.lock().await;
+    let latest = auth::allowed_source_access(
+        &s.pool,
+        &user,
+        &s.config.source_ids(),
+        &s.config.source_viewers,
+    )
+    .await?;
+    if !latest.configure.contains(&id) {
+        return Err(forbidden());
+    }
+    nav::store::insert(&s.pool, &anchor, &user.username)
+        .await
+        .map_err(bad)?;
+    body(anchor)
+}
+#[derive(serde::Deserialize)]
+struct NavQuery {
+    start_ms: i64,
+    end_ms: i64,
+    max_points: Option<usize>,
+}
+async fn native_nav(
+    State(s): State<Service>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<NavQuery>,
+) -> ApiResult {
+    if !access.view.contains(&id) {
+        return Err(forbidden());
+    }
+    let (Some(start), Some(end)) = (
+        query.start_ms.checked_mul(1000),
+        query.end_ms.checked_mul(1000),
+    ) else {
+        return Err(bad("时间范围溢出"));
+    };
+    let max_points = query.max_points.unwrap_or(1000);
+    if start <= 0
+        || end < start
+        || end - start > 31 * 86400 * 1_000_000i64
+        || !(2..=5000).contains(&max_points)
+    {
+        return Err(bad(
+            "请选择起始快照之后、最多 31 天的时间范围；点数为 2–5000",
+        ));
+    }
+    let Some(anchor) = nav::store::load(&s.pool, &id, start).await? else {
+        return body(nav::Report::unavailable(
+            &id,
+            0,
+            start,
+            end,
+            0,
+            "所选起点之前没有原生起始持仓快照；请先建立快照或选择其后的时间范围".into(),
+        ));
+    };
+    let source = s
+        .config
+        .sources
+        .iter()
+        .find(|v| v.enabled && v.id == id)
+        .cloned()
+        .ok_or_else(forbidden)?;
+    let rocks = s.rocks.clone();
+    let lock = s.readers[&id].clone();
+    let mut cache = lock.lock_owned().await;
+    let limit = s.config.recent_rows;
+    let stale = s.config.stale_secs;
+    let read_anchor = anchor.clone();
+    let inputs = tokio::task::spawn_blocking(move || {
+        reader::with_db(&rocks, &source, |db| {
+            let snapshot = cache.read(&source, db, limit, stale)?;
+            ensure!(
+                snapshot.projection_errors == 0,
+                "原生投影存在错误，暂停净值回放"
+            );
+            let through = snapshot
+                .last_event_us
+                .context("missing execution evidence time")?;
+            Ok((nav::source::fills(&source, db, &read_anchor, end)?, through))
+        })
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
+    let (fills, through) = match inputs {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error=?e,"native NAV source cut unavailable");
+            return body(nav::Report::unavailable(
+                &id,
+                anchor.snapshot_us,
+                start,
+                end,
+                0,
+                "原生执行证据不完整、起始证据发生变化或来源世代不匹配；请检查同步和起始快照".into(),
+            ));
+        }
+    };
+    body(
+        nav::service::timeline(
+            &anchor,
+            fills,
+            s.market_data.as_deref(),
+            s.reference_service.as_deref(),
+            start,
+            end,
+            through,
+            max_points,
+        )
+        .await,
+    )
+}
+
 async fn cost_report(
     State(s): State<Service>,
     Extension(access): Extension<Arc<SourceAccess>>,
@@ -534,6 +711,7 @@ async fn save_source_grants(
     if !access.configure.contains(&id) {
         return Err(forbidden());
     }
+    let _barrier = s.catalog_lock.lock().await;
     body(
         auth::set_source_grants(&s.pool, &id, &r.grants, &s.config.source_ids())
             .await

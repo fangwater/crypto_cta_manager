@@ -63,6 +63,15 @@ impl AccountRates {
         if at_us < self.observed_at_us || lots <= 0 || !price.is_finite() || price <= 0.0 {
             return None;
         }
+        if offset == "close" {
+            let ordinary = self.fees.get("close")?;
+            let today = self.fees.get("close_today")?;
+            // A generic Close report does not declare its today/yesterday
+            // allocation. Distinct rates cannot be resolved from FIFO choice.
+            if ordinary.per_lot != today.per_lot || ordinary.notional_rate != today.notional_rate {
+                return None;
+            }
+        }
         let amount = self
             .fees
             .get(offset)?
@@ -136,6 +145,95 @@ impl Feed {
             as_of_us,
         )
     }
+
+    /// One causal opening observation plus all changes inside the requested
+    /// window; avoids one HTTP request for every fill.
+    pub async fn history(
+        &self,
+        source: &str,
+        venue: &str,
+        symbol: &str,
+        start_us: i64,
+        end_us: i64,
+    ) -> Result<Vec<AccountRates>> {
+        ensure!(
+            start_us <= end_us && end_us - start_us <= 366 * 86400 * 1_000_000i64,
+            "invalid account rate history window"
+        );
+        let first = self.rates(source, venue, symbol, start_us).await?;
+        let mut observations = BTreeMap::new();
+        if let Some(rate) = first {
+            observations.insert(rate.observed_at_us, rate);
+        }
+        if start_us == end_us {
+            return Ok(observations.into_values().collect());
+        }
+        let account = self
+            .settings
+            .accounts
+            .get(source)
+            .context("missing source account alias")?;
+        let start = chrono::DateTime::from_timestamp_micros(start_us)
+            .context("invalid fee history start")?
+            .to_rfc3339();
+        let end = chrono::DateTime::from_timestamp_micros(end_us)
+            .context("invalid fee history end")?
+            .to_rfc3339();
+        let _permit = self.permits.acquire().await?;
+        let url = Url::parse(&self.settings.api_url)?.join("api/v1/account-rates")?;
+        let mut response = self
+            .client
+            .get(url)
+            .query(&[
+                ("account", account.as_str()),
+                ("venue", venue),
+                ("instrument", symbol),
+                ("start", start.as_str()),
+                ("end", end.as_str()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut bytes = vec![];
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(
+                bytes.len() + chunk.len() <= 16 * 1024 * 1024,
+                "account rate history response too large"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        let value: Value = serde_json::from_slice(&bytes)?;
+        ensure!(
+            text(&value, "sourceType")? == "CTP_ACCOUNT_QUERY"
+                && text(&value, "accountKey")? == account
+                && text(&value, "mode")? == "observations"
+                && value["asOf"].is_null(),
+            "wrong account fee history identity"
+        );
+        let rows = value["rates"]
+            .as_array()
+            .context("missing account fee history")?;
+        ensure!(
+            rows.len() <= 10000 && value["count"].as_u64() == Some(rows.len() as u64),
+            "account fee history count exceeds budget"
+        );
+        for row in rows {
+            let rate = parse_record(row, account, venue, symbol, end_us)?;
+            ensure!(
+                rate.observed_at_us >= start_us,
+                "fee history predates requested window"
+            );
+            if let Some(old) = observations.get(&rate.observed_at_us) {
+                ensure!(
+                    serde_json::to_value(old)? == serde_json::to_value(&rate)?,
+                    "conflicting account fee observations"
+                );
+            } else {
+                observations.insert(rate.observed_at_us, rate);
+            }
+        }
+        Ok(observations.into_values().collect())
+    }
 }
 fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key]
@@ -182,6 +280,15 @@ fn parse(
     let Some(row) = rows.first() else {
         return Ok(None);
     };
+    parse_record(row, account, venue, symbol, as_of_us).map(Some)
+}
+fn parse_record(
+    row: &Value,
+    account: &str,
+    venue: &str,
+    symbol: &str,
+    as_of_us: i64,
+) -> Result<AccountRates> {
     ensure!(
         text(row, "accountKey")? == account
             && text(row, "venue")? == venue
@@ -240,7 +347,7 @@ fn parse(
         record_hash: hash(row, "recordHash")?,
         receipt_sha256: hash(row, "receiptSha256")?,
     };
-    Ok(Some(result))
+    Ok(result)
 }
 
 #[cfg(test)]
