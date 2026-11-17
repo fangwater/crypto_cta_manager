@@ -46,15 +46,17 @@ npm run build:cn-futures
 # npm run build 继续构建上游 Crypto 页面。
 ```
 
-HTTP API 只监听 loopback，前端保留 `/manager/` 和同源 `/manager/api/` 网关约定。需由国内环境自己的 Nginx 提供 `frontend/dist` 并代理 `/manager/api/` 至 `127.0.0.1:18211/api/`。当前未部署、未启动常驻 Web 服务；不要使用复制来的 Crypto 生产部署脚本操作国内环境。
+HTTP API 只监听 loopback，前端保留 `/manager/` 和同源 `/manager/api/` 网关约定。本机 PM2 运行 Manager 和接收器，经 SSH 反向转发及腾讯云既有 Nginx 提供网页；云端单独运行只读导出器。具体路径与启停方式见[部署说明](cn_futures_pm2.md)，不要使用复制来的 Crypto 生产部署脚本操作国内环境。
 
 ## 读取与事实边界
 
-只读原生列族 `cn_trading_events`、`cn_uniform_orders`、`cn_trade_facts`。为每个 source 单独打开 Manager secondary，catch up 一次后读取其固定视图；RocksDB secondary 不支持 `snapshot()`，读取中不再次 catch up。执行 primary 可以一直保持打开和写入。近期订单／成交响应有上限，内存不保留全部原始记录；每个 source 独立读取，故障不会阻断其他账户。API 返回经过授权的数据，不暴露原始审计载荷、账户哈希、SDK 路径或交易凭据。
+只读原生列族 `cn_trading_events`、`cn_uniform_orders`、`cn_trade_facts`。每个 source 复用独立的 Manager secondary，将 catch-up 和跨列族读取串行化；RocksDB secondary 不支持 `snapshot()`，读取中不再次 catch up。执行 primary 可以一直保持打开和写入。近期订单／成交响应有上限，内存不保留全部原始记录；每个 source 独立读取，故障不会阻断其他账户。API 返回经过授权的数据，不暴露原始审计载荷、账户哈希、SDK 路径或交易凭据。
+
+观察结果使用有界内存缓存：没有新提交时只更新查询时间、过期状态及同步元数据；有变化时读取 WAL，追加投影新证据，并仅重读变化的订单／成交列族。单独手续费修订仍会刷新成交。旧证据修订、WAL 缺口或不支持的操作触发完整重算，数据库身份或列族替换使缓存失效。首次读取仍需扫描已有证据。副本的 apply 锁只在单次查询内持有，不能因长期复用 secondary 而阻塞后续同步提交。成本查询复用相同固定读取视图。
 
 `state_observed_us` 是持仓快照的实际观察时刻，`last_event_us` 是最后证据时刻，`read_at_us` 只是查询时刻。晚于快照的成交令 `positions_may_lag=true`：继续标明旧快照，而不据不完整回报重建今昨仓或冻结。瞬时查询失败时页面保留上次结果并明确标记，不将旧数据装成新读数；认证失效或权限撤销则清除对应缓存展示。
 
-`available_local_budget` 只是执行核心的保守本地可用预算，不是账户权益或实时保证金。手续费直接保留事实值和币种，未报告保持空；不按 maker/taker 费率补造。合约乘数、开平、订单类型、原始发送状态和完整身份留在订单原记录中。`native_time` 按柜台原生整数展示，不转换为 Unix 时间。未实现国内保证金、结算盈亏、净值、交易日历或自动换月，不以 Crypto 的 USDT、自然日或资金费率逻辑代替。
+`available_local_budget` 只是执行核心的保守本地可用预算，不是账户权益或实时保证金。国内页面不按 maker/taker 分类；理论手续费统一按合约及开仓、平仓、平今、平昨规则计算。实际手续费直接保留事实值和币种，未报告保持空，不用估算费用回填。合约乘数、开平、订单类型、原始发送状态和完整身份留在订单原记录中。`native_time` 按柜台原生整数展示，不转换为 Unix 时间。未实现国内保证金、结算盈亏、净值、交易日历或自动换月，不以 Crypto 的 USDT、自然日或资金费率逻辑代替。
 
 ## 状态机对齐
 
@@ -67,12 +69,13 @@ HTTP API 只监听 loopback，前端保留 `/manager/` 和同源 `/manager/api/`
 
 CTP 的 Manager 回归使用合成 JSON、隔离 RocksDB 和 loopback 同步 HTTP，覆盖六所、
 原生会话、未知费用、断线恢复、增量搬运及同步重启；不代表新增实盘成交验收。
-2026-11-17：35 项原生模块回归和完整测试（668 通过、37 按原设置忽略）通过，
+2026-11-17：完整测试（682 通过、37 按原设置忽略）通过，
 `cargo fmt --check`、`cargo check --locked --all-targets` 和国内前端构建通过。
 `cn_futures_web`、`sync-server`、`cn_futures_reference` 的 release 构建及 YD／CTP
-混合来源示例的导出、接收、Manager 纯配置校验通过，未连接柜台或部署常驻进程。
+混合来源示例的导出、接收、Manager 纯配置校验通过，未连接柜台。
 部署前已另建隔离 PostgreSQL，20 项显式集成测试通过（原生 HTTP／权限／静态网页 1 项、
 当前 schema 及显式维护 19 项）；测试集群只使用专用 socket 和临时测试数据库。
+复用 secondary 和观察缓存改动后，隔离 PostgreSQL 的原生 HTTP／权限／静态网页集成测试再次通过。
 PM2 的生产网页与进程部署方式见[部署说明](cn_futures_pm2.md)。
 
 | 观察状态 | 事实依据 | 不能据此推断 |

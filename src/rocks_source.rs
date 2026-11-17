@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use rocksdb::{DB, Direction, IteratorMode, Options};
 
 mod secondary;
+pub(crate) use secondary::ReaderPool;
 pub use secondary::{ReaderSession, configure as configure_source_readers};
 
 #[derive(Debug)]

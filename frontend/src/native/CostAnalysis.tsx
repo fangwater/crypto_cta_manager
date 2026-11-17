@@ -41,7 +41,7 @@ export default function CostAnalysis({ sourceId, tradingDay }: { sourceId: strin
       <Button disabled={loading || !sourceId || !/^\d{8}$/.test(day)} onClick={() => setRefresh(v => v + 1)}>重新计算</Button>
       {loading && <span role="status" className="text-sm text-muted">正在计算…</span>}
     </div>
-    <p className="text-sm text-muted">按真实成交手数比较理论执行价格与手续费，正值表示实际成本更高。手续费按合约和开平规则计算，开仓、平今、平昨分别维护。交易日及夜盘归属以维护的数据为准；分钟参考价不包含盘口价差与市场冲击。</p>
+    <p className="text-sm text-muted">按真实成交手数比较理论执行价格与手续费，正值表示实际成本更高。手续费按合约和开平规则计算，开仓、平仓、平今、平昨分别维护。交易日及夜盘归属以维护的数据为准；分钟参考价不包含盘口价差与市场冲击。</p>
     {error && <Alert tone="error">{error}</Alert>}
     {!/^\d{8}$/.test(day) && <p className="text-sm text-muted">请输入需要复盘的交易日。</p>}
     {report && <>

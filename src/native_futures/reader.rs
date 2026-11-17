@@ -5,12 +5,19 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{collections::BTreeSet, fs::File, ops::Deref, path::Path};
 
+mod cache;
+mod changes;
+mod projection;
+pub use cache::Cache;
+
 const EVENTS: &str = "cn_trading_events";
 const ORDERS: &str = "cn_uniform_orders";
 const FILLS: &str = "cn_trade_facts";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
+    #[serde(skip)]
+    max_fill_evidence_sequence: i64,
     pub source_id: String,
     pub account: String,
     pub read_at_us: i64,
@@ -108,6 +115,40 @@ pub(super) fn open_secondary(source: &Source, secondary: &Path) -> Result<ReadVi
 }
 
 fn read_snapshot(source: &Source, db: &DB, limit: usize, stale_secs: u64) -> Result<Snapshot> {
+    let projection = projection::read(db, &source.adapter, None)?;
+    read_snapshot_with_projection(
+        source,
+        db,
+        limit,
+        stale_secs,
+        &projection,
+        None,
+        false,
+        false,
+    )
+}
+
+fn replication_stale(
+    status: Option<&super::sync::ReplicaStatus>,
+    now: i64,
+    stale_secs: u64,
+) -> bool {
+    status.is_some_and(|s| {
+        s.last_synced_at_us
+            .is_none_or(|t| now.saturating_sub(t) > stale_secs as i64 * 1_000_000)
+    })
+}
+
+fn read_snapshot_with_projection(
+    source: &Source,
+    db: &DB,
+    limit: usize,
+    stale_secs: u64,
+    projection: &projection::Projection,
+    previous_rows: Option<&Snapshot>,
+    reuse_orders: bool,
+    reuse_fills: bool,
+) -> Result<Snapshot> {
     // RocksDB secondaries do not support snapshots. This handle is caught up
     // exactly once and never advanced while its column families are read.
     let view = db;
@@ -121,6 +162,7 @@ fn read_snapshot(source: &Source, db: &DB, limit: usize, stale_secs: u64) -> Res
             .is_none_or(|t| super::now_us().saturating_sub(t) > stale_secs as i64 * 1_000_000)
     });
     let mut result = Snapshot {
+        max_fill_evidence_sequence: 0,
         source_id: source.id.clone(),
         account: source.account.clone(),
         read_at_us: super::now_us(),
@@ -145,105 +187,22 @@ fn read_snapshot(source: &Source, db: &DB, limit: usize, stale_secs: u64) -> Res
         replication,
         replication_stale,
     };
-    let mut state_sequence = 0;
-    let mut runtime = None;
-    let mut latest_start = None;
-    let mut transport_sequence = None;
-    let mut guard: Option<(i64, &str, String)> = None;
-    for item in view.iterator_cf(
-        db.cf_handle(EVENTS).context("events handle")?,
-        IteratorMode::End,
-    ) {
-        let (_, bytes) = item.context("scan domestic evidence")?;
-        let event = json(&bytes, EVENTS)?;
-        let sequence = integer(&event, "sequence")?;
-        let received = integer(&event, "received_us")?;
-        result.last_event_us.get_or_insert(received);
-        if !event["projection_error"].is_null() {
-            result.projection_errors += 1;
-        }
-        let value = &event["value"];
-        let kind = value["type"].as_str().context("missing evidence type")?;
-        if kind == "runtime_start" && latest_start.is_none() {
-            latest_start = Some(sequence);
-        }
-        if result.transport_ready.is_none() {
-            let ready = if kind == "transport_status" {
-                value["ready"].as_bool()
-            } else {
-                value["transport_ready"].as_bool()
-            };
-            if let Some(ready) = ready {
-                result.transport_ready = Some(ready);
-                result.transport_observed_us = Some(received);
-                transport_sequence = Some(sequence);
-            }
-        }
-        if guard.is_none() {
-            let outcome = match kind {
-                "trading_blocked" => Some((
-                    "blocked",
-                    value["error"]
-                        .as_str()
-                        .unwrap_or("execution blocked")
-                        .to_owned(),
-                )),
-                "reconciling" | "recovery_checkpoint" => Some(("recovering", String::new())),
-                "restart_required" => Some((
-                    "blocked",
-                    value["reason"]
-                        .as_str()
-                        .unwrap_or("execution restart required")
-                        .to_owned(),
-                )),
-                // Current raw Yida evidence contract: 1=connected, 2=disconnected,
-                // 14=invalidated, 16=fatal. Never interpret native times as UTC.
-                "yida_event"
-                    if source.adapter == "yida" && value["event"]["replay"].as_i64() == Some(0) =>
-                {
-                    match value["event"]["kind"].as_i64() {
-                        Some(1) => Some(("recovering", String::new())),
-                        Some(2) => Some(("disconnected", "native connection disconnected".into())),
-                        Some(14 | 16) => {
-                            Some(("blocked", "native adapter invalidated or failed".into()))
-                        }
-                        _ => None,
-                    }
-                }
-                // CTP has no replay field. Only connection events are readiness
-                // guards: 14=query trade and 16=response error (possibly retried).
-                // Execution faults are reported by explicit state/block evidence.
-                "ctp_event" if source.adapter == "ctp" => match value["event"]["kind"].as_i64() {
-                    Some(1) => Some(("recovering", String::new())),
-                    Some(2) => Some(("disconnected", "CTP connection disconnected".into())),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some((phase, reason)) = outcome {
-                guard = Some((sequence, phase, reason));
-            }
-        }
-        if runtime.is_none() && matches!(kind, "runtime_start" | "runtime_stopped") {
-            runtime = Some((kind.to_owned(), sequence));
-        }
-        if result.state_observed_us.is_none() && matches!(kind, "state" | "reconciled") {
-            let state = &value["state"];
-            ensure!(state.is_object(), "missing execution state");
-            result.snapshot_ready = state["ready"].as_bool().context("missing ready state")?;
-            result.reported_can_trade = value["can_trade"].as_bool();
-            result.reason = state["reason"].as_str().unwrap_or_default().into();
-            result.trading_day = state["trading_day"].as_str().map(str::to_owned);
-            result.available_local_budget = state["available_local_budget"].as_f64();
-            result.positions = state["positions"]
-                .as_array()
-                .context("missing positions snapshot")?
-                .clone();
-            result.state_observed_us = Some(received);
-            state_sequence = sequence;
-        }
-    }
+    let state_sequence = projection.state_sequence();
+    projection.apply(&mut result, stale_secs);
     for (cf, is_fill) in [(ORDERS, false), (FILLS, true)] {
+        if let Some(previous) = previous_rows {
+            if is_fill && reuse_fills {
+                result.total_fills = previous.total_fills;
+                result.fills = previous.fills.clone();
+                result.max_fill_evidence_sequence = previous.max_fill_evidence_sequence;
+                continue;
+            }
+            if !is_fill && reuse_orders {
+                result.total_orders = previous.total_orders;
+                result.orders = previous.orders.clone();
+                continue;
+            }
+        }
         let mut recent = Vec::new();
         for item in view.iterator_cf(
             db.cf_handle(cf).context("record handle")?,
@@ -266,7 +225,9 @@ fn read_snapshot(source: &Source, db: &DB, limit: usize, stale_secs: u64) -> Res
                             .is_some_and(|p| p.is_finite() && p > 0.0),
                     "invalid factual fill quantity or price"
                 );
-                result.positions_may_lag |= integer(&record, "evidence_seq")? > state_sequence;
+                result.max_fill_evidence_sequence = result
+                    .max_fill_evidence_sequence
+                    .max(integer(&record, "evidence_seq")?);
             } else {
                 result.total_orders += 1;
                 ensure!(
@@ -315,47 +276,9 @@ fn read_snapshot(source: &Source, db: &DB, limit: usize, stale_secs: u64) -> Res
             "duplicate position identity"
         );
     }
-    result.snapshot_current_runtime =
-        result.state_observed_us.is_some() && latest_start.is_none_or(|seq| state_sequence >= seq);
-    if !result.snapshot_current_runtime {
-        result.reported_can_trade = None;
-    }
-    if transport_sequence.is_some_and(|seq| latest_start.is_some_and(|start| seq < start)) {
-        result.transport_ready = None;
-        result.transport_observed_us = None;
-    }
-    result.status = if runtime
-        .as_ref()
-        .is_some_and(|(k, _)| k == "runtime_stopped")
-    {
-        "stopped"
-    } else if result.last_event_us.is_none() {
-        "waiting"
-    } else if let Some((_, phase, reason)) =
-        guard.as_ref().filter(|(seq, _, _)| *seq > state_sequence)
-    {
-        result.reason = reason.clone();
-        *phase
-    } else if !result.snapshot_current_runtime {
-        "recovering"
-    } else if runtime
-        .as_ref()
-        .is_some_and(|(_, seq)| *seq > state_sequence)
-    {
-        "recovering"
-    } else if result.projection_errors > 0 || !result.snapshot_ready {
-        "blocked"
-    } else if result.transport_ready == Some(false) {
-        "transport_unavailable"
-    } else if result
-        .last_event_us
-        .is_none_or(|ts| result.read_at_us - ts > stale_secs as i64 * 1_000_000)
-    {
-        "stale"
-    } else {
-        "observing"
-    }
-    .into();
+    result.read_at_us = super::now_us();
+    result.positions_may_lag = result.max_fill_evidence_sequence > state_sequence;
+    projection.apply(&mut result, stale_secs);
     Ok(result)
 }
 
@@ -370,11 +293,16 @@ pub struct CostFacts {
 pub fn read_cost_facts(source: &Source, secondary: &Path, day: &str) -> Result<CostFacts> {
     super::reference::valid_day(day)?;
     let db = open_secondary(source, secondary)?;
+    read_cost_facts_from_db(source, &db, day)
+}
+
+pub(super) fn read_cost_facts_from_db(source: &Source, db: &DB, day: &str) -> Result<CostFacts> {
+    super::reference::valid_day(day)?;
     let mut result = CostFacts {
         fills: vec![],
         orders: vec![],
         replication: if source.sync.is_some() {
-            Some(super::sync::replica_status(&db, &source.id)?)
+            Some(super::sync::replica_status(db, &source.id)?)
         } else {
             None
         },
@@ -417,4 +345,37 @@ pub fn read_cost_facts(source: &Source, secondary: &Path, day: &str) -> Result<C
         }
     }
     Ok(result)
+}
+
+/// Keep the replica apply barrier only for this query, independently of the
+/// reusable secondary's lifetime. Stage reception may continue concurrently.
+pub(super) fn with_db<T>(
+    pool: &crate::rocks_source::ReaderPool,
+    source: &Source,
+    scan: impl FnOnce(&DB) -> Result<T>,
+) -> Result<T> {
+    let _guard = if source.sync.is_some() {
+        Some(super::sync::replica_read_lock(&source.rocksdb_path)?)
+    } else {
+        None
+    };
+    pool.read(
+        &source.rocksdb_path,
+        &[EVENTS.into(), ORDERS.into(), FILLS.into()],
+        |db| {
+            for name in [EVENTS, ORDERS, FILLS] {
+                ensure!(
+                    db.cf_handle(name).is_some(),
+                    "execution store is missing {name}"
+                );
+            }
+            if source.sync.is_some() {
+                let state = super::sync::replica_status(db, &source.id)?;
+                if !state.initialized || state.applying {
+                    return Err(super::sync::ReplicaBusy.into());
+                }
+            }
+            scan(db)
+        },
+    )
 }

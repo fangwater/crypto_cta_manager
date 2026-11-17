@@ -1143,3 +1143,49 @@ async fn http_pages_reuse_one_live_journal_and_negotiate_compression() {
     assert_eq!(replaced.status(), reqwest::StatusCode::CONFLICT);
     server.abort();
 }
+
+#[test]
+fn cached_replica_queries_release_apply_barriers_and_read_later_committed_fees() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut cloud, local) = configs(temp.path());
+    cloud.sync_export.as_mut().unwrap().batch_records = 1000;
+    let db = primary(&cloud.sources[0].rocksdb_path);
+    seed(&db);
+    let first = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
+    let replica = Replica::open(&local, &local.sources[0]).unwrap();
+    replica.accept(&first).unwrap();
+    replica.apply().unwrap();
+    let pool = crate::rocks_source::ReaderPool::new(
+        &local.secondary_root,
+        &[&local.sources[0].rocksdb_path],
+    )
+    .unwrap();
+    let mut cache = reader::Cache::default();
+    let mut read = || {
+        reader::with_db(&pool, &local.sources[0], |db| {
+            cache.read(&local.sources[0], db, 10, 30)
+        })
+        .unwrap()
+    };
+    assert!(read().fills[0]["commission"].is_null());
+    let mut fill = fixture()["fill"].clone();
+    fill["commission"] = json!(42.0);
+    db.put_cf(
+        db.cf_handle(NativeCf::Fills.name()).unwrap(),
+        b"trade\x00",
+        serde_json::to_vec(&fill).unwrap(),
+    )
+    .unwrap();
+    let next = super::export::page(
+        &cloud,
+        &cloud.sources[0].id,
+        with_hash(
+            request(first.until, None, Some(first.store_id)),
+            Some(first.until_sha256),
+        ),
+    )
+    .unwrap();
+    replica.accept(&next).unwrap();
+    replica.apply().unwrap();
+    assert_eq!(read().fills[0]["commission"], 42.0);
+}

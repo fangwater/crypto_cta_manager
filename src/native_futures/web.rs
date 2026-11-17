@@ -63,7 +63,8 @@ fn token(headers: &HeaderMap) -> Option<String> {
 pub struct Service {
     config: Arc<Config>,
     pool: PgPool,
-    readers: Arc<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    readers: Arc<BTreeMap<String, Arc<tokio::sync::Mutex<reader::Cache>>>>,
+    rocks: Arc<crate::rocks_source::ReaderPool>,
     catalog_lock: Arc<tokio::sync::Mutex<()>>,
     market_data: Option<Arc<Feed>>,
 }
@@ -71,6 +72,14 @@ pub struct Service {
 impl Service {
     pub fn new(config: Config, pool: PgPool) -> Result<Self> {
         config.validate()?;
+        let rocks = Arc::new(crate::rocks_source::ReaderPool::new(
+            &config.secondary_root,
+            &config
+                .sources
+                .iter()
+                .map(|s| s.rocksdb_path.as_path())
+                .collect::<Vec<_>>(),
+        )?);
         let market_data = config
             .market_data
             .clone()
@@ -87,6 +96,7 @@ impl Service {
             ),
             config: Arc::new(config),
             pool,
+            rocks,
             catalog_lock: Arc::default(),
             market_data,
         })
@@ -350,14 +360,14 @@ async fn snapshot(
         .find(|source| source.enabled && source.id == id)
         .cloned()
         .ok_or_else(forbidden)?;
-    let secondary = s.config.secondary_root.join(&id);
+    let rocks = s.rocks.clone();
     let lock = s.readers[&id].clone();
     let guard = lock.lock_owned().await;
     let limit = s.config.recent_rows;
     let stale = s.config.stale_secs;
     let observed = tokio::task::spawn_blocking(move || {
-        let _guard = guard;
-        reader::read(&source, &secondary, limit, stale)
+        let mut cache = guard;
+        reader::with_db(&rocks, &source, |db| cache.read(&source, db, limit, stale))
     })
     .await
     .map_err(anyhow::Error::from)??;
@@ -387,6 +397,7 @@ async fn cost_report(
         .cloned()
         .ok_or_else(forbidden)?;
     let config = s.config.clone();
+    let rocks = s.rocks.clone();
     let lock = s.readers[&id].clone();
     let guard = lock.lock_owned().await;
     let day = query.trading_day;
@@ -406,8 +417,9 @@ async fn cost_report(
                 (None, true)
             }
         };
-        let facts =
-            reader::read_cost_facts(&source, &config.secondary_root.join(&read_id), &read_day)?;
+        let facts = reader::with_db(&rocks, &source, |db| {
+            reader::read_cost_facts_from_db(&source, db, &read_day)
+        })?;
         Ok((pack, facts, error))
     })
     .await

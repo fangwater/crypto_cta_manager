@@ -480,3 +480,120 @@ fn last_reconciled_time(db: &DB) -> Option<i64> {
         .unwrap();
     serde_json::from_slice::<Value>(&bytes).unwrap()["received_us"].as_i64()
 }
+
+#[test]
+fn cached_observation_matches_cold_reads_and_updates_only_changed_evidence_and_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("exec");
+    let db = db(&primary);
+    let source = source(&primary);
+    let f = fixture();
+    let mut state = f["state"].clone();
+    state["received_us"] = json!(super::now_us());
+    put(&db, "cn_trading_events", "001", &state);
+    put(&db, "cn_uniform_orders", "one", &f["order"]);
+    put(&db, "cn_trade_facts", "one", &f["fill"]);
+    let pool =
+        crate::rocks_source::ReaderPool::new(&tmp.path().join("pooled"), &[&primary]).unwrap();
+    let mut cache = reader::Cache::default();
+    let mut read =
+        || reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
+    let first = read();
+    assert_eq!(first.status, "observing");
+    assert_eq!(read().total_fills, 1);
+    put(
+        &db,
+        "cn_trading_events",
+        "002",
+        &json!({"sequence":101,"received_us":super::now_us(),"value":{"type":"market_tick","error":7,"reason":false,"payload":[1,2,3]}}),
+    );
+    let tick = read();
+    assert_eq!(tick.status, "observing");
+    assert_eq!(tick.total_orders, 1);
+    let mut fill = f["fill"].clone();
+    fill["commission"] = json!(123.5);
+    put(&db, "cn_trade_facts", "one", &fill);
+    assert_eq!(read().fills[0]["commission"], 123.5);
+    put(
+        &db,
+        "cn_trading_events",
+        "003",
+        &json!({"sequence":102,"received_us":super::now_us(),"value":{"type":"yida_event","event":{"kind":2,"replay":0}}}),
+    );
+    let cached = read();
+    let cold = reader::read(&source, &tmp.path().join("cold"), 10, 30).unwrap();
+    let mut a = serde_json::to_value(cached).unwrap();
+    let mut b = serde_json::to_value(cold).unwrap();
+    a["read_at_us"] = json!(0);
+    b["read_at_us"] = json!(0);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn cached_snapshot_lag_includes_fills_outside_recent_rows_and_clears_after_a_new_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("exec");
+    let db = db(&primary);
+    let source = source(&primary);
+    let f = fixture();
+    let mut state = f["state"].clone();
+    state["received_us"] = json!(super::now_us());
+    put(&db, "cn_trading_events", "001", &state);
+    let mut late = f["fill"].clone();
+    late["evidence_seq"] = json!(1000);
+    late["received_us"] = json!(1);
+    put(&db, "cn_trade_facts", "late", &late);
+    let mut recent = f["fill"].clone();
+    recent["received_us"] = json!(2);
+    recent["fill"]["identity"]["trade_id"] = json!("second");
+    put(&db, "cn_trade_facts", "recent", &recent);
+    let pool =
+        crate::rocks_source::ReaderPool::new(&tmp.path().join("pooled"), &[&primary]).unwrap();
+    let mut cache = reader::Cache::default();
+    let mut read = || reader::with_db(&pool, &source, |db| cache.read(&source, db, 1, 30)).unwrap();
+    let first = read();
+    assert_eq!(first.fills.len(), 1);
+    assert!(first.positions_may_lag);
+    state["sequence"] = json!(500);
+    state["received_us"] = json!(super::now_us());
+    put(&db, "cn_trading_events", "002", &state);
+    assert!(read().positions_may_lag);
+    state["sequence"] = json!(1001);
+    put(&db, "cn_trading_events", "003", &state);
+    assert!(!read().positions_may_lag);
+}
+
+#[test]
+fn cached_observation_rebuilds_after_old_evidence_updates_and_directory_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("exec");
+    let db = db(&primary);
+    let source = source(&primary);
+    let mut state = fixture()["state"].clone();
+    state["received_us"] = json!(super::now_us());
+    put(&db, "cn_trading_events", "001", &state);
+    let pool =
+        crate::rocks_source::ReaderPool::new(&tmp.path().join("pooled"), &[&primary]).unwrap();
+    let mut cache = reader::Cache::default();
+    let mut read =
+        || reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
+    assert!(read().snapshot_ready);
+    state["value"]["state"]["ready"] = json!(false);
+    put(&db, "cn_trading_events", "001", &state);
+    put(
+        &db,
+        "cn_trading_events",
+        "002",
+        &json!({"sequence":101,"received_us":super::now_us(),"value":{"type":"market_tick"}}),
+    );
+    assert!(!read().snapshot_ready);
+    drop(db);
+    std::fs::rename(&primary, tmp.path().join("old-exec")).unwrap();
+    let fresh = super::tests::db(&primary);
+    state["value"]["state"]["positions"] = json!([]);
+    state["value"]["state"]["trading_day"] = json!("20261117");
+    put(&fresh, "cn_trading_events", "001", &state);
+    let next = read();
+    assert_eq!(next.trading_day.as_deref(), Some("20261117"));
+    assert!(next.positions.is_empty());
+}
