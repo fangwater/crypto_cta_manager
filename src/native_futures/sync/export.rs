@@ -131,6 +131,8 @@ fn recover(db: &DB) -> Result<()> {
 }
 
 fn capture(db: &DB, source: &Source, secondary: &FsPath, journal_path: &FsPath) -> Result<()> {
+    let started = std::time::Instant::now();
+    tracing::info!(source_id=%source.id, "capturing native source view");
     let execution_id = identity(&source.rocksdb_path)?;
     let store_id = hex::encode(Sha256::digest(format!(
         "{execution_id}\n{}",
@@ -227,22 +229,23 @@ fn capture(db: &DB, source: &Source, secondary: &FsPath, journal_path: &FsPath) 
     let mut batch = WriteBatch::default();
     batch.put(PENDING, serde_json::to_vec(&plan)?);
     write(db, batch)?;
-    recover(db)
+    recover(db)?;
+    tracing::info!(source_id=%source.id, records=plan.counts.iter().sum::<u64>(),
+        changes=plan.until-plan.after, elapsed_ms=started.elapsed().as_millis(),
+        "captured native source view");
+    Ok(())
 }
 
-pub(super) fn page(config: &Config, source_id: &str, request: Request) -> Result<Page> {
-    if request.mode != crate::runtime_mode::RuntimeMode::CnFutures {
-        return conflict("synchronization mode mismatch");
-    }
+struct Journal {
+    db: DB,
+    directory_id: String,
+}
+
+fn open_journal(config: &Config, source_id: &str) -> Result<Journal> {
     let settings = config
         .sync_export
         .as_ref()
         .context("sync_export is not configured")?;
-    let source = config
-        .sources
-        .iter()
-        .find(|s| s.id == source_id && s.enabled && s.sync.is_none())
-        .context("export source unavailable")?;
     let root = resolved(&settings.journal_root)?;
     let path = root.join(source_id);
     ensure!(
@@ -251,6 +254,29 @@ pub(super) fn page(config: &Config, source_id: &str, request: Request) -> Result
     );
     std::fs::create_dir_all(&root)?;
     let db = open_owned(&path, "cn_futures_sync_export", source_id, &[])?;
+    Ok(Journal {
+        db,
+        directory_id: identity(&path)?,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn page(config: &Config, source_id: &str, request: Request) -> Result<Page> {
+    let db = open_journal(config, source_id)?;
+    page_with_db(config, source_id, request, &db.db)
+}
+
+fn page_with_db(config: &Config, source_id: &str, request: Request, db: &DB) -> Result<Page> {
+    if request.mode != crate::runtime_mode::RuntimeMode::CnFutures {
+        return conflict("synchronization mode mismatch");
+    }
+    let settings = config.sync_export.as_ref().context("sync_export")?;
+    let source = config
+        .sources
+        .iter()
+        .find(|s| s.id == source_id && s.enabled && s.sync.is_none())
+        .context("export source unavailable")?;
+    let path = resolved(&settings.journal_root)?.join(source_id);
     let existing = get::<Head>(&db, HEAD)?;
     if request.after > existing.as_ref().map_or(0, |h| h.cursor)
         || request
@@ -336,7 +362,7 @@ pub(super) fn page(config: &Config, source_id: &str, request: Request) -> Result
 struct ExportState {
     config: Config,
     token_hash: [u8; 32],
-    locks: BTreeMap<String, Arc<tokio::sync::Mutex<()>>>,
+    journals: BTreeMap<String, Arc<tokio::sync::Mutex<Option<Journal>>>>,
 }
 #[derive(Clone)]
 pub struct ExportService(Arc<ExportState>);
@@ -353,7 +379,7 @@ impl ExportService {
     pub(super) fn with_token(config: Config, secret: &str) -> Result<Self> {
         config.validate()?;
         let settings = config.sync_export.as_ref().context("sync_export")?;
-        let locks = settings
+        let journals = settings
             .source_ids
             .iter()
             .map(|id| (id.clone(), Arc::default()))
@@ -361,13 +387,14 @@ impl ExportService {
         Ok(Self(Arc::new(ExportState {
             config,
             token_hash: Sha256::digest(secret.as_bytes()).into(),
-            locks,
+            journals,
         })))
     }
     pub fn router(self) -> Router {
         Router::new()
             .route("/api/native/sync/{id}", post(export_page))
             .with_state(self)
+            .layer(tower_http::compression::CompressionLayer::new().gzip(true))
     }
 }
 
@@ -397,14 +424,43 @@ async fn export_page(
         )
             .into_response();
     }
-    let Some(lock) = service.0.locks.get(&id).cloned() else {
+    let Some(lock) = service.0.journals.get(&id).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let guard = lock.lock_owned().await;
     let state = service.0.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let _guard = guard;
-        page(&state.config, &id, request)
+        let mut journal = guard;
+        if let Some(cached) = journal.as_ref() {
+            let root = &state
+                .config
+                .sync_export
+                .as_ref()
+                .context("sync_export")?
+                .journal_root;
+            if !identity(&root.join(&id)).is_ok_and(|value| value == cached.directory_id) {
+                *journal = None;
+                return conflict(
+                    "export journal directory changed; preserve history and review the source",
+                );
+            }
+        }
+        if journal.is_none() {
+            *journal = Some(open_journal(&state.config, &id)?);
+        }
+        let result = page_with_db(
+            &state.config,
+            &id,
+            request,
+            &journal.as_ref().expect("journal initialized").db,
+        );
+        if result
+            .as_ref()
+            .is_err_and(|error| error.downcast_ref::<rocksdb::Error>().is_some())
+        {
+            *journal = None;
+        }
+        result
     })
     .await;
     match result {

@@ -2,13 +2,32 @@ use super::{store::*, *};
 use crate::native_futures::config::{Config, Source, resolved};
 use rocksdb::{DB, IteratorMode, WriteBatch};
 use std::{
+    io::Read,
     path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+pub(super) fn decode_page(bytes: Vec<u8>, gzip: bool) -> Result<Page> {
+    let bytes = if gzip {
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(bytes.as_slice())
+            .take(MAX_RESPONSE_BYTES as u64 + 1)
+            .read_to_end(&mut decoded)
+            .context("decompress native sync response")?;
+        decoded
+    } else {
+        bytes
+    };
+    ensure!(
+        bytes.len() <= MAX_RESPONSE_BYTES,
+        "decoded native sync response exceeds 16 MiB"
+    );
+    serde_json::from_slice(&bytes).context("decode native sync response")
+}
 
 pub struct Replica {
     pub(super) db: DB,
@@ -233,6 +252,7 @@ impl Replica {
     ) -> Result<ReplicaStatus> {
         let me = self.clone();
         tokio::task::spawn_blocking(move || me.apply()).await??;
+        let mut progress_at = Instant::now();
         loop {
             let state = self.status()?;
             if stop.load(Ordering::Relaxed) {
@@ -257,10 +277,17 @@ impl Replica {
             let mut response = client
                 .post(url)
                 .header(reqwest::header::AUTHORIZATION, authorization)
+                .header(reqwest::header::ACCEPT_ENCODING, "gzip")
                 .json(&request)
                 .send()
                 .await?
                 .error_for_status()?;
+            let gzip = match response.headers().get(reqwest::header::CONTENT_ENCODING) {
+                None => false,
+                Some(value) if value == "identity" => false,
+                Some(value) if value == "gzip" => true,
+                _ => anyhow::bail!("unsupported native sync content encoding"),
+            };
             let mut bytes = vec![];
             while let Some(chunk) = response.chunk().await? {
                 ensure!(
@@ -269,15 +296,22 @@ impl Replica {
                 );
                 bytes.extend_from_slice(&chunk);
             }
-            let page: Page =
-                serde_json::from_slice(&bytes).context("decode native sync response")?;
-            let done = page.next == page.until;
             let me = self.clone();
-            tokio::task::spawn_blocking(move || -> Result<()> {
+            let done = tokio::task::spawn_blocking(move || -> Result<bool> {
+                let page = decode_page(bytes, gzip)?;
+                let done = page.next == page.until;
                 me.accept(&page)?;
-                me.apply()
+                me.apply()?;
+                Ok(done)
             })
             .await??;
+            if done || progress_at.elapsed() >= Duration::from_secs(15) {
+                let progress = self.status()?;
+                tracing::info!(source_id=%self.source.id, received=progress.received_cursor,
+                    committed=progress.committed_cursor, target=?progress.target_cursor,
+                    "native synchronization progress");
+                progress_at = Instant::now();
+            }
             if done {
                 return self.status();
             }

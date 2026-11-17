@@ -41,7 +41,7 @@ export default function CostAnalysis({ sourceId, tradingDay }: { sourceId: strin
       <Button disabled={loading || !sourceId || !/^\d{8}$/.test(day)} onClick={() => setRefresh(v => v + 1)}>重新计算</Button>
       {loading && <span role="status" className="text-sm text-muted">正在计算…</span>}
     </div>
-    <p className="text-sm text-muted">按真实成交手数比较理论执行价格与手续费，正值表示实际成本更高。交易日及夜盘归属以维护的数据为准；分钟参考价不包含盘口价差与市场冲击。</p>
+    <p className="text-sm text-muted">按真实成交手数比较理论执行价格与手续费，正值表示实际成本更高。手续费按合约和开平规则计算，开仓、平今、平昨分别维护。交易日及夜盘归属以维护的数据为准；分钟参考价不包含盘口价差与市场冲击。</p>
     {error && <Alert tone="error">{error}</Alert>}
     {!/^\d{8}$/.test(day) && <p className="text-sm text-muted">请输入需要复盘的交易日。</p>}
     {report && <>
@@ -58,7 +58,7 @@ export default function CostAnalysis({ sourceId, tradingDay }: { sourceId: strin
         {report.signals.map(s => <tr key={s.signal_id}><td>{s.signal_id}</td><td>{s.venue}／{s.symbol}</td><td>{direction(s.side, s.offset)}</td><td>{s.window_minutes} 分钟 {s.model.toUpperCase()}</td><td>{s.expected_lots}／{s.priced_lots}</td><td>{number(s.theoretical_price)}</td><td>{s.reason ?? '价格完整'}</td></tr>)}
       </tbody></table></div>
       <h2 className="font-semibold">真实成交对照</h2>
-      <div className="native-table-scroll"><table className="native-table"><thead><tr>{['交易所／合约', '成交号', '会话／引用', '方向／开平', '手数', '参考编号', '成交价／理论价', '事实手续费', '理论手续费（元）', '价差成本（元）', '手续费差（元）', '总成本差（元）', '数据状态'].map(h => <th key={h}>{h}</th>)}</tr></thead><tbody>
+      <div className="native-table-scroll"><table className="native-table"><thead><tr>{['交易所／合约', '成交号', '会话／引用', '方向／开平', '手数', '参考编号', '成交价／理论价', '实际手续费', '理论手续费（元）', '价差成本（元）', '手续费差（元）', '总成本差（元）', '数据状态'].map(h => <th key={h}>{h}</th>)}</tr></thead><tbody>
         {report.fills.slice(page * 100, (page + 1) * 100).map(f => <tr key={`${f.venue}:${f.symbol}:${f.trade_id}:${f.side}`}><td>{f.venue}／{f.symbol}</td><td>{f.trade_id}</td><td>{f.session ?? '—'}／{f.order_ref ?? '—'}</td><td>{direction(f.side, f.offset)}</td><td>{f.lots}</td><td>{f.signal_id ?? '—'}</td><td>{number(f.actual_price)}／{number(f.theoretical_price)}</td><td>{f.actual_commission === null ? '未报告' : `${number(f.actual_commission)} ${f.commission_currency ?? '币种未报告'}`}</td><td>{number(f.theoretical_commission_cny)}</td><td>{number(f.price_shortfall_cny)}</td><td>{number(f.fee_shortfall_cny)}</td><td>{number(f.total_shortfall_cny)}</td><td>{f.reason ?? '对照完整'}</td></tr>)}
       </tbody></table></div>
       {report.fills.length > 100 && <div className="flex items-center gap-3"><Button disabled={page === 0} onClick={() => setPage(v => v - 1)}>上一页</Button><span className="text-sm">{page + 1}／{Math.ceil(report.fills.length / 100)}</span><Button disabled={(page + 1) * 100 >= report.fills.length} onClick={() => setPage(v => v + 1)}>下一页</Button></div>}

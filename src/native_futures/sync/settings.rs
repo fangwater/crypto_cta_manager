@@ -79,7 +79,7 @@ pub fn validate_config(config: &Config) -> Result<()> {
     if let Some(sync) = &config.sync {
         ensure!(
             (1..=86400).contains(&sync.poll_secs)
-                && (1..=300).contains(&sync.timeout_secs)
+                && (1..=3600).contains(&sync.timeout_secs)
                 && (1..=32).contains(&sync.concurrent_sources),
             "invalid native synchronization timing"
         );

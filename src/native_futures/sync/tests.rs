@@ -229,15 +229,25 @@ async fn http_bootstrap_incremental_old_order_and_fee_updates_preserve_source_by
     assert_eq!(snapshot.total_fills, 1);
     assert_eq!(snapshot.total_orders, 1);
     assert_eq!(snapshot.replication.unwrap().committed_cursor, 3);
-    let unchanged = super::export::page(
-        &cloud,
-        &cloud.sources[0].id,
-        with_hash(
+    let unchanged: Page = client()
+        .post(format!(
+            "{}/api/native/sync/{}",
+            local.sources[0].sync.as_ref().unwrap().url,
+            cloud.sources[0].id
+        ))
+        .bearer_auth(TEST_TOKEN)
+        .json(&with_hash(
             request(3, None, state.store_id.clone()),
             state.committed_sha256.clone(),
-        ),
-    )
-    .unwrap();
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert!(unchanged.changes.is_empty());
     assert_eq!(unchanged.until, 3);
     let mut f = fixture();
@@ -647,17 +657,19 @@ fn interrupted_export_capture_is_discarded_or_completed_before_serving_a_cut() {
     }
 }
 
-#[tokio::test]
-async fn journal_generation_and_checkpoint_hash_detect_reset_and_rewritten_prefix() {
+#[test]
+fn journal_generation_and_checkpoint_hash_detect_reset_and_rewritten_prefix() {
     let temp = tempfile::tempdir().unwrap();
-    let (cloud, mut local) = configs(temp.path());
+    let (mut cloud, local) = configs(temp.path());
+    cloud.sync_export.as_mut().unwrap().batch_records = 500;
     let db = primary(&cloud.sources[0].rocksdb_path);
     seed(&db);
-    let (url, server) = serve(cloud.clone()).await;
-    local.sources[0].sync.as_mut().unwrap().url = url;
-    let replica = Arc::new(Replica::open(&local, &local.sources[0]).unwrap());
-    let c = client();
-    let state = replica.sync_once(&c, TEST_TOKEN).await.unwrap();
+    let initial =
+        super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
+    let replica = Replica::open(&local, &local.sources[0]).unwrap();
+    replica.accept(&initial).unwrap();
+    replica.apply().unwrap();
+    let state = replica.status().unwrap();
     let old = all_bytes(&replica.db);
     let journal_path = cloud
         .sync_export
@@ -687,7 +699,17 @@ async fn journal_generation_and_checkpoint_hash_detect_reset_and_rewritten_prefi
     batch.put(seq_key(b'J', 3), serde_json::to_vec(&replacement).unwrap());
     write(&journal, batch).unwrap();
     drop(journal);
-    assert!(replica.sync_once(&c, TEST_TOKEN).await.is_err());
+    assert!(
+        super::export::page(
+            &cloud,
+            &cloud.sources[0].id,
+            with_hash(
+                request(state.committed_cursor, None, state.store_id.clone()),
+                state.committed_sha256.clone()
+            )
+        )
+        .is_err()
+    );
     assert_eq!(
         replica.status().unwrap().committed_cursor,
         state.committed_cursor
@@ -695,8 +717,101 @@ async fn journal_generation_and_checkpoint_hash_detect_reset_and_rewritten_prefi
     assert_eq!(all_bytes(&replica.db), old);
     std::fs::rename(&journal_path, temp.path().join("preserved-export-journal")).unwrap();
     let fresh = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
-    assert_ne!(Some(fresh.store_id), state.store_id);
-    assert!(replica.sync_once(&c, TEST_TOKEN).await.is_err());
+    assert_ne!(Some(fresh.store_id.clone()), state.store_id);
+    assert!(replica.accept(&fresh).is_err());
     assert_eq!(all_bytes(&replica.db), old);
+}
+
+#[test]
+fn gzip_pages_are_bounded_after_decompression_and_corrupt_streams_are_rejected() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let (cloud, _) = configs(temp.path());
+    let db = primary(&cloud.sources[0].rocksdb_path);
+    seed(&db);
+    let page = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
+    let raw = serde_json::to_vec(&page).unwrap();
+    let compress = |bytes: &[u8]| {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    };
+    let decoded = super::collector::decode_page(compress(&raw), true).unwrap();
+    assert_eq!(serde_json::to_vec(&decoded).unwrap(), raw);
+    assert!(super::collector::decode_page(b"invalid gzip".to_vec(), true).is_err());
+    assert!(
+        super::collector::decode_page(compress(&vec![b'a'; MAX_RESPONSE_BYTES + 1]), true).is_err()
+    );
+}
+
+#[tokio::test]
+async fn http_pages_reuse_one_live_journal_and_negotiate_compression() {
+    let temp = tempfile::tempdir().unwrap();
+    let (cloud, _) = configs(temp.path());
+    let db = primary(&cloud.sources[0].rocksdb_path);
+    seed(&db);
+    let (url, server) = serve(cloud.clone()).await;
+    let c = client();
+    let response = c
+        .post(format!("{url}/api/native/sync/{}", cloud.sources[0].id))
+        .bearer_auth(TEST_TOKEN)
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+        .json(&request(0, None, None))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_ENCODING],
+        "gzip"
+    );
+    let page =
+        super::collector::decode_page(response.bytes().await.unwrap().to_vec(), true).unwrap();
+    let journal_path = cloud
+        .sync_export
+        .as_ref()
+        .unwrap()
+        .journal_root
+        .join(&cloud.sources[0].id);
+    assert!(
+        open_owned(
+            &journal_path,
+            "cn_futures_sync_export",
+            &cloud.sources[0].id,
+            &[]
+        )
+        .is_err(),
+        "exporter must keep its journal open between pages"
+    );
+    let next: Page = c
+        .post(format!("{url}/api/native/sync/{}", cloud.sources[0].id))
+        .bearer_auth(TEST_TOKEN)
+        .json(&with_hash(
+            request(page.next, Some(page.until), Some(page.store_id)),
+            Some(page.next_sha256),
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(next.after, page.next);
+    assert_eq!(next.changes.len(), 1);
+    let identity = journal_path.join("IDENTITY");
+    let original = std::fs::read(&identity).unwrap();
+    std::fs::write(&identity, b"replacement-journal").unwrap();
+    let replaced = c
+        .post(format!("{url}/api/native/sync/{}", cloud.sources[0].id))
+        .bearer_auth(TEST_TOKEN)
+        .json(&request(0, None, None))
+        .send()
+        .await
+        .unwrap();
+    std::fs::write(&identity, original).unwrap();
+    assert_eq!(replaced.status(), reqwest::StatusCode::CONFLICT);
     server.abort();
 }
