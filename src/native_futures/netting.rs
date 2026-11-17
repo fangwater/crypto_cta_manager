@@ -43,7 +43,7 @@ pub struct InitialPosition {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Initialize {
-    pub strategies: BTreeSet<String>,
+    pub strategy_groups: BTreeMap<String, BTreeSet<String>>,
     pub contracts: BTreeMap<String, Contract>,
     pub positions: BTreeMap<String, BTreeMap<String, InitialPosition>>,
     pub snapshot_evidence_sequence: i64,
@@ -79,9 +79,12 @@ impl Quote {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetBatch {
+    pub strategy_group: String,
     pub batch_id: String,
     pub expected_revision: i64,
     pub decision_us: i64,
+    #[serde(default)]
+    pub signal_times: BTreeMap<String, i64>,
     /// Complete roster, each with a complete contract vector (including zeros).
     pub strategies: Strategies,
     pub quotes: BTreeMap<String, Quote>,
@@ -188,12 +191,22 @@ pub struct Valuation {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StrategyGroup {
+    pub members: BTreeSet<String>,
+    pub decision_us: i64,
+    pub held: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Portfolio {
     pub source_id: String,
     pub revision: i64,
     pub decision_us: i64,
     pub batch_id: Option<String>,
     pub external_demand_open: bool,
+    pub target_revision: i64,
+    pub last_strategy_group: Option<String>,
+    pub strategy_groups: BTreeMap<String, StrategyGroup>,
     pub contracts: BTreeMap<String, Contract>,
     pub targets: Strategies,
     pub positions: BTreeMap<String, BTreeMap<String, Position>>,
@@ -223,6 +236,7 @@ pub struct NetTarget {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BatchReceipt {
+    pub strategy_group: String,
     pub source_id: String,
     pub batch_id: String,
     pub revision: i64,
@@ -230,6 +244,20 @@ pub struct BatchReceipt {
     pub internal_crosses: Vec<InternalCross>,
     pub external_demands: Strategies,
     pub net_targets: BTreeMap<String, NetTarget>,
+    pub execution_plan: ExecutionPlan,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExecutionPlan {
+    pub source_id: String,
+    pub batch_id: Option<String>,
+    pub target_revision: i64,
+    pub account_revision: i64,
+    pub publishable: bool,
+    /// One signed account target per native contract, independently of how
+    /// many factor strategies contributed to it.
+    pub net_targets: Quantities,
+    pub attribution: Strategies,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -303,7 +331,23 @@ impl Portfolio {
         );
         let at_us = anchor.snapshot_us;
         ensure!(
-            (1..=128).contains(&request.strategies.len())
+            (1..=32).contains(&request.strategy_groups.len()),
+            "require 1..32 strategy groups"
+        );
+        let mut strategies = BTreeSet::new();
+        for (name, members) in &request.strategy_groups {
+            valid_id(name)?;
+            ensure!(!members.is_empty(), "strategy group is empty");
+            for member in members {
+                ensure!(
+                    strategies.insert(member.clone()),
+                    "strategy belongs to multiple groups"
+                );
+            }
+        }
+
+        ensure!(
+            (1..=128).contains(&strategies.len())
                 && (1..=64).contains(&request.contracts.len())
                 && request.snapshot_evidence_sequence > 0
                 && at_us > 0
@@ -311,7 +355,7 @@ impl Portfolio {
                 && request.note.len() <= 4096,
             "invalid native attribution initialization"
         );
-        for name in &request.strategies {
+        for name in &strategies {
             crate::order_config::validate_strategy_name(name).map_err(anyhow::Error::msg)?;
         }
         for (market, contract) in &request.contracts {
@@ -325,13 +369,13 @@ impl Portfolio {
             request
                 .positions
                 .keys()
-                .all(|name| request.strategies.contains(name)),
+                .all(|name| strategies.contains(name)),
             "initial position has unknown strategy"
         );
         let mut positions = BTreeMap::new();
         let mut account: BTreeMap<String, Position> = BTreeMap::new();
         let mut targets = BTreeMap::new();
-        for name in &request.strategies {
+        for name in &strategies {
             let mut rows = BTreeMap::new();
             let mut desired = BTreeMap::new();
             if let Some(initial) = request.positions.get(name) {
@@ -374,6 +418,22 @@ impl Portfolio {
             decision_us: 0,
             batch_id: None,
             external_demand_open: false,
+            target_revision: 0,
+            last_strategy_group: None,
+            strategy_groups: request
+                .strategy_groups
+                .iter()
+                .map(|(name, members)| {
+                    (
+                        name.clone(),
+                        StrategyGroup {
+                            members: members.clone(),
+                            decision_us: 0,
+                            held: false,
+                        },
+                    )
+                })
+                .collect(),
             contracts: request.contracts.clone(),
             targets,
             positions,
@@ -387,7 +447,7 @@ impl Portfolio {
         if !self.external_demand_open {
             return BTreeMap::new();
         }
-        self.targets
+        self.effective_targets()
             .iter()
             .filter_map(|(name, rows)| {
                 let remaining: Quantities = rows
@@ -401,11 +461,41 @@ impl Portfolio {
             })
             .collect()
     }
+    pub fn execution_plan(&self) -> Result<ExecutionPlan> {
+        Ok(ExecutionPlan {
+            source_id: self.source_id.clone(),
+            batch_id: self.batch_id.clone(),
+            target_revision: self.target_revision,
+            account_revision: self.revision,
+            publishable: self.external_demand_open,
+            net_targets: self
+                .net_targets()?
+                .into_iter()
+                .map(|(market, row)| (market, row.target_lots))
+                .collect(),
+            attribution: self.external_demands(),
+        })
+    }
+    fn effective_targets(&self) -> Strategies {
+        let mut targets = self.targets.clone();
+        for group in self.strategy_groups.values().filter(|g| g.held) {
+            for name in &group.members {
+                for (market, position) in &self.positions[name] {
+                    targets
+                        .get_mut(name)
+                        .unwrap()
+                        .insert(market.clone(), position.quantity());
+                }
+            }
+        }
+        targets
+    }
     pub fn net_targets(&self) -> Result<BTreeMap<String, NetTarget>> {
+        let effective = self.effective_targets();
         self.contracts
             .keys()
             .map(|market| {
-                let target = self.targets.values().try_fold(0i64, |n, rows| {
+                let target = effective.values().try_fold(0i64, |n, rows| {
                     n.checked_add(rows[market])
                         .context("aggregate target overflow")
                 })?;
@@ -438,6 +528,10 @@ impl Portfolio {
     /// Pure plan: callers persist the returned state and complete receipt together.
     pub fn batch(&self, request: &TargetBatch, now_us: i64) -> Result<(Self, BatchReceipt)> {
         valid_id(&request.batch_id)?;
+        let group = self
+            .strategy_groups
+            .get(&request.strategy_group)
+            .context("unknown strategy group")?;
         require(
             !self.external_demand_open,
             "previous external demand is unsettled; import factual fills or release confirmed canceled demand first",
@@ -447,7 +541,7 @@ impl Portfolio {
             "portfolio changed; reload before publishing",
         )?;
         require(
-            request.decision_us > self.decision_us
+            request.decision_us > group.decision_us
                 && request.decision_us >= self.anchor.snapshot_us,
             "stale decision timestamp",
         )?;
@@ -456,8 +550,17 @@ impl Portfolio {
             "decision must be within the last 120 seconds"
         );
         ensure!(
-            request.strategies.keys().eq(self.targets.keys()),
-            "batch must contain the complete registered strategy roster"
+            request.strategies.keys().eq(group.members.iter()),
+            "batch must contain the complete registered group roster"
+        );
+        ensure!(
+            request.signal_times.is_empty()
+                || (request.signal_times.keys().eq(request.strategies.keys())
+                    && request
+                        .signal_times
+                        .values()
+                        .all(|at| *at >= 0 && *at <= request.decision_us)),
+            "invalid per-strategy signal observation times"
         );
         for rows in request.strategies.values() {
             ensure!(
@@ -476,16 +579,25 @@ impl Portfolio {
             "quote for unregistered contract"
         );
         let mut next = self.clone();
-        next.targets = request.strategies.clone();
+        next.targets.extend(request.strategies.clone());
+        let updated = next
+            .strategy_groups
+            .get_mut(&request.strategy_group)
+            .unwrap();
+        updated.decision_us = request.decision_us;
+        updated.held = false;
+        next.last_strategy_group = Some(request.strategy_group.clone());
         next.revision = next.revision.checked_add(1).context("revision overflow")?;
-        next.decision_us = request.decision_us;
+        next.target_revision = next.revision;
+        next.decision_us = self.decision_us.max(request.decision_us);
         next.batch_id = Some(request.batch_id.clone());
         let mut crosses = vec![];
         let mut external = Strategies::new();
+        let effective = next.effective_targets();
         for (market, contract) in &self.contracts {
             let mut buyers = VecDeque::new();
             let mut sellers = VecDeque::new();
-            for (name, rows) in &request.strategies {
+            for (name, rows) in &effective {
                 let delta = rows[market] - self.positions[name][market].quantity();
                 if delta > 0 {
                     buyers.push_back((name.clone(), delta));
@@ -549,6 +661,7 @@ impl Portfolio {
         next.external_demand_open = !external.is_empty();
         next.check()?;
         let receipt = BatchReceipt {
+            strategy_group: request.strategy_group.clone(),
             source_id: self.source_id.clone(),
             batch_id: request.batch_id.clone(),
             revision: next.revision,
@@ -556,6 +669,7 @@ impl Portfolio {
             internal_crosses: crosses,
             external_demands: external,
             net_targets: next.net_targets()?,
+            execution_plan: next.execution_plan()?,
         };
         Ok((next, receipt))
     }

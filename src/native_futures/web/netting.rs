@@ -13,6 +13,10 @@ pub(super) fn routes() -> Router<Service> {
         )
         .route("/api/native/sources/{id}/target-batches", post(batch))
         .route(
+            "/api/native/sources/{id}/netting/execution-plan",
+            get(execution_plan),
+        )
+        .route(
             "/api/native/sources/{id}/netting/release-demands",
             post(release_demands),
         )
@@ -38,7 +42,7 @@ fn failure(error: anyhow::Error) -> ApiError {
     bad(error)
 }
 
-async fn authorize(
+pub(super) async fn authorize(
     s: &Service,
     user: &AuthUser,
     access: &SourceAccess,
@@ -181,7 +185,18 @@ async fn initialize(
     Json(request): Json<model::Initialize>,
 ) -> ApiResult {
     let _guard = s.catalog_lock.lock().await;
-    authorize(&s, &user, &access, &id, request.strategies.iter(), true).await?;
+    authorize(
+        &s,
+        &user,
+        &access,
+        &id,
+        request
+            .strategy_groups
+            .values()
+            .flat_map(|members| members.iter()),
+        true,
+    )
+    .await?;
     if let Some(state) = store::load(&s.pool, &id).await? {
         authorize(&s, &user, &access, &id, state.targets.keys(), true).await?;
         return body(
@@ -246,14 +261,26 @@ async fn batch(
     Extension(user): Extension<AuthUser>,
     Extension(access): Extension<Arc<SourceAccess>>,
     Path(id): Path<String>,
+    scope: Option<Extension<super::netting_machine::PublisherScope>>,
     Json(request): Json<model::TargetBatch>,
 ) -> ApiResult {
+    if scope.is_some_and(|Extension(scope)| scope.strategy_group != request.strategy_group) {
+        return Err(forbidden());
+    }
     let _guard = s.catalog_lock.lock().await;
-    let state = authorized(&s, &user, &access, &id, true).await?;
+    authorize(&s, &user, &access, &id, std::iter::empty(), true).await?;
+    let state = store::load(&s.pool, &id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "账户尚未初始化策略归因账本".into()))?;
+    let group = state
+        .strategy_groups
+        .get(&request.strategy_group)
+        .ok_or_else(|| bad("未知策略组"))?;
+    authorize(&s, &user, &access, &id, group.members.iter(), true).await?;
     if request.strategies.keys().collect::<BTreeSet<_>>()
-        != state.targets.keys().collect::<BTreeSet<_>>()
+        != group.members.iter().collect::<BTreeSet<_>>()
     {
-        return Err(bad("批次必须包含全部已登记策略"));
+        return Err(bad("批次必须包含该组全部已登记策略"));
     }
     if let Some(receipt) = store::replay(
         &s.pool,
@@ -463,4 +490,14 @@ async fn release_demands(
             .await
             .map_err(failure)?,
     )
+}
+
+async fn execution_plan(
+    State(s): State<Service>,
+    Extension(user): Extension<AuthUser>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let state = authorized(&s, &user, &access, &id, false).await?;
+    body(state.execution_plan()?)
 }

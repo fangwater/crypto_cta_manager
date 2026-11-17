@@ -2,13 +2,13 @@
 
 最后更新：2026-11-17 UTC。
 
-国内 Manager 提供账户隔离的策略归因账本。每个 `factor-1h` 是独立策略，同一决策时点的所有策略目标通过一个请求提交。配置目录、当前归因账本、成对内部调拨、冻结的外部需求和批次收据在同一个 PostgreSQL 事务内提交；提交前读者继续看到上一批。不同进程也通过账户行锁串行化。没有逐策略执行通知。
+国内 Manager 提供账户隔离的策略归因账本。实例保留 `01 / 02` 分组，临时归因使用 `cn-futures-01-{factor_name}-1h`；每个因子是独立子策略，同一决策时点的所有策略目标通过一个请求提交。配置目录、当前归因账本、成对内部调拨、冻结的外部需求和批次收据在同一个 PostgreSQL 事务内提交；提交前读者继续看到上一批。不同进程也通过账户行锁串行化。没有逐策略执行通知。
 
 本模块不加载交易 SDK、不修改执行库、不报撤单。读取 API 输出完整的净目标、外部需求开关和 revision，供后续执行端对接；`execution_enabled=false`。现有 Crypto 的发布、异步归档和 Redis 通道保持其原有契约。国内新接口的 200 表示 Manager 归因事务已提交，不表示交易所已成交。
 
 ## 账本与匹配
 
-- 每个账户固定登记一个完整策略名单和原生合约范围，合约键如 `SHFE:sn2612`。所有目标为有符号整数手。不同账户、交易所、原生月份互不轧差。
+- 每个账户固定登记策略组、各组完整策略名单和原生合约范围，合约键如 `SHFE:sn2612`。所有目标为有符号整数手。不同账户、交易所、原生月份互不轧差。
 - 初始化需要当前运行代、完整且无成交滞后的事实持仓快照和明确的人工策略分配。客户端提供 `snapshot_evidence_sequence`，服务端重新读取快照并核对，冻结执行库世代和原生证据 SHA-256；后续批次及成交导入也核验此锚点。初始策略净手数必须等于对应合约的事实账户净手数，不按目标或合约相似度猜测归属。初始参考价和合约乘数由配置者明确指定并审计，是归因起点，不代表历史实际成本或账户结算净值。
 - 对每个策略计算 `目标 - 已归属持仓`。同合约的相反需求按策略名确定性匹配。每笔内部事件同时记录 buyer / seller、手数、同一价格、BBO 来源和观测时间，双方原子入账，手续费为零。价格固定为该决策时点有效 BBO 的 mid；BBO 不得晚于决策，也不得早于决策五秒以上。没有有效报价则整批拒绝。
 - 内部调拨只改变策略 FIFO 成本和实现收益，不改变账户事实归因持仓，不生成交易所成交、委托编号或执行库记录。策略可以持有相反虚拟仓位，账户保持净额。
@@ -22,13 +22,13 @@
 
 ## 接口
 
-所有接口使用国内 Manager 原有 `cn_cta_session` 登录与授权。需要账户权限和名单内每一个策略的对应权限；查看事件或估值同样检查整个名单的可见性。策略先通过 `/api/native/strategies` 创建并授权，加入组合后，该接口拒绝单条目标保存，必须使用整批入口。
+接口支持国内 Manager 原有 `cn_cta_session` 登录与授权；机器令牌仅允许下文列出的组级发布操作。需要账户权限和名单内每一个策略的对应权限；查看事件或估值同样检查整个名单的可见性。策略先通过 `/api/native/strategies` 创建并授权，加入组合后，该接口拒绝单条目标保存，必须使用整批入口。
 
 | 方法与路径 | 行为 |
 |---|---|
 | POST `/api/native/sources/{id}/netting` | 显式初始化一次，核对事实快照；禁止隐式覆盖旧账本 |
 | GET `/api/native/sources/{id}/netting` | 当前策略 FIFO、完整净目标、revision 和已归属手数 |
-| POST `/api/native/sources/{id}/target-batches` | 原子更新整个策略名单的完整目标 |
+| POST `/api/native/sources/{id}/target-batches` | 原子更新指定组全部策略的完整目标 |
 | GET `/api/native/sources/{id}/netting/events?after=-1&limit=50` | 按 revision 分页读取不可变审计，最多 100 条 |
 | POST `/api/native/sources/{id}/netting/fill-allocations` | 引用源库事实记录，将真实成交分配到冻结需求 |
 | POST `/api/native/sources/{id}/netting/release-demands` | 用新的完整、无委托且持仓一致的事实快照释放已撤销的剩余需求 |
@@ -38,7 +38,7 @@
 
 ```json
 {
-  "strategies": ["td_pr_010-1h", "factor_094-1h"],
+  "strategy_groups": {"cn-futures-01": ["cn-futures-01-td_pr_010-1h", "cn-futures-01-factor_094-1h"]},
   "contracts": {"SHFE:sn2612": {"multiplier": 1}},
   "positions": {},
   "snapshot_evidence_sequence": 123,
@@ -50,12 +50,13 @@
 
 ```json
 {
+  "strategy_group": "cn-futures-01",
   "batch_id": "sn-hour-20261117-2100",
   "expected_revision": 0,
   "decision_us": 1794920400000000,
   "strategies": {
-    "td_pr_010-1h": {"SHFE:sn2612": 1},
-    "factor_094-1h": {"SHFE:sn2612": -1}
+    "cn-futures-01-td_pr_010-1h": {"SHFE:sn2612": 1},
+    "cn-futures-01-factor_094-1h": {"SHFE:sn2612": -1}
   },
   "quotes": {
     "SHFE:sn2612": {
@@ -68,7 +69,7 @@
 }
 ```
 
-每批必须包含全部登记策略，每个策略必须包含全部登记合约，包括显式零目标。移除因子或换月时保留旧身份、旧合约及必要的零目标，不能省略后被当作平仓；改变名单/合约范围需要单独、明确的账本迁移，当前不提供自动迁移。
+每批指定 `strategy_group`，必须包含该组全部登记策略，每个策略必须包含全部登记合约，包括显式零目标。移除因子或换月时保留旧身份、旧合约及必要的零目标，不能省略后被当作平仓；改变名单/合约范围需要单独、明确的账本迁移，当前不提供自动迁移。
 
 `batch_id` 在账户内幂等：完全相同的请求重试返回原收据，即使后续批次已经提交。相同编号内容不同、revision 不一致或决策时间回退返回 409。新批次决策不得早于锚点，必须在接收时最近 120 秒内；幂等重试先查已提交事件，不受后续时间推移影响。任何校验或存储失败都回滚整批。
 
@@ -80,7 +81,7 @@
   "batch_id": "sn-hour-20261117-2100",
   "expected_revision": 1,
   "evidence_key": "303031",
-  "allocations": {"td_pr_010-1h": 1}
+  "allocations": {"cn-futures-01-td_pr_010-1h": 1}
 }
 ```
 
@@ -90,9 +91,30 @@
 
 估值请求为 `{"at_us": <UTC微秒>, "quotes": {<原生合约>: <BBO对象>}}`，明确标识为虚拟策略归因。原账户 NAV 和成本复盘接口继续读取原始事实，不被内部成交污染。
 
+## 组级发布与整批净目标
+
+`Initialize.strategy_groups` 把名单按实例划分，例如 `cn-futures-01` 和 `cn-futures-02`。每个子策略只属于一个组；同一账户的批次事务仍串行化。某组提交只替换该组完整目标，其他组保持原值；决策时钟按组校验，两个组可以使用同一个 bar 时间。未结清的账户外部需求仍阻止下一批，防止未知旧委托结果与新调拨交叉。
+
+`signal_times` 是可选的逐策略真实决策时间表；提供时必须完整对应本批策略，数值不晚于外层发布时间。内部调拨定价继续使用外层 `decision_us` 的有效 BBO，不把旧 bar 的参考价当作当前调拨价。
+
+| 方法与路径 | 行为 |
+|---|---|
+| POST `/api/native/sources/{id}/netting/publish-token` | 会话授权，为 `strategy_group` 生成/轮换一次性展示的机器发布令牌 |
+| DELETE 同一路径 | 会话授权，撤销该组发布令牌 |
+| GET `/api/native/sources/{id}/netting/publication?strategy_group=cn-futures-01` | 组名单、完整合约范围、组时钟和当前账户 revision |
+| GET `/api/native/sources/{id}/netting/execution-plan` | 一份完整账户净目标及其子策略归因分配 |
+
+令牌接口请求为 `{"strategy_group":"cn-futures-01"}`。机器客户端使用 `X-CTA-Publish-Token`，令牌绑定源账户、策略组和发放用户；每次检查当前用户状态、账户边界及组内全部策略配置权。机器令牌只能读取该组发布元数据和整批 POST，不能读其他组、整个归因账本、生成令牌或导入成交。权限撤回、用户禁用、令牌轮换/撤销在下一请求生效。库内只保存哈希。
+
+整批 POST 的收据新增 `execution_plan`，与目标和内部调拨在同一事务内冻结；查询接口提供同一账户当前完整计划。字段包括 `source_id / batch_id / target_revision / account_revision / publishable / net_targets / attribution`。`net_targets` 只含每个原生合约的一份带符号净手数，不按因子发多份执行命令。`attribution` 保存各策略剩余需求；成交仅更新账户 revision，保留该批 target revision。后续执行端应以 `source_id + batch_id + target_revision` 去重，并整份接纳目标。
+
+当剩余外部需求为零时，计划不可对外执行，内部仍可形成双方调拨记录；净目标为零但当前账户尚有仓位时，平仓需求仍可执行。释放已撤销需求会将对应组置为持仓保持状态；别的组后续提交不会自动恢复该组旧的未成交意图，只有该组新的明确批次可以恢复。
+
+本轮已完成信号整批推送到 Manager、组隔离、净目标输出和可拆分归因。按用户确认，不新增原生自动报撤单适配器，不把计划接纳当作实际成交；`execution_enabled=false` 仍然准确。
+
 ## 数据维护与验证
 
-新库由当前 `migrations/schema.sql` 显式初始化；已有国内 Manager 数据库须审核并执行 `scripts/apply_native_netting_schema.sql`，不在正常启动时执行 DDL。该脚本只创建 Manager 自有组合、成员、事件和外部需求预算表，执行库不变。本次代码改动不自动执行线上 DDL 或重启服务。
+新库由当前 `migrations/schema.sql` 显式初始化；已有国内 Manager 数据库首次启用净额归因时须审核并执行 `scripts/apply_native_netting_schema.sql`，不在正常启动时执行 DDL。该脚本只创建 Manager 自有组合、成员、事件、外部需求预算和组级发布令牌表，执行库不变。已安装旧净额表或存在归因账本的数据库需要单独审核迁移，不能重跑建表脚本或覆盖账本。本次代码改动不自动执行线上 DDL 或重启服务。
 
 SDK-free 验证：
 

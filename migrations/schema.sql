@@ -489,6 +489,7 @@ CREATE TABLE cta_native_netting_portfolios (
 );
 CREATE TABLE cta_native_netting_members (
     source_id text NOT NULL REFERENCES cta_native_netting_portfolios(source_id),
+    strategy_group text NOT NULL,
     strategy_name text PRIMARY KEY REFERENCES cta_position_strategies(strategy_name)
 );
 CREATE TABLE cta_native_netting_events (
@@ -514,4 +515,13 @@ CREATE TABLE cta_native_netting_demands (
     market text NOT NULL,
     remaining_lots bigint NOT NULL,
     PRIMARY KEY(source_id,batch_id,strategy_name,market)
+);
+
+CREATE TABLE cta_native_netting_publishers (
+    source_id text NOT NULL REFERENCES cta_native_netting_portfolios(source_id),
+    strategy_group text NOT NULL,
+    actor_user_id bigint NOT NULL REFERENCES cta_users(user_id),
+    token_hash text UNIQUE NOT NULL,
+    created_at_us bigint NOT NULL CHECK (created_at_us > 0),
+    PRIMARY KEY(source_id,strategy_group)
 );

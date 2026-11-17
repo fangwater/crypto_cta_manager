@@ -8,6 +8,7 @@ use crypto_cta_manager::{
     postgres,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{
     AssertSqlSafe,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -45,7 +46,7 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
     postgres::initialize(&pool).await?;
     sqlx::raw_sql("INSERT INTO cta_users(user_id,username,password_hash) VALUES(1,'operator','test-only'); INSERT INTO cta_order_sources(source_id,account_label,venue_label,rocksdb_path) VALUES('source','test','ctp','/isolated/test'); INSERT INTO cta_position_strategies(strategy_name,updated_at_us,created_by_user_id) VALUES('a-1h',1,1),('b-1h',1,1);").execute(&pool).await?;
     // Rehearse explicit maintenance on an existing catalog, not only fresh DDL.
-    sqlx::raw_sql("DROP TABLE cta_native_netting_demands; DROP TABLE cta_native_netting_members; DROP TABLE cta_native_netting_events; DROP TABLE cta_native_netting_portfolios;").execute(&pool).await?;
+    sqlx::raw_sql("DROP TABLE cta_native_netting_publishers; DROP TABLE cta_native_netting_demands; DROP TABLE cta_native_netting_members; DROP TABLE cta_native_netting_events; DROP TABLE cta_native_netting_portfolios;").execute(&pool).await?;
     sqlx::raw_sql(include_str!("../scripts/apply_native_netting_schema.sql"))
         .execute(&pool)
         .await?;
@@ -53,9 +54,39 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
         .fetch_one(&pool)
         .await?;
     assert_eq!(catalog_count, 2);
+    let temp = tempfile::tempdir()?;
+    let primary = temp.path().join("execution-evidence");
+    let mut native_options = rocksdb::Options::default();
+    native_options.create_if_missing(true);
+    native_options.create_missing_column_families(true);
+    let native = rocksdb::DB::open_cf(
+        &native_options,
+        &primary,
+        ["cn_trading_events", "cn_uniform_orders", "cn_trade_facts"],
+    )?;
+    let native_source = crypto_cta_manager::native_futures::config::Source {
+        id: "source".into(),
+        account: "test".into(),
+        adapter: "ctp".into(),
+        rocksdb_path: primary.clone(),
+        enabled: true,
+        sync: None,
+    };
+    let anchor_us = now_us() - 10_000_000;
+    let evidence = serde_json::to_vec(
+        &json!({"sequence":10,"received_us":anchor_us,"projection_error":null,"value":{"type":"reconciled","state":{"ready":true,"positions":[],"orders":[],"trading_day":"20261117"}}}),
+    )?;
+    native.put_cf(
+        native.cf_handle("cn_trading_events").unwrap(),
+        10i64.to_be_bytes(),
+        &evidence,
+    )?;
     let market = "SHFE:sn2612";
     let initial = netting::Initialize {
-        strategies: BTreeSet::from(["a-1h".into(), "b-1h".into()]),
+        strategy_groups: BTreeMap::from([(
+            "test".into(),
+            BTreeSet::from(["a-1h".into(), "b-1h".into()]),
+        )]),
         contracts: BTreeMap::from([(market.into(), netting::Contract { multiplier: 1.0 })]),
         positions: BTreeMap::new(),
         snapshot_evidence_sequence: 10,
@@ -67,17 +98,22 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
         &BTreeMap::new(),
         crypto_cta_manager::native_futures::evidence::Anchor {
             source_id: "source".into(),
-            snapshot_us: now_us() - 10_000_000,
+            snapshot_us: anchor_us,
             trading_day: "20261117".into(),
             evidence_sequence: 10,
-            evidence_sha256: "a".repeat(64),
-            store_id: "test-store".into(),
+            evidence_sha256: hex::encode(Sha256::digest(&evidence)),
+            store_id: crypto_cta_manager::native_futures::evidence::generation(
+                &native_source,
+                &native,
+            )?,
             note: initial.note.clone(),
         },
     )?;
     store::initialize(&pool, &state, &initial, 1).await?;
     store::initialize(&pool, &state, &initial, 1).await?;
     let mut request = netting::TargetBatch {
+        strategy_group: "test".into(),
+        signal_times: BTreeMap::new(),
         batch_id: "hour1".into(),
         expected_revision: 0,
         decision_us: now_us() - 100_000,
@@ -178,16 +214,15 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
     .fetch_one(&pool)
     .await?;
     assert_eq!(targets[market]["qty"], 2);
-    // HTTP permissions and the legacy single-strategy bypass guard need no SDK
-    // and never open the nonexistent execution path in this test.
+    // Verify group tokens and new complete publications against an SDK-free
+    // synthetic native evidence database, never an actual account or SDK.
     sqlx::raw_sql("UPDATE cta_users SET role='admin' WHERE user_id=1; INSERT INTO cta_users(user_id,username,password_hash) VALUES(2,'viewer','test-only'); INSERT INTO cta_user_source_permissions(user_id,source_id,access_level) VALUES(2,'source','configure');").execute(&pool).await?;
     let admin_token = crypto_cta_manager::auth::create_session(&pool, 1).await?.0;
     let viewer_token = crypto_cta_manager::auth::create_session(&pool, 2).await?.0;
-    let temp = tempfile::tempdir()?;
     let config: crypto_cta_manager::native_futures::config::Config = toml::from_str(&format!(
         "mode = 'cn_futures'\nsecondary_root = '{}'\n[[sources]]\nid = 'source'\naccount = 'test'\nadapter = 'ctp'\nrocksdb_path = '{}'\n",
         temp.path().join("secondary").display(),
-        temp.path().join("nonexistent-exec").display()
+        primary.display()
     ))?;
     let service = crypto_cta_manager::native_futures::web::Service::new(config, pool.clone())?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -250,6 +285,131 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
             .status(),
         reqwest::StatusCode::BAD_REQUEST
     );
+    // A long-lived machine token may publish only its registered account/group.
+    let issued: Value = client
+        .post(format!("{root}/netting/publish-token"))
+        .header("Cookie", format!("cn_cta_session={admin_token}"))
+        .json(&json!({"strategy_group":"test"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let machine = issued["publish_token"]
+        .as_str()
+        .context("one-time publish token")?;
+    let metadata: Value = client
+        .get(format!("{root}/netting/publication?strategy_group=test"))
+        .header("X-CTA-Publish-Token", machine)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(metadata["revision"], 3);
+    assert_eq!(metadata["members"].as_array().unwrap().len(), 2);
+    let original:Value=sqlx::query_scalar("SELECT request FROM cta_native_netting_events WHERE source_id='source' AND event_id='batch:hour1'").fetch_one(&pool).await?;
+    let replay: Value = client
+        .post(format!("{root}/target-batches"))
+        .header("X-CTA-Publish-Token", machine)
+        .json(&original)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(replay["batch_id"], "hour1");
+    assert_eq!(replay["execution_plan"]["net_targets"][market], 1);
+    assert_eq!(
+        client
+            .get(format!("{root}/netting"))
+            .header("X-CTA-Publish-Token", machine)
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        client
+            .get(format!(
+                "{root}/netting/publication?strategy_group=cn-futures-02"
+            ))
+            .header("X-CTA-Publish-Token", machine)
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    let mut wrong = original.clone();
+    wrong["strategy_group"] = json!("cn-futures-02");
+    assert_eq!(
+        client
+            .post(format!("{root}/target-batches"))
+            .header("X-CTA-Publish-Token", machine)
+            .json(&wrong)
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    let mut fresh = request.clone();
+    fresh.batch_id = "machine-new".into();
+    fresh.expected_revision = 3;
+    fresh.decision_us = now_us() - 1000;
+    fresh.quotes.get_mut(market).unwrap().observed_us = fresh.decision_us;
+    let accepted: Value = client
+        .post(format!("{root}/target-batches"))
+        .header("X-CTA-Publish-Token", machine)
+        .json(&fresh)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(accepted["batch_id"], "machine-new");
+    assert_eq!(accepted["execution_plan"]["target_revision"], 4);
+    let plan: Value = client
+        .get(format!("{root}/netting/execution-plan"))
+        .header("Cookie", format!("cn_cta_session={admin_token}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(plan["net_targets"][market], 1);
+    assert_eq!(plan["target_revision"], 4);
+    assert_eq!(plan["publishable"], false);
+    sqlx::query("UPDATE cta_users SET role='user' WHERE user_id=1")
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        client
+            .get(format!("{root}/netting/publication?strategy_group=test"))
+            .header("X-CTA-Publish-Token", machine)
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    sqlx::query("UPDATE cta_users SET role='admin' WHERE user_id=1")
+        .execute(&pool)
+        .await?;
+    client
+        .delete(format!("{root}/netting/publish-token"))
+        .header("Cookie", format!("cn_cta_session={admin_token}"))
+        .json(&json!({"strategy_group":"test"}))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert_eq!(
+        client
+            .get(format!("{root}/netting/publication?strategy_group=test"))
+            .header("X-CTA-Publish-Token", machine)
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
     let history: Vec<Value> = client
         .get(format!("{root}/netting/events"))
         .header("Cookie", format!("cn_cta_session={admin_token}"))
@@ -258,13 +418,13 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(history.len(), 4);
+    assert_eq!(history.len(), 5);
     server.abort();
     let current = store::load(&pool, "source").await?.unwrap();
     let mut pending = request.clone();
     pending.batch_id = "hour3".into();
     pending.expected_revision = current.revision;
-    pending.decision_us = now_us() - 100_000;
+    pending.decision_us = now_us();
     pending.quotes.get_mut(market).unwrap().observed_us = pending.decision_us;
     pending
         .strategies
@@ -274,12 +434,12 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
     store::batch(&pool, "source", &pending, 1).await?;
     let mut blocked = pending.clone();
     blocked.batch_id = "hour4".into();
-    blocked.expected_revision = 4;
+    blocked.expected_revision = current.revision + 1;
     blocked.decision_us += 1;
     assert!(store::batch(&pool, "source", &blocked, 1).await.is_err());
     let release = store::ReleaseDemand {
         event_id: "canceled-hour3".into(),
-        expected_revision: 4,
+        expected_revision: current.revision + 1,
         note: "fresh order-free snapshot confirms canceled remainder".into(),
     };
     let mut proof = current.anchor.clone();
@@ -319,12 +479,13 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
         .await?,
         released
     );
-    assert!(
-        !store::load(&pool, "source")
-            .await?
-            .unwrap()
-            .external_demand_open
-    );
+    let restored = store::load(&pool, "source").await?.unwrap();
+    assert!(!restored.external_demand_open);
+    assert!(restored.strategy_groups["test"].held);
+    assert_eq!(restored.targets["a-1h"][market], 3);
+    let plan = restored.execution_plan()?;
+    assert!(!plan.publishable);
+    assert_eq!(plan.net_targets[market], 1);
     pool.close().await;
     sqlx::raw_sql(AssertSqlSafe(format!("DROP DATABASE {database}")))
         .execute(&admin)

@@ -5,7 +5,10 @@ const AT: i64 = 1_000_000_000;
 
 fn portfolio(a: i64, b: i64) -> Portfolio {
     let request = Initialize {
-        strategies: BTreeSet::from(["a-1h".into(), "b-1h".into()]),
+        strategy_groups: BTreeMap::from([(
+            "test".into(),
+            BTreeSet::from(["a-1h".into(), "b-1h".into()]),
+        )]),
         contracts: BTreeMap::from([(MARKET.into(), Contract { multiplier: 5.0 })]),
         positions: BTreeMap::from([
             (
@@ -50,6 +53,8 @@ fn portfolio(a: i64, b: i64) -> Portfolio {
 }
 fn batch(state: &Portfolio, a: i64, b: i64) -> TargetBatch {
     TargetBatch {
+        strategy_group: "test".into(),
+        signal_times: BTreeMap::new(),
         batch_id: format!("hour-{}", state.revision),
         expected_revision: state.revision,
         decision_us: AT + state.revision,
@@ -348,4 +353,68 @@ fn factual_identity_uses_native_contract_day_side_and_trade_id() {
         FactualFill::from_evidence(&unknown).unwrap().commission_cny,
         None
     );
+}
+
+#[test]
+fn strategy_groups_publish_complete_owned_batches_and_share_one_account_plan() {
+    let mut state = portfolio(0, 0);
+    state.strategy_groups.insert(
+        "cn-futures-02".into(),
+        StrategyGroup {
+            members: BTreeSet::from(["other-1h".into()]),
+            decision_us: 0,
+            held: false,
+        },
+    );
+    state.positions.insert(
+        "other-1h".into(),
+        BTreeMap::from([(MARKET.into(), Position::default())]),
+    );
+    state
+        .targets
+        .insert("other-1h".into(), BTreeMap::from([(MARKET.into(), 0)]));
+    let first = batch(&state, 1, -1);
+    let (state, receipt) = state.batch(&first, AT).unwrap();
+    assert_eq!(receipt.execution_plan.net_targets[MARKET], 0);
+    assert!(!receipt.execution_plan.publishable);
+    assert_eq!(receipt.internal_crosses.len(), 1);
+    let mut second = first.clone();
+    second.strategy_group = "cn-futures-02".into();
+    second.batch_id = "other-group".into();
+    second.expected_revision = state.revision;
+    second.strategies = BTreeMap::from([("other-1h".into(), BTreeMap::from([(MARKET.into(), 0)]))]);
+    let (next, _) = state.batch(&second, AT).unwrap();
+    assert_eq!(next.targets["a-1h"][MARKET], 1);
+    assert_eq!(next.targets["b-1h"][MARKET], -1);
+    assert_eq!(next.execution_plan().unwrap().net_targets[MARKET], 0);
+    let mut wrong = second.clone();
+    wrong.expected_revision = next.revision;
+    wrong.decision_us += 1;
+    wrong
+        .strategies
+        .insert("a-1h".into(), BTreeMap::from([(MARKET.into(), 20)]));
+    assert!(next.batch(&wrong, AT + 1).is_err());
+
+    // A restored group with canceled remainder retains its original audit
+    // target, but another group's publication must use its attributed holdings.
+    let mut released = next;
+    released.strategy_groups.get_mut("test").unwrap().held = true;
+    released
+        .targets
+        .get_mut("a-1h")
+        .unwrap()
+        .insert(MARKET.into(), 3);
+    second.batch_id = "after-release".into();
+    second.expected_revision = released.revision;
+    second.decision_us += 1;
+    second
+        .strategies
+        .get_mut("other-1h")
+        .unwrap()
+        .insert(MARKET.into(), 2);
+    let (next, receipt) = released.batch(&second, AT + 1).unwrap();
+    assert_eq!(next.targets["a-1h"][MARKET], 3);
+    assert_eq!(receipt.execution_plan.net_targets[MARKET], 2);
+    assert_eq!(receipt.external_demands.len(), 1);
+    assert_eq!(receipt.external_demands["other-1h"][MARKET], 2);
 }

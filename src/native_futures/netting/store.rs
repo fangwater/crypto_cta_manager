@@ -160,13 +160,15 @@ pub async fn initialize(
     )?;
     // A strategy name belongs to one native account portfolio. Shared templates
     // across accounts require separately named attribution strategies.
-    for name in state.targets.keys() {
-        let result=sqlx::query("INSERT INTO cta_native_netting_members(source_id,strategy_name) VALUES($1,$2) ON CONFLICT(strategy_name) DO NOTHING")
-            .bind(&state.source_id).bind(name).execute(&mut *tx).await?;
-        require(
-            result.rows_affected() == 1,
-            "strategy already belongs to a native portfolio",
-        )?;
+    for (group, settings) in &state.strategy_groups {
+        for name in &settings.members {
+            let result=sqlx::query("INSERT INTO cta_native_netting_members(source_id,strategy_group,strategy_name) VALUES($1,$2,$3) ON CONFLICT(strategy_name) DO NOTHING")
+            .bind(&state.source_id).bind(group).bind(name).execute(&mut *tx).await?;
+            require(
+                result.rows_affected() == 1,
+                "strategy already belongs to a native portfolio",
+            )?;
+        }
     }
     catalog(&mut tx, state).await?;
     let receipt = serde_json::to_value(state)?;
@@ -368,6 +370,14 @@ pub async fn release(
     }
     let mut next = state.clone();
     next.external_demand_open = false;
+    let group = next
+        .last_strategy_group
+        .clone()
+        .context("missing active strategy group")?;
+    next.strategy_groups
+        .get_mut(&group)
+        .context("missing active group state")?
+        .held = true;
     next.revision = next.revision.checked_add(1).context("revision overflow")?;
     sqlx::query("UPDATE cta_native_netting_demands SET remaining_lots=0 WHERE source_id=$1 AND remaining_lots<>0")
         .bind(source).execute(&mut *tx).await?;

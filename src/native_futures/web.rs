@@ -1,4 +1,5 @@
 mod netting;
+mod netting_machine;
 
 use super::{config::Config, cost, market_data::Feed, nav, reader, reference, reference_data};
 use crate::{
@@ -142,6 +143,7 @@ impl Service {
                 get(strategy_grants).put(save_strategy_grants),
             )
             .merge(netting::routes())
+            .merge(netting_machine::routes())
             .with_state(self.clone())
             .route_layer(middleware::from_fn_with_state(self, authenticate))
             .route_layer(tower_http::compression::CompressionLayer::new().gzip(true))
@@ -212,6 +214,25 @@ async fn authenticate(
         "/api/auth/status" | "/api/auth/register" | "/api/auth/login" | "/api/auth/logout"
     ) {
         return next.run(request).await;
+    }
+    if request.headers().contains_key("X-CTA-Publish-Token") {
+        let headers = request.headers().clone();
+        let method = request.method().clone();
+        let path = request.uri().path().to_owned();
+        let (user, access, scope) =
+            match netting_machine::authenticate_machine(&service, &headers, &method, &path).await {
+                Ok(principal) => principal,
+                Err(error) => return error.into_response(),
+            };
+        request.extensions_mut().insert(user);
+        request.extensions_mut().insert(Arc::new(access));
+        request.extensions_mut().insert(scope);
+        let mut response = next.run(request).await;
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+        return response;
     }
     let Some(token) = token(request.headers()) else {
         return ApiError(StatusCode::UNAUTHORIZED, "请先登录".into()).into_response();
