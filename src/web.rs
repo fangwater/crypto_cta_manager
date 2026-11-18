@@ -2313,6 +2313,7 @@ async fn rebuild_timeline_snapshot_projected(
                             max_points,
                             comparison,
                             as_of,
+                            false,
                         )
                         .await
                         .unwrap_or_else(theoretical_timeline_error),
