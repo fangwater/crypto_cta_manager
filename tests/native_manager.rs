@@ -132,9 +132,26 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     let app = web::with_frontend(web::Service::new(config, pool.clone())?.router(), &frontend)?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let client = Client::new();
-    let page = client.get(format!("{address}/manager/")).send().await?;
-    assert_eq!(page.status(), StatusCode::OK);
-    assert!(page.text().await?.contains("国内期货 CTA"));
+    for route in [
+        "/manager/",
+        "/manager/workspace",
+        "/manager/accounts/",
+        "/manager/account/?source=sim",
+        "/manager/net-value/",
+        "/manager/acquisition-cost/?source=sim",
+        "/manager/config/position/",
+        "/manager/admin/",
+    ] {
+        let page = client.get(format!("{address}{route}")).send().await?;
+        assert_eq!(page.status(), StatusCode::OK, "{route}");
+        assert!(page.text().await?.contains("国内期货 CTA"), "{route}");
+    }
+    let missing = client
+        .get(format!("{address}/manager/assets/missing.js"))
+        .send()
+        .await?;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert!(!missing.text().await?.contains("国内期货 CTA"));
     let asset = client
         .get(format!("{address}/manager/assets/app.js"))
         .send()

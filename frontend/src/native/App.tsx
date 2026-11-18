@@ -1,105 +1,131 @@
 import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from 'react'
-import { Activity, Plus, RefreshCw, Trash2 } from 'lucide-react'
-import { AuthGate, useAuth } from '../components/AuthGate'
+import { Activity, Plus, RefreshCw, Scale, Settings, Shield, Trash2, WalletCards } from 'lucide-react'
+import { useAuth } from '../components/AuthGate'
+import { AppShell, PageIntro, StatTile } from '../components/AppShell'
+import { Tabs } from '../components/ui/Tabs'
+import { normalizePath, readSourceId, routes } from '../lib/routes'
+import {
+  accountType, errorMessage, executionStatus, money, NativeAccounts, NativeWorkspace,
+  time, tradeStatus, transportStatus, useNativeAccounts,
+} from './Accounts'
 import { Button } from '../components/ui/Button'
 import { Alert } from '../components/ui/Badge'
 import { Card, CardContent } from '../components/ui/Card'
 import { Input, Label, Select } from '../components/ui/Field'
-import { ApiError, createAuthUser, listAuthUsers, type AuthUser } from '../api'
+import { createAuthUser, listAuthUsers, type AuthUser } from '../api'
 import * as api from './api'
 import CostAnalysis from './CostAnalysis'
 import './native.css'
 
 const NavAnalysis = lazy(() => import('./NavAnalysis'))
 
-const statuses: Record<string, string> = { submitted_locally: '本地已提交', rejected_locally: '本地拒绝', observed: '已见回报', observing: '观察中', waiting: '等待数据', recovering: '恢复中', disconnected: '已断线', transport_unavailable: '交易通道未就绪', blocked: '已阻断', stale: '数据延迟', stopped: '已停止', prepared: '发送前', pending: '等待回报', working: '已受理', partially_filled: '部分成交', cancel_pending: '撤单待确认', settling: '等待成交事实', filled: '已成交', cancelled: '已撤单', rejected: '已拒绝', uncertain: '发送结果不确定' }
+const statuses: Record<string, string> = { submitted_locally: '本地已提交', rejected_locally: '本地拒绝', observed: '已见回报', prepared: '发送前', pending: '等待回报', working: '已受理', partially_filled: '部分成交', cancel_pending: '撤单待确认', settling: '等待成交事实', filled: '已成交', cancelled: '已撤单', rejected: '已拒绝', uncertain: '发送结果不确定' }
 const offsets: Record<string, string> = { open: '开仓', close: '平仓', close_today: '平今', close_yesterday: '平昨' }
 const venues = ['SHFE', 'INE', 'DCE', 'CZCE', 'CFFEX', 'GFEX']
 const label = (value: string) => statuses[value] ?? value
 const side = (value: string) => value === 'buy' ? '买' : '卖'
-const time = (us: number | null) => us === null ? '—' : new Date(us / 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
-const money = (value: number | null) => value === null ? '—' : value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
-const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
-type Tab = 'account' | 'orders' | 'fills' | 'nav' | 'cost' | 'strategies' | 'permissions'
-const tabs: [Tab, string][] = [['account', '账户与持仓'], ['orders', '委托'], ['fills', '成交'], ['nav', '净值'], ['cost', '成本分析'], ['strategies', '策略'], ['permissions', '权限']]
+const accountTabs = [
+  { id: 'account', label: '持仓' },
+  { id: 'orders', label: '委托' },
+  { id: 'fills', label: '成交' },
+] as const
+const navTab = { id: 'nav', label: '净值' } as const
+type AccountTab = typeof accountTabs[number]['id'] | typeof navTab.id
 
 function Table({ headers, children }: { headers: string[]; children: ReactNode }) {
   return <div className="native-table-scroll"><table className="native-table"><thead><tr>{headers.map(h => <th key={h}>{h}</th>)}</tr></thead><tbody>{children}</tbody></table></div>
 }
 
-export default function NativeApp() { return <AuthGate><Workspace /></AuthGate> }
+export default function NativeApp() {
+  const path = normalizePath(location.pathname)
+  const workspace = path === normalizePath(routes.workspace)
+  const accounts = path === normalizePath(routes.accounts)
+  const strategies = path === normalizePath(routes.configPosition) || path === '/manager/config'
+  const permissions = path === normalizePath(routes.admin)
+  const [requestedSource, setRequestedSource] = useState(readSourceId)
+  const data = useNativeAccounts(workspace || accounts ? undefined : requestedSource, strategies || permissions)
 
-function Workspace() {
-  const { user, logout } = useAuth()
-  const [tab, setTab] = useState<Tab>('account')
-  const [sources, setSources] = useState<api.Source[] | null>(null)
-  const [sourceId, setSourceId] = useState('')
-  const [snapshot, setSnapshot] = useState<api.Snapshot | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [refresh, setRefresh] = useState(0)
-  const [auto, setAuto] = useState(true)
-  useEffect(() => {
-    const controller = new AbortController()
-    api.getSources(controller.signal).then(rows => {
-      setSources(rows)
-      const selected = new URLSearchParams(location.search).get('source')
-      setSourceId(rows.find(r => r.source_id === selected)?.source_id ?? rows[0]?.source_id ?? '')
-    }).catch(e => { if (!controller.signal.aborted) setError(errorMessage(e)) })
-    return () => controller.abort()
-  }, [])
-  useEffect(() => {
-    if (!sourceId || !sources?.some(s => s.source_id === sourceId)) return
-    const controller = new AbortController()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const load = async () => {
-      setLoading(true)
-      try {
-        const next = await api.getSnapshot(sourceId, controller.signal)
-        if (!controller.signal.aborted) { setSnapshot(next); setError(null) }
-      } catch (e) {
-        if (!controller.signal.aborted) {
-          setError(errorMessage(e))
-          if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
-            setSnapshot(null)
-            const remaining = (sources ?? []).filter(s => s.source_id !== sourceId)
-            setSources(remaining)
-            setSourceId(remaining[0]?.source_id ?? '')
-          }
-        }
-      }
-      finally {
-        if (!controller.signal.aborted) { setLoading(false); if (auto) timer = setTimeout(load, 5000) }
-      }
-    }
-    void load()
-    return () => { controller.abort(); clearTimeout(timer) }
-  }, [sourceId, sources, refresh, auto])
-  const chooseSource = (id: string) => { setSnapshot(null); setSourceId(id); const url = new URL(location.href); url.searchParams.set('source', id); history.replaceState(null, '', url) }
-  const source = sources?.find(s => s.source_id === sourceId)
-  return <div className="min-h-screen bg-canvas">
-    <header className="border-b border-border bg-surface"><div className="native-header">
-      <div className="flex items-center gap-3"><Activity className="text-brand" size={22} /><h1 className="font-semibold">国内期货 CTA</h1><span className="native-pill">观察模式</span></div>
-      <div className="flex flex-wrap items-center gap-3"><span className="text-sm text-muted">{user.username}</span><Button onClick={() => void logout()}>退出</Button></div>
-    </div><nav className="native-tabs">{tabs.map(([id, title]) => <button key={id} aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>{title}</button>)}</nav></header>
-    <main className="native-main">
-      <div className="mb-5 flex flex-wrap items-center gap-3">
-        <Select aria-label="账户" value={sourceId} onChange={e => chooseSource(e.target.value)}>{!sources?.length && <option value="">{sources === null ? '加载账户…' : '暂无授权账户'}</option>}{sources?.map(s => <option key={s.source_id} value={s.source_id}>{s.account}</option>)}</Select>
-        <label className="flex items-center gap-2 text-sm text-muted"><input type="checkbox" checked={auto} onChange={e => setAuto(e.target.checked)} />自动刷新</label>
-        <Button disabled={loading || !sourceId} onClick={() => setRefresh(v => v + 1)}><RefreshCw size={14} />刷新</Button>
-        {snapshot && <span className="text-sm text-muted">{label(snapshot.status)} · 交易日 {snapshot.trading_day ?? '—'} · 查询 {time(snapshot.read_at_us)}</span>}
-      </div>
-      {error && <Alert tone="error" className="mb-4">{error}{snapshot ? `；以下为上次成功读取的数据（${time(snapshot.read_at_us)}）` : ''}</Alert>}
-      {snapshot?.replication && <div className="mb-4 space-y-2">
-        <p className="text-sm text-muted">本地同步副本 · 最近提交 {time(snapshot.replication.last_synced_at_us)} · 源视图 {time(snapshot.replication.source_captured_at_us)}{snapshot.replication.target_cursor !== null ? ` · 待提交 ${snapshot.replication.target_cursor - snapshot.replication.committed_cursor} 条修订` : ''}</p>
-        {(snapshot.replication.last_error || snapshot.replication_stale) && <Alert tone="warning">{snapshot.replication.last_error ?? '同步数据已超过配置的新鲜度限制，请检查同步服务。'} 以下展示已提交的本地历史数据。</Alert>}
-      </div>}
-      {tab === 'nav' ? <Suspense fallback={<p className="text-sm text-muted">正在加载净值页面…</p>}><NavAnalysis key={sourceId} sourceId={sourceId} snapshot={snapshot} canConfigure={source?.access_level === 'configure'} /></Suspense> : tab === 'strategies' ? <Strategies /> : tab === 'permissions' ? <Permissions source={source} /> : tab === 'cost' ? <CostAnalysis key={sourceId} sourceId={sourceId} tradingDay={snapshot?.trading_day} /> : !snapshot ? <Card><CardContent className="py-12 text-center text-muted">{loading ? '正在读取账户记录…' : '暂无账户数据'}</CardContent></Card> : <>
+  if (workspace) return <NativeWorkspace data={data} />
+  if (accounts) return <NativeAccounts data={data} />
+
+  const source = data.sources?.find(row => row.source_id === requestedSource) ?? data.sources?.[0]
+  const chooseSource = (id: string) => {
+    const url = new URL(location.href)
+    url.searchParams.set('source', id)
+    history.replaceState(null, '', url)
+    setRequestedSource(id)
+  }
+  const selectSource = <Select className="w-auto max-w-full" aria-label="账户" value={source?.source_id ?? ''} onChange={event => chooseSource(event.target.value)}>
+    {!data.sources?.length && <option value="">{data.loading ? '加载账户…' : '暂无授权账户'}</option>}
+    {data.sources?.map(row => <option key={row.source_id} value={row.source_id}>{row.account}</option>)}
+  </Select>
+
+  if (strategies) return <AppShell active="config" title="CTA 管理平台" subtitle="策略配置" icon={Settings}>
+    <PageIntro eyebrow="策略" title="仓位策略" />
+    <Strategies />
+  </AppShell>
+
+  if (permissions) return <AppShell active="admin" title="CTA 管理平台" subtitle="访问权限" icon={Shield}>
+    <PageIntro eyebrow="权限" title="账户与策略授权" actions={selectSource} />
+    {data.error && <Alert tone="error" className="mb-4">{data.error}</Alert>}
+    <Permissions source={source} />
+  </AppShell>
+
+  const account = path === '/manager/account'
+  const navMonitor = path === normalizePath(routes.navMonitor)
+  const cost = path === normalizePath(routes.executionCost())
+  const active = account ? 'accounts' : navMonitor ? 'nav-monitor' : cost ? 'acquisition-cost' : 'manager'
+  const title = account ? '账户详情' : navMonitor ? '账户净值' : cost ? '执行成本' : '净值分析'
+  const Icon = account ? WalletCards : cost ? Scale : Activity
+  const sourceId = source?.source_id ?? ''
+  const result = data.accounts[sourceId]
+  const snapshot = result?.snapshot ?? null
+  const error = data.error ?? result?.error
+  const nav = <Suspense fallback={<p className="text-sm text-muted">正在加载净值页面…</p>}>
+    <NavAnalysis key={sourceId} sourceId={sourceId} snapshot={snapshot} canConfigure={source?.access_level === 'configure'} />
+  </Suspense>
+
+  return <AppShell active={active} title="CTA 管理平台" subtitle={title} icon={Icon} wide>
+    <PageIntro eyebrow={title} title={source?.account ?? title} description={source && accountType(source)} />
+    <div className="mb-5 flex flex-wrap items-center gap-3">
+      {selectSource}
+      <label className="flex items-center gap-2 text-sm text-muted"><input type="checkbox" checked={data.autoRefresh} onChange={event => data.setAutoRefresh(event.target.checked)} />自动刷新</label>
+      <Button onClick={data.refresh} disabled={data.loading} aria-label="刷新数据"><RefreshCw size={14} />刷新</Button>
+      {snapshot && <span className="text-sm text-muted">{executionStatus(snapshot)} · 交易日 {snapshot.trading_day ?? '—'} · 查询 {time(snapshot.read_at_us)}</span>}
+    </div>
+    {error && <Alert tone="error" className="mb-4">{error}{snapshot ? `；当前展示 ${time(snapshot.read_at_us)} 读取的数据` : ''}</Alert>}
+    {result?.applying && <Alert tone="warning" className="mb-4">同步副本正在提交，稍后可重新读取。</Alert>}
+    {snapshot?.replication && <div className="mb-4 space-y-2">
+      <p className="text-sm text-muted">本地同步副本 · 最近提交 {time(snapshot.replication.last_synced_at_us)} · 源视图 {time(snapshot.replication.source_captured_at_us)}{snapshot.replication.target_cursor !== null ? ` · 待提交 ${snapshot.replication.target_cursor - snapshot.replication.committed_cursor} 条修订` : ''}</p>
+      {(snapshot.replication.last_error || snapshot.replication_stale) && <Alert tone="warning">{snapshot.replication.last_error ?? '同步数据已超过配置的新鲜度限制。'} 以下展示已提交的本地历史数据。</Alert>}
+    </div>}
+    {!source ? <EmptyAccount loading={data.loading} />
+      : cost ? <CostAnalysis key={sourceId} sourceId={sourceId} tradingDay={snapshot?.trading_day} />
+      : navMonitor ? nav
+      : <AccountDetail key={sourceId} snapshot={snapshot} loading={data.loading} nav={account ? undefined : nav} />}
+  </AppShell>
+}
+
+function EmptyAccount({ loading }: { loading: boolean }) {
+  return <Card><CardContent className="py-12 text-center text-muted">{loading ? '正在读取账户记录…' : '暂无账户数据'}</CardContent></Card>
+}
+
+function AccountDetail({ snapshot, loading, nav }: { snapshot: api.Snapshot | null; loading: boolean; nav?: ReactNode }) {
+  const [tab, setTab] = useState<AccountTab>(nav ? 'nav' : 'account')
+  const tabs = nav ? [navTab, ...accountTabs] : [...accountTabs]
+  return <>
+    <Tabs<AccountTab> value={tab} onChange={setTab} items={tabs} className="mb-4" />
+    {tab === 'nav' ? nav : !snapshot ? <EmptyAccount loading={loading} /> : <>
         {snapshot.reason && <Alert tone="warning" className="mb-4">{snapshot.reason}</Alert>}
         {snapshot.positions_may_lag && <Alert tone="warning" className="mb-4">已有较新的事实成交，持仓仍显示 {time(snapshot.state_observed_us)} 的快照。</Alert>}
         {tab === 'account' && <>
-          <div className="native-stats"><Metric name="本地可用预算（元）" value={money(snapshot.available_local_budget)} /><Metric name="委托记录" value={String(snapshot.total_orders)} /><Metric name="事实成交" value={String(snapshot.total_fills)} /><Metric name="投影错误" value={String(snapshot.projection_errors)} /></div>
-          <p className="mb-3 text-sm text-muted">持仓快照 {time(snapshot.state_observed_us)} · 快照恢复 {snapshot.snapshot_ready ? snapshot.snapshot_current_runtime ? '已追平' : '已追平（旧进程）' : '未就绪'} · 通道 {snapshot.transport_ready === null ? '未报告' : snapshot.transport_ready ? '已连接' : '未连接'}</p>
+          <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <StatTile label="本地可用预算（元）" value={money(snapshot.available_local_budget)} />
+            <StatTile label="委托记录" value={String(snapshot.total_orders)} />
+            <StatTile label="事实成交" value={String(snapshot.total_fills)} />
+            <StatTile label="投影错误" value={String(snapshot.projection_errors)} />
+          </div>
+          <p className="mb-3 text-sm text-muted">持仓快照 {time(snapshot.state_observed_us)} · 快照恢复 {snapshot.snapshot_ready ? snapshot.snapshot_current_runtime ? '已追平' : '已追平（旧进程）' : '未就绪'} · 通道 {transportStatus(snapshot)} · 交易许可回报 {tradeStatus(snapshot)}</p>
           <Table headers={['交易所', '合约', '方向', '今仓（手）', '昨仓（手）', '冻结今仓', '冻结昨仓']}>
             {snapshot.positions.map(p => <tr key={`${p.venue}:${p.symbol}:${p.side}`}><td>{p.venue}</td><td>{p.symbol}</td><td>{p.side === 'buy' ? '多' : '空'}</td><td>{p.position.today}</td><td>{p.position.yesterday}</td><td>{p.position.frozen_today}</td><td>{p.position.frozen_yesterday}</td></tr>)}
           </Table>
@@ -110,12 +136,10 @@ function Workspace() {
         {tab === 'fills' && <><p className="mb-3 text-sm text-muted">最近 {snapshot.fills.length} 条 · 全部 {snapshot.total_fills} 条。手续费按合约及开仓、平仓、平今、平昨规则计费；柜台未报告的实际扣费显示为“未报告”。</p><Table headers={['接收时间', '交易日', '交易所／合约', '成交号', '方向／开平', '手数', '成交价', '事实手续费', '柜台原生时间']}>
           {snapshot.fills.map(r => <tr key={`${r.fill.identity.trading_day}:${r.fill.identity.venue}:${r.fill.identity.symbol}:${r.fill.identity.trade_id}:${r.fill.identity.side}`}><td>{time(r.received_us)}</td><td>{r.fill.identity.trading_day}</td><td>{r.fill.identity.venue}／{r.fill.identity.symbol}</td><td>{r.fill.identity.trade_id}</td><td>{side(r.fill.identity.side)}／{offsets[r.fill.offset]}</td><td>{r.fill.lots}</td><td>{r.fill.price}</td><td>{r.commission === null ? '未报告' : `${money(r.commission)} ${r.commission_currency ?? ''}`}</td><td>{r.native_time ?? '—'}</td></tr>)}
         </Table></>}
-      </>}
-    </main>
-  </div>
+    </>}
+  </>
 }
 
-function Metric({ name, value }: { name: string; value: string }) { return <Card><CardContent className="py-4"><p className="text-sm text-muted">{name}</p><p className="mt-1 text-xl font-semibold tabular-nums">{value}</p></CardContent></Card> }
 type TargetRow = { venue: string; symbol: string; qty: string; signal: number }
 function Strategies() {
   const [items, setItems] = useState<api.Strategy[]>([])

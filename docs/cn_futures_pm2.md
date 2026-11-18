@@ -32,8 +32,10 @@ pm2 save
 它使用心跳和 `ExitOnForwardFailure`，失败时由 PM2 重启。增加其他云端时显式增加
 独立的隧道端口、source_id 与导出 URL，不共享身份或副本。
 
-Manager 的 `--frontend-root` 提供已构建网页和同源 API，默认地址为
-`http://127.0.0.1:18211/manager/`。网页可匿名加载，数据 API 保持登录和来源权限检查。
+Manager 的 `--frontend-root` 提供已构建网页和同源 API，总览地址为
+`http://127.0.0.1:18211/manager/workspace/`。国内期货与 Crypto CTA 共用前端入口、导航、
+账户总览和账户卡片组件。每条授权来源在 `/manager/accounts/` 独立显示，详情链接以
+`source` 参数保留账户身份。网页可匿名加载，数据 API 保持登录和来源权限检查。
 首次初始化管理员后再开放云端入口。部署可生成强随机初始密码并仅存入本机 0600
 的私有登录文件，操作者自行读取；不在日志或 Git 中保存密码。
 通过既有反向代理或 SSH 转发访问；API 保持 loopback。没有启动 Vite 开发服务器。

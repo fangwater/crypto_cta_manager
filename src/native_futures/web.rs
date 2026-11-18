@@ -198,13 +198,31 @@ pub fn with_frontend(api: Router, root: &std::path::Path) -> Result<Router> {
         "native frontend root must contain index.html"
     );
     let api = api.route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }));
-    let files = tower_http::services::ServeDir::new(&root)
-        .not_found_service(tower_http::services::ServeFile::new(index));
-    Ok(Router::new()
-        .route("/", get(|| async { Redirect::temporary("/manager/") }))
+    let index = tower_http::services::ServeFile::new(index);
+    let mut app = Router::new()
+        .route(
+            "/",
+            get(|| async { Redirect::temporary("/manager/workspace/") }),
+        )
         .merge(api.clone())
         .nest("/manager", api)
-        .nest_service("/manager", files))
+        .nest_service("/manager", tower_http::services::ServeDir::new(root));
+    for page in [
+        "workspace",
+        "accounts",
+        "account",
+        "net-value",
+        "acquisition-cost",
+        "config",
+        "config/position",
+        "admin",
+    ] {
+        let path = format!("/manager/{page}");
+        app = app
+            .route_service(&path, index.clone())
+            .route_service(&format!("{path}/"), index.clone());
+    }
+    Ok(app)
 }
 
 pub async fn serve(

@@ -24,6 +24,8 @@ const links: Array<{
   { id: 'admin', href: '/manager/admin/', label: '权限', icon: Shield },
 ]
 
+const domesticLinks = links.filter(({ id }) => id !== 'virtual' && id !== 'auto-earn' && id !== 'docs')
+
 export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: boolean }) {
   const { logout } = useAuth()
   const navRef = useRef<HTMLElement>(null)
@@ -45,27 +47,32 @@ export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: 
         'items-center gap-1',
         mobile ? 'flex w-full overflow-x-auto' : 'hidden rounded-xl border border-border bg-canvas/80 p-1 lg:flex',
       )} aria-label="主导航" ref={navRef}>
-        {links.map((link) => {
-        const Icon = link.icon
-        const isActive = active === link.id
-        return (
-          <a
-            key={link.id}
-            href={link.id === 'manager' ? routes.nav(sourceId) : link.id === 'acquisition-cost' ? routes.executionCost(sourceId) : link.href}
-            title={link.label}
-            aria-label={link.label}
-            aria-current={isActive ? 'page' : undefined}
-            className={cn(
-              'inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-              isActive
-                ? 'bg-surface text-brand shadow-sm'
-                : 'text-muted hover:bg-surface/70 hover:text-ink',
-            )}
-          >
-            <Icon size={15} strokeWidth={2.1} />
-            <span className={mobile ? undefined : 'hidden xl:inline'}>{link.label}</span>
-          </a>
-        )
+        {(import.meta.env.MODE === 'cn-futures' ? domesticLinks : links).map((link) => {
+          const Icon = link.icon
+          const isActive = active === link.id
+          const href = link.id === 'manager' ? routes.nav(sourceId)
+            : link.id === 'acquisition-cost' ? routes.executionCost(sourceId)
+            : link.id === 'nav-monitor' && sourceId && import.meta.env.MODE === 'cn-futures'
+              ? `${link.href}?source=${encodeURIComponent(sourceId)}`
+              : link.href
+          return (
+            <a
+              key={link.id}
+              href={href}
+              title={link.label}
+              aria-label={link.label}
+              aria-current={isActive ? 'page' : undefined}
+              className={cn(
+                'inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                isActive
+                  ? 'bg-surface text-brand shadow-sm'
+                  : 'text-muted hover:bg-surface/70 hover:text-ink',
+              )}
+            >
+              <Icon size={15} strokeWidth={2.1} />
+              <span className={mobile ? undefined : 'hidden xl:inline'}>{link.label}</span>
+            </a>
+          )
         })}
         {mobile && <button type="button" title="退出" aria-label="退出" onClick={() => void logout()}
           className="ml-auto inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-surface hover:text-ink">

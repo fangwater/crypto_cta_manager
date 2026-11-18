@@ -11,8 +11,7 @@ export default defineConfig(({ mode }) => ({
     transformIndexHtml: {
       order: 'pre',
       handler: (html: string) => mode === 'cn-futures'
-        ? html.replace('<title>CTA NAV</title>', '<title>国内期货 CTA</title>')
-          .replace('/src/main.tsx', '/src/native/main.tsx') : html,
+        ? html.replace('<title>CTA NAV</title>', '<title>国内期货 CTA</title>') : html,
     },
   }],
   server: {
