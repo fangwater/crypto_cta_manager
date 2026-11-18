@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { overviewTotal, overviewAlertCount, isExternalOverview } from '../src/lib/accountOverview.ts'
+import { overviewTotal, overviewAlertCount, isExternalOverview, nativeSourceStatus } from '../src/lib/accountOverview.ts'
+
+test('native sync and execution statuses remain distinct', () => {
+  assert.equal(nativeSourceStatus({ collection_status: 'live', execution_status: 'quiet' }).label, '已同步')
+  assert.deepEqual(nativeSourceStatus({ collection_status: 'live', execution_status: 'stopped' }), {
+    label: '已停止', tone: 'neutral', title: '已同步',
+  })
+  assert.equal(nativeSourceStatus({ collection_status: 'live', execution_status: 'recovering' }).label, '对账中')
+  assert.equal(nativeSourceStatus({ collection_status: 'loading' }).label, '同步中')
+  assert.equal(nativeSourceStatus({ collection_status: 'stale' }).label, '同步延迟')
+})
 
 test('MM and remote CTA use external status while local CTA keeps its local rules', () => {
   const mm = { source_id: 'external:nav:bybit_mm_alpha', account_kind: 'mm', equity: 100, collection_status: 'live' }

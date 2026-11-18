@@ -91,7 +91,13 @@ export interface NavReport {
   sources: SourceNavReport[]
 }
 
-export interface DashboardAccount {
+export interface SourceSyncState {
+  collection_status?: 'live' | 'historical' | 'stale' | 'loading' | 'unavailable' | null
+  collection_status_reason?: string | null
+  execution_status?: string | null
+}
+
+export interface DashboardAccount extends SourceSyncState {
   execution_sources?: DashboardAccount[]
   source_id: string
   /** Manager display name. Uses alias when configured. */
@@ -103,6 +109,11 @@ export interface DashboardAccount {
   target_proxy_enabled: boolean
   /** Count supplied by the compact dashboard projection, without symbol detail rows. */
   open_position_symbol_count?: number | null
+  execution_observed_ts_us?: number | null
+  recent_position_symbol_count?: number | null
+  position_status?: 'live' | 'historical' | null
+  position_observed_ts_us?: number | null
+  position_historical_reason?: string | null
   /** Current session's grant on this account. Undefined only in stale payloads. */
   access_level?: 'view' | 'configure' | null
   can_edit_alias?: boolean
@@ -368,6 +379,16 @@ export interface StrategyNavTimeline {
   points: NavTimelinePoint[]
 }
 
+export interface NativeNavFeeEvidence {
+  fill_count: number
+  actual_count: number
+  estimated_count: number
+  missing_count: number
+  actual_known_cny: number
+  estimated_known_cny: number
+  volume_cny: number
+}
+
 export interface NavTimelineReport {
   valuation: string
   earliest_start_ts_us: number
@@ -377,6 +398,7 @@ export interface NavTimelineReport {
   available_symbols: string[]
   selected_symbols: string[]
   available_strategies: string[]
+  fee_evidence?: NativeNavFeeEvidence
   summary: NavTotals
   symbols: AggregateSymbolNavReport[]
   points: NavTimelinePoint[]
@@ -528,15 +550,15 @@ export interface AcquisitionCostBreakdown {
   fill_count: number
   reference_turnover_quote: number
   actual_turnover_quote: number
-  actual_fee_quote: number
-  virtual_fee_quote: number
+  actual_fee_quote: number | null
+  virtual_fee_quote: number | null
   price_shortfall_quote: number
   first_minute_shortfall_quote: number
   five_sample_drift_quote: number
   price_shortfall_bps: number
-  after_fee_shortfall_bps: number
+  after_fee_shortfall_bps: number | null
   first_minute_shortfall_bps: number
-  after_fee_shortfall_quote: number
+  after_fee_shortfall_quote: number | null
 }
 
 export interface AcquisitionFillDiagnostic {
@@ -568,6 +590,7 @@ export interface AcquisitionExecutionFill {
   actual_price: number
   actual_qty: number
   liquidity: string
+  offset?: string
   target_delay_us: number
   order_delay_us: number
 }
@@ -591,6 +614,8 @@ export interface AcquisitionCostRow {
   strategy_name: string
   symbol: string
   venue: string
+  offset?: string
+  native_trading_minutes?: number
   received_at_us: number
   virtual_execution_ts_us: number
   delta_qty: number
@@ -639,6 +664,7 @@ export interface AcquisitionCostReport {
   by_strategy: AcquisitionCostBreakdown[]
   by_symbol: AcquisitionCostBreakdown[]
   by_side: AcquisitionCostBreakdown[]
+  by_offset?: AcquisitionCostBreakdown[]
   by_liquidity: AcquisitionCostBreakdown[]
   by_target_delay: AcquisitionCostBreakdown[]
   by_order_delay: AcquisitionCostBreakdown[]

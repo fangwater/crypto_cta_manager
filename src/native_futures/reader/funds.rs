@@ -448,10 +448,11 @@ impl FundsProjection {
             || snapshot
                 .replication
                 .as_ref()
-                .is_some_and(|replica| replica.last_error.is_some())
+                .is_some_and(|replica| replica.last_error.is_some() || !replica_caught_up(replica))
             || funds.observed_us > snapshot.read_at_us
-            || snapshot.read_at_us.saturating_sub(funds.observed_us)
-                > stale_secs as i64 * 1_000_000;
+            || funds.source == AccountFundsSource::CtpTradingAccount
+                && snapshot.read_at_us.saturating_sub(funds.observed_us)
+                    > stale_secs as i64 * 1_000_000;
         snapshot.funds = Some(funds.clone());
     }
 }

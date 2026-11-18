@@ -20,6 +20,8 @@ import './nav-dashboard.css'
 import type { TimelineQuery } from './api'
 import { ApiError, getAccountTimeline, getDashboard, getHealth, getTimeline, getTimelineOverlay } from './api'
 import { AppShell } from './components/AppShell'
+import { AnalysisMetric } from './components/AnalysisMetric'
+import { isNativeFuturesVenue } from './components/ContractLeveragePanel'
 import { NavMonitorPage } from './pages/NavMonitorPage'
 import { WorkspacePage } from './pages/WorkspacePage'
 import { AccountsPage } from './pages/AccountsPage'
@@ -65,6 +67,7 @@ import type {
   HealthResponse,
   NavSeriesKey,
   NavTotals,
+  NativeNavFeeEvidence,
   SourceNavReport,
   TimelineChartMode,
   TimelineSnapshot,
@@ -482,6 +485,7 @@ function NavPage() {
     () => dashboard?.report.sources.find((source) => source.source_id === scope),
     [dashboard, scope],
   )
+  const native = dashboard?.report.valuation.startsWith('native_') === true || isNativeFuturesVenue(selectedSource?.configured_venue)
   const availableSymbols = timeline?.report.available_symbols ?? []
   const availableStrategies = useMemo(() => activeNavStrategies(timeline), [timeline])
   const selectedSet = useMemo(
@@ -539,18 +543,21 @@ function NavPage() {
   const fundingIncome = displayed.income
   const hasFunding = displayed.kind !== 'unavailable'
   const strategyChart = chartMode === 'strategies' || chartMode === 'strategyFunding'
-  const fundingLabel = (key: NavSeriesKey) => usesEstimatedFunding ? navSeriesLabel(key, timeline?.theoretical[0]?.execution_model).replace('Funding', '估算 Funding').replace('funding', '估算 funding') : navSeriesLabel(key, timeline?.theoretical[0]?.execution_model)
-  const fundingSeriesVisible = (key: NavSeriesKey) => (!key.startsWith('theoretical_twap3m_') || timeline?.theoretical.some((r) => r.execution_model === 'twap3m')) && (!key.startsWith('theoretical_instant_taker_') || timeline?.theoretical.some((r) => r.execution_model === 'instant_taker')) && (hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_')))
+  const fundingLabel = (key: NavSeriesKey) => {
+    const label = navSeriesLabel(key, timeline?.theoretical[0]?.execution_model, native)
+    return usesEstimatedFunding ? label.replace('Funding', '估算 Funding').replace('funding', '估算 funding') : label
+  }
+  const availableSeries = (key: NavSeriesKey) => (!native || !key.startsWith('theoretical_') || timeline?.theoretical.some((r) => r.points.length > 0)) && (!key.startsWith('theoretical_twap3m_') || timeline?.theoretical.some((r) => r.execution_model === 'twap3m')) && (!key.startsWith('theoretical_instant_taker_') || timeline?.theoretical.some((r) => r.execution_model === 'instant_taker')) && (hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_')))
   const portfolioSeriesOptions = (
     selectedSymbols === null
       ? seriesOptions
       : seriesOptions.filter((key) => !key.startsWith('theoretical_'))
-  ).filter(fundingSeriesVisible)
+  ).filter(availableSeries)
   const portfolioVisibleSeries = (
     selectedSymbols === null
       ? visibleSeries
       : visibleSeries.filter((key) => !key.startsWith('theoretical_'))
-  ).filter(fundingSeriesVisible)
+  ).filter(availableSeries)
   const totals = noSymbolsSelected
     ? ZERO_TOTALS
     : (timeline?.report.summary ?? null)
@@ -832,7 +839,7 @@ function NavPage() {
               </h2>
             </div>
             <div className="control-row">
-              <div className="segmented segmented--compact" aria-label="费率口径">
+              <div className="segmented segmented--compact" aria-label={native ? '手续费口径' : '费率口径'}>
                 <button
                   type="button"
                   className={feeMode === 'after' ? 'is-active' : ''}
@@ -888,7 +895,7 @@ function NavPage() {
             />
             <SummaryItem
               icon={<Coins size={18} />}
-              label="区间估算手续费"
+              label={native ? '区间手续费' : '区间估算手续费'}
               value={totals?.estimated_trading_fee_quote ?? null}
             />
             <SummaryItem
@@ -907,10 +914,10 @@ function NavPage() {
           </div>
         </section>
 
-        <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />
+        {native ? !noSymbolsSelected && timeline?.report.fee_evidence && <NativeCommissionAnalysis evidence={timeline.report.fee_evidence} /> : dashboard && <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />}
         {!noSymbolsSelected && timeline?.execution_slippage.map((value, index) => <ExecutionSlippagePanel key={index} value={value} model={timeline.theoretical[index]?.execution_model} />)}
-        {!noSymbolsSelected && <FundingPanel value={timeline?.funding} accountTotals={pnlMode === 'account'} selectedForNav={displayed.kind === 'actual'} />}
-        {!noSymbolsSelected && <FundingEstimatePanel value={estimate} />}
+        {!native && !noSymbolsSelected && <FundingPanel value={timeline?.funding} accountTotals={pnlMode === 'account'} selectedForNav={displayed.kind === 'actual'} />}
+        {!native && !noSymbolsSelected && <FundingEstimatePanel value={estimate} />}
 
         <section className="chart-section" aria-labelledby="chart-title">
           <div className="panel-heading pnl-chart-header">
@@ -948,7 +955,7 @@ function NavPage() {
                 >
                   分策略 PnL
                 </button>
-                <button
+                {!native && <button
                   type="button"
                   className={pnlMode === 'strategy' && chartMode === 'strategyFunding' ? 'is-active' : ''}
                   onClick={() => {
@@ -957,7 +964,7 @@ function NavPage() {
                   }}
                 >
                   策略 Funding
-                </button>
+                </button>}
               </div>
               {chartMode === 'symbols' && (
                 <span className="symbol-series-count">
@@ -1003,6 +1010,7 @@ function NavPage() {
                   visibleSeries={portfolioVisibleSeries}
                   mode={chartMode}
                   feeMode={feeMode}
+                  native={native}
                 />
               )}
               {noSymbolsSelected && (
@@ -1200,12 +1208,16 @@ function NavPage() {
               <thead>
                 <tr>
                   <th>策略</th>
-                  <th className="numeric">估算 Funding</th>
-                  <th className="numeric">净值变化（含估算 Funding）</th>
+                  {!native && <>
+                    <th className="numeric">估算 Funding</th>
+                    <th className="numeric">净值变化（含估算 Funding）</th>
+                  </>}
                   <th className="numeric">成交</th>
-                  <th className="numeric">Maker 笔 / 额</th>
-                  <th className="numeric">Taker 笔 / 额</th>
-                  <th className="numeric">未判定 笔 / 额</th>
+                  {!native && <>
+                    <th className="numeric">Maker 笔 / 额</th>
+                    <th className="numeric">Taker 笔 / 额</th>
+                    <th className="numeric">未判定 笔 / 额</th>
+                  </>}
                   <th className="numeric">持仓合约</th>
                   <th className="numeric">期末总敞口</th>
                   <th className="numeric">区间已实现</th>
@@ -1226,27 +1238,31 @@ function NavPage() {
                         <code>{strategy.strategy}</code>
                       )}
                     </td>
-                    <td className={`numeric mono ${signedClass(funding?.income_quote ?? 0)}`} title={funding && Object.entries(funding.income_by_asset).map(([asset, value]) => `${asset} ${fundingMoney(value)}`).join(' / ')}>
-                      {funding ? fundingMoney(funding.income_quote) : '—'}
-                    </td>
-                    <td className={`numeric mono nav-cell ${signedClass(totalNav ?? 0)}`}>
-                      {totalNav == null ? '—' : money(totalNav)}
-                    </td>
+                    {!native && <>
+                      <td className={`numeric mono ${signedClass(funding?.income_quote ?? 0)}`} title={funding && Object.entries(funding.income_by_asset).map(([asset, value]) => `${asset} ${fundingMoney(value)}`).join(' / ')}>
+                        {funding ? fundingMoney(funding.income_quote) : '—'}
+                      </td>
+                      <td className={`numeric mono nav-cell ${signedClass(totalNav ?? 0)}`}>
+                        {totalNav == null ? '—' : money(totalNav)}
+                      </td>
+                    </>}
                     <td className="numeric mono">
                       {integer(strategy.summary.fill_count)}
                     </td>
-                    <LiquidityTableCell
-                      count={strategy.summary.maker_fill_count}
-                      volume={strategy.summary.maker_volume_quote}
-                    />
-                    <LiquidityTableCell
-                      count={strategy.summary.taker_fill_count}
-                      volume={strategy.summary.taker_volume_quote}
-                    />
-                    <LiquidityTableCell
-                      count={strategy.summary.unknown_liquidity_fill_count}
-                      volume={strategy.summary.unknown_liquidity_volume_quote}
-                    />
+                    {!native && <>
+                      <LiquidityTableCell
+                        count={strategy.summary.maker_fill_count}
+                        volume={strategy.summary.maker_volume_quote}
+                      />
+                      <LiquidityTableCell
+                        count={strategy.summary.taker_fill_count}
+                        volume={strategy.summary.taker_volume_quote}
+                      />
+                      <LiquidityTableCell
+                        count={strategy.summary.unknown_liquidity_fill_count}
+                        volume={strategy.summary.unknown_liquidity_volume_quote}
+                      />
+                    </>}
                     <td className="numeric mono">{integer(strategy.symbol_count)}</td>
                     <td className="numeric mono">
                       {money(strategy.gross_position_value_quote)}
@@ -1369,10 +1385,9 @@ function NavPage() {
                   value={timestampUs(source.initial_position_snapshot_ts_us)}
                 />
                 <SourceDatum label="累计成交" value={integer(source.fill_count)} />
-                <SourceDatum
-                  label="Maker / Taker 费率"
-                  value={accountFeeSummary(source)}
-                />
+                {isNativeFuturesVenue(source.configured_venue)
+                  ? <SourceDatum label="手续费口径" value="按合约及开平" />
+                  : <SourceDatum label="Maker / Taker 费率" value={accountFeeSummary(source)} />}
                 <SourceDatum
                   label="累计费后净值"
                   value={`${money(source.nav_change_after_fee_quote)} CNY`}
@@ -1397,6 +1412,23 @@ function NavPage() {
           </div>
         </section>
     </AppShell>
+  )
+}
+
+function NativeCommissionAnalysis({ evidence }: { evidence: NativeNavFeeEvidence }) {
+  const amount = (count: number, total: number) => count > 0 ? `${money(total)} CNY` : '—'
+  return (
+    <section className="execution-section" aria-labelledby="execution-title">
+      <div className="panel-heading">
+        <h2 id="execution-title">区间成交手续费</h2>
+        <span className="generation-time">{integer(evidence.fill_count)} 笔 · {money(evidence.volume_cny)} CNY</span>
+      </div>
+      <div className="summary-strip nav-analysis-stats">
+        <AnalysisMetric label="实际手续费" value={amount(evidence.actual_count, evidence.actual_known_cny)} detail={`${integer(evidence.actual_count)} 笔有柜台费用回报`} />
+        <AnalysisMetric label="按历史费率估算" value={amount(evidence.estimated_count, evidence.estimated_known_cny)} detail={`${integer(evidence.estimated_count)} 笔按合约和开平估算`} />
+        {evidence.missing_count > 0 && <AnalysisMetric label="缺少费用依据" value={`${integer(evidence.missing_count)} 笔`} />}
+      </div>
+    </section>
   )
 }
 

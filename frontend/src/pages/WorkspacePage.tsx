@@ -8,7 +8,7 @@ import { useAccountOverview } from '../hooks/useAccountOverview'
 import { money } from '../format'
 import { routes } from '../lib/routes'
 import { accountVenueLabel } from '../lib/workspace'
-import { overviewAlertCount, overviewTotal, isExternalOverview, type OverviewRow } from '../lib/accountOverview'
+import { overviewAlertCount, overviewTotal, isExternalOverview, nativeSourceStatus, type OverviewRow } from '../lib/accountOverview'
 import './workspace.css'
 
 type ValueKey = 'yesterday_equity' | 'equity' | 'today_profit' | 'profit_percent' | 'long_position' | 'short_position' | 'long_leverage' | 'short_leverage' | 'net_position' | 'max_drawdown_15d_percent' | 'margin' | 'margin_percent' | 'date_ms' | 'queried_at_ms'
@@ -115,12 +115,20 @@ function Summary({ label, value, title, warn }: { label: string; value: string; 
 
 function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
   const unpricedAssets = row.position_unpriced_assets ?? []
+  const status = row.venue === 'ctp' || row.venue === 'yida'
+    ? nativeSourceStatus(row.collection_status === 'historical' ? { collection_status: 'historical' } : row)
+    : null
   const positionNotice = unpricedAssets.length > 0
     ? `仓位、杠杆和轧差仅包含已定价持仓；未计入缺价资产：${unpricedAssets.join('、')}。缺价资产金额未知，未按零估值。`
     : undefined
   return <tr data-source={row.source_id}>
     <td className="overview-index">{index + 1}</td>
-    <th scope="row" className="overview-account-cell"><a href={isExternalOverview(row) ? row.detail_url ?? undefined : routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a>{isExternalOverview(row) && <span className="ml-2 text-[10px] text-muted">{row.account_kind?.toUpperCase()}{row.collection_status === 'stale' ? ' · 已过期' : row.collection_status === 'loading' ? ' · 同步中' : row.collection_status === 'unavailable' ? ' · 暂不可用' : ''}</span>}{positionNotice && <details className="text-xs font-normal text-amber-700"><summary className="cursor-pointer">部分估值</summary><span>{positionNotice}</span></details>}</th>
+    <th scope="row" className="overview-account-cell">
+      <a href={isExternalOverview(row) ? row.detail_url ?? undefined : routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a>
+      {status && <span className="ml-2 text-[10px] text-muted" title={status.title}>{status.label}</span>}
+      {isExternalOverview(row) && <span className="ml-2 text-[10px] text-muted">{row.account_kind?.toUpperCase()}{row.collection_status === 'stale' ? ' · 已过期' : row.collection_status === 'loading' ? ' · 同步中' : row.collection_status === 'unavailable' ? ' · 暂不可用' : ''}</span>}
+      {positionNotice && <details className="text-xs font-normal text-amber-700"><summary className="cursor-pointer">部分估值</summary><span>{positionNotice}</span></details>}
+    </th>
     {columns.map(column => {
       const indicativeEquity = column.key === 'equity' && row.equity == null && row.sdk_market_value != null
       const value = indicativeEquity ? row.sdk_market_value : row[column.key]
@@ -138,7 +146,14 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
       const ltpMargin = row.margin_kind === 'ltp_frozen' && ['margin', 'margin_percent'].includes(column.key)
       const updated = row.history_rebuilt_at_ms == null ? '' : `；更新时间 ${dateTime.format(row.history_rebuilt_at_ms)} 上海时间`
       const sdkNote = indicativeEquity ? `SDK 估值 · 行情时间未核验${row.funds_trading_day ? ` · 交易日 ${row.funds_trading_day}` : ''}` : undefined
-      const title = sdkNote ?? (historicalFunds ? row.funds_historical_reason ?? '历史资金观察'
+      const positionCell = row.position_status && ['long_position', 'short_position', 'net_position'].includes(column.key)
+      const recentPosition = positionCell && (row.position_status === 'historical' ? '最近持仓'
+        : row.execution_status === 'quiet' ? '最近有效持仓' : null)
+      const positionTitle = positionCell && row.position_as_of_ms != null
+        ? [`持仓截至 ${dateTime.format(row.position_as_of_ms)}`, row.position_historical_reason,
+          value == null ? '估值不可用' : undefined].filter(Boolean).join(' · ')
+        : undefined
+      const title = sdkNote ?? positionTitle ?? (historicalFunds ? row.funds_historical_reason ?? '历史资金观察'
         : fundsDate ? '柜台资金观察时间（上海时间）'
         : dailyFundsMissing ? '缺少上海时间零点的权益依据'
         : ltpMargin ? 'LTP 实际冻结／占用保证金；占比 = 占用保证金 ÷ 实时权益 × 100%' : partialPosition ? positionNotice : (row.account_kind === 'fr' || row.account_kind === 'mm') && profit
@@ -150,6 +165,7 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
         {side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}
         {sdkNote && <span className="block text-[10px] text-muted">{sdkNote}</span>}
         {historicalFunds && value != null && <span className="block text-[10px] text-muted">历史观察</span>}
+        {recentPosition && value != null && <span className="block text-[10px] text-muted">{recentPosition}</span>}
         {ltpMargin && column.key === 'margin' && value != null && <span className="block text-[10px] text-muted">LTP 占用</span>}
         {partialPosition && value != null && <sup aria-label="仅已定价持仓">*</sup>}
       </td>

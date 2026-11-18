@@ -13,6 +13,8 @@ pub(super) struct Projection {
     guard: Option<(i64, &'static str, String)>,
     runtime: Option<(bool, i64)>,
     state: Option<State>,
+    observed_positions: Option<State>,
+    position_boundary: Option<i64>,
     reconciled: Option<(i64, i64)>,
     funds: super::funds::FundsProjection,
 }
@@ -25,7 +27,7 @@ struct State {
     reason: String,
     day: Option<String>,
     budget: Option<f64>,
-    positions: Vec<Value>,
+    positions: Arc<Vec<Value>>,
 }
 #[derive(Deserialize)]
 pub(super) struct Envelope<'a> {
@@ -78,6 +80,52 @@ fn message(raw: Option<&RawValue>, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_owned())
 }
 
+fn complete_inventory(event: &Envelope<'_>) -> bool {
+    #[derive(Deserialize)]
+    struct Completeness {
+        ready: bool,
+        connected: Option<bool>,
+    }
+    event.projection_error.is_none()
+        && event
+            .value
+            .state
+            .and_then(|state| serde_json::from_str::<Completeness>(state.get()).ok())
+            .is_some_and(|state| {
+                state.ready && state.connected != Some(false)
+                    || event.value.kind == "reconciled" && state.connected == Some(true)
+            })
+}
+
+fn read_state(bytes: &[u8]) -> Result<State> {
+    let event: Envelope<'_> = serde_json::from_slice(bytes)?;
+    let state = json(
+        event
+            .value
+            .state
+            .context("missing execution state")?
+            .get()
+            .as_bytes(),
+        EVENTS,
+    )?;
+    ensure!(state.is_object(), "missing execution state");
+    Ok(State {
+        sequence: event.sequence,
+        received: event.received_us,
+        ready: state["ready"].as_bool().context("missing ready state")?,
+        can_trade: boolean(event.value.can_trade),
+        reason: state["reason"].as_str().unwrap_or_default().into(),
+        day: state["trading_day"].as_str().map(str::to_owned),
+        budget: state["available_local_budget"].as_f64(),
+        positions: Arc::new(
+            state["positions"]
+                .as_array()
+                .context("missing positions snapshot")?
+                .clone(),
+        ),
+    })
+}
+
 pub(super) fn read(db: &DB, adapter: &str, previous: Option<&Projection>) -> Result<Projection> {
     let mut next = previous.cloned().unwrap_or_default();
     let from = previous.and_then(|old| old.last_key.as_deref());
@@ -87,6 +135,7 @@ pub(super) fn read(db: &DB, adapter: &str, previous: Option<&Projection>) -> Res
     let cf = db.cf_handle(EVENTS).context("events handle")?;
     let mut last_key = None;
     let mut state_key = None;
+    let mut observed_positions_key = None;
     let mut guard_error = None;
     for item in db.iterator_cf(cf, mode) {
         let (key, bytes) = item.context("scan domestic evidence")?;
@@ -169,7 +218,24 @@ pub(super) fn read(db: &DB, adapter: &str, previous: Option<&Projection>) -> Res
         if matches!(kind, "runtime_start" | "runtime_stopped") {
             next.runtime = Some((kind == "runtime_stopped", event.sequence));
         }
+        if matches!(
+            kind,
+            "runtime_start"
+                | "runtime_stopped"
+                | "reconciling"
+                | "recovery_checkpoint"
+                | "restart_required"
+        ) || native.as_ref().is_some_and(|raw| {
+            (kind == "ctp_event" || raw.replay == Some(0))
+                && (matches!(raw.kind, Some(1 | 2))
+                    || kind == "yida_event" && matches!(raw.kind, Some(14 | 16)))
+        }) {
+            next.position_boundary = Some(event.sequence);
+        }
         if matches!(kind, "state" | "reconciled") {
+            if complete_inventory(&event) {
+                observed_positions_key = Some(key.clone());
+            }
             state_key = Some(key.clone());
         }
         last_key = Some(key);
@@ -182,35 +248,37 @@ pub(super) fn read(db: &DB, adapter: &str, previous: Option<&Projection>) -> Res
     if let Some(key) = last_key {
         next.last_key = Some(key.into_vec());
     }
-    if let Some(key) = state_key {
+    if let Some(key) = &state_key {
         // Decode the latest inventory once. Older state rows can include
         // large snapshots and are superseded by the last forward record.
         let bytes = db
             .get_cf(cf, key)?
             .context("missing latest execution state")?;
-        let event: Envelope<'_> = serde_json::from_slice(&bytes)?;
-        let value = event.value;
-        let state = json(
-            value
-                .state
-                .context("missing execution state")?
-                .get()
-                .as_bytes(),
-            EVENTS,
-        )?;
-        ensure!(state.is_object(), "missing execution state");
-        next.state = Some(State {
-            sequence: event.sequence,
-            received: event.received_us,
-            ready: state["ready"].as_bool().context("missing ready state")?,
-            can_trade: boolean(value.can_trade),
-            reason: state["reason"].as_str().unwrap_or_default().into(),
-            day: state["trading_day"].as_str().map(str::to_owned),
-            budget: state["available_local_budget"].as_f64(),
-            positions: state["positions"]
-                .as_array()
-                .context("missing positions snapshot")?
-                .clone(),
+        next.state = Some(read_state(&bytes)?);
+    }
+    if let Some(key) = &observed_positions_key {
+        next.observed_positions = if state_key.as_ref() == Some(key) {
+            next.state.clone()
+        } else {
+            db.get_cf(cf, key)
+                .ok()
+                .flatten()
+                .and_then(|bytes| read_state(&bytes).ok())
+        }
+        .filter(|state| {
+            state.received > 0
+                && validate_position_rows(&state.positions).is_ok()
+                && state.positions.iter().all(|row| {
+                    row["symbol"]
+                        .as_str()
+                        .is_some_and(|symbol| !symbol.is_empty())
+                        && row["position"]["today"]
+                            .as_i64()
+                            .zip(row["position"]["yesterday"].as_i64())
+                            .is_some_and(|(today, yesterday)| {
+                                today.checked_add(yesterday).is_some()
+                            })
+                })
         });
     }
     Ok(next)
@@ -237,7 +305,7 @@ impl Projection {
             result.reason = state.reason.clone();
             result.trading_day = state.day.clone();
             result.available_local_budget = state.budget;
-            result.positions = state.positions.clone();
+            result.positions = state.positions.as_ref().clone();
             result.state_observed_us = Some(state.received);
             result.state_evidence_sequence = Some(state.sequence);
         }
@@ -283,6 +351,20 @@ impl Projection {
             "observing"
         }
         .into();
+        result.position_observation =
+            self.observed_positions
+                .as_ref()
+                .map(|state| PositionObservation {
+                    observed_us: state.received,
+                    evidence_sequence: state.sequence,
+                    current_runtime: state.received <= result.read_at_us
+                        && !matches!(result.status.as_str(), "stopped" | "disconnected")
+                        && self
+                            .position_boundary
+                            .is_none_or(|before| state.sequence > before),
+                    later_fills: result.max_fill_evidence_sequence > state.sequence,
+                    rows: state.positions.clone(),
+                });
         self.funds.apply(result, stale_secs);
     }
 }

@@ -80,6 +80,7 @@ pub(super) struct Sample {
     pub(super) snapshot: Option<Arc<reader::Snapshot>>,
     attempted_at_us: Option<i64>,
     collection: Option<&'static str>,
+    collection_reason: Option<&'static str>,
     failed: bool,
     notionals: Option<(f64, f64)>,
     nav_cut: Option<NavCut>,
@@ -90,13 +91,37 @@ impl Sample {
         self.collection.unwrap_or("loading")
     }
 
-    fn current(&self) -> Option<&reader::Snapshot> {
-        self.snapshot.as_deref().filter(|snapshot| {
-            self.collection() == "live"
-                && snapshot.snapshot_ready
-                && snapshot.snapshot_current_runtime
-                && !snapshot.positions_may_lag
+    fn execution_status(&self) -> Option<&str> {
+        self.snapshot.as_ref().map(|snapshot| {
+            if snapshot.status == "stale" {
+                "quiet"
+            } else {
+                snapshot.status.as_str()
+            }
         })
+    }
+
+    fn position(&self) -> Option<PositionDisplay<'_>> {
+        let observation = self.snapshot.as_ref()?.position_observation.as_ref()?;
+        let reason = match self.execution_status() {
+            Some("stopped") => Some("执行已停止"),
+            Some("disconnected") => Some("柜台已断线"),
+            _ if self.collection() != "live" => self.collection_reason.or(Some("当前未能核验持仓")),
+            _ if !observation.current_runtime => Some("尚未收到本次连接的完整持仓对账"),
+            _ if observation.later_fills => Some("该持仓对账之后已有成交，等待新的完整观测"),
+            _ => None,
+        };
+        Some(PositionDisplay {
+            observation,
+            reason,
+        })
+    }
+
+    fn position_reason(&self, position: Option<PositionDisplay<'_>>) -> Option<&'static str> {
+        match position {
+            Some(position) => position.reason,
+            None => Some(self.collection_reason.unwrap_or("尚无可验证的完整持仓对账")),
+        }
     }
 
     fn funds(&self, now_us: i64, stale_secs: u64) -> Option<FundsObservation<'_>> {
@@ -109,15 +134,19 @@ impl Sample {
             Some("执行已停止")
         } else if snapshot.status == "disconnected" {
             Some("柜台已断线")
+        } else if self.collection() != "live" {
+            self.collection_reason
+                .or(Some("当前未收到可验证的账户资金"))
         } else if !snapshot.funds_current_runtime {
             Some("当前运行尚未收到可验证的账户资金")
-        } else if snapshot.funds_stale
-            || now_us.saturating_sub(funds.observed_us) > stale_us
-            || funds.observed_us > now_us
+        } else if funds.observed_us > now_us {
+            Some("资金回报时间待核验")
+        } else if funds.source == reader::AccountFundsSource::CtpTradingAccount
+            && now_us.saturating_sub(funds.observed_us) > stale_us
         {
-            Some("当前资金观察已失效")
-        } else if self.collection() != "live" {
-            Some("当前未收到可验证的账户资金")
+            Some("CTP 周期资金查询逾期")
+        } else if snapshot.funds_stale {
+            Some("最近资金回报未通过校验")
         } else {
             None
         };
@@ -125,6 +154,22 @@ impl Sample {
             funds,
             historical_reason,
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PositionDisplay<'a> {
+    observation: &'a reader::PositionObservation,
+    reason: Option<&'static str>,
+}
+
+impl PositionDisplay<'_> {
+    fn status(self) -> &'static str {
+        if self.reason.is_some() {
+            "historical"
+        } else {
+            "live"
+        }
     }
 }
 
@@ -249,13 +294,14 @@ fn observation(previous: Sample, result: Result<reader::Snapshot, ApiError>, now
     let snapshot = match result {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            sample.collection = Some(match (sample.snapshot.is_some(), error.0) {
-                (true, _) => "stale",
-                (false, StatusCode::SERVICE_UNAVAILABLE) => "loading",
-                (false, _) => "unavailable",
-            });
             sample.failed = error.0 != StatusCode::SERVICE_UNAVAILABLE;
-            sample.notionals = None;
+            let (status, reason) = if sample.failed {
+                ("unavailable", "执行记录读取失败")
+            } else {
+                ("loading", "副本正在初始化或提交同步")
+            };
+            sample.collection = Some(status);
+            sample.collection_reason = Some(reason);
             sample.nav_cut = None;
             sample.nav = None;
             return sample;
@@ -266,26 +312,19 @@ fn observation(previous: Sample, result: Result<reader::Snapshot, ApiError>, now
             .replication
             .as_ref()
             .is_some_and(|s| s.last_error.is_some());
-    sample.collection = Some(
-        if snapshot.replication_stale || snapshot.status == "stale" {
-            "stale"
-        } else if sample.failed {
-            "unavailable"
-        } else if snapshot.last_event_us.is_none() || snapshot.status == "recovering" {
-            "loading"
-        } else if snapshot.status == "stopped" || snapshot.status == "disconnected" {
-            "stale"
-        } else {
-            "live"
-        },
-    );
-    let same_position = sample.current().is_some_and(|previous| {
-        previous.state_observed_us == snapshot.state_observed_us
-            && previous.positions == snapshot.positions
-            && previous.total_fills == snapshot.total_fills
-    }) && snapshot.snapshot_ready
-        && snapshot.snapshot_current_runtime
-        && !snapshot.positions_may_lag;
+    let (status, reason) = collection(&snapshot);
+    sample.collection = Some(status);
+    sample.collection_reason = reason;
+    let same_position = sample
+        .snapshot
+        .as_ref()
+        .and_then(|old| old.position_observation.as_ref())
+        .zip(snapshot.position_observation.as_ref())
+        .is_some_and(|(old, current)| {
+            old.evidence_sequence == current.evidence_sequence
+                && old.observed_us == current.observed_us
+                && old.rows == current.rows
+        });
     if !same_position {
         sample.notionals = None;
     }
@@ -297,11 +336,32 @@ fn observation(previous: Sample, result: Result<reader::Snapshot, ApiError>, now
     sample
 }
 
-fn positions(snapshot: &reader::Snapshot) -> Option<BTreeMap<(&str, &str), (i64, i64)>> {
+fn collection(snapshot: &reader::Snapshot) -> (&'static str, Option<&'static str>) {
+    if snapshot.projection_errors != 0 {
+        return ("unavailable", Some("执行证据校验异常"));
+    }
+    if let Some(replica) = &snapshot.replication {
+        if replica.last_error.is_some() {
+            return ("stale", Some("远端副本同步失败"));
+        }
+        if snapshot.replication_stale {
+            return ("stale", Some("远端副本同步逾期"));
+        }
+        if !reader::replica_caught_up(replica) {
+            return ("loading", Some("执行记录正在同步"));
+        }
+    }
+    if snapshot.last_event_us.is_none() {
+        return ("loading", Some("尚无执行事件"));
+    }
+    ("live", None)
+}
+
+fn positions(rows: &[Value]) -> Option<BTreeMap<(&str, &str), (i64, i64)>> {
     let mut result = BTreeMap::new();
-    for row in &snapshot.positions {
+    for row in rows {
         let venue = row["venue"].as_str()?;
-        let contract = row["symbol"].as_str()?;
+        let contract = row["symbol"].as_str().filter(|symbol| !symbol.is_empty())?;
         let lots = row["position"]["today"]
             .as_i64()?
             .checked_add(row["position"]["yesterday"].as_i64()?)?;
@@ -321,10 +381,13 @@ async fn position_notionals(s: &Service, sample: &Sample) -> Option<(f64, f64)> 
     if let Some(values) = sample.notionals {
         return Some(values);
     }
-    let snapshot = sample.current()?;
-    let at = snapshot.state_observed_us?;
+    if sample.collection() != "live" {
+        return None;
+    }
+    let position = sample.position()?.observation;
+    let at = position.observed_us;
     let (mut long_cny, mut short_cny) = (0.0, 0.0);
-    for ((venue, contract), (long, short)) in positions(snapshot)? {
+    for ((venue, contract), (long, short)) in positions(&position.rows)? {
         let prices = s
             .market_data
             .as_ref()?
@@ -481,11 +544,16 @@ struct NativeOverviewRow {
     #[serde(flatten)]
     row: OverviewRow,
     quote_currency: &'static str,
+    collection_status_reason: Option<&'static str>,
+    execution_status: Option<String>,
     funds_status: Option<&'static str>,
     funds_as_of_ms: Option<i64>,
     funds_historical_reason: Option<&'static str>,
     funds_trading_day: Option<String>,
     sdk_market_value: Option<f64>,
+    position_status: Option<&'static str>,
+    position_as_of_ms: Option<i64>,
+    position_historical_reason: Option<&'static str>,
 }
 
 pub(super) async fn overview(
@@ -508,9 +576,11 @@ pub(super) async fn overview(
     for source in visible(&s, &access) {
         let sample = s.overview.sample(&source.id);
         let mut funds = sample.funds(now_us, s.config.stale_secs);
+        let position = sample.position();
         let anchors = nav::store::list(&s.pool, &source.id).await?;
         dates.extend(anchors.iter().filter_map(|a| shanghai_date(a.snapshot_us)));
         dates.extend(funds.and_then(|obs| shanghai_date(obs.funds.observed_us)));
+        dates.extend(position.and_then(|obs| shanghai_date(obs.observation.observed_us)));
         let mut row = OverviewRow {
             source_id: source.id.clone(),
             account: aliases.get(&source.id).unwrap_or(&source.account).clone(),
@@ -520,30 +590,50 @@ pub(super) async fn overview(
             history_start_ms: anchors.last().map(|anchor| anchor.snapshot_us / 1000),
             ..Default::default()
         };
-        let (status, notionals) = if let Some(day) = selected_day {
-            let anchor = anchors
-                .iter()
-                .find(|a| shanghai_date(a.snapshot_us) == Some(day));
-            funds = funds
-                .filter(|obs| shanghai_date(obs.funds.observed_us) == Some(day))
-                .map(FundsObservation::with_historical_date);
-            row.date_ms = anchor.map(|a| a.snapshot_us / 1000);
-            row.queried_at_ms = now_ms;
-            (
-                if anchor.is_some() || funds.is_some() {
-                    "historical"
-                } else {
-                    "unavailable"
-                },
-                anchor.and_then(anchor_notionals),
-            )
-        } else {
-            row.date_ms = sample
-                .current()
-                .and_then(|snapshot| snapshot.state_observed_us)
-                .map(|at| at / 1000);
-            (sample.collection(), sample.current().and(sample.notionals))
-        };
+        let (status, notionals, position_status, position_at, position_reason) =
+            if let Some(day) = selected_day {
+                let anchor = anchors
+                    .iter()
+                    .find(|a| shanghai_date(a.snapshot_us) == Some(day));
+                let observed =
+                    position.filter(|obs| shanghai_date(obs.observation.observed_us) == Some(day));
+                funds = funds
+                    .filter(|obs| shanghai_date(obs.funds.observed_us) == Some(day))
+                    .map(FundsObservation::with_historical_date);
+                let at = anchor
+                    .map(|a| a.snapshot_us)
+                    .or_else(|| observed.map(|obs| obs.observation.observed_us));
+                row.date_ms = at.map(|at| at / 1000);
+                row.queried_at_ms = now_ms;
+                (
+                    if at.is_some() || funds.is_some() {
+                        "historical"
+                    } else {
+                        "unavailable"
+                    },
+                    match anchor {
+                        Some(anchor) => anchor_notionals(anchor),
+                        None => observed.and(sample.notionals),
+                    },
+                    at.map(|_| "historical"),
+                    at,
+                    Some(if at.is_some() {
+                        "所选日期的持仓观测"
+                    } else {
+                        "所选日期没有可验证的完整持仓对账"
+                    }),
+                )
+            } else {
+                let at = position.map(|obs| obs.observation.observed_us);
+                row.date_ms = at.map(|at| at / 1000);
+                (
+                    sample.collection(),
+                    position.and(sample.notionals),
+                    position.map(PositionDisplay::status),
+                    at,
+                    sample.position_reason(position),
+                )
+            };
         row.collection_status = Some(status.into());
         if let Some((long, short)) = notionals {
             row.long_position = Some(long);
@@ -553,14 +643,27 @@ pub(super) async fn overview(
         if let Some(obs) = funds {
             obs.apply_to(&mut row);
         }
+        let (collection_status_reason, execution_status) = if selected_day.is_none() {
+            (
+                sample.collection_reason,
+                sample.execution_status().map(str::to_owned),
+            )
+        } else {
+            (None, None)
+        };
         accounts.push(NativeOverviewRow {
             row,
             quote_currency: "CNY",
+            collection_status_reason,
+            execution_status,
             funds_status: funds.map(FundsObservation::status),
             funds_as_of_ms: funds.map(|obs| obs.funds.observed_us / 1000),
             funds_historical_reason: funds.and_then(|obs| obs.historical_reason),
             funds_trading_day: funds.and_then(|obs| obs.funds.trading_day.clone()),
             sdk_market_value: funds.and_then(FundsObservation::sdk_market_value),
+            position_status,
+            position_as_of_ms: position_at.map(|at| at / 1000),
+            position_historical_reason: position_reason,
         });
     }
     let loading = !accounts.is_empty()
@@ -609,10 +712,17 @@ pub(super) async fn dashboard(
         let anchor = nav::store::first(&s.pool, id).await?;
         let first_anchor_us = anchor.as_ref().map(|anchor| anchor.snapshot_us);
         let can_configure = access.configure.contains(id);
-        let position_count = sample
-            .current()
-            .and_then(positions)
-            .map(|positions| positions.len());
+        let position = sample.position();
+        let position_count = position
+            .and_then(|obs| positions(&obs.observation.rows))
+            .map(|set| set.len());
+        let current_position_count = position
+            .filter(|obs| obs.reason.is_none())
+            .and(position_count);
+        let recent_position_count = position
+            .filter(|obs| obs.reason.is_some())
+            .and(position_count);
+        let position_reason = sample.position_reason(position);
         let portfolio = crate::native_futures::netting::store::load(&s.pool, id).await?;
         let strategy_anchor = portfolio
             .filter(|p| p.targets.keys().all(|name| scope.can_view(name)))
@@ -646,12 +756,20 @@ pub(super) async fn dashboard(
             "gateway_prefix": null, "configurable": false, "target_proxy_enabled": false,
             "access_level": if can_configure { "configure" } else { "view" },
             "can_edit_alias": can_configure, "display_alias": aliases.get(id),
-            "open_position_symbol_count": position_count, "account_pnl_start_ts_us": first_anchor_us,
+            "open_position_symbol_count": current_position_count,
+            "recent_position_symbol_count": recent_position_count,
+            "position_status": position.map(PositionDisplay::status),
+            "position_observed_ts_us": position.map(|obs| obs.observation.observed_us),
+            "position_historical_reason": position_reason,
+            "account_pnl_start_ts_us": first_anchor_us,
             "strategy_pnl_start_ts_us": strategy_anchor,
             "account_pnl_only": strategy_anchor.is_none(),
             "live_equity_quote": equity, "live_equity_status": equity_status,
             "account_funds": funds.map(FundsObservation::card),
             "quote_currency": "CNY", "collection_status": sample.collection(),
+            "collection_status_reason": sample.collection_reason,
+            "execution_status": sample.execution_status(),
+            "execution_observed_ts_us": observed.and_then(|snapshot| snapshot.last_event_us),
         }));
         reports.push(json!({
             "source_id": id, "account": account, "configured_venue": source.adapter,
@@ -749,9 +867,12 @@ mod tests {
         let mut read =
             || reader::with_db(&secondary, &source, |db| cache.read(&source, db, 10, 30));
         let sample = observation(Sample::default(), Ok(read()?), now);
-        assert!(
-            sample.current().is_none(),
-            "settlement blocked positions are unavailable"
+        assert_eq!(
+            sample
+                .position()
+                .context("read-only reconciliation")?
+                .status(),
+            "live"
         );
         let funds = sample.funds(now, 30).context("fresh broker observation")?;
         assert_eq!(funds.status(), "live");
@@ -765,10 +886,9 @@ mod tests {
         assert_eq!(funds.card()["previous_balance"], 1200.0);
         assert!(row.yesterday_equity.is_none());
         assert!(row.today_profit.is_none());
-        assert_eq!(
-            sample.funds(now + 30_000_000, 30).unwrap().status(),
-            "historical"
-        );
+        let late = sample.funds(now + 30_000_000, 30).context("aged query")?;
+        assert_eq!(late.status(), "historical");
+        assert_eq!(late.historical_reason, Some("CTP 周期资金查询逾期"));
 
         put(12, now, json!({"type":"runtime_stopped"}))?;
         let stopped = observation(sample, Ok(read()?), now);
@@ -822,6 +942,137 @@ mod tests {
     }
 
     #[test]
+    fn quiet_replica_keeps_yida_funds_and_positions_until_evidence_becomes_unverifiable()
+    -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let primary = tmp.path().join("exec");
+        let mut options = rocksdb::Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = rocksdb::DB::open_cf(
+            &options,
+            &primary,
+            ["cn_trading_events", "cn_uniform_orders", "cn_trade_facts"],
+        )?;
+        let source = Source {
+            id: "account".into(),
+            account: "test".into(),
+            adapter: "yida".into(),
+            rocksdb_path: primary,
+            enabled: true,
+            sync: None,
+        };
+        let now = crate::native_futures::now_us();
+        let old = now - 600_000_000;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/yida_native_records.json"
+        ))?;
+        let mut state = fixture["state"].clone();
+        state["received_us"] = json!(old);
+        let cf = db
+            .cf_handle("cn_trading_events")
+            .context("test events CF")?;
+        db.put_cf(cf, 100_i64.to_be_bytes(), serde_json::to_vec(&state)?)?;
+        let mut snapshot = reader::read(&source, &tmp.path().join("secondary"), 10, 30)?;
+        assert_eq!(
+            snapshot.status, "stale",
+            "execution evidence still applies its own age rule"
+        );
+        snapshot.replication = Some(crate::native_futures::sync::ReplicaStatus {
+            initialized: true,
+            committed_cursor: 100,
+            received_cursor: 100,
+            source_captured_at_us: Some(old),
+            last_synced_at_us: Some(now),
+            ..Default::default()
+        });
+        snapshot.funds = Some(reader::AccountFunds {
+            source: reader::AccountFundsSource::YidaExtendedAccount,
+            evidence_sequence: 99,
+            observed_us: old,
+            trading_day: Some("20261118".into()),
+            currency: None,
+            valuation_basis: None,
+            balance: None,
+            previous_balance: None,
+            margin: None,
+            available: None,
+            usable_cash: Some(500.0),
+            deposit: None,
+            withdraw: None,
+            native_fields: BTreeMap::new(),
+        });
+        snapshot.funds_current_runtime = true;
+        let mut quiet = observation(Sample::default(), Ok(snapshot.clone()), now);
+        assert_eq!(quiet.collection(), "live");
+        assert_eq!(quiet.execution_status(), Some("quiet"));
+        assert!(quiet.nav_cut.context("retained NAV evidence")?.historical);
+        let funds = quiet.funds(now, 30).context("broker funds")?;
+        assert_eq!(funds.status(), "live");
+        assert_eq!(funds.funds.observed_us, old);
+        let position = quiet.position().context("complete position observation")?;
+        assert_eq!(position.status(), "live");
+        assert_eq!(position.observation.observed_us, old);
+        assert_eq!(
+            positions(&position.observation.rows)
+                .context("valid position rows")?
+                .len(),
+            2
+        );
+        quiet.notionals = Some((123.0, 0.0));
+
+        let busy = observation(
+            quiet.clone(),
+            Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "test barrier".into(),
+            )),
+            now,
+        );
+        assert_eq!(busy.collection(), "loading");
+        assert_eq!(
+            busy.position().context("last known observation")?.status(),
+            "historical"
+        );
+        assert_eq!(busy.funds(now, 30).unwrap().status(), "historical");
+        assert_eq!(busy.notionals, Some((123.0, 0.0)));
+        assert!(busy.nav_cut.is_none());
+        let failed = observation(
+            quiet.clone(),
+            Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "test failure".into(),
+            )),
+            now,
+        );
+        assert_eq!(failed.collection(), "unavailable");
+        assert_eq!(failed.collection_reason, Some("执行记录读取失败"));
+
+        let replica = snapshot.replication.as_mut().unwrap();
+        replica.target_cursor = Some(101);
+        let catching_up = observation(quiet.clone(), Ok(snapshot.clone()), now);
+        assert_eq!(catching_up.collection(), "loading");
+        assert_eq!(catching_up.position().unwrap().status(), "historical");
+        snapshot.replication_stale = true;
+        let delayed = observation(quiet.clone(), Ok(snapshot.clone()), now);
+        assert_eq!(delayed.collection(), "stale");
+        assert_eq!(delayed.collection_reason, Some("远端副本同步逾期"));
+
+        snapshot.replication_stale = false;
+        snapshot.replication.as_mut().unwrap().target_cursor = None;
+        snapshot.position_observation.as_mut().unwrap().later_fills = true;
+        let later_fill = observation(quiet, Ok(snapshot), now);
+        assert_eq!(later_fill.collection(), "live");
+        assert_eq!(later_fill.position().unwrap().status(), "historical");
+        assert_eq!(
+            later_fill.position().unwrap().reason,
+            Some("该持仓对账之后已有成交，等待新的完整观测")
+        );
+        assert_eq!(later_fill.notionals, Some((123.0, 0.0)));
+        Ok(())
+    }
+
+    #[test]
     fn cached_cumulative_nav_keeps_stopped_cut_without_live_positions() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let primary = tmp.path().join("exec");
@@ -858,7 +1109,10 @@ mod tests {
             || reader::with_db(&secondary, &source, |db| cache.read(&source, db, 10, 30));
 
         let mut sample = observation(Sample::default(), Ok(read()?), now);
-        assert!(sample.current().is_some());
+        assert_eq!(
+            sample.position().context("current positions")?.status(),
+            "live"
+        );
         let active = sample.nav_cut.context("reconciled cutoff")?;
         assert!(!active.historical);
         sample.nav = Some(CachedNav {
@@ -879,8 +1133,11 @@ mod tests {
         assert_eq!(stopped.sequence, active.sequence);
         assert_eq!(stopped.revision, active.revision);
         assert!(stopped.historical && stopped.stopped);
-        assert!(sample.current().is_none());
-        assert!(sample.notionals.is_none());
+        assert_eq!(
+            sample.position().context("retained positions")?.status(),
+            "historical"
+        );
+        assert_eq!(sample.notionals, Some((1.0, 0.0)));
         assert!(sample.nav.is_none());
 
         let saved = CachedNav {
@@ -908,7 +1165,10 @@ mod tests {
             ..Default::default()
         });
         let failed = observation(sample, Ok(failed), now + 2);
-        assert!(failed.current().is_none());
+        assert_eq!(
+            failed.position().context("retained positions")?.status(),
+            "historical"
+        );
         assert!(failed.nav_cut.is_none());
         assert!(failed.nav.is_none());
         Ok(())

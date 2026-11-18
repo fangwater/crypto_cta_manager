@@ -45,6 +45,7 @@ interface Props {
   visibleSeries: NavSeriesKey[]
   mode: TimelineChartMode
   feeMode: FeeMode
+  native?: boolean
 }
 
 const symbolPalette = [
@@ -98,7 +99,8 @@ export const navSeriesMeta: Record<
   },
 }
 
-export function navSeriesLabel(key: NavSeriesKey, model?: TheoreticalExecutionModel | null) {
+export function navSeriesLabel(key: NavSeriesKey, model?: TheoreticalExecutionModel | null, native = false) {
+  if (native && key === 'estimated_trading_fee_quote') return '手续费'
   if (key.startsWith('theoretical_')) {
     const fee = key.endsWith('before_fee_quote') ? '费前' : '费后'
     if (key.startsWith('theoretical_instant_taker_')) return `理论瞬时taker（${fee}）`
@@ -141,6 +143,7 @@ export function NavTimelineChart({
   visibleSeries,
   mode,
   feeMode,
+  native = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -154,7 +157,7 @@ export function NavTimelineChart({
     const series =
       mode === 'portfolio'
         ? visibleSeries.map((key) => {
-            const meta = { ...navSeriesMeta[key], label: navSeriesLabel(key, theoretical[0]?.execution_model) }
+            const meta = { ...navSeriesMeta[key], label: navSeriesLabel(key, theoretical[0]?.execution_model, native) }
             const isTheoretical = isTheoreticalSeries(key)
             const reference = key.startsWith('theoretical_instant_taker_') ? theoretical.find((r) => r.execution_model === 'instant_taker') : key.startsWith('theoretical_twap3m_') ? theoretical.find((r) => r.execution_model === 'twap3m') : theoretical[0]
             const data = isTheoretical
@@ -307,6 +310,7 @@ export function NavTimelineChart({
     }
   }, [
     feeMode,
+    native,
     mode,
     points,
     strategyPoints,

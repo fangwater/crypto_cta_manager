@@ -256,6 +256,9 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     assert_eq!(overview["accounts"][0]["source_id"], "sim");
     assert_eq!(overview["accounts"][0]["quote_currency"], "CNY");
     assert_eq!(overview["accounts"][0]["collection_status"], "loading");
+    for field in ["collection_status_reason", "execution_status"] {
+        assert!(overview["accounts"][0].get(field).is_some(), "{field}");
+    }
     assert!(overview["accounts"][0]["equity"].is_null());
     assert!(overview["accounts"][0]["margin"].is_null());
     let dashboard: Value = client
@@ -324,6 +327,7 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     assert_eq!(historical["dates"], json!(["2026-11-17"]));
     let row = &historical["accounts"][0];
     assert_eq!(row["collection_status"], "historical");
+    assert!(row["execution_status"].is_null());
     assert_eq!(row["long_position"], 1_575_000.0);
     assert_eq!(row["short_position"], 525_000.0);
     assert_eq!(row["net_position"], 1_050_000.0);

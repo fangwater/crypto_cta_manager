@@ -600,13 +600,29 @@ fn cached_snapshot_lag_includes_fills_outside_recent_rows_and_clears_after_a_new
     let first = read();
     assert_eq!(first.fills.len(), 1);
     assert!(first.positions_may_lag);
+    assert!(first.position_observation.unwrap().later_fills);
     state["sequence"] = json!(500);
     state["received_us"] = json!(super::now_us());
     put(&db, "cn_trading_events", "002", &state);
     assert!(read().positions_may_lag);
     state["sequence"] = json!(1001);
     put(&db, "cn_trading_events", "003", &state);
-    assert!(!read().positions_may_lag);
+    let caught_up = read();
+    assert!(!caught_up.positions_may_lag);
+    let proof = caught_up.position_observation.unwrap();
+    assert!(!proof.later_fills);
+    assert!(proof.current_runtime);
+
+    state["sequence"] = json!(1002);
+    state["value"]["type"] = json!("state");
+    state["value"]["state"]["ready"] = json!(false);
+    state["value"]["state"]["positions"] = json!([]);
+    put(&db, "cn_trading_events", "004", &state);
+    let incomplete = read();
+    assert!(incomplete.positions.is_empty());
+    let last = incomplete.position_observation.unwrap();
+    assert_eq!(last.evidence_sequence, proof.evidence_sequence);
+    assert_eq!(last.rows, proof.rows);
 }
 
 #[test]
@@ -808,7 +824,7 @@ fn broker_funds_yida_need_confirmed_recovery_and_keep_native_marks_distinct() {
     let structural = |kind| json!({"type":"yida_event","received_us":now,"event":{"kind":kind,"day":20261117,"replay":0}});
     let account = |replay, available, detail: Value| {
         json!({
-            "type":"yida_event","received_us":now-50,"event":{
+        "type":"yida_event","received_us":now-120_000_000,"event":{
                 "kind":8,"day":20261117,"replay":replay,"error":0,"login_count":1,"right":0,
                 "available":available,"account":detail
             }
@@ -836,7 +852,7 @@ fn broker_funds_yida_need_confirmed_recovery_and_keep_native_marks_distinct() {
     assert!(funds.balance.is_none());
     assert!(funds.margin.is_none());
     assert!(funds.currency.is_none());
-    assert_eq!(funds.observed_us, now - 50);
+    assert_eq!(funds.observed_us, now - 120_000_000);
 
     event(7, account(1, 30.0, Value::Null));
     assert_eq!(read().funds.unwrap().usable_cash, Some(100.0));

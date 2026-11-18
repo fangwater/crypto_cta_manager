@@ -99,7 +99,8 @@ export function AccountOverviewPage() {
     setDashboard(snapshot)
     setAccountStudios(studios)
     setStudio(studios.find(s => s.source_id === nativeId) ?? null)
-    window.history.replaceState({}, '', routes.account(scope.account.source_id))
+    const section = window.location.hash === '#contract-fees' ? 'contract-fees' : undefined
+    window.history.replaceState({}, '', routes.account(scope.account.source_id, section))
   }, [accountId])
 
   useEffect(() => {
@@ -125,7 +126,6 @@ export function AccountOverviewPage() {
   const markets = account?.execution_sources ?? []
   const marketAccount = markets.find(a => a.source_id === sourceId) ?? account
   const native = isNativeFuturesVenue(marketAccount?.venue)
-  const quoteCurrency = native ? 'CNY' : '报价币'
   const report = dashboard?.report.sources.find(s => s.source_id === publicId)
   const bindings = useMemo(() => accountBindings(accountStudios), [accountStudios])
   const liquidityReport = report?.execution_sources?.find(s => s.source_id === sourceId) ?? report
@@ -137,6 +137,12 @@ export function AccountOverviewPage() {
     ? (liquidityReport?.maker_volume_quote ?? 0) / knownLiquidityVolume
     : 0
   const takerRatio = knownLiquidityVolume > 0 ? 1 - makerRatio : 0
+
+  useEffect(() => {
+    if (!loading && !catalogLoading && native && window.location.hash === '#contract-fees') {
+      document.getElementById('contract-fees')?.scrollIntoView()
+    }
+  }, [loading, catalogLoading, native])
 
   const positionByName = useMemo(
     () => new Map(positions.map((item) => [item.strategy_name, item])),
@@ -233,7 +239,7 @@ export function AccountOverviewPage() {
               }}>{markets.map(m => <option key={m.source_id} value={m.source_id}>{accountVenueLabel(m.venue)}</option>)}</Select>
             </CardContent></Card>}
             {markets.length === 0 && !estimatedFundingOnly(sourceId) && marketAccount?.venue === 'binance-futures' && <FundingSettingsPanel key={sourceId} sourceId={sourceId} canConfigure={canConfigure} />}
-            <Card>
+            <Card id={native ? 'contract-fees' : undefined}>
               <CardHeader className="border-b border-border-soft/80">
                 <div>
                   <CardTitle className="text-base">{native ? '合约手续费' : '估算费率'}</CardTitle>
@@ -251,7 +257,7 @@ export function AccountOverviewPage() {
                     await refresh()
                     return '已保存报价币费率；成交手续费重新估算，理论费率对后续目标生效'
                   })} />}
-                <div className="space-y-2 border-t border-border-soft pt-3">
+                {!native && <div className="space-y-2 border-t border-border-soft pt-3">
                   <div className="flex items-center justify-between text-sm">
                     <span className="font-medium text-ink">成交名义比例</span>
                     <span className="mono text-muted">
@@ -263,13 +269,13 @@ export function AccountOverviewPage() {
                     <div className="bg-amber-500" style={{ width: `${takerRatio * 100}%` }} />
                   </div>
                   <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-                    <span>Maker {money(liquidityReport?.maker_volume_quote ?? 0)} {quoteCurrency} / {liquidityReport?.maker_fill_count ?? 0} 笔</span>
-                    <span>Taker {money(liquidityReport?.taker_volume_quote ?? 0)} {quoteCurrency} / {liquidityReport?.taker_fill_count ?? 0} 笔</span>
+                    <span>Maker {money(liquidityReport?.maker_volume_quote ?? 0)} 报价币 / {liquidityReport?.maker_fill_count ?? 0} 笔</span>
+                    <span>Taker {money(liquidityReport?.taker_volume_quote ?? 0)} 报价币 / {liquidityReport?.taker_fill_count ?? 0} 笔</span>
                     {(liquidityReport?.unknown_liquidity_fill_count ?? 0) > 0 && (
-                      <span>Unknown {money(liquidityReport?.unknown_liquidity_volume_quote ?? 0)} {quoteCurrency} / {liquidityReport?.unknown_liquidity_fill_count ?? 0} 笔</span>
+                      <span>Unknown {money(liquidityReport?.unknown_liquidity_volume_quote ?? 0)} 报价币 / {liquidityReport?.unknown_liquidity_fill_count ?? 0} 笔</span>
                     )}
                   </div>
-                </div>
+                </div>}
               </CardContent>
             </Card>
 

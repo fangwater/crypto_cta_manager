@@ -8,6 +8,7 @@ use std::{
     fs::File,
     ops::Deref,
     path::Path,
+    sync::Arc,
 };
 
 mod cache;
@@ -20,6 +21,16 @@ pub use funds::{AccountFunds, AccountFundsSource};
 const EVENTS: &str = "cn_trading_events";
 const ORDERS: &str = "cn_uniform_orders";
 const FILLS: &str = "cn_trade_facts";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PositionObservation {
+    pub observed_us: i64,
+    pub evidence_sequence: i64,
+    pub current_runtime: bool,
+    pub later_fills: bool,
+    #[serde(skip)]
+    pub(super) rows: Arc<Vec<Value>>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
@@ -49,6 +60,7 @@ pub struct Snapshot {
     pub funds_current_runtime: bool,
     pub funds_stale: bool,
     pub positions_may_lag: bool,
+    pub position_observation: Option<PositionObservation>,
     pub positions: Vec<Value>,
     pub orders: Vec<super::state::ObservedOrder>,
     pub fills: Vec<Value>,
@@ -154,6 +166,15 @@ fn replication_stale(
     })
 }
 
+pub(super) fn replica_caught_up(replica: &super::sync::ReplicaStatus) -> bool {
+    replica.initialized
+        && !replica.applying
+        && replica.received_cursor == replica.committed_cursor
+        && replica
+            .target_cursor
+            .is_none_or(|target| target <= replica.committed_cursor)
+}
+
 fn read_snapshot_with_projection(
     source: &Source,
     db: &DB,
@@ -200,6 +221,7 @@ fn read_snapshot_with_projection(
         funds_current_runtime: false,
         funds_stale: false,
         positions_may_lag: false,
+        position_observation: None,
         positions: vec![],
         orders: vec![],
         fills: vec![],
@@ -276,8 +298,16 @@ fn read_snapshot_with_projection(
                 .collect::<Result<_>>()?;
         }
     }
+    validate_position_rows(&result.positions)?;
+    result.read_at_us = super::now_us();
+    result.positions_may_lag = result.max_fill_evidence_sequence > state_sequence;
+    projection.apply(&mut result, stale_secs);
+    Ok(result)
+}
+
+fn validate_position_rows(rows: &[Value]) -> Result<()> {
     let mut identities = BTreeSet::new();
-    for position in &result.positions {
+    for position in rows {
         let p = &position["position"];
         for field in ["today", "yesterday", "frozen_today", "frozen_yesterday"] {
             ensure!(integer(p, field)? >= 0, "negative native position");
@@ -298,10 +328,7 @@ fn read_snapshot_with_projection(
             "duplicate position identity"
         );
     }
-    result.read_at_us = super::now_us();
-    result.positions_may_lag = result.max_fill_evidence_sequence > state_sequence;
-    projection.apply(&mut result, stale_secs);
-    Ok(result)
+    Ok(())
 }
 
 /// A complete trading day's evidence, independent of the recent-row UI limit.

@@ -1,5 +1,6 @@
 import { BookOpen, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { getDashboard } from '../api'
 import { AppShell } from '../components/AppShell'
 import {
   ApiTable,
@@ -73,10 +74,61 @@ function FieldRows({
   )
 }
 
-function buildChapters(gateway: string): Chapter[] {
+function nativeFeeChapters(): Partial<Record<ChapterId, Chapter>> {
+  const rates = `${MANAGER_PATH}/native/sources/{source_id}/rates`
+  const acquisition = `${CATALOG_PATH}/acquisition-cost`
+  return {
+    'acquisition-cost': {
+      id: 'acquisition-cost',
+      group: '策略目录',
+      title: '持仓成本',
+      lead: '按同一合约的实际成交手数比较成交价格和参考成本。支持最近 30 天。',
+      content: <>
+        <Endpoint method="GET" path={acquisition} summary="按实际成交的原生交易日读取明确关联的参考信号及对应交易分钟" />
+        <FieldRows rows={[
+          { field: 'sourceIds / startMs / endMs', detail: '一个有查看权限的账户及查询起止时间。时间为 Unix 毫秒，包含两端。' },
+          { field: 'rows[].execution_model / rows[].native_trading_minutes', detail: '参考可使用合约 TWAP 或 VWAP，窗口按原生交易时段计算。' },
+          { field: 'by_offset / rows[].offset', detail: '保留开仓、平仓、平今和平昨，成交数量以手计。' },
+          { field: 'actual_fee_quote / virtual_fee_quote', detail: '实际手续费取成交回报，理论手续费按对应开平、相同手数和参考成交额计算，单位为人民币。' },
+          { field: 'price_shortfall_quote / after_fee_shortfall_quote', detail: '按买卖方向调整的价格差及费后差。缺少事实手续费或历史参考费率时费后差为空。' },
+        ]} />
+      </>,
+    },
+    'account-studio': {
+      id: 'account-studio',
+      group: '账户绑定',
+      title: '合约手续费与保证金',
+      lead: '从账户详情查询指定合约在所选时刻已观察到的柜台费率。',
+      content: <>
+        <Endpoint method="GET" path={rates} summary="读取有权限账户的合约手续费和多空保证金观察" />
+        <FieldRows rows={[
+          { field: 'venue / symbol / at_us', detail: '原生交易所、完整合约代码和查询时点。at_us 为 Unix 微秒。' },
+          { field: 'rates.fees.open / close / close_today', detail: '开仓、平仓（含平昨）和平今的费率。费用 = 每手金额 × 手数 + 成交额费率 × 成交额。' },
+          { field: 'rates.margin', detail: '同次账户观察返回的多空保证金率及每手金额。' },
+          { field: 'rates', detail: '缺少该合约的历史观察时为空。费率可用于历史费用估算，已报告的成交手续费优先。' },
+        ]} />
+      </>,
+    },
+    client: {
+      id: 'client',
+      group: '附录',
+      title: '客户端',
+      lead: '合约费率和成本复盘可通过当前 Manager 的只读接口查询。',
+      content: <>
+        <ApiTable rows={[
+          { method: 'GET', path: rates, summary: '按账户、交易所和原生合约查询柜台费率观察' },
+          { method: 'GET', path: acquisition, summary: '按账户和时间查询实际与参考成本' },
+        ]} />
+        <Note>使用有该账户查看权限的 Manager 登录会话，保留原生合约代码的大小写和月份格式。</Note>
+      </>,
+    },
+  }
+}
+
+function buildChapters(gateway: string, native: boolean): Chapter[] {
   const manager = joinGateway(gateway, MANAGER_PATH)
   const account = joinGateway(gateway, ACCOUNT_PATH)
-  return [
+  const chapters: Chapter[] = [
   {
     id: 'overview',
     group: '概念',
@@ -744,6 +796,8 @@ print(json.dumps(request("POST", "catalog/position-strategies", payload), ensure
     ),
   },
   ]
+  const replacements = native ? nativeFeeChapters() : {}
+  return chapters.map(chapter => replacements[chapter.id] ?? chapter)
 }
 
 const CHAPTER_IDS: ChapterId[] = [
@@ -771,8 +825,20 @@ function chapterFromHash(hash: string): ChapterId {
 
 export function DocsPage() {
   const [activeId, setActiveId] = useState(() => chapterFromHash(window.location.hash))
+  const [native, setNative] = useState<boolean | null>(null)
+  const [loadError, setLoadError] = useState(false)
   const gateway = currentGatewayOrigin()
-  const chapters = useMemo(() => buildChapters(gateway), [gateway])
+  const chapters = useMemo(() => native === null ? [] : buildChapters(gateway, native), [gateway, native])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void getDashboard(controller.signal).then(dashboard => {
+      if (!controller.signal.aborted) setNative(dashboard.report.valuation.startsWith('native_'))
+    }).catch(() => {
+      if (!controller.signal.aborted) setLoadError(true)
+    })
+    return () => controller.abort()
+  }, [])
 
   useEffect(() => {
     const onHashChange = () => setActiveId(chapterFromHash(window.location.hash))
@@ -800,6 +866,12 @@ export function DocsPage() {
   function openChapter(id: ChapterId) {
     window.history.replaceState(null, '', `/manager/docs/#${id}`)
     setActiveId(id)
+  }
+
+  if (!active) {
+    return <AppShell active="docs" title="文档" subtitle="读取账户环境" icon={BookOpen}>
+      <p className="text-sm text-muted" role="status">{loadError ? '暂时无法读取账户环境，请刷新后重试。' : '正在读取账户环境…'}</p>
+    </AppShell>
   }
 
   return (

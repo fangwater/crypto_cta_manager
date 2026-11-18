@@ -2,6 +2,7 @@ import { accountExecutionGroup } from '../lib/executionGroups'
 import { accountFeeSummary, fundingMoney } from '../format'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import { AccountAliasEditor } from '../components/AccountAliasEditor'
+import { isNativeFuturesVenue } from '../components/ContractLeveragePanel'
 import {
   Activity,
   ArrowRight,
@@ -25,6 +26,7 @@ import { cn } from '../lib/cn'
 import { routes } from '../lib/routes'
 import { accountSignalConfigPath } from '../lib/signalConfigLinks'
 import { accountVenueLabel } from '../lib/workspace'
+import { nativeSourceStatus } from '../lib/accountOverview'
 import type {
   DashboardAccount,
   DashboardSnapshot,
@@ -118,9 +120,19 @@ export function AccountsPage() {
     () => new Map((dashboard?.report.sources ?? []).map((source) => [source.source_id, source])),
     [dashboard],
   )
-  const activeAccounts = accounts.filter(
-    (account) => account.enabled && reportsBySource.has(account.source_id),
+  const accountCount = accounts.filter(account =>
+    account.enabled && reportsBySource.has(account.source_id) && (!isNativeFuturesVenue(account.venue)
+      || account.collection_status === 'live'),
   ).length
+  const native = accounts.some(account => isNativeFuturesVenue(account.venue))
+  function healthLabel() {
+    if (navHistoryLoading) return '净值加载中'
+    if (error) return '连接失败'
+    if (!health) return '检查中'
+    if (health.status === 'loading') return native ? '账户同步中' : '净值加载中'
+    if (health.status === 'ok') return '服务在线'
+    return native ? '有账户待同步' : '数据延迟'
+  }
 
   function updateAlias(update: { source_id: string; account: string; display_alias: string | null }) {
     setDashboard(current => current ? {
@@ -138,8 +150,8 @@ export function AccountsPage() {
       icon={LayoutDashboard}
       actions={
         <div className="flex items-center gap-2">
-          <Badge tone={health?.status === 'ok' && !navHistoryLoading ? 'success' : error || health?.status === 'degraded' ? 'warning' : 'neutral'} className="hidden sm:inline-flex">
-            {navHistoryLoading || health?.status === 'loading' ? '净值加载中' : health ? health.status === 'ok' ? '服务在线' : '数据延迟' : error ? '连接失败' : '检查中'}
+          <Badge tone={error || health?.status === 'degraded' ? 'warning' : health?.status === 'ok' && !navHistoryLoading ? 'success' : 'neutral'} className="hidden sm:inline-flex">
+            {healthLabel()}
           </Badge>
           <Button
             type="button"
@@ -169,12 +181,12 @@ export function AccountsPage() {
       {navHistoryLoading && <div className="chart-notice mb-4" role="status">净值历史正在后台加载，完成后自动显示。</div>}
       {health?.last_refresh_error && (
         <Alert tone="warning" className="mb-4">
-          最近一次服务端重算失败，当前显示上一份有效数据
+          {native ? health.last_refresh_error : '最近一次服务端重算失败，当前显示上一份有效数据'}
         </Alert>
       )}
 
       <div className="mb-8 grid gap-3 sm:grid-cols-2">
-        <StatTile label="运行账户" value={dashboard ? integer(activeAccounts) : '--'} />
+        <StatTile label={native ? '已同步账户' : '运行账户'} value={dashboard ? integer(accountCount) : '--'} />
         <StatTile label="已配置账户" value={dashboard ? integer(accounts.length) : '--'} />
       </div>
 
@@ -248,10 +260,18 @@ function AccountCard({
   health: HealthResponse | null
   onAliasSaved: (update: { source_id: string; account: string; display_alias: string | null }) => void
 }) {
+  const native = isNativeFuturesVenue(account.venue)
   const ready = account.enabled && report !== undefined
+  const nativeStatus = native && account.enabled ? nativeSourceStatus(account) : null
+  const lastExecutionRecord = account.execution_observed_ts_us != null
+    ? `最近记录 ${timestampUs(account.execution_observed_ts_us)}`
+    : undefined
+  const statusTitle = nativeStatus
+    ? [nativeStatus.title, lastExecutionRecord].filter(Boolean).join(' · ')
+    : undefined
   const status = !account.enabled
     ? '待接入'
-    : !report
+    : nativeStatus ? nativeStatus.label : !report
       ? '等待数据'
       : !health
         ? '检查中'
@@ -267,20 +287,27 @@ function AccountCard({
   const signalConfigPath = account.enabled && account.access_level === 'configure'
     ? accountSignalConfigPath(account.source_id)
     : undefined
-  const openPositions = account.open_position_symbol_count
+  const openPositions = account.open_position_symbol_count ?? (native ? account.recent_position_symbol_count : null)
+  const historicalPositions = native && openPositions != null
+    && (account.position_status === 'historical' || account.open_position_symbol_count == null)
+  const positionLabel = historicalPositions ? '最近持仓'
+    : native && account.execution_status === 'quiet' && openPositions != null ? '最近有效持仓' : '当前持仓'
+  const positionTime = native && account.position_observed_ts_us != null
+    ? `截至 ${timestampUs(account.position_observed_ts_us)}`
+    : undefined
   const funds = account.account_funds
   const equity = account.live_equity_quote
   const availableCash = equity == null ? (funds?.usable_cash ?? funds?.available) : null
   const amount = equity ?? availableCash
   const historical = funds?.status === 'historical' || account.live_equity_status === 'stale'
   const assetLabel = availableCash != null
-    ? historical ? '历史可用资金' : '可用资金'
+    ? historical || account.venue === 'yida' ? '最近可用资金' : '可用资金'
     : historical ? '历史权益' : '实时权益'
   const assetSource = funds?.source === 'ctp_trading_account' ? 'CTP 资金查询'
     : funds?.source === 'yida_extended_account' ? '易达资金回报' : undefined
   const assetUnit = equity != null ? 'CNY' : funds?.currency
-  const assetTime = funds ? `回报 ${timestampUs(funds.observed_us)}` : undefined
-  const assetDetail = [funds?.historical_reason, assetSource, assetTime, funds?.trading_day ? `交易日 ${funds.trading_day}` : undefined,
+  const assetTime = funds && assetSource ? `${assetSource} ${timestampUs(funds.observed_us)}` : undefined
+  const assetDetail = [assetTime, funds?.trading_day ? `交易日 ${funds.trading_day}` : undefined,
     amount != null && !assetUnit ? '币种未回报' : undefined].filter(Boolean).join(' · ')
   const previousSettlement = funds?.source === 'ctp_trading_account' && funds.previous_balance != null && funds.currency
     ? `上次结算权益 ${money(funds.previous_balance)} ${funds.currency}`
@@ -309,7 +336,7 @@ function AccountCard({
           {(account.unified_account || isUnifiedVenue(account.venue)) && (
             <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
           )}
-          <Badge tone={ready && health ? health.status === 'ok' ? 'success' : 'warning' : 'neutral'}>{status}</Badge>
+          <Badge tone={nativeStatus?.tone ?? (ready && health ? health.status === 'ok' ? 'success' : 'warning' : 'neutral')} title={statusTitle}>{status}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4 pt-0">
@@ -325,7 +352,7 @@ function AccountCard({
             label={assetLabel}
             value={amount != null ? [money(amount), assetUnit].filter(Boolean).join(' ') : '--'}
             detail={sdkAssets.length ? <>{assetDetail}<br />{sdkAssets.join(' · ')}<br />行情估值时间未核验</> : assetDetail}
-            title={previousSettlement}
+            title={[funds?.historical_reason, previousSettlement].filter(Boolean).join(' · ') || undefined}
           />
           {(account.unified_account || isUnifiedVenue(account.venue)) && (
             <Metric
@@ -345,11 +372,11 @@ function AccountCard({
               title={funding.income_quote != null ? `统计截至 ${timestampUs(funding.end_ts_us)}${funding.refreshing ? '，更新中' : ''}` : undefined}
               tone={funding.income_quote != null ? signedClass(funding.income_quote) : ''} />
           </>}
-          <Metric label="当前持仓" value={openPositions != null ? `${openPositions} 个合约` : '--'} />
-          <Metric
-            label="Maker / Taker 费率"
-            value={report ? accountFeeSummary(report) : '--'}
-          />
+          <Metric label={positionLabel} value={openPositions != null ? `${openPositions} 个合约` : '--'}
+            detail={positionTime} title={account.position_historical_reason ?? undefined} />
+          {native ? <Metric label="合约手续费" value={ready
+            ? <a className="text-brand hover:underline" href={routes.account(account.source_id, 'contract-fees')}>查询开仓、平仓、平今</a>
+            : '--'} /> : <Metric label="Maker / Taker 费率" value={report ? accountFeeSummary(report) : '--'} />}
           <Metric label="最近成交" value={timestampUs(report?.last_fill_ts_us ?? null)} />
         </div>
         {funding && !funding.complete && <p className="text-xs text-muted" title={funding.unavailable_reason ?? undefined}>
@@ -411,7 +438,7 @@ function uniMmrTone(value: number | null | undefined, status?: string | null) {
   return ''
 }
 
-function Metric({ label, value, tone = '', title, detail }: { label: string; value: string; tone?: string; title?: string; detail?: React.ReactNode }) {
+function Metric({ label, value, tone = '', title, detail }: { label: string; value: React.ReactNode; tone?: string; title?: string; detail?: React.ReactNode }) {
   return (
     <div title={title}>
       <p className="text-xs text-muted">{label}</p>

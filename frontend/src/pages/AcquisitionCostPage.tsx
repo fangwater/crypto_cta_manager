@@ -1,4 +1,4 @@
-import { theoreticalExecutionDescription, theoreticalExecutionLabel } from '../lib/theoreticalExecution'
+import { isNativeExecutionModel, nativeOffsetLabel, theoreticalExecutionDescription, theoreticalExecutionLabel } from '../lib/theoreticalExecution'
 import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, Scale } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getAcquisitionCost, getDashboard, getKlineCacheStatus } from '../api'
@@ -177,11 +177,14 @@ export function AcquisitionCostPage() {
 
   const report = snapshot?.reports[referenceIndex] ?? snapshot?.reports[0]
   const totals = report?.totals
+  const model = report?.execution_model ?? (dashboard?.report.valuation.startsWith('native_') ? 'native_reference' : null)
+  const native = isNativeExecutionModel(model)
+  const comparisons = native ? report?.by_offset ?? [] : report?.by_strategy ?? []
   return (
     <AppShell
       active="acquisition-cost"
       title="持仓成本"
-      subtitle={`实际成交与${theoreticalExecutionLabel(report?.execution_model)}`}
+      subtitle={`实际成交与${theoreticalExecutionLabel(model)}`}
       icon={Scale}
       actions={
         <Button type="button" size="sm" variant="primary" disabled={loading || !scopeReady} onClick={() => void query(1)}>
@@ -193,7 +196,7 @@ export function AcquisitionCostPage() {
       <PageIntro
         eyebrow="Delta cost"
         title="实际成本 vs 虚拟成本"
-        description={theoreticalExecutionDescription(report?.execution_model)}
+        description={theoreticalExecutionDescription(model)}
       />
 
       {error && <Alert className="mb-4">{error}</Alert>}
@@ -305,17 +308,26 @@ export function AcquisitionCostPage() {
 
       {report && (
         <Card className="mb-6">
-          <CardHeader><CardTitle>策略对比</CardTitle><CardDescription>正值表示实际成交更贵；先看覆盖率，再比较价格差和费用差。</CardDescription></CardHeader>
+          <CardHeader>
+            <CardTitle>{native ? '开平费用对比' : '策略对比'}</CardTitle>
+            <CardDescription>{native ? '比较同量成交的实际手续费与对应开平的参考手续费。缺少费用依据时显示为空。' : '正值表示实际成交更贵；先看覆盖率，再比较价格差和费用差。'}</CardDescription>
+          </CardHeader>
           <CardContent className="overflow-x-auto">
             <table className="min-w-full text-left text-[13px]">
-              <thead><tr><th>策略</th><th className="text-right">可比成交数</th><th className="text-right">可比成交额 CNY</th><th className="text-right">价格差 bps</th><th className="text-right">费后差 CNY</th></tr></thead>
-              <tbody>{report.by_strategy.map((row) => <tr key={row.bucket} className="border-b border-border-soft">
-                <td className="py-2">{row.bucket}</td><td className="text-right tabular-nums">{row.fill_count}</td>
+              <thead><tr>
+                <th>{native ? '开平' : '策略'}</th><th className="text-right">可比成交数</th><th className="text-right">可比成交额 CNY</th>
+                {native && <><th className="text-right">实际手续费 CNY</th><th className="text-right">参考手续费 CNY</th></>}
+                <th className="text-right">价格差 bps</th><th className="text-right">费后差 CNY</th>
+              </tr></thead>
+              <tbody>{comparisons.map((row) => <tr key={row.bucket} className="border-b border-border-soft">
+                <td className="py-2">{native ? nativeOffsetLabel(row.bucket) ?? '—' : row.bucket}</td><td className="text-right tabular-nums">{row.fill_count}</td>
                 <td className="text-right tabular-nums">{money(row.reference_turnover_quote)}</td>
+                {native && <><td className="text-right tabular-nums">{moneyCny(row.actual_fee_quote)}</td><td className="text-right tabular-nums">{moneyCny(row.virtual_fee_quote)}</td></>}
                 <td className={cn('text-right tabular-nums', costClass(row.price_shortfall_bps))}>{bps(row.price_shortfall_bps)}</td>
                 <td className={cn('text-right tabular-nums', costClass(row.after_fee_shortfall_quote))}>{moneyCny(row.after_fee_shortfall_quote)}</td>
               </tr>)}</tbody>
             </table>
+            {native && comparisons.length === 0 && <p className="py-4 text-sm text-muted">没有可比开平成交。</p>}
           </CardContent>
         </Card>
       )}
@@ -343,10 +355,11 @@ export function AcquisitionCostPage() {
               {[...report.rows].reverse().map((row) => {
                   const formatPrice = rowPriceFormatter(row)
                   const difference = row.actual_vwap == null ? null : row.actual_vwap - row.virtual_vwap
+                  const offset = native ? nativeOffsetLabel(row.offset) : null
                   return <tr key={deltaKey(row)} className={cn('border-b border-border-soft last:border-0', selectedKey === deltaKey(row) && 'bg-canvas')}>
                     <td className="whitespace-nowrap px-4 py-2 tabular-nums text-muted">{timestampUs(row.received_at_us)}<div className="text-xs">{row.strategy_name} <button type="button" className="ml-2 text-brand underline" onClick={() => { setSelectedKey(deltaKey(row)); document.getElementById('delta-analysis')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }}>复盘</button></div></td>
                     <td className="px-4 py-2 font-medium">{row.symbol}</td>
-                    <td className="px-4 py-2">{side(row.delta_qty)}</td>
+                    <td className="px-4 py-2">{offset ? `${side(row.delta_qty)} · ${offset}` : side(row.delta_qty)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{quantity(Math.abs(row.delta_qty))}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right text-[11px] tabular-nums text-muted">{sampleText(row)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{row.execution_model === "twap5m" && row.zero_volume_fallback_sample_count ? "收盘价" : (row.sample_prices.length - row.zero_volume_skipped_sample_count) + " / " + row.sample_prices.length}</td>
