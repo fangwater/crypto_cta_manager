@@ -12,7 +12,7 @@ interface Props {
   points: NavTimelinePoint[]
   symbolPoints: SymbolNavTimeline[]
   mode: 'portfolio' | 'symbols'
-  equityUsdt: number | null
+  equityQuote: number | null
 }
 
 const palette = ['#176b5b', '#2563a7', '#b7791f', '#c2413b', '#7357a3', '#0f766e']
@@ -21,14 +21,14 @@ function money(value: number) {
   return value.toLocaleString('en-US', { maximumFractionDigits: 0 })
 }
 
-export function PositionLeverageChart({ points, symbolPoints, mode, equityUsdt }: Props) {
+export function PositionLeverageChart({ points, symbolPoints, mode, equityQuote }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!containerRef.current) return
     const chart = echarts.init(containerRef.current, undefined, { renderer: 'canvas' })
     const leverage = (point: NavTimelinePoint) =>
-      equityUsdt && equityUsdt > 0 ? point.gross_position_value_quote / equityUsdt : null
+      equityQuote && equityQuote > 0 ? point.gross_position_value_quote / equityQuote : null
     const positionSeries =
       mode === 'portfolio'
         ? [
@@ -89,7 +89,7 @@ export function PositionLeverageChart({ points, symbolPoints, mode, equityUsdt }
               const value = Number(row.value?.[1])
               const formatted = row.seriesName === '杠杆率'
                 ? `${value.toFixed(3)}x`
-                : `${money(value)} 报价币`
+                : `${money(value)} CNY`
               return `${row.marker ?? ''}${row.seriesName ?? ''}: ${formatted}`
             })
             .join('<br/>')
@@ -112,7 +112,7 @@ export function PositionLeverageChart({ points, symbolPoints, mode, equityUsdt }
       observer.disconnect()
       chart.dispose()
     }
-  }, [equityUsdt, mode, points, symbolPoints])
+  }, [equityQuote, mode, points, symbolPoints])
 
   return <div ref={containerRef} className="pnl-chart" aria-label="仓位与杠杆率时间曲线" />
 }

@@ -12,9 +12,10 @@ use crate::nav::{NavTimelinePoint, NavTotals};
 pub(super) mod wire {
     include!(concat!(env!("OUT_DIR"), "/cta.nav.rs"));
 }
-use wire::{Column, Curve, CurveKind, Metric, TimeAxis, Timeline};
+pub(crate) use wire::CurveKind;
+use wire::{Column, Curve, Metric, TimeAxis, Timeline};
 
-pub(super) const CONTENT_TYPE: &str = "application/x-protobuf";
+pub(crate) const CONTENT_TYPE: &str = "application/x-protobuf";
 
 pub(super) fn compressible(
     _: axum::http::StatusCode,
@@ -29,7 +30,7 @@ pub(super) fn compressible(
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub(super) enum View {
+pub(crate) enum View {
     #[default]
     Portfolio,
     Symbols,
@@ -263,6 +264,22 @@ impl Encoder {
             ],
         );
     }
+}
+
+/// Encode a report with the same complete actual columns as the Crypto browser API.
+pub(crate) fn encode_actual_curves(
+    metadata: Value,
+    curves: Vec<(CurveKind, String, Vec<NavTimelinePoint>)>,
+) -> Result<Vec<u8>> {
+    let mut encoder = Encoder::default();
+    let Some(prost_types::value::Kind::StructValue(metadata)) = proto_value(metadata).kind else {
+        anyhow::bail!("invalid timeline metadata");
+    };
+    encoder.message.metadata = Some(metadata);
+    for (kind, key, points) in curves {
+        encoder.actual(kind, key, &points);
+    }
+    Ok(encoder.message.encode_to_vec())
 }
 
 pub(super) fn encode(snapshot: &TimelineSnapshot, view: View) -> Result<Vec<u8>> {

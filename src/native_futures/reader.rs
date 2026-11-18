@@ -1,9 +1,14 @@
-use super::config::Source;
+use super::{config::Source, evidence::NativeOrderIdentity};
 use anyhow::{Context, Result, ensure};
 use rocksdb::{DB, Direction, IteratorMode, Options};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, fs::File, ops::Deref, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    ops::Deref,
+    path::Path,
+};
 
 mod cache;
 mod changes;
@@ -18,6 +23,8 @@ const FILLS: &str = "cn_trade_facts";
 pub struct Snapshot {
     #[serde(skip)]
     max_fill_evidence_sequence: i64,
+    #[serde(skip)]
+    pub(super) nav_evidence_revision: u64,
     pub source_id: String,
     pub account: String,
     pub read_at_us: i64,
@@ -166,6 +173,7 @@ fn read_snapshot_with_projection(
     });
     let mut result = Snapshot {
         max_fill_evidence_sequence: 0,
+        nav_evidence_revision: 0,
         source_id: source.id.clone(),
         account: source.account.clone(),
         read_at_us: super::now_us(),
@@ -290,6 +298,7 @@ fn read_snapshot_with_projection(
 
 /// A complete trading day's evidence, independent of the recent-row UI limit.
 /// Fill/order correlation is performed later using the complete native key.
+#[derive(Default)]
 pub struct CostFacts {
     pub fills: Vec<Value>,
     pub orders: Vec<Value>,
@@ -332,22 +341,123 @@ pub(super) fn read_cost_facts_from_db(source: &Source, db: &DB, day: &str) -> Re
                 continue;
             }
             if is_fill {
-                ensure!(
-                    integer(&record["fill"], "lots")? > 0
-                        && record["fill"]["price"]
-                            .as_f64()
-                            .is_some_and(|p| p.is_finite() && p > 0.0),
-                    "invalid factual fill quantity or price"
-                );
-                ensure!(
-                    identity["trade_id"].is_string() && record["fill"]["system_id"].is_string(),
-                    "native fill identifiers must remain strings"
-                );
+                validate_cost_fill(&record)?;
                 result.fills.push(record);
             } else {
                 super::state::observe(record.clone())?;
                 result.orders.push(record);
             }
+        }
+    }
+    Ok(result)
+}
+
+fn validate_cost_fill(record: &Value) -> Result<()> {
+    let fill = &record["fill"];
+    ensure!(
+        integer(fill, "lots")? > 0
+            && fill["price"]
+                .as_f64()
+                .is_some_and(|p| p.is_finite() && p > 0.0),
+        "invalid factual fill quantity or price"
+    );
+    ensure!(
+        fill["identity"]["trade_id"].is_string() && fill["system_id"].is_string(),
+        "native fill identifiers must remain strings"
+    );
+    Ok(())
+}
+
+pub(super) struct CostWindow {
+    pub days: BTreeMap<String, CostFacts>,
+    pub replication: Option<super::sync::ReplicaStatus>,
+}
+
+#[derive(Deserialize)]
+struct FillReceipt {
+    received_us: i64,
+}
+
+pub(super) fn read_cost_window(
+    source: &Source,
+    db: &DB,
+    start: i64,
+    end: i64,
+) -> Result<CostWindow> {
+    const MAX_SCAN: usize = 2_000_000;
+    const MAX_FILLS: usize = 250_000;
+    const ORDER_LOOKUP_CHUNK_SIZE: usize = 4_096;
+    let mut result = CostWindow {
+        days: BTreeMap::new(),
+        replication: source
+            .sync
+            .as_ref()
+            .map(|_| super::sync::replica_status(db, &source.id))
+            .transpose()?,
+    };
+    let mut linked_orders = BTreeSet::new();
+    let mut retained = 0;
+    for (index, item) in db
+        .iterator_cf(
+            db.cf_handle(FILLS).context("native fills CF")?,
+            IteratorMode::Start,
+        )
+        .enumerate()
+    {
+        ensure!(index < MAX_SCAN, "native cost fill scan budget exceeded");
+        let (_, bytes) = item?;
+        let receipt: FillReceipt =
+            serde_json::from_slice(&bytes).context("decode native fill receipt time")?;
+        if !(start..=end).contains(&receipt.received_us) {
+            continue;
+        }
+        let record = json(&bytes, FILLS)?;
+        validate_cost_fill(&record)?;
+        retained += 1;
+        ensure!(
+            retained <= MAX_FILLS,
+            "native cost retained fill budget exceeded"
+        );
+        let fill = &record["fill"];
+        let day = fill["identity"]["trading_day"]
+            .as_str()
+            .context("missing native fill trading day")?;
+        super::reference::valid_day(day)?;
+        if let Some(order) = NativeOrderIdentity::for_fill(fill)? {
+            linked_orders.insert(order);
+        }
+        result
+            .days
+            .entry(day.to_owned())
+            .or_default()
+            .fills
+            .push(record);
+    }
+    let orders = db.cf_handle(ORDERS).context("native orders CF")?;
+    let linked_orders: Vec<_> = linked_orders.into_iter().collect();
+    for chunk in linked_orders.chunks(ORDER_LOOKUP_CHUNK_SIZE) {
+        let keys = chunk
+            .iter()
+            .map(serde_json::to_vec)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let found = db.multi_get_cf(keys.iter().map(|key| (&orders, key)));
+        for (expected, bytes) in chunk.iter().zip(found) {
+            let Some(bytes) = bytes? else {
+                continue;
+            };
+            let record = json(&bytes, ORDERS)?;
+            let identity: NativeOrderIdentity = serde_json::from_value(record["identity"].clone())?;
+            ensure!(
+                &identity == expected,
+                "native order value differs from its key"
+            );
+            super::state::observe(record.clone())?;
+            result
+                .days
+                .get_mut(expected.trading_day())
+                .context("missing cost trading day")?
+                .orders
+                .push(record);
         }
     }
     Ok(result)

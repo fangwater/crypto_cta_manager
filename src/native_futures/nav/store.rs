@@ -48,3 +48,16 @@ pub async fn load(pool: &PgPool, source: &str, at_us: i64) -> Result<Option<Anch
     })
     .transpose()
 }
+
+pub async fn first(pool: &PgPool, source: &str) -> Result<Option<Anchor>> {
+    let anchor: Option<Json<Anchor>> = sqlx::query_scalar(
+        "SELECT anchor FROM cn_futures_nav_snapshots WHERE source_id=$1 ORDER BY snapshot_us LIMIT 1",
+    ).bind(source).fetch_optional(pool).await?;
+    anchor
+        .map(|Json(anchor)| {
+            anchor.validate()?;
+            ensure!(anchor.source_id == source, "native anchor source mismatch");
+            Ok(anchor)
+        })
+        .transpose()
+}

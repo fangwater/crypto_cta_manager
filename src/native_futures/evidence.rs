@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 const EVENTS: &str = "cn_trading_events";
 mod ctaker;
+pub(super) use ctaker::NativeOrderIdentity;
 pub use ctaker::{CtakerFillProof, ctaker_fill_proof};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -124,7 +124,7 @@ impl Position {
     pub fn quantity(&self) -> i64 {
         self.fifo.iter().map(|lot| lot.lots).sum()
     }
-    fn apply(
+    pub(crate) fn apply(
         &mut self,
         mut lots: i64,
         price: f64,

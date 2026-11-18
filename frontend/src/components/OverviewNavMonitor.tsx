@@ -66,7 +66,7 @@ export function OverviewNavMonitor({ accounts, autoRefresh }: { accounts: Overvi
       {accounts.map(account => <AccountNavCard key={account.source_id} account={account} entry={entries[account.source_id]} />)}
     </div>
     {accounts.length === 0 && <div className="overview-panel overview-empty">没有匹配的账户</div>}
-    <p className="py-3 text-xs text-muted">各账户从自己的监控历史起点归零。曲线读取已保存的四小时整点结果，截至最近一期；时间均为上海时间。</p>
+    <p className="py-3 text-xs text-muted">各账户从自己的监控历史起点归零。曲线按已有账户记录和分钟收盘价计算，截至最近一个有数据的四小时整点；时间均为上海时间。</p>
   </section>
 }
 
@@ -81,7 +81,7 @@ function AccountNavCard({ account, entry }: { account: OverviewRow; entry?: Entr
   const hasPoints = Boolean(value?.points.length)
   const status = entry?.stale ? '更新失败' : loading ? hasPoints ? '更新中' : '加载中' : value?.complete ? '已更新' : hasPoints ? '部分数据' : '暂不可用'
   const valuation = value?.valuation === 'quantity_fifo_window_delta' ? '成交价估值（浮动及总体为估计值）'
-    : value?.valuation === 'quantity_fifo_closed_1m_window_delta' ? '分钟收盘价估值'
+    : ['native_lot_fifo_completed_minute_close', 'quantity_fifo_closed_1m_window_delta'].includes(value?.valuation ?? '') ? '分钟收盘价估值'
     : account.account_kind === 'fr' ? '已实现收益，不计浮动盈亏' : '含浮动盈亏'
   const funding = value?.funding === 'estimated' ? '估算资金费' : value?.funding === 'actual' ? '实际资金费' : undefined
   const href = isExternalOverview(account) ? account.detail_url ?? undefined : routes.nav(account.source_id)
@@ -95,7 +95,7 @@ function AccountNavCard({ account, entry }: { account: OverviewRow; entry?: Entr
     </header>
     <div className="overview-nav-metrics">
       <div>
-        <p className="overview-nav-metric-label">累计净值变化 <span>报价币</span></p>
+        <p className="overview-nav-metric-label">累计净值变化 <span>CNY</span></p>
         <p className={`overview-nav-number ${latest == null || latest === 0 ? 'text-ink' : latest > 0 ? 'text-teal-700' : 'text-rose-600'}`} data-nav-value>{latest == null ? '—' : `${latest > 0 ? '+' : ''}${money(latest)}`}<TrendIcon size={20} aria-hidden="true" /></p>
       </div>
       <div className="overview-nav-change"><span>本期变化</span><strong className={change == null || change === 0 ? 'text-muted' : change > 0 ? 'text-teal-700' : 'text-rose-600'}>{change == null ? '—' : `${change > 0 ? '+' : ''}${money(change)}`}</strong></div>

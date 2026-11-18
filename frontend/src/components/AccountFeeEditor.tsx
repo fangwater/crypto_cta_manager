@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AccountStudio, QuoteFeeRates } from '../types'
+import type { NativeContractRateLookup } from '../api'
+import { formatNativeContractRate, nativeFeeFields } from './ContractLeveragePanel'
 import { feeBps } from '../format'
 import { Button } from './ui/Button'
 import { FieldHint, Input, Label } from './ui/Field'
@@ -67,5 +69,28 @@ export function AccountFeeEditor({ studio, disabled, onSave }: {
         {asset}：Maker {feeBps(rates.maker_fee_rate)} / Taker {feeBps(rates.taker_fee_rate)} / 理论 {feeBps(rates.theoretical_twap_fee_rate)}
       </p>)}
     </div>
+  </div>
+}
+
+export function NativeAccountFeeReadout({ observation }: { observation: NativeContractRateLookup | null }) {
+  const rates = observation?.rates
+  return <div className="space-y-3">
+    <div className="flex flex-wrap items-center gap-3">
+      <Label>计价货币
+        <select className="rounded border border-border-soft bg-white px-3 py-2" value="CNY" disabled>
+          <option value="CNY">CNY</option>
+        </select>
+      </Label>
+    </div>
+    <div className="flex flex-wrap items-end gap-3">
+      {nativeFeeFields.map(([field, label]) => <Label key={field} className="min-w-[12rem] flex-1">
+        {label} 手续费
+        <Input value={rates ? formatNativeContractRate(rates.fees[field].notional_rate, rates.fees[field].per_lot) : '—'} disabled />
+      </Label>)}
+      <Button type="button" size="sm" disabled>保存</Button>
+    </div>
+    <FieldHint>{rates
+      ? `${rates.venue}:${rates.symbol} · 按成交金额计费比例 + 每手金额`
+      : observation ? '该合约暂无柜台费率观察。' : '在合约保证金卡片查询合约后可查看柜台手续费。'}</FieldHint>
   </div>
 }

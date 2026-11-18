@@ -32,6 +32,7 @@ import { DocsPage } from './pages/DocsPage'
 import { AcquisitionCostPage } from './pages/AcquisitionCostPage'
 import { AdminPage } from './pages/AdminPage'
 import { AutoEarnPage } from './pages/AutoEarnPage'
+import { AuthGate } from './components/AuthGate'
 import { normalizePath, readSourceId, routes } from './lib/routes'
 import { retainedQuickRangeStartMs } from './lib/navRange'
 import { activeNavStrategies } from './lib/navStrategies'
@@ -183,13 +184,17 @@ function initialScope() {
 }
 
 function defaultPnlMode(dashboard: DashboardSnapshot, sourceId: string): PnlMode {
-  const funding = dashboard.accounts?.find((account) => account.source_id === sourceId)?.funding
-  return usesActualFunding(funding)
+  const account = dashboard.accounts?.find((item) => item.source_id === sourceId)
+  return account?.account_pnl_only || usesActualFunding(account?.funding)
     ? 'account'
     : 'strategy'
 }
 
 export default function App() {
+  return <AuthGate><AuthenticatedApp /></AuthGate>
+}
+
+function AuthenticatedApp() {
   const path = normalizePath(window.location.pathname)
   if (path === '/' || path === '/manager/workspace') return <WorkspacePage />
   if (path === '/manager/net-value') return <NavMonitorPage />
@@ -493,7 +498,7 @@ function NavPage() {
     const normalizedQuery = query.trim().toUpperCase()
     const rows = normalizedQuery
       ? (timeline?.report.symbols ?? []).filter((row) =>
-          row.symbol.includes(normalizedQuery),
+          row.symbol.toUpperCase().includes(normalizedQuery),
         )
       : [...(timeline?.report.symbols ?? [])]
     return rows.sort(
@@ -549,7 +554,7 @@ function NavPage() {
   const totals = noSymbolsSelected
     ? ZERO_TOTALS
     : (timeline?.report.summary ?? null)
-  const leverageEquityUsdt = useMemo(() => {
+  const leverageEquityQuote = useMemo(() => {
     const accounts = (dashboard?.accounts ?? []).filter(
       (account) =>
         account.enabled &&
@@ -561,14 +566,14 @@ function NavPage() {
       accounts.some(
         (account) =>
           account.live_equity_status !== 'ok' ||
-          !Number.isFinite(account.live_equity_usdt) ||
-          (account.live_equity_usdt ?? 0) <= 0,
+          !Number.isFinite(account.live_equity_quote) ||
+          (account.live_equity_quote ?? 0) <= 0,
       )
     ) {
       return null
     }
     return accounts.reduce(
-      (total, account) => total + (account.live_equity_usdt ?? 0),
+      (total, account) => total + (account.live_equity_quote ?? 0),
       0,
     )
   }, [dashboard, scope, timeline])
@@ -927,7 +932,7 @@ function NavPage() {
                   className={chartMode === 'symbols' ? 'is-active' : ''}
                   onClick={() => setChartMode('symbols')}
                 >
-                  分币
+                  分合约
                 </button>
                 <button
                   type="button"
@@ -956,7 +961,7 @@ function NavPage() {
               </div>
               {chartMode === 'symbols' && (
                 <span className="symbol-series-count">
-                  {selectedSet.size} 条币种曲线
+                  {selectedSet.size} 条合约曲线
                 </span>
               )}
               {pnlMode === 'strategy' && strategyChart && (
@@ -972,7 +977,7 @@ function NavPage() {
             <p className="chart-notice">实际持仓按已完成的 1 分钟收盘价估值；成交价格、数量和交易费按真实成交计算。</p>
           )}
           {timeline?.report.valuation === 'quantity_fifo_window_delta' && (
-            <p className="chart-notice">当前区间使用本地成交历史重建：已实现盈亏、数量和手续费按真实成交计算；浮盈及总净值按各币种最近成交价估值，不代表分钟市价。超出 K 线保留范围时，理论净值与滑点不可用。</p>
+            <p className="chart-notice">当前区间使用本地成交历史重建：已实现盈亏、数量和手续费按真实成交计算；浮盈及总净值按各合约最近成交价估值，不代表分钟市价。超出 K 线保留范围时，理论净值与滑点不可用。</p>
           )}
           {timeline?.theoretical.map((reference, index) => reference.unavailable_reason && <div key={index} className="chart-notice" role="status">{theoreticalExecutionLabel(reference.execution_model)}：{reference.unavailable_reason}</div>)}
           {timeline?.theoretical[0]?.latest_point_ts_us != null && timeline.theoretical[0].latest_point_ts_us < timeline.report.end_ts_us && (
@@ -1001,7 +1006,7 @@ function NavPage() {
                 />
               )}
               {noSymbolsSelected && (
-                <div className="chart-empty">当前未选择币种</div>
+                <div className="chart-empty">当前未选择合约</div>
               )}
               {!noSymbolsSelected &&
                 strategyChart &&
@@ -1041,9 +1046,9 @@ function NavPage() {
                 </div>
               </aside>
             ) : chartMode === 'symbols' ? (
-              <aside className="symbol-curve-picker" aria-label="分币曲线选择">
+              <aside className="symbol-curve-picker" aria-label="分合约曲线选择">
                 <div className="symbol-curve-picker__header">
-                  <strong>币种</strong>
+                  <strong>合约</strong>
                   <div className="symbol-curve-picker__actions">
                     <button
                       type="button"
@@ -1152,8 +1157,8 @@ function NavPage() {
               <h2 id="position-chart-title">仓位与杠杆率</h2>
             </div>
             <span className="symbol-series-count">
-              {chartMode === 'symbols' ? '分币净仓位' : '组合仓位'}
-              {leverageEquityUsdt === null ? '，权益不可用' : ''}
+              {chartMode === 'symbols' ? '分合约净仓位' : '组合仓位'}
+              {leverageEquityQuote === null ? '，权益不可用' : ''}
             </span>
           </div>
           <div className="chart-body">
@@ -1163,10 +1168,10 @@ function NavPage() {
                   points={timeline.report.points}
                   symbolPoints={timeline.report.symbol_points}
                   mode={chartMode === 'symbols' ? 'symbols' : 'portfolio'}
-                  equityUsdt={leverageEquityUsdt}
+                  equityQuote={leverageEquityQuote}
                 />
               )}
-              {noSymbolsSelected && <div className="chart-empty">当前未选择币种</div>}
+              {noSymbolsSelected && <div className="chart-empty">当前未选择合约</div>}
               {!timeline && !timelineLoading && <div className="chart-empty">暂无仓位时间线</div>}
               {timelineLoading && (
                 <div className="chart-loading">
@@ -1201,7 +1206,7 @@ function NavPage() {
                   <th className="numeric">Maker 笔 / 额</th>
                   <th className="numeric">Taker 笔 / 额</th>
                   <th className="numeric">未判定 笔 / 额</th>
-                  <th className="numeric">持仓币种</th>
+                  <th className="numeric">持仓合约</th>
                   <th className="numeric">期末总敞口</th>
                   <th className="numeric">区间已实现</th>
                   <th className="numeric">区间浮动盈亏</th>
@@ -1293,8 +1298,8 @@ function NavPage() {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索币种"
-                aria-label="搜索币种"
+                placeholder="搜索合约"
+                aria-label="搜索合约"
               />
             </label>
           </div>
@@ -1302,8 +1307,8 @@ function NavPage() {
             <table>
               <thead>
                 <tr>
-                  <th>币种</th>
-                  <th className="numeric">期末净数量</th>
+                  <th>合约</th>
+                  <th className="numeric">期末净手数</th>
                   <th className="numeric">期末净敞口</th>
                   <th className="numeric">区间已实现</th>
                   <th className="numeric">区间浮动盈亏</th>
@@ -1324,7 +1329,7 @@ function NavPage() {
               </tbody>
             </table>
             {visibleRows.length === 0 && (
-              <div className="empty-state">没有匹配的币种</div>
+              <div className="empty-state">没有匹配的合约</div>
             )}
           </div>
         </section>
@@ -1349,7 +1354,7 @@ function NavPage() {
               return (
               <div className="source-row" key={source.source_id}>
                 <div className="source-identity">
-                  <span className="venue-mark">{okx ? 'O' : 'B'}</span>
+                  <span className="venue-mark">{source.configured_venue === 'ctp' ? 'CTP' : source.configured_venue === 'yida' ? 'YD' : okx ? 'O' : 'B'}</span>
                   <div>
                     <strong>
                       {source.account}
@@ -1370,7 +1375,7 @@ function NavPage() {
                 />
                 <SourceDatum
                   label="累计费后净值"
-                  value={`${money(source.nav_change_after_fee_quote)} 报价币`}
+                  value={`${money(source.nav_change_after_fee_quote)} CNY`}
                   tone={signedClass(source.nav_change_after_fee_quote)}
                 />
                 {unified && (
@@ -1425,7 +1430,7 @@ function LiquidityExecutionAnalysis({ totals }: { totals: NavTotals }) {
           <h2 id="execution-title">区间成交执行分析</h2>
         </div>
         <span className="generation-time">
-          {integer(totals.fill_count)} 笔 · {money(totals.volume_quote)} 报价币
+          {integer(totals.fill_count)} 笔 · {money(totals.volume_quote)} CNY
         </span>
       </div>
       <div className="liquidity-analysis">
@@ -1460,7 +1465,7 @@ function LiquidityTableCell({ count, volume }: { count: number; volume: number }
   return (
     <td className="numeric mono liquidity-cell">
       <strong>{integer(count)} 笔</strong>
-      <small>{money(volume)} 报价币</small>
+      <small>{money(volume)} CNY</small>
     </td>
   )
 }
@@ -1483,7 +1488,7 @@ function SummaryItem({
         <span>{label}</span>
         <strong className={signed && value !== null ? signedClass(value) : ''}>
           {value === null ? '--' : money(value)}{' '}
-          {value !== null && <small>报价币</small>}
+          {value !== null && <small>CNY</small>}
         </strong>
       </div>
     </div>
@@ -1513,8 +1518,8 @@ function SymbolTableRow({
         >
           {selected && <Check size={13} />}
         </button>
-        <strong className="symbol-name">{row.symbol.replace(/(?:USDT|USDC|USD)$/, '')}</strong>
-        <span className="symbol-quote">/{row.symbol.match(/(?:USDT|USDC|USD)$/)?.[0] ?? ''}</span>
+        <strong className="symbol-name">{row.symbol}</strong>
+        <span className="symbol-quote">/CNY</span>
       </td>
       <td className={`numeric mono ${signedClass(row.net_quantity)}`}>
         {quantity(row.net_quantity)}

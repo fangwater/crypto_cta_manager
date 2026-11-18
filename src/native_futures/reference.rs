@@ -144,11 +144,22 @@ fn offset(value: &str) -> bool {
 impl Pack {
     pub fn load(path: &Path) -> Result<Self> {
         let file = fs::File::open(path).context("open reference pack")?;
-        let mut bytes = Vec::new();
-        file.take(MAX_PACK_BYTES + 1).read_to_end(&mut bytes)?;
+        let mut remaining = MAX_PACK_BYTES;
+        Self::read(file, &mut remaining)
+    }
+
+    fn read(file: fs::File, remaining: &mut u64) -> Result<Self> {
+        let max_bytes = MAX_PACK_BYTES.min(*remaining);
         ensure!(
-            bytes.len() as u64 <= MAX_PACK_BYTES,
-            "reference pack exceeds 64 MiB"
+            file.metadata()?.len() <= max_bytes,
+            "reference pack exceeds its remaining read budget"
+        );
+        let mut bytes = Vec::new();
+        file.take(max_bytes + 1).read_to_end(&mut bytes)?;
+        *remaining = remaining.saturating_sub(bytes.len() as u64);
+        ensure!(
+            bytes.len() as u64 <= max_bytes,
+            "reference pack exceeds its remaining read budget"
         );
         let pack: Self = serde_json::from_slice(&bytes).context("decode reference pack")?;
         pack.validate()?;
@@ -307,9 +318,8 @@ impl Pack {
 
 /// Resolve descendants as well as the root; a source/day symlink must never
 /// redirect reads, backups or atomic replacement into an execution database.
-pub fn pack_path(config: &Config, source: &str, day: &str) -> Result<PathBuf> {
+fn pack_directory(config: &Config, source: &str) -> Result<PathBuf> {
     config.validate()?;
-    valid_day(day)?;
     ensure!(
         config.sources.iter().any(|s| s.enabled && s.id == source),
         "reference source is not enabled"
@@ -320,20 +330,65 @@ pub fn pack_path(config: &Config, source: &str, day: &str) -> Result<PathBuf> {
             .as_deref()
             .context("reference_root is not configured")?,
     )?;
-    let path = root.join(source).join(format!("{day}.json"));
+    let directory = resolved(&root.join(source))?;
     ensure!(
-        resolved(&path)?.starts_with(&root),
-        "reference file escapes reference_root"
+        directory.starts_with(&root),
+        "reference directory escapes reference_root"
+    );
+    Ok(directory)
+}
+
+pub fn pack_path(config: &Config, source: &str, day: &str) -> Result<PathBuf> {
+    valid_day(day)?;
+    let directory = pack_directory(config, source)?;
+    let path = directory.join(format!("{day}.json"));
+    ensure!(
+        resolved(&path)?.starts_with(&directory),
+        "reference file escapes source directory"
     );
     Ok(path)
 }
 
-pub fn load(config: &Config, source: &str, day: &str) -> Result<Option<Pack>> {
-    let path = pack_path(config, source, day)?;
-    if !path.exists() {
-        return Ok(None);
+pub(super) fn days(config: &Config, source: &str) -> Result<BTreeSet<String>> {
+    if config.reference_root.is_none() {
+        return Ok(BTreeSet::new());
     }
-    let pack = Pack::load(&path)?;
+    let directory = pack_directory(config, source)?;
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(error).context("list native reference packs"),
+    };
+    let mut days = BTreeSet::new();
+    for entry in entries {
+        let name = entry?.file_name();
+        if let Some(day) = name.to_str().and_then(|s| s.strip_suffix(".json"))
+            && valid_day(day).is_ok()
+        {
+            days.insert(day.to_owned());
+        }
+    }
+    Ok(days)
+}
+
+pub fn load(config: &Config, source: &str, day: &str) -> Result<Option<Pack>> {
+    let mut remaining = MAX_PACK_BYTES;
+    load_bounded(config, source, day, &mut remaining)
+}
+
+pub(super) fn load_bounded(
+    config: &Config,
+    source: &str,
+    day: &str,
+    remaining: &mut u64,
+) -> Result<Option<Pack>> {
+    let path = pack_path(config, source, day)?;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("open reference pack"),
+    };
+    let pack = Pack::read(file, remaining)?;
     ensure!(
         pack.source_id == source && pack.trading_day == day,
         "reference pack identity differs from requested source/day"

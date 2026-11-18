@@ -63,8 +63,17 @@ impl CnFuturesMarket for Mock {
         &self,
         request: Request<GetMinuteBarsRequest>,
     ) -> Result<Response<GetMinuteBarsResponse>, Status> {
-        self.queries.lock().unwrap().push(request.into_inner());
-        Ok(Response::new(self.response.lock().unwrap().clone()))
+        let request = request.into_inner();
+        let mut response = self.response.lock().unwrap().clone();
+        match &request.range {
+            Some(Range::Time(window)) => response
+                .bars
+                .retain(|b| (window.start_ms..=window.end_ms).contains(&b.open_time_ms)),
+            Some(Range::TradingDay(day)) => response.bars.retain(|b| b.trading_day == *day),
+            None => {}
+        }
+        self.queries.lock().unwrap().push(request);
+        Ok(Response::new(response))
     }
     async fn get_data_state(
         &self,
@@ -92,6 +101,97 @@ impl CnFuturesMarket for Mock {
     ) -> Result<Response<Self::StreamIntradayFramesStream>, Status> {
         Err(Status::unimplemented("not used"))
     }
+}
+
+#[tokio::test]
+async fn exact_receipt_minute_proves_factual_multiplier_and_coalesces_parallel_requests() {
+    let (state, url, task) = server().await;
+    let temp = tempfile::tempdir().unwrap();
+    let feed = Feed::new(settings(url, temp.path())).unwrap();
+    let day = pack().trading_day;
+    let open_ms = response().bars[0].open_time_ms;
+    let lookup = || feed.day_multiplier("SHFE", "cu2612", &day, open_ms * 1000 + 5, now());
+    let (a, b) = tokio::join!(lookup(), lookup());
+    assert_eq!(a.unwrap(), Some(5.0));
+    assert_eq!(b.unwrap(), Some(5.0));
+    let recorded = state.queries.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].range,
+        Some(Range::Time(TimeRange {
+            start_ms: open_ms,
+            end_ms: open_ms
+        }))
+    );
+    assert_eq!(feed.cache_status().fetched_candles, 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn recovered_fills_fall_back_to_their_own_trading_day_and_reject_unproved_days() {
+    let (state, url, task) = server().await;
+    let temp = tempfile::tempdir().unwrap();
+    let feed = Feed::new(settings(url, temp.path())).unwrap();
+    let day = pack().trading_day;
+    let open_ms = response().bars[0].open_time_ms;
+    assert_eq!(
+        feed.day_multiplier("SHFE", "cu2612", &day, now() - 1, now())
+            .await
+            .unwrap(),
+        Some(5.0)
+    );
+    // A receipt minute whose trading day belongs to a different fill is
+    // insufficient even when the provider returns an identical contract name.
+    assert_eq!(
+        feed.day_multiplier("SHFE", "cu2612", "20261112", open_ms * 1000, now())
+            .await
+            .unwrap(),
+        None
+    );
+    let recorded = state.queries.lock().unwrap();
+    assert_eq!(recorded.len(), 4);
+    assert_eq!(recorded[1].range, Some(Range::TradingDay(20261113)));
+    assert_eq!(recorded[3].range, Some(Range::TradingDay(20261112)));
+    assert!(!recorded[1].include_empty_minutes);
+    drop(recorded);
+    assert_eq!(
+        feed.day_multiplier("SHFE", "cu2612", "20261112", open_ms * 1000, now())
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        state.queries.lock().unwrap().len(),
+        4,
+        "unsupported exact day is cached briefly"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn multiplier_reuses_verified_archived_days_and_rejects_wrong_contracts() {
+    let (state, url, task) = server().await;
+    let temp = tempfile::tempdir().unwrap();
+    let settings = settings(url, temp.path());
+    let day = pack().trading_day;
+    let feed = Feed::new(settings.clone()).unwrap();
+    let _ = feed.day("SHFE", "cu2612", &day, now()).await.unwrap();
+    let feed = Feed::new(settings).unwrap();
+    assert_eq!(
+        feed.day_multiplier("SHFE", "cu2612", &day, now() - 1, now())
+            .await
+            .unwrap(),
+        Some(5.0)
+    );
+    assert_eq!(state.queries.lock().unwrap().len(), 1);
+    let receipt_us = response().bars[0].open_time_ms * 1000;
+    assert!(
+        feed.day_multiplier("SHFE", "ag2612", &day, receipt_us, now())
+            .await
+            .is_err()
+    );
+    assert_eq!(state.queries.lock().unwrap().len(), 2);
+    task.abort();
 }
 async fn server() -> (Mock, String, tokio::task::JoinHandle<()>) {
     let state = Mock {

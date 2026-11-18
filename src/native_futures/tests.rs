@@ -45,6 +45,45 @@ fn put(db: &DB, cf: &str, key: &str, value: &Value) {
 }
 
 #[test]
+fn cost_window_uses_inclusive_receipt_bounds_and_complete_native_order_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("exec");
+    let db = db(&primary);
+    let fixture = fixture();
+    let order = &fixture["order"];
+    let mut fill = fixture["fill"].clone();
+    let day = order["identity"]["trading_day"].as_str().unwrap();
+    fill["fill"]["order_key"] = order["identity"]["native"].clone();
+    fill["received_us"] = json!(101);
+    put(&db, "cn_trade_facts", "in-range", &fill);
+    fill["fill"]["identity"]["trade_id"] = json!("outside");
+    fill["received_us"] = json!(102);
+    put(&db, "cn_trade_facts", "outside", &fill);
+    let order_key = super::evidence::NativeOrderIdentity::for_fill(&fill["fill"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&order_key).unwrap(),
+        r#"{"trading_day":"20261112","venue":"SHFE","native":{"session":"yida:20261112:group:1","order_ref":"10"}}"#
+    );
+    put(
+        &db,
+        "cn_uniform_orders",
+        &serde_json::to_string(&order_key).unwrap(),
+        order,
+    );
+    let mut wrong_order = order.clone();
+    wrong_order["identity"]["native"]["session"] = json!("another-session");
+    put(&db, "cn_uniform_orders", "wrong-session", &wrong_order);
+
+    let window = reader::read_cost_window(&source(&primary), &db, 101, 101).unwrap();
+    assert_eq!(window.days.len(), 1);
+    let facts = &window.days[day];
+    assert_eq!(facts.fills.len(), 1);
+    assert_eq!(facts.orders, vec![order.clone()]);
+}
+
+#[test]
 fn distinguishes_submission_cancellation_and_factual_settlement() {
     let mut record = fixture()["order"].clone();
     record["order"]["status"] = json!("working");
@@ -502,7 +541,9 @@ fn cached_observation_matches_cold_reads_and_updates_only_changed_evidence_and_r
         || reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
     let first = read();
     assert_eq!(first.status, "observing");
-    assert_eq!(read().total_fills, 1);
+    let unchanged = read();
+    assert_eq!(unchanged.total_fills, 1);
+    assert_eq!(unchanged.nav_evidence_revision, first.nav_evidence_revision);
     put(
         &db,
         "cn_trading_events",
@@ -512,10 +553,13 @@ fn cached_observation_matches_cold_reads_and_updates_only_changed_evidence_and_r
     let tick = read();
     assert_eq!(tick.status, "observing");
     assert_eq!(tick.total_orders, 1);
+    assert_eq!(tick.nav_evidence_revision, first.nav_evidence_revision);
     let mut fill = f["fill"].clone();
     fill["commission"] = json!(123.5);
     put(&db, "cn_trade_facts", "one", &fill);
-    assert_eq!(read().fills[0]["commission"], 123.5);
+    let corrected = read();
+    assert_eq!(corrected.fills[0]["commission"], 123.5);
+    assert_ne!(corrected.nav_evidence_revision, first.nav_evidence_revision);
     put(
         &db,
         "cn_trading_events",
@@ -579,7 +623,8 @@ fn cached_observation_rebuilds_after_old_evidence_updates_and_directory_replacem
     let mut cache = reader::Cache::default();
     let mut read =
         || reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
-    assert!(read().snapshot_ready);
+    let first = read();
+    assert!(first.snapshot_ready);
     state["value"]["state"]["ready"] = json!(false);
     put(&db, "cn_trading_events", "001", &state);
     put(
@@ -588,7 +633,9 @@ fn cached_observation_rebuilds_after_old_evidence_updates_and_directory_replacem
         "002",
         &json!({"sequence":101,"received_us":super::now_us(),"value":{"type":"market_tick"}}),
     );
-    assert!(!read().snapshot_ready);
+    let corrected = read();
+    assert!(!corrected.snapshot_ready);
+    assert_ne!(corrected.nav_evidence_revision, first.nav_evidence_revision);
     drop(db);
     std::fs::rename(&primary, tmp.path().join("old-exec")).unwrap();
     let fresh = super::tests::db(&primary);
@@ -598,6 +645,7 @@ fn cached_observation_rebuilds_after_old_evidence_updates_and_directory_replacem
     let next = read();
     assert_eq!(next.trading_day.as_deref(), Some("20261117"));
     assert!(next.positions.is_empty());
+    assert_ne!(next.nav_evidence_revision, corrected.nav_evidence_revision);
 }
 
 #[test]

@@ -42,9 +42,11 @@ amounts, lot quantities and open/close flags. Preserve account-scoped permission
 and report missing financial data as unavailable.
 
 For CN parity work, fetch the current upstream source and identify the frontend
-release served by Crypto. Verify the CN bundle against that release using the
-SHA-256 hashes of the HTML, JavaScript and CSS. Also open the same pages with
-CN accounts to verify the API data, units and account selection.
+release served by Crypto. The operator permits CN-only changes to asset labels,
+units and the fields that supply them. Compare the source diff to the Crypto
+release, check the shared layout and navigation on desktop and mobile, and
+verify the SHA-256 of each published file against the local CN build. Exercise
+the same pages with CN accounts to verify data, units and account selection.
 
 Commit and publish CN product changes on `cn-futures` and deploy them to CN
 Manager only. A change to Crypto `main` or a Crypto production release requires

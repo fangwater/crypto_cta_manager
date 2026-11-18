@@ -1,7 +1,0 @@
-.native-table-scroll{overflow:auto;border:1px solid var(--color-border);border-radius:.75rem;background:var(--color-surface)}
-.native-table{width:100%;border-collapse:collapse;font-size:.8rem;white-space:nowrap;text-align:left}
-.native-table th,.native-table td{padding:.75rem 1rem;border-bottom:1px solid var(--color-border-soft);font-variant-numeric:tabular-nums}
-.native-table th{font-weight:500;color:var(--color-muted);background:var(--color-canvas)}
-.native-table tbody tr:last-child td{border-bottom:0}
-.native-target-row{display:grid;grid-template-columns:100px minmax(100px,1fr) 130px auto;gap:.75rem}
-@media(max-width:640px){.native-target-row{grid-template-columns:80px minmax(70px,1fr) 80px auto;gap:.35rem}}

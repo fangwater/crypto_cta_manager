@@ -211,6 +211,16 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
 }
 
 pub async fn register(pool: &PgPool, request: RegisterRequest) -> Result<AuthUser> {
+    register_if_allowed(pool, request, true)
+        .await?
+        .context("registration was closed")
+}
+
+pub(crate) async fn register_if_allowed(
+    pool: &PgPool,
+    request: RegisterRequest,
+    allow_after_setup: bool,
+) -> Result<Option<AuthUser>> {
     let username = validate_username(&request.username)?;
     let password_hash = hash_password(&request.password)?;
     let mut tx = pool
@@ -228,6 +238,9 @@ pub async fn register(pool: &PgPool, request: RegisterRequest) -> Result<AuthUse
         .fetch_one(&mut *tx)
         .await
         .context("failed to inspect existing users")?;
+    if already_exists && !allow_after_setup {
+        return Ok(None);
+    }
     let role = if already_exists { "user" } else { "admin" };
     let user = sqlx::query(
         "INSERT INTO cta_users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING user_id, username, role",
@@ -245,11 +258,11 @@ pub async fn register(pool: &PgPool, request: RegisterRequest) -> Result<AuthUse
         }
     })?;
     tx.commit().await.context("failed to commit registration")?;
-    Ok(AuthUser {
+    Ok(Some(AuthUser {
         user_id: user.try_get("user_id")?,
         username: user.try_get("username")?,
         role: user.try_get("role")?,
-    })
+    }))
 }
 
 /// Administrator-created account; unlike `register` it never bootstraps the

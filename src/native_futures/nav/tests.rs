@@ -316,3 +316,29 @@ fn receive_key_is_a_stable_tie_breaker_and_new_trading_day_moves_today_lots_to_y
     close.key = b"b".to_vec();
     assert!(report(&a, &[close, open], &prices(), &BTreeMap::new()).is_ok());
 }
+
+#[test]
+fn complete_endpoints_do_not_hide_a_missing_active_minute() {
+    let mut a = anchor();
+    a.positions.push(position(Side::Buy, 1, 0, 100.0));
+    let mut prices = prices();
+    let market = prices.values_mut().next().unwrap();
+    market.sessions = vec![(9 * 3600, 15 * 3600)];
+    market.closes.remove(&(at() + 120_000_000));
+    let result = build_selected(
+        Inputs {
+            anchor: &a,
+            fills: &[],
+            prices: &prices,
+            rates: &BTreeMap::new(),
+            start_us: at(),
+            end_us: at() + 180_000_000,
+            source_through_us: at() + 180_000_000,
+            max_points: 2,
+        },
+        &[],
+        false,
+        Some(15 * 60_000_000),
+    );
+    assert!(result.is_err());
+}

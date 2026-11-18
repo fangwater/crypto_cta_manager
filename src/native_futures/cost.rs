@@ -10,6 +10,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(super) mod acquisition;
+
 #[derive(Debug, Serialize)]
 pub struct SignalPrice {
     pub signal_id: String,
@@ -17,6 +19,7 @@ pub struct SignalPrice {
     pub symbol: String,
     pub side: String,
     pub offset: String,
+    pub received_us: i64,
     pub expected_lots: i64,
     pub priced_lots: i64,
     pub model: Model,
@@ -25,6 +28,9 @@ pub struct SignalPrice {
     pub sample_prices: Vec<f64>,
     pub sample_weights: Vec<f64>,
     pub theoretical_price: Option<f64>,
+    pub virtual_turnover_cny: Option<f64>,
+    pub virtual_commission_cny: Option<f64>,
+    pub pending: bool,
     pub reason: Option<String>,
 }
 
@@ -34,12 +40,14 @@ pub struct FillCost {
     pub symbol: String,
     pub trading_day: String,
     pub trade_id: String,
+    pub received_us: i64,
     pub session: Option<String>,
     pub order_ref: Option<String>,
     pub side: String,
     pub offset: String,
     pub lots: i64,
     pub actual_price: f64,
+    pub contract_multiplier: Option<f64>,
     pub signal_id: Option<String>,
     pub theoretical_price: Option<f64>,
     pub actual_commission: Option<f64>,
@@ -135,12 +143,14 @@ impl<'a> ReferenceIndex<'a> {
 }
 
 fn signal_price(index: &ReferenceIndex<'_>, signal: &Signal, now_us: i64) -> Result<SignalPrice> {
+    let received = reference::timestamp(&signal.received_at)?;
     let mut result = SignalPrice {
         signal_id: signal.id.clone(),
         venue: signal.venue.clone(),
         symbol: signal.symbol.clone(),
         side: signal.side.clone(),
         offset: signal.offset.clone(),
+        received_us: received,
         expected_lots: signal.lots,
         priced_lots: 0,
         model: signal.model,
@@ -149,6 +159,9 @@ fn signal_price(index: &ReferenceIndex<'_>, signal: &Signal, now_us: i64) -> Res
         sample_prices: vec![],
         sample_weights: vec![],
         theoretical_price: None,
+        virtual_turnover_cny: None,
+        virtual_commission_cny: None,
+        pending: false,
         reason: None,
     };
     let fail = |mut r: SignalPrice, reason: &str| {
@@ -159,7 +172,6 @@ fn signal_price(index: &ReferenceIndex<'_>, signal: &Signal, now_us: i64) -> Res
     let Some(contract) = index.contracts.get(&market) else {
         return Ok(fail(result, "缺少合约乘数与价格精度"));
     };
-    let received = reference::timestamp(&signal.received_at)?;
     let first = received.div_euclid(MINUTE_US) * MINUTE_US
         + if received % MINUTE_US == 0 {
             0
@@ -186,6 +198,7 @@ fn signal_price(index: &ReferenceIndex<'_>, signal: &Signal, now_us: i64) -> Res
         return Ok(fail(result, "本交易日剩余交易分钟不足执行窗口"));
     }
     if result.sample_open_us.last().unwrap() + MINUTE_US > now_us {
+        result.pending = true;
         return Ok(fail(result, "执行窗口尚未全部收盘"));
     }
     let mut volumes = vec![];
@@ -220,6 +233,17 @@ fn signal_price(index: &ReferenceIndex<'_>, signal: &Signal, now_us: i64) -> Res
         "nonfinite theoretical price"
     );
     result.theoretical_price = Some(price);
+    let turnover = signal.lots as f64 * price * contract.contract_multiplier;
+    ensure!(turnover.is_finite(), "nonfinite virtual turnover");
+    result.virtual_turnover_cny = Some(turnover);
+    result.virtual_commission_cny = contract
+        .fees
+        .get(&signal.offset)
+        .map(|fee| fee.amount(signal.lots, price, contract.contract_multiplier));
+    ensure!(
+        result.virtual_commission_cny.is_none_or(f64::is_finite),
+        "nonfinite virtual commission"
+    );
     Ok(result)
 }
 
@@ -255,12 +279,13 @@ pub fn build(
             "reference source/day mismatch"
         );
     }
+    let reference = pack.map(ReferenceIndex::new).transpose()?;
     let mut signals = pack
-        .map(|p| {
-            let index = ReferenceIndex::new(p)?;
+        .zip(reference.as_ref())
+        .map(|(p, index)| {
             p.signals
                 .iter()
-                .map(|s| signal_price(&index, s, now_us))
+                .map(|s| signal_price(index, s, now_us))
                 .collect::<Result<Vec<_>>>()
         })
         .transpose()?
@@ -318,6 +343,10 @@ pub fn build(
         );
         super::validate_market(&format!("{venue}:{symbol}"))?;
         ensure!(matches!(side, "buy" | "sell"), "invalid factual fill side");
+        ensure!(
+            matches!(offset, "open" | "close" | "close_yesterday" | "close_today"),
+            "invalid factual fill offset"
+        );
         let lots = f["lots"]
             .as_i64()
             .filter(|n| *n > 0)
@@ -331,12 +360,16 @@ pub fn build(
             symbol: symbol.into(),
             trading_day: day.into(),
             trade_id: trade_id.into(),
+            received_us: record["received_us"]
+                .as_i64()
+                .context("missing factual fill receipt timestamp")?,
             session: f["order_key"]["session"].as_str().map(str::to_owned),
             order_ref: f["order_key"]["order_ref"].as_str().map(str::to_owned),
             side: side.into(),
             offset: offset.into(),
             lots,
             actual_price: price,
+            contract_multiplier: None,
             signal_id: None,
             theoretical_price: None,
             actual_commission: record["commission"].as_f64(),
@@ -347,11 +380,32 @@ pub fn build(
             total_shortfall_cny: None,
             reason: None,
         };
-        row.signal_id = row
+        let order_key = row
             .session
             .as_deref()
             .zip(row.order_ref.as_deref())
-            .and_then(|(session, order_ref)| links.get(&(venue, session, order_ref)))
+            .map(|(session, order_ref)| (venue, session, order_ref));
+        let contract = reference
+            .as_ref()
+            .and_then(|index| index.contracts.get(&(venue, symbol)));
+        let order = order_key.and_then(|key| orders.get(&key));
+        let recorded_multiple = order
+            .filter(|order| {
+                let instrument = &order["instrument"];
+                let request = &order["order"]["request"];
+                instrument["venue"] == venue
+                    && instrument["symbol"] == symbol
+                    && request["venue"] == venue
+                    && request["symbol"] == symbol
+                    && request["side"] == side
+                    && request["offset"] == offset
+            })
+            .and_then(|order| order["instrument"]["contract_multiple"].as_f64())
+            .filter(|multiple| multiple.is_finite() && *multiple > 0.0);
+        row.contract_multiplier =
+            recorded_multiple.or_else(|| contract.map(|c| c.contract_multiplier));
+        row.signal_id = order_key
+            .and_then(|key| links.get(&key))
             .map(|id| (*id).to_owned());
         let compare = || -> std::result::Result<(usize, f64, f64, Option<f64>), String> {
             let pack = pack.ok_or("尚未维护本账户／交易日的参考数据")?;
@@ -392,11 +446,7 @@ pub fn build(
                     .clone()
                     .unwrap_or("理论价格不可用".into())
             })?;
-            let contract = pack
-                .contracts
-                .iter()
-                .find(|c| c.venue == venue && c.symbol == symbol)
-                .ok_or("缺少合约规则")?;
+            let contract = contract.ok_or("缺少合约规则")?;
             for (key, expected) in [
                 ("contract_multiple", contract.contract_multiplier),
                 ("price_tick", contract.price_tick),
@@ -428,6 +478,7 @@ pub fn build(
                     .checked_add(lots)
                     .context("matched lots overflow")?;
                 row.theoretical_price = Some(theoretical);
+                row.contract_multiplier = contract.map(|c| c.contract_multiplier);
                 row.price_shortfall_cny = Some(shortfall);
                 row.theoretical_commission_cny = fee;
                 row.fee_shortfall_cny = fee

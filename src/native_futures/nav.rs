@@ -5,9 +5,55 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+pub(crate) mod attribution;
 pub mod service;
 pub mod source;
 pub mod store;
+
+pub(crate) const MAX_WINDOW_US: i64 = 31 * 86_400 * 1_000_000;
+const MINUTE_US: i64 = 60_000_000;
+
+fn evaluation_times(start: i64, end: i64, changes: impl Iterator<Item = i64>) -> BTreeSet<i64> {
+    let first_minute_end = (start.div_euclid(MINUTE_US) * MINUTE_US).saturating_add(MINUTE_US);
+    let mut times = BTreeSet::from([end]);
+    times.extend((first_minute_end..end).step_by(MINUTE_US as usize));
+    times.extend(changes.filter(|&at| at > start && at < end));
+    times
+}
+
+fn sample_tick(at: i64, end: i64, interval_us: Option<i64>) -> bool {
+    at == end || interval_us.is_none_or(|interval| at % interval == 0)
+}
+pub(crate) type Market = (String, String);
+
+pub(crate) fn market_name((venue, contract): &Market) -> String {
+    format!("{venue}:{contract}")
+}
+
+pub(crate) fn select_markets(
+    available: &BTreeSet<Market>,
+    requested: &[String],
+) -> Result<BTreeSet<Market>> {
+    if requested.is_empty() {
+        return Ok(available.clone());
+    }
+    requested
+        .iter()
+        .map(|name| {
+            let mut matches = available.iter().filter(|key| {
+                name.eq_ignore_ascii_case(&market_name(key)) || name.eq_ignore_ascii_case(&key.1)
+            });
+            let market = matches
+                .next()
+                .with_context(|| format!("所选区间无合约 {name} 的持仓或成交证据"))?;
+            ensure!(
+                matches.next().is_none(),
+                "合约 {name} 对应多个交易所，请选择完整合约"
+            );
+            Ok(market.clone())
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -289,6 +335,8 @@ pub struct Point {
     pub floating_cny: f64,
     pub fees_cny: Option<f64>,
     pub nav_after_fees_cny: Option<f64>,
+    pub gross_position_cny: f64,
+    pub net_position_cny: f64,
 }
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Fees {
@@ -298,23 +346,26 @@ pub struct Fees {
     pub missing_count: usize,
     pub actual_known_cny: f64,
     pub estimated_known_cny: f64,
+    pub volume_cny: f64,
 }
 impl Fees {
-    fn add(&mut self, fill: &Fill, rates: Option<&AccountRates>) -> Result<()> {
+    fn add(&mut self, volume_cny: f64, actual: Option<f64>, estimated: Option<f64>) -> Result<()> {
         self.fill_count += 1;
-        if let Some(fee) = fill.commission_cny {
+        self.volume_cny += volume_cny;
+        if let Some(fee) = actual {
             self.actual_count += 1;
             self.actual_known_cny += fee;
-        } else if let Some(fee) = rates.and_then(|r| {
-            r.estimated_fee(fill.offset.key(), fill.lots, fill.price, fill.received_us)
-        }) {
+        } else if let Some(fee) = estimated {
             self.estimated_count += 1;
             self.estimated_known_cny += fee;
         } else {
             self.missing_count += 1;
         }
         ensure!(
-            self.actual_known_cny.is_finite() && self.estimated_known_cny.is_finite(),
+            self.actual_known_cny.is_finite()
+                && self.estimated_known_cny.is_finite()
+                && (self.actual_known_cny + self.estimated_known_cny).is_finite()
+                && self.volume_cny.is_finite(),
             "native fee sum overflow"
         );
         Ok(())
@@ -332,6 +383,13 @@ pub struct MarketSummary {
     pub realized_cny: f64,
     pub floating_cny: f64,
     pub nav_before_fees_cny: f64,
+    pub initial_net_lots: i64,
+    pub long_value_cny: f64,
+    pub short_value_cny: f64,
+    pub fees: Fees,
+    pub summary: Point,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<Point>,
 }
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -348,6 +406,9 @@ pub struct Report {
     pub summary: Option<Point>,
     pub markets: Vec<MarketSummary>,
     pub points: Vec<Point>,
+    pub sampled: bool,
+    pub available_symbols: Vec<String>,
+    pub selected_symbols: Vec<String>,
 }
 impl Report {
     pub fn unavailable(
@@ -372,6 +433,9 @@ impl Report {
             summary: None,
             markets: vec![],
             points: vec![],
+            sampled: false,
+            available_symbols: vec![],
+            selected_symbols: vec![],
         }
     }
 }
@@ -386,47 +450,183 @@ pub struct Inputs<'a> {
     pub source_through_us: i64,
     pub max_points: usize,
 }
+#[derive(Clone, Copy, Debug, Default)]
+struct Amounts {
+    realized: f64,
+    floating: f64,
+    long_value: f64,
+    short_value: f64,
+}
+
+impl std::ops::AddAssign for Amounts {
+    fn add_assign(&mut self, other: Self) {
+        self.realized += other.realized;
+        self.floating += other.floating;
+        self.long_value += other.long_value;
+        self.short_value += other.short_value;
+    }
+}
+
 fn valuation(
-    ledgers: &BTreeMap<(String, String), MarketLedger>,
-    prices: &BTreeMap<(String, String), MarketPrices>,
+    ledgers: &BTreeMap<Market, MarketLedger>,
+    prices: &BTreeMap<Market, MarketPrices>,
     at: i64,
-) -> Result<BTreeMap<(String, String), (f64, f64)>> {
+) -> Result<BTreeMap<Market, Amounts>> {
     ledgers
         .iter()
         .map(|(key, ledger)| {
-            let floating = if ledger.long.is_empty() && ledger.short.is_empty() {
-                0.0
-            } else {
-                ledger.floating(prices.get(key).context("缺少该合约行情")?.mark(at)?)?
+            let (long, short) = ledger.quantities();
+            let mut amounts = Amounts {
+                realized: ledger.realized,
+                ..Default::default()
             };
-            Ok((key.clone(), (ledger.realized, floating)))
+            if long != 0 || short != 0 {
+                let mark = prices.get(key).context("缺少该合约行情")?.mark(at)?;
+                amounts.floating = ledger.floating(mark)?;
+                amounts.long_value = long as f64 * ledger.multiplier * mark;
+                amounts.short_value = short as f64 * ledger.multiplier * mark;
+            }
+            Ok((key.clone(), amounts))
         })
         .collect()
 }
-fn totals(values: &BTreeMap<(String, String), (f64, f64)>) -> (f64, f64) {
-    values
-        .values()
-        .fold((0.0, 0.0), |(r, f), (a, b)| (r + a, f + b))
+
+fn totals<'a>(values: impl Iterator<Item = &'a Amounts>) -> Amounts {
+    values.fold(Amounts::default(), |mut result, value| {
+        result += *value;
+        result
+    })
 }
-fn point(
-    at: i64,
-    values: &BTreeMap<(String, String), (f64, f64)>,
-    baseline: (f64, f64),
-    fees: &Fees,
-) -> Point {
-    let (realized, floating) = totals(values);
-    let (r, f) = (realized - baseline.0, floating - baseline.1);
-    Point {
+
+fn point(at: i64, value: Amounts, baseline: Amounts, fees: &Fees) -> Result<Point> {
+    let realized = value.realized - baseline.realized;
+    let floating = value.floating - baseline.floating;
+    let nav = realized + floating;
+    let fee = fees.total();
+    let after_fee = fee.map(|fee| nav - fee);
+    let gross = value.long_value + value.short_value;
+    let net = value.long_value - value.short_value;
+    ensure!(
+        [realized, floating, nav, gross, net]
+            .into_iter()
+            .all(f64::is_finite)
+            && after_fee.is_none_or(f64::is_finite),
+        "native NAV total overflow"
+    );
+    Ok(Point {
         timestamp_us: at,
-        nav_before_fees_cny: r + f,
-        realized_cny: r,
-        floating_cny: f,
-        fees_cny: fees.total(),
-        nav_after_fees_cny: fees.total().map(|v| r + f - v),
+        nav_before_fees_cny: nav,
+        realized_cny: realized,
+        floating_cny: floating,
+        fees_cny: fee,
+        nav_after_fees_cny: after_fee,
+        gross_position_cny: gross,
+        net_position_cny: net,
+    })
+}
+
+/// Preserve both endpoints and each bucket's extrema while replaying all changes.
+struct Sampler {
+    points: Vec<Point>,
+    total: usize,
+    width: usize,
+    index: usize,
+    min: Option<(usize, Point)>,
+    max: Option<(usize, Point)>,
+}
+
+impl Sampler {
+    fn new(total: usize, limit: usize) -> Self {
+        let pairs = (limit - 2) / 2;
+        let width = if total <= limit || pairs == 0 {
+            0
+        } else {
+            (total - 2).div_ceil(pairs)
+        };
+        Self {
+            points: Vec::new(),
+            total,
+            width,
+            index: 0,
+            min: None,
+            max: None,
+        }
+    }
+
+    fn add(&mut self, point: Point, limit: usize) {
+        let index = self.index;
+        self.index += 1;
+        let last = index + 1 == self.total;
+        if last {
+            self.flush();
+        }
+        if index == 0 || last || self.total <= limit {
+            self.points.push(point);
+            return;
+        }
+        if self.width == 0 {
+            return;
+        }
+        let nav = |p: &Point| p.nav_after_fees_cny.unwrap_or(p.nav_before_fees_cny);
+        if self
+            .min
+            .as_ref()
+            .is_none_or(|(_, old)| nav(&point) < nav(old))
+        {
+            self.min = Some((index, point.clone()));
+        }
+        if self
+            .max
+            .as_ref()
+            .is_none_or(|(_, old)| nav(&point) > nav(old))
+        {
+            self.max = Some((index, point));
+        }
+        if index.is_multiple_of(self.width) {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if let (Some((lo, low)), Some((hi, high))) = (self.min.take(), self.max.take()) {
+            if lo <= hi {
+                self.points.push(low);
+                if hi != lo {
+                    self.points.push(high);
+                }
+            } else {
+                self.points.extend([high, low]);
+            }
+        }
     }
 }
 
 pub fn build(input: Inputs<'_>) -> Result<Report> {
+    build_selected(input, &[], false, None)
+}
+
+fn available_markets(anchor: &Anchor, fills: &[Fill], end_us: i64) -> BTreeSet<Market> {
+    anchor
+        .positions
+        .iter()
+        .map(|p| (p.venue.clone(), p.symbol.clone()))
+        .chain(
+            fills
+                .iter()
+                .filter(|f| {
+                    f.evidence_sequence > anchor.evidence_sequence && f.received_us <= end_us
+                })
+                .map(|f| (f.venue.clone(), f.symbol.clone())),
+        )
+        .collect()
+}
+
+fn build_selected(
+    input: Inputs<'_>,
+    requested: &[String],
+    curves: bool,
+    interval_us: Option<i64>,
+) -> Result<Report> {
     let Inputs {
         anchor,
         fills,
@@ -437,6 +637,8 @@ pub fn build(input: Inputs<'_>) -> Result<Report> {
         source_through_us,
         max_points,
     } = input;
+    let available = available_markets(anchor, fills, end_us);
+    let selected = select_markets(&available, requested)?;
     anchor.validate()?;
     ensure!(
         start_us >= anchor.snapshot_us
@@ -448,6 +650,9 @@ pub fn build(input: Inputs<'_>) -> Result<Report> {
     let mut ledgers: BTreeMap<(String, String), MarketLedger> = BTreeMap::new();
     for p in &anchor.positions {
         let key = (p.venue.clone(), p.symbol.clone());
+        if !selected.contains(&key) {
+            continue;
+        }
         ensure!(
             prices
                 .get(&key)
@@ -511,6 +716,9 @@ pub fn build(input: Inputs<'_>) -> Result<Report> {
             "invalid or duplicate native NAV fill"
         );
         let key = (fill.venue.clone(), fill.symbol.clone());
+        if !selected.contains(&key) {
+            continue;
+        }
         let multiplier = prices
             .get(&key)
             .context("缺少成交合约的已验证乘数和行情")?
@@ -526,6 +734,7 @@ pub fn build(input: Inputs<'_>) -> Result<Report> {
         );
         ledger.multiplier = multiplier;
     }
+    ordered.retain(|fill| selected.contains(&(fill.venue.clone(), fill.symbol.clone())));
     let mut next = 0;
     while next < ordered.len() && ordered[next].received_us < start_us {
         let fill = ordered[next];
@@ -536,36 +745,54 @@ pub fn build(input: Inputs<'_>) -> Result<Report> {
         next += 1;
     }
     let initial = valuation(&ledgers, prices, start_us)?;
-    let baseline = totals(&initial);
+    let initial_lots: BTreeMap<_, _> = ledgers
+        .iter()
+        .map(|(key, ledger)| {
+            let (long, short) = ledger.quantities();
+            (key.clone(), long - short)
+        })
+        .collect();
+    let baseline = totals(initial.values());
     let mut fees = Fees::default();
-    let mut points = vec![];
-    if start_us < end_us {
-        points.push(point(start_us, &initial, baseline, &fees));
-    }
-    let mut ticks = BTreeSet::from([end_us]);
-    for market in prices.values() {
-        ticks.extend(
-            market
-                .closes
-                .range((
-                    std::ops::Bound::Excluded(start_us),
-                    std::ops::Bound::Included(end_us),
-                ))
-                .map(|(t, _)| *t),
-        );
-    }
-    ticks.extend(
-        ordered[next..]
-            .iter()
-            .filter(|f| f.received_us > start_us)
-            .map(|f| f.received_us),
+    let mut by_market: BTreeMap<_, Fees> = selected
+        .iter()
+        .map(|key| (key.clone(), Fees::default()))
+        .collect();
+    let ticks = evaluation_times(
+        start_us,
+        end_us,
+        ordered[next..].iter().map(|fill| fill.received_us),
     );
     ensure!(ticks.len() <= 600_000, "native NAV sample budget exceeded");
+    let tick_count = ticks
+        .iter()
+        .filter(|&&at| sample_tick(at, end_us, interval_us))
+        .count()
+        + usize::from(start_us < end_us);
+    let mut portfolio = Sampler::new(tick_count, max_points);
+    let mut market_curves: BTreeMap<_, _> = selected
+        .iter()
+        .filter(|_| curves)
+        .map(|key| (key.clone(), Sampler::new(tick_count, max_points)))
+        .collect();
+
+    if start_us < end_us {
+        portfolio.add(point(start_us, baseline, baseline, &fees)?, max_points);
+        for (key, curve) in &mut market_curves {
+            curve.add(
+                point(start_us, initial[key], initial[key], &by_market[key])?,
+                max_points,
+            );
+        }
+    }
     for tick in ticks {
         while next < ordered.len() && ordered[next].received_us <= tick {
             let fill = ordered[next];
             let key = (fill.venue.clone(), fill.symbol.clone());
-            ledgers.get_mut(&key).unwrap().apply(fill)?;
+            let ledger = ledgers
+                .get_mut(&key)
+                .context("missing native market ledger")?;
+            ledger.apply(fill)?;
             let observed = rates.get(&key).and_then(|v| {
                 v.iter()
                     .filter(|r| r.observed_at_us <= fill.received_us)
@@ -575,76 +802,70 @@ pub fn build(input: Inputs<'_>) -> Result<Report> {
                 ensure!(
                     r.venue == fill.venue
                         && r.symbol == fill.symbol
-                        && r.contract_multiplier == ledgers[&key].multiplier,
+                        && r.contract_multiplier == ledger.multiplier,
                     "fee observation belongs to another market or multiplier"
                 );
             }
-            fees.add(fill, observed)?;
+            let estimated = observed.and_then(|r| {
+                r.estimated_fee(fill.offset.key(), fill.lots, fill.price, fill.received_us)
+            });
+            let volume = fill.price * fill.lots as f64 * ledger.multiplier;
+            fees.add(volume, fill.commission_cny, estimated)?;
+            by_market
+                .get_mut(&key)
+                .context("missing native fee ledger")?
+                .add(volume, fill.commission_cny, estimated)?;
             next += 1;
         }
         let values = valuation(&ledgers, prices, tick)?;
-        points.push(point(tick, &values, baseline, &fees));
-    }
-    let final_values = valuation(&ledgers, prices, end_us)?;
-    let summary = point(end_us, &final_values, baseline, &fees);
-    ensure!(
-        [
-            summary.nav_before_fees_cny,
-            summary.realized_cny,
-            summary.floating_cny
-        ]
-        .iter()
-        .all(|v| v.is_finite()),
-        "native NAV sum overflow"
-    );
-    let markets = ledgers
-        .iter()
-        .map(|((venue, symbol), ledger)| {
-            let key = (venue.clone(), symbol.clone());
-            let (r, f) = final_values[&key];
-            let (r0, f0) = initial.get(&key).copied().unwrap_or_default();
-            let (long_lots, short_lots) = ledger.quantities();
-            MarketSummary {
-                venue: venue.clone(),
-                symbol: symbol.clone(),
-                long_lots,
-                short_lots,
-                realized_cny: r - r0,
-                floating_cny: f - f0,
-                nav_before_fees_cny: r + f - r0 - f0,
-            }
-        })
-        .collect();
-    // Retain endpoints and extrema per bucket; all underlying fills/minutes were
-    // processed before presentation downsampling.
-    if points.len() > max_points {
-        let count = (max_points - 2) / 2;
-        let width = (points.len() - 2).div_ceil(count.max(1));
-        let mut selected = BTreeSet::from([0, points.len() - 1]);
-        if count > 0 {
-            for begin in (1..points.len() - 1).step_by(width) {
-                let end = (begin + width).min(points.len() - 1);
-                let key = |i: usize| {
-                    points[i]
-                        .nav_after_fees_cny
-                        .unwrap_or(points[i].nav_before_fees_cny)
-                };
-                let lo = (begin..end)
-                    .min_by(|a, b| key(*a).total_cmp(&key(*b)))
-                    .unwrap();
-                let hi = (begin..end)
-                    .max_by(|a, b| key(*a).total_cmp(&key(*b)))
-                    .unwrap();
-                selected.insert(lo);
-                selected.insert(hi);
+        if sample_tick(tick, end_us, interval_us) {
+            portfolio.add(
+                point(tick, totals(values.values()), baseline, &fees)?,
+                max_points,
+            );
+            for (key, curve) in &mut market_curves {
+                curve.add(
+                    point(tick, values[key], initial[key], &by_market[key])?,
+                    max_points,
+                );
             }
         }
-        points = points
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, p)| selected.contains(&i).then_some(p))
-            .collect();
     }
+    let final_values = valuation(&ledgers, prices, end_us)?;
+    let summary = point(end_us, totals(final_values.values()), baseline, &fees)?;
+    let markets = ledgers
+        .into_iter()
+        .map(|(key, ledger)| {
+            let (long_lots, short_lots) = ledger.quantities();
+            let value = final_values[&key];
+            let fees = by_market
+                .remove(&key)
+                .context("missing terminal fee ledger")?;
+            let summary = point(end_us, value, initial[&key], &fees)?;
+            let points = market_curves
+                .remove(&key)
+                .map(|curve| curve.points)
+                .unwrap_or_default();
+            let (venue, symbol) = key.clone();
+            Ok(MarketSummary {
+                venue,
+                symbol,
+                long_lots,
+                short_lots,
+                realized_cny: summary.realized_cny,
+                floating_cny: summary.floating_cny,
+                nav_before_fees_cny: summary.nav_before_fees_cny,
+                initial_net_lots: initial_lots[&key],
+                long_value_cny: value.long_value,
+                short_value_cny: value.short_value,
+                fees,
+                summary,
+                points,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let points = portfolio.points;
+    let sampled = points.len() < tick_count;
     let reason = (fees.missing_count > 0).then(|| {
         "部分成交的 CNY 实收费用或开平费率依据不完整；保留费用前净值，费用后净值为未知".into()
     });
@@ -662,6 +883,9 @@ pub fn build(input: Inputs<'_>) -> Result<Report> {
         summary: Some(summary),
         markets,
         points,
+        sampled,
+        available_symbols: available.iter().map(market_name).collect(),
+        selected_symbols: selected.iter().map(market_name).collect(),
     })
 }
 

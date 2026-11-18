@@ -1,5 +1,10 @@
 use super::*;
-use std::os::unix::fs::MetadataExt;
+use std::{
+    os::unix::fs::MetadataExt,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+static NEXT_NAV_EVIDENCE_REVISION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(PartialEq, Eq)]
 struct Epoch {
@@ -92,7 +97,16 @@ impl Cache {
             replication.as_ref().and_then(|s| s.store_id.clone()),
             limit,
         );
-        if self.version.as_ref() == Some(&version) {
+        let changed = self.database_sequence.map(|old| {
+            changes::since(
+                db,
+                old,
+                self.projection.as_ref().and_then(|p| p.last_key.as_deref()),
+            )
+        });
+        if self.version.as_ref() == Some(&version)
+            && changed.is_some_and(|c| !c.events && !c.orders && !c.fills)
+        {
             if let (Some(cached), Some(projection)) = (&self.snapshot, &self.projection) {
                 let mut result = cached.clone();
                 result.read_at_us = super::super::now_us();
@@ -105,13 +119,6 @@ impl Cache {
                 return Ok(result);
             }
         }
-        let changed = self.database_sequence.map(|old| {
-            changes::since(
-                db,
-                old,
-                self.projection.as_ref().and_then(|p| p.last_key.as_deref()),
-            )
-        });
         let previous = if changed.is_some_and(|c| !c.reset_events) {
             self.projection.as_ref()
         } else {
@@ -124,7 +131,7 @@ impl Cache {
             .filter(|_| self.version.as_ref().is_some_and(|v| v.2 == limit));
         let reuse_orders = changed.is_some_and(|c| !c.orders);
         let reuse_fills = changed.is_some_and(|c| !c.fills);
-        let result = read_snapshot_with_projection(
+        let mut result = read_snapshot_with_projection(
             source,
             db,
             limit,
@@ -134,6 +141,16 @@ impl Cache {
             reuse_orders,
             reuse_fills,
         )?;
+        // Fill rewrites and corrections to existing journal evidence can change
+        // NAV even when the observed account sequence and row count are unchanged.
+        result.nav_evidence_revision = self
+            .snapshot
+            .as_ref()
+            .filter(|_| changed.is_some_and(|c| !c.fills && !c.reset_events))
+            .map_or_else(
+                || NEXT_NAV_EVIDENCE_REVISION.fetch_add(1, Ordering::Relaxed),
+                |previous| previous.nav_evidence_revision,
+            );
         self.database_sequence = Some(sequence);
         self.version = Some(version);
         self.projection = Some(projection);

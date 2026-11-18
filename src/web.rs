@@ -55,7 +55,7 @@ mod publication;
 #[cfg(test)]
 mod publication_tests;
 mod target_state;
-mod timeline_proto;
+pub(crate) mod timeline_proto;
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");

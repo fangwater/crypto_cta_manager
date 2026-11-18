@@ -37,16 +37,32 @@ pub async fn price_anchor(
     Ok(anchor)
 }
 
-pub async fn timeline(
+pub(crate) struct Query<'a> {
+    pub start_us: i64,
+    pub end_us: i64,
+    pub through_us: i64,
+    pub max_points: usize,
+    pub symbols: &'a [String],
+    pub symbol_curves: bool,
+    pub interval_us: Option<i64>,
+}
+
+pub(crate) async fn timeline(
     anchor: &Anchor,
     fills: Vec<Fill>,
     market: Option<&market_data::Feed>,
     reference: Option<&reference_data::Feed>,
-    start_us: i64,
-    end_us: i64,
-    through_us: i64,
-    max_points: usize,
+    query: Query<'_>,
 ) -> Report {
+    let Query {
+        start_us,
+        end_us,
+        through_us,
+        max_points,
+        symbols,
+        symbol_curves,
+        interval_us,
+    } = query;
     let unavailable = |reason: &str| {
         Report::unavailable(
             &anchor.source_id,
@@ -67,27 +83,37 @@ pub async fn timeline(
             "发现起始快照之后才入库的恢复成交，缺少可验证的原始成交时刻；不能按查询回报时间重排历史，可在完整恢复后另建快照继续跟踪",
         );
     }
-    let assemble=async {
-        let mut markets=BTreeSet::new();
-        for p in &anchor.positions {markets.insert((p.venue.clone(),p.symbol.clone()));}
-        for f in &fills {markets.insert((f.venue.clone(),f.symbol.clone()));}
-        ensure!(markets.len()<=64,"native NAV market count exceeds budget");
-        let mut prices=BTreeMap::new();
-        let mut rates=BTreeMap::new();
-        for (venue,symbol) in markets {
-            let feed=market.context("尚未配置持仓计价所需的 market-replay 行情")?;
-            prices.insert((venue.clone(),symbol.clone()),feed.nav_prices(&venue,&symbol,start_us,end_us).await?);
-            if fills.iter().any(|f|f.venue==venue && f.symbol==symbol && f.received_us>=start_us && f.commission_cny.is_none()) {
-                if let Some(feed)=reference {
-                    match feed.history(&anchor.source_id,&venue,&symbol,start_us,end_us).await {
-                        Ok(observations)=>{rates.insert((venue,symbol),observations);}
-                        Err(error)=>tracing::warn!(source_id=%anchor.source_id,error=?error,"native NAV fee observations unavailable; retain gross NAV"),
-                    }
+    let markets = available_markets(anchor, &fills, end_us);
+    let selected = match select_markets(&markets, symbols) {
+        Ok(selected) => selected,
+        Err(error) => return unavailable(&error.to_string()),
+    };
+    let assemble = async {
+        let prices = prices(market, &selected, start_us, end_us).await?;
+        let mut rates = BTreeMap::new();
+        for (venue, symbol) in selected {
+            if fills.iter().any(|f| {
+                f.venue == venue && f.symbol == symbol && f.received_us >= start_us
+                    && f.received_us <= end_us && f.commission_cny.is_none()
+            }) && let Some(feed) = reference {
+                match feed.history(&anchor.source_id, &venue, &symbol, start_us, end_us).await {
+                    Ok(observations) => { rates.insert((venue, symbol), observations); }
+                    Err(error) => tracing::warn!(source_id=%anchor.source_id,error=?error,"native NAV fee observations unavailable; retain gross NAV"),
                 }
             }
         }
-        let anchor=anchor.clone();
-        tokio::task::spawn_blocking(move ||build(Inputs{anchor:&anchor,fills:&fills,prices:&prices,rates:&rates,start_us,end_us,source_through_us:through_us,max_points})).await?
+        let anchor = anchor.clone();
+        let symbols = symbols.to_vec();
+        tokio::task::spawn_blocking(move || build_selected(Inputs {
+            anchor: &anchor,
+            fills: &fills,
+            prices: &prices,
+            rates: &rates,
+            start_us,
+            end_us,
+            source_through_us: through_us,
+            max_points,
+        }, &symbols, symbol_curves, interval_us)).await?
     }.await;
     match assemble {
         Ok(report) => report,
@@ -98,4 +124,25 @@ pub async fn timeline(
             )
         }
     }
+}
+
+pub(super) async fn prices(
+    market: Option<&market_data::Feed>,
+    markets: &BTreeSet<Market>,
+    start_us: i64,
+    end_us: i64,
+) -> Result<BTreeMap<Market, MarketPrices>> {
+    ensure!(
+        markets.len() <= 64,
+        "native NAV market count exceeds budget"
+    );
+    let mut prices = BTreeMap::new();
+    for (venue, symbol) in markets {
+        let feed = market.context("尚未配置持仓计价所需的 market-replay 行情")?;
+        prices.insert(
+            (venue.clone(), symbol.clone()),
+            feed.nav_prices(venue, symbol, start_us, end_us).await?,
+        );
+    }
+    Ok(prices)
 }

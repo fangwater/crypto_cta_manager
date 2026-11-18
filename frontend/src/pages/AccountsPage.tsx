@@ -19,9 +19,9 @@ import { ApiError, getDashboard, getHealth } from '../api'
 import { AppShell, PageIntro, StatTile } from '../components/AppShell'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
-import { Card, CardContent } from '../components/ui/Card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { executionMarketLabel, formatUniMmr, integer, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
-import { AccountActionLink, AccountCardLayout, AccountMetric } from '../components/AccountCardLayout'
+import { cn } from '../lib/cn'
 import { routes } from '../lib/routes'
 import { accountSignalConfigPath } from '../lib/signalConfigLinks'
 import { accountVenueLabel } from '../lib/workspace'
@@ -267,42 +267,48 @@ function AccountCard({
   const signalConfigPath = account.enabled && account.access_level === 'configure'
     ? accountSignalConfigPath(account.source_id)
     : undefined
-  const openPositions = account.open_position_symbol_count ??
-    report?.symbols.filter(
-      (symbol) =>
-        Math.abs(symbol.long_position_value_quote) > 1e-9 ||
-        Math.abs(symbol.short_position_value_quote) > 1e-9,
-    ).length ?? 0
+  const openPositions = account.open_position_symbol_count
 
   return (
-    <AccountCardLayout dimmed={!ready} mark={venueMark(account.venue)}
-      title={<AccountAliasEditor account={account} onSaved={onAliasSaved} />}
-      sourceId={account.execution_sources?.length ? undefined : account.source_id}
-      badges={<>
-        <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
-        {account.venue === 'binance-futures' && <FundingStatusBadge value={account.funding} />}
-        {(account.unified_account || isUnifiedVenue(account.venue)) && (
-          <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
-        )}
-        <Badge tone={ready && health ? health.status === 'ok' ? 'success' : 'warning' : 'neutral'}>{status}</Badge>
-      </>}>
+    <Card className={cn(!ready && 'opacity-80')}>
+      <CardHeader className="flex flex-row items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="grid h-10 w-10 place-items-center rounded-xl bg-canvas text-sm font-bold text-brand">
+            {venueMark(account.venue)}
+          </div>
+          <div className="min-w-0">
+            <CardTitle className="text-base"><AccountAliasEditor account={account} onSaved={onAliasSaved} /></CardTitle>
+            {!account.execution_sources?.length && <CardDescription className="font-mono text-[11px]">{account.source_id}</CardDescription>}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Badge tone={account.venue === 'binance-coin-futures' ? 'warning' : 'brand'}>{executionMarketLabel(account.venue)}</Badge>
+          {account.venue === 'binance-futures' && <FundingStatusBadge value={account.funding} />}
+          {(account.unified_account || isUnifiedVenue(account.venue)) && (
+            <Badge tone={account.unified_account ? 'brand' : 'neutral'}>统一账户</Badge>
+          )}
+          <Badge tone={ready && health ? health.status === 'ok' ? 'success' : 'warning' : 'neutral'}>{status}</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4 pt-0">
         {!!account.execution_sources?.length && <p className="text-sm text-muted">{account.execution_sources.map(leg => accountVenueLabel(leg.venue)).join(' / ')}</p>}
         <div className="grid grid-cols-2 gap-3 text-sm">
-          <AccountMetric
-            label={funding?.income_quote != null ? '累计费后净值（含 Funding）' : '累计费后净值'}
-            value={displayedNav != null ? `${money(displayedNav)} 报价币` : '--'}
+          <Metric
+            label={report?.nav_is_historical && report.nav_as_of_ts_us ? `累计费后净值（截至 ${timestampUs(report.nav_as_of_ts_us)}）` : funding?.income_quote != null ? '累计费后净值（含 Funding）' : '累计费后净值'}
+            value={displayedNav != null ? `${money(displayedNav)} CNY` : '--'}
             tone={displayedNav != null ? signedClass(displayedNav) : ''}
+            title={report?.nav_as_of_ts_us ? `截至 ${timestampUs(report.nav_as_of_ts_us)}` : undefined}
           />
-          <AccountMetric
+          <Metric
             label="实时权益"
             value={
-              account.live_equity_usdt != null
-                ? `${money(account.live_equity_usdt)} USDT`
+              account.live_equity_quote != null
+                ? `${money(account.live_equity_quote)} CNY`
                 : '--'
             }
           />
           {(account.unified_account || isUnifiedVenue(account.venue)) && (
-            <AccountMetric
+            <Metric
               label="UniMMR"
               value={
                 account.uni_mmr_status === 'stale'
@@ -313,18 +319,18 @@ function AccountCard({
             />
           )}
           {funding && <>
-            <AccountMetric label="订单费后净值" value={report ? `${money(report.nav_change_after_fee_quote)} 报价币` : '--'} />
-            <AccountMetric label={`Funding（${funding.kind === 'actual' ? '实际' : '估算'}）`}
-              value={funding.income_quote != null ? `${fundingMoney(funding.income_quote)} 报价币` : '--'}
+            <Metric label="订单费后净值" value={report ? `${money(report.nav_change_after_fee_quote)} CNY` : '--'} />
+            <Metric label={`Funding（${funding.kind === 'actual' ? '实际' : '估算'}）`}
+              value={funding.income_quote != null ? `${fundingMoney(funding.income_quote)} CNY` : '--'}
               title={funding.income_quote != null ? `统计截至 ${timestampUs(funding.end_ts_us)}${funding.refreshing ? '，更新中' : ''}` : undefined}
               tone={funding.income_quote != null ? signedClass(funding.income_quote) : ''} />
           </>}
-          <AccountMetric label="当前持仓" value={report ? `${openPositions} 个合约` : '--'} />
-          <AccountMetric
+          <Metric label="当前持仓" value={openPositions != null ? `${openPositions} 个合约` : '--'} />
+          <Metric
             label="Maker / Taker 费率"
             value={report ? accountFeeSummary(report) : '--'}
           />
-          <AccountMetric label="最近成交" value={timestampUs(report?.last_fill_ts_us ?? null)} />
+          <Metric label="最近成交" value={timestampUs(report?.last_fill_ts_us ?? null)} />
         </div>
         {funding && !funding.complete && <p className="text-xs text-muted" title={funding.unavailable_reason ?? undefined}>
           {funding.loading ? 'Funding 补齐中' : funding.income_quote != null ? 'Funding 部分覆盖：仅计入已知收支' : 'Funding 暂不可用'}
@@ -332,18 +338,18 @@ function AccountCard({
         <div className="flex flex-wrap gap-2 border-t border-border-soft pt-4">
           {ready ? (
             <>
-              <AccountActionLink
+              <ActionLink
                 href={routes.account(account.source_id)}
                 primary
                 icon={<Settings size={15} />}
                 label="查看配置"
               />
-              <AccountActionLink
+              <ActionLink
                 href={routes.nav(account.source_id)}
                 icon={<Activity size={15} />}
                 label="净值"
               />
-              <AccountActionLink
+              <ActionLink
                 href={routes.executionCost(account.source_id)}
                 icon={<Scale size={15} />}
                 label="成本"
@@ -357,7 +363,7 @@ function AccountCard({
             </>
           )}
           {executionUrl ? (
-            <AccountActionLink
+            <ActionLink
               href={executionUrl}
               icon={<ExternalLink size={15} />}
               label="执行监控"
@@ -366,14 +372,15 @@ function AccountCard({
             <ActionDisabled icon={<ExternalLink size={15} />} label="执行监控" />
           )}
           {signalConfigPath && (
-            <AccountActionLink
+            <ActionLink
               href={signalConfigPath}
               icon={<Settings size={15} />}
               label="信号配置"
             />
           )}
         </div>
-    </AccountCardLayout>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -382,6 +389,43 @@ function uniMmrTone(value: number | null | undefined, status?: string | null) {
   if (value <= 1.05) return 'text-rose-700'
   if (value <= 1.5) return 'text-warning'
   return ''
+}
+
+function Metric({ label, value, tone = '', title }: { label: string; value: string; tone?: string; title?: string }) {
+  return (
+    <div title={title}>
+      <p className="text-xs text-muted">{label}</p>
+      <p className={cn('mt-1 font-medium tabular-nums text-ink', tone)}>{value}</p>
+    </div>
+  )
+}
+
+function ActionLink({
+  href,
+  icon,
+  label,
+  primary = false,
+}: {
+  href: string
+  icon: React.ReactNode
+  label: string
+  primary?: boolean
+}) {
+  return (
+    <a
+      href={href}
+      className={cn(
+        'inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+        primary
+          ? 'bg-brand text-white hover:bg-brand-hover'
+          : 'border border-border bg-surface text-ink hover:bg-canvas',
+      )}
+    >
+      {icon}
+      {label}
+      {primary && <ArrowRight size={14} />}
+    </a>
+  )
 }
 
 function ActionDisabled({ icon, label }: { icon: React.ReactNode; label: string }) {

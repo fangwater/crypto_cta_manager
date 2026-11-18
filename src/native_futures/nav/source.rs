@@ -150,6 +150,28 @@ pub fn validate_anchor(source: &Source, db: &DB, anchor: &Anchor) -> Result<()> 
 pub fn fills(source: &Source, db: &DB, anchor: &Anchor, end_us: i64) -> Result<Vec<Fill>> {
     validate_anchor(source, db, anchor)?;
     let mut fills = vec![];
+    scan_fills(
+        db,
+        anchor.evidence_sequence,
+        end_us,
+        |key, value, seq, received| {
+            ensure!(
+                fills.len() < 250_000,
+                "native NAV retained fill budget exceeded"
+            );
+            fills.push(parse_fill(source, db, key, value, seq, received)?);
+            Ok(())
+        },
+    )?;
+    Ok(fills)
+}
+
+pub(super) fn scan_fills(
+    db: &DB,
+    after_seq: i64,
+    end_us: i64,
+    mut read: impl FnMut(&[u8], &Value, i64, i64) -> Result<()>,
+) -> Result<()> {
     let mut scanned = 0;
     for item in db.iterator_cf(
         db.cf_handle(FILLS).context("native fills CF")?,
@@ -161,45 +183,51 @@ pub fn fills(source: &Source, db: &DB, anchor: &Anchor, end_us: i64) -> Result<V
         let value: Value = serde_json::from_slice(&bytes)?;
         let seq = integer(&value, "evidence_seq")?;
         let received = integer(&value, "received_us")?;
-        if seq <= anchor.evidence_sequence || received > end_us {
+        if seq <= after_seq || received > end_us {
             continue;
         }
-        ensure!(
-            fills.len() < 250_000,
-            "native NAV retained fill budget exceeded"
-        );
-        let fill = &value["fill"];
-        let id = &fill["identity"];
-        ensure!(
-            value["commission"].is_null()
-                || value["commission"].as_f64().is_some_and(f64::is_finite),
-            "malformed native commission"
-        );
-        ensure!(
-            value["commission_currency"].is_null() || value["commission_currency"].is_string(),
-            "malformed native commission currency"
-        );
-        let commission_cny = if value["commission_currency"] == "CNY" {
-            value["commission"].as_f64()
-        } else {
-            None
-        };
-        fills.push(Fill {
-            key: key.to_vec(),
-            source_id: source.id.clone(),
-            venue: text(id, "venue")?.into(),
-            symbol: text(id, "symbol")?.into(),
-            trading_day: text(id, "trading_day")?.into(),
-            trade_id: text(id, "trade_id")?.into(),
-            side: serde_json::from_value(id["side"].clone())?,
-            offset: serde_json::from_value(fill["offset"].clone())?,
-            lots: integer(fill, "lots")?,
-            price: fill["price"].as_f64().context("native fill price")?,
-            received_us: received,
-            evidence_sequence: seq,
-            commission_cny,
-            live_origin: live_origin(source, db, &value, seq)?,
-        });
+        read(&key, &value, seq, received)?;
     }
-    Ok(fills)
+    Ok(())
+}
+
+pub(super) fn parse_fill(
+    source: &Source,
+    db: &DB,
+    key: &[u8],
+    value: &Value,
+    seq: i64,
+    received: i64,
+) -> Result<Fill> {
+    let fill = &value["fill"];
+    let id = &fill["identity"];
+    ensure!(
+        value["commission"].is_null() || value["commission"].as_f64().is_some_and(f64::is_finite),
+        "malformed native commission"
+    );
+    ensure!(
+        value["commission_currency"].is_null() || value["commission_currency"].is_string(),
+        "malformed native commission currency"
+    );
+    let commission_cny = if value["commission_currency"] == "CNY" {
+        value["commission"].as_f64()
+    } else {
+        None
+    };
+    Ok(Fill {
+        key: key.to_vec(),
+        source_id: source.id.clone(),
+        venue: text(id, "venue")?.into(),
+        symbol: text(id, "symbol")?.into(),
+        trading_day: text(id, "trading_day")?.into(),
+        trade_id: text(id, "trade_id")?.into(),
+        side: serde_json::from_value(id["side"].clone())?,
+        offset: serde_json::from_value(fill["offset"].clone())?,
+        lots: integer(fill, "lots")?,
+        price: fill["price"].as_f64().context("native fill price")?,
+        received_us: received,
+        evidence_sequence: seq,
+        commission_cny,
+        live_origin: live_origin(source, db, value, seq)?,
+    })
 }

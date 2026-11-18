@@ -57,7 +57,7 @@ export interface AuthStatus {
   user: AuthUser | null
 }
 
-export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   Object.assign(headers, options.headers)
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
@@ -536,6 +536,37 @@ export function getAccountContractLeverage(sourceId: string, symbol: string) {
   const params = new URLSearchParams({ symbol })
   return requestJson<SavedSymbolContractLeverage>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/contract-leverage?${params}`,
+  )
+}
+
+export interface NativeContractRate {
+  venue: string
+  symbol: string
+  observed_at_us: number
+  trading_day: string
+  fees: Record<'open' | 'close' | 'close_today', { per_lot: number; notional_rate: number }>
+  long_margin_rate: number
+  short_margin_rate: number
+  long_margin_per_lot: number
+  short_margin_per_lot: number
+}
+
+export interface NativeContractRateLookup {
+  source_id: string
+  rates: NativeContractRate | null
+}
+
+export function getNativeContractRates(sourceId: string, contract: string, signal?: AbortSignal) {
+  const [venue, symbol, extra] = contract.trim().split(':')
+  if (!venue?.trim() || !symbol?.trim() || extra !== undefined) {
+    throw new Error('请输入交易所和原生合约代码，例如 SHFE:cu2612。')
+  }
+  const params = new URLSearchParams({
+    venue: venue.trim().toUpperCase(), symbol: symbol.trim(), at_us: String(serverClock.now() * 1000),
+  })
+  return requestJson<NativeContractRateLookup>(
+    `/native/sources/${encodeURIComponent(sourceId)}/rates?${params}`,
+    { signal },
   )
 }
 

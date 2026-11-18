@@ -35,8 +35,8 @@ const timeFormatter = new Intl.DateTimeFormat('zh-CN', {
   hour12: false,
 })
 
-export function money(value: number) {
-  return moneyFormatter.format(value)
+export function money(value: number | null | undefined) {
+  return value != null && Number.isFinite(value) ? moneyFormatter.format(value) : '--'
 }
 
 export function fundingMoney(value: number) {
@@ -51,15 +51,16 @@ export function quantity(value: number) {
   return quantityFormatter.format(value)
 }
 
-export function integer(value: number) {
-  return integerFormatter.format(value)
+export function integer(value: number | null | undefined) {
+  return value != null && Number.isFinite(value) ? integerFormatter.format(value) : '--'
 }
 
-export function timestampUs(value: number | null) {
-  return value === null ? '--' : timeFormatter.format(value / 1_000)
+export function timestampUs(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value) ? '--' : timeFormatter.format(value / 1_000)
 }
 
-export function feeBps(rate: number) {
+export function feeBps(rate: number | null) {
+  if (rate == null) return '--'
   return `${(rate * 10_000).toFixed(2)} bps`
 }
 
@@ -73,11 +74,13 @@ export function isUnifiedVenue(venue: string) {
 }
 
 export function executionMarketLabel(venue: string) {
+  if (venue === 'yida' || venue === 'ctp') return '国内期货 · CNY'
   if (venue === 'spread') return '多市场账户'
   return venue === 'binance-coin-futures' ? '币本位' : 'U 本位'
 }
 
 export function executionSymbolPlaceholder(venue: string) {
+  if (venue === 'yida' || venue === 'ctp') return 'SHFE:rb2701 / CZCE:SA701'
   if (venue === 'bybit-futures' || venue === 'bitget-futures') return 'BTCUSDT / ETHUSDT'
   return venue === 'binance-coin-futures' ? 'BTCUSD / ETHUSD' : 'BTCUSDT / BTCUSDC'
 }

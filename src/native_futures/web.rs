@@ -1,3 +1,4 @@
+mod manager;
 mod netting;
 mod netting_machine;
 mod netting_plan;
@@ -65,13 +66,36 @@ fn token(headers: &HeaderMap) -> Option<String> {
         .find_map(|v| v.strip_prefix(&format!("{COOKIE}=")).map(str::to_owned))
 }
 
+async fn catalog_actor<'a>(
+    s: &'a Service,
+    headers: &HeaderMap,
+) -> Result<(tokio::sync::MutexGuard<'a, ()>, AuthUser, SourceAccess), ApiError> {
+    // Membership, user roles and session revocation share this lock with edits.
+    let guard = s.catalog_lock.lock().await;
+    let token =
+        token(headers).ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "请先登录".into()))?;
+    let user = auth::load_session(&s.pool, &token)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "请重新登录".into()))?;
+    let access = auth::allowed_source_access(
+        &s.pool,
+        &user,
+        &s.config.source_ids(),
+        &s.config.source_viewers,
+    )
+    .await?;
+    Ok((guard, user, access))
+}
+
 #[derive(Clone)]
 pub struct Service {
     config: Arc<RuntimeConfig>,
     pool: PgPool,
     readers: Arc<BTreeMap<String, Arc<tokio::sync::Mutex<reader::Cache>>>>,
     rocks: Arc<crate::rocks_source::ReaderPool>,
+    overview: Arc<manager::Observations>,
     catalog_lock: Arc<tokio::sync::Mutex<()>>,
+    cost_admission: Arc<tokio::sync::Semaphore>,
     market_data: Option<Arc<Feed>>,
     reference_service: Option<Arc<reference_data::Feed>>,
     plan_changes: Arc<BTreeMap<String, watch::Sender<()>>>,
@@ -127,6 +151,7 @@ impl Service {
                     .map(|s| (s.id.clone(), Arc::default()))
                     .collect(),
             ),
+            overview: Arc::new(manager::Observations::new(&config)),
             config: Arc::new(RuntimeConfig {
                 settings: config,
                 ctaker_plan_readers,
@@ -134,6 +159,7 @@ impl Service {
             pool,
             rocks,
             catalog_lock: Arc::default(),
+            cost_admission: Arc::new(tokio::sync::Semaphore::new(4)),
             market_data,
             reference_service,
             plan_changes: Arc::new(plan_changes),
@@ -177,6 +203,7 @@ impl Service {
                 "/api/native/strategies/{name}/grants",
                 get(strategy_grants).put(save_strategy_grants),
             )
+            .merge(manager::routes())
             .merge(netting::routes())
             .merge(netting_machine::routes())
             .with_state(self.clone())
@@ -211,10 +238,17 @@ pub fn with_frontend(api: Router, root: &std::path::Path) -> Result<Router> {
         "workspace",
         "accounts",
         "account",
+        "exec",
         "net-value",
         "acquisition-cost",
         "config",
         "config/position",
+        "config/order",
+        "config/bindings",
+        "config/virtual",
+        "virtual",
+        "auto-earn",
+        "docs",
         "admin",
     ] {
         let path = format!("/manager/{page}");
@@ -237,6 +271,7 @@ pub async fn serve(
     );
     let service = Service::new(config, pool)?;
     let plan_shutdown = service.plan_shutdown.clone();
+    manager::start_observing(&service);
     let mut app = service.router();
     if let Some(root) = frontend_root {
         app = with_frontend(app, root)?;
@@ -372,9 +407,23 @@ async fn session(s: &Service, user: AuthUser) -> std::result::Result<Response, A
 }
 async fn auth_register(
     State(s): State<Service>,
+    headers: HeaderMap,
     Json(r): Json<auth::RegisterRequest>,
 ) -> std::result::Result<Response, ApiError> {
-    let user = auth::register(&s.pool, r).await.map_err(bad)?;
+    let admin = match token(&headers) {
+        Some(t) => auth::load_session(&s.pool, &t)
+            .await?
+            .is_some_and(|u| u.is_admin()),
+        None => false,
+    };
+    let closed = || ApiError(StatusCode::FORBIDDEN, "请联系管理员创建账户".into());
+    if !admin && auth::has_users(&s.pool).await? {
+        return Err(closed());
+    }
+    let user = auth::register_if_allowed(&s.pool, r, admin)
+        .await
+        .map_err(bad)?
+        .ok_or_else(closed)?;
     session(&s, user).await
 }
 async fn auth_login(
@@ -391,6 +440,7 @@ async fn auth_logout(
     headers: HeaderMap,
 ) -> std::result::Result<Response, ApiError> {
     if let Some(t) = token(&headers) {
+        let _guard = s.catalog_lock.lock().await;
         auth::delete_session(&s.pool, &t).await?;
     }
     Ok((
@@ -416,9 +466,10 @@ async fn users(
 }
 async fn create_user(
     State(s): State<Service>,
-    Extension(user): Extension<AuthUser>,
+    headers: HeaderMap,
     Json(r): Json<auth::CreateUserRequest>,
 ) -> ApiResult {
+    let (_guard, user, _) = catalog_actor(&s, &headers).await?;
     if !user.is_admin() {
         return Err(forbidden());
     }
@@ -426,11 +477,11 @@ async fn create_user(
 }
 async fn set_role(
     State(s): State<Service>,
-    Extension(user): Extension<AuthUser>,
-    Extension(access): Extension<Arc<SourceAccess>>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
     Json(r): Json<auth::SetRoleRequest>,
 ) -> ApiResult {
+    let (_guard, user, access) = catalog_actor(&s, &headers).await?;
     if !user.is_admin() {
         return Err(forbidden());
     }
@@ -454,6 +505,10 @@ async fn snapshot(
     if !access.view.contains(&id) {
         return Err(forbidden());
     }
+    body(read_snapshot(&s, &id).await?)
+}
+
+async fn read_snapshot(s: &Service, id: &str) -> Result<reader::Snapshot, ApiError> {
     let source = s
         .config
         .sources
@@ -462,17 +517,17 @@ async fn snapshot(
         .cloned()
         .ok_or_else(forbidden)?;
     let rocks = s.rocks.clone();
-    let lock = s.readers[&id].clone();
+    let lock = s.readers[id].clone();
     let guard = lock.lock_owned().await;
     let limit = s.config.recent_rows;
     let stale = s.config.stale_secs;
-    let observed = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let mut cache = guard;
         reader::with_db(&rocks, &source, |db| cache.read(&source, db, limit, stale))
     })
     .await
-    .map_err(anyhow::Error::from)??;
-    body(observed)
+    .map_err(anyhow::Error::from)?
+    .map_err(ApiError::from)
 }
 
 #[derive(serde::Deserialize)]
@@ -524,17 +579,44 @@ async fn account_rates(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<RatesQuery>,
 ) -> ApiResult {
-    if !access.view.contains(&id) {
+    if !access.view.contains(&id)
+        || !s
+            .config
+            .sources
+            .iter()
+            .any(|source| source.id == id && source.enabled)
+    {
         return Err(forbidden());
     }
     super::validate_market(&format!("{}:{}", query.venue, query.symbol)).map_err(bad)?;
+    if query.at_us <= 0 || chrono::DateTime::from_timestamp_micros(query.at_us).is_none() {
+        return Err(bad("无效的合约费率查询时刻"));
+    }
     let feed = s
         .reference_service
         .as_ref()
-        .context("reference_service is not configured")?;
+        .filter(|_| {
+            s.config
+                .reference_service
+                .as_ref()
+                .is_some_and(|cfg| cfg.accounts.contains_key(&id))
+        })
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "该账户暂未提供柜台合约费率观察".into(),
+            )
+        })?;
     let rates = feed
         .rates(&id, &query.venue, &query.symbol, query.at_us)
-        .await?;
+        .await
+        .map_err(|error| {
+            tracing::warn!(source_id=%id,error=?error,"domestic account rates unavailable");
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "暂时无法读取柜台合约费率观察".into(),
+            )
+        })?;
     body(
         json!({"source_id":id,"at_us":query.at_us,"currency":"CNY","rates":rates,"fee_basis":"account_rate_observation"}),
     )
@@ -629,32 +711,40 @@ async fn native_nav(
     if !access.view.contains(&id) {
         return Err(forbidden());
     }
-    let (Some(start), Some(end)) = (
-        query.start_ms.checked_mul(1000),
-        query.end_ms.checked_mul(1000),
-    ) else {
-        return Err(bad("时间范围溢出"));
-    };
-    let max_points = query.max_points.unwrap_or(1000);
-    if start <= 0
-        || end < start
-        || end - start > 31 * 86400 * 1_000_000i64
-        || !(2..=5000).contains(&max_points)
-    {
-        return Err(bad(
-            "请选择起始快照之后、最多 31 天的时间范围；点数为 2–5000",
-        ));
+    body(nav_report(&s, &id, query).await?)
+}
+
+async fn nav_report(s: &Service, id: &str, query: NavQuery) -> Result<nav::Report, ApiError> {
+    account_nav_report(s, id, query, None).await
+}
+
+struct BrowserNav<'a> {
+    symbols: &'a [String],
+    symbol_curves: bool,
+    interval_us: i64,
+}
+
+impl NavQuery {
+    fn window(&self) -> Result<(i64, i64, usize), ApiError> {
+        let (Some(start), Some(end)) = (
+            self.start_ms.checked_mul(1000),
+            self.end_ms.checked_mul(1000),
+        ) else {
+            return Err(bad("时间范围溢出"));
+        };
+        let max_points = self.max_points.unwrap_or(1000);
+        if start <= 0 || end < start || !(2..=5000).contains(&max_points) {
+            return Err(bad("请选择有效时间范围；点数为 2–5000"));
+        }
+        Ok((start, end, max_points))
     }
-    let Some(anchor) = nav::store::load(&s.pool, &id, start).await? else {
-        return body(nav::Report::unavailable(
-            &id,
-            0,
-            start,
-            end,
-            0,
-            "所选起点之前没有原生起始持仓快照；请先建立快照或选择其后的时间范围".into(),
-        ));
-    };
+}
+
+async fn with_nav_source<T: Send + 'static>(
+    s: &Service,
+    id: &str,
+    read: impl FnOnce(&super::config::Source, &rocksdb::DB, i64) -> anyhow::Result<T> + Send + 'static,
+) -> Result<anyhow::Result<T>, ApiError> {
     let source = s
         .config
         .sources
@@ -663,42 +753,77 @@ async fn native_nav(
         .cloned()
         .ok_or_else(forbidden)?;
     let rocks = s.rocks.clone();
-    let lock = s.readers[&id].clone();
-    let mut cache = lock.lock_owned().await;
+    let mut cache = s.readers[id].clone().lock_owned().await;
     let limit = s.config.recent_rows;
     let stale = s.config.stale_secs;
-    let read_anchor = anchor.clone();
-    let inputs = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         reader::with_db(&rocks, &source, |db| {
             let snapshot = cache.read(&source, db, limit, stale)?;
             ensure!(
                 snapshot.projection_errors == 0,
                 "原生投影存在错误，暂停净值回放"
             );
-            let mut through = snapshot
+            let through = snapshot
                 .nav_anchor_observed_us
                 .context("missing complete account observation time")?;
-            let fills = nav::source::fills(&source, db, &read_anchor, end)?;
-            // Lifecycle/heartbeat records cannot extend financial coverage while
-            // reconnect recovery is incomplete. Only account cuts or verified
-            // factual live trades establish a later usable account horizon.
-            for fill in fills.iter().filter(|fill| fill.live_origin) {
-                through = through.max(fill.received_us);
-            }
-            Ok((fills, through))
+            read(&source, db, through)
         })
     })
     .await
     .map_err(anyhow::Error::from)?;
-    let (fills, through) = match inputs {
-        Ok(v) => v,
-        Err(e) => {
-            if e.downcast_ref::<super::sync::ReplicaBusy>().is_some() {
-                return Err(e.into());
-            }
-            tracing::warn!(error=?e,"native NAV source cut unavailable");
-            return body(nav::Report::unavailable(
-                &id,
+    match result {
+        Err(error) if error.downcast_ref::<super::sync::ReplicaBusy>().is_some() => {
+            Err(error.into())
+        }
+        result => Ok(result),
+    }
+}
+
+async fn account_nav_report(
+    s: &Service,
+    id: &str,
+    query: NavQuery,
+    browser: Option<BrowserNav<'_>>,
+) -> Result<nav::Report, ApiError> {
+    let (start, end, max_points) = query.window()?;
+    if end - start > nav::MAX_WINDOW_US {
+        return Err(ApiError(
+            if browser.is_some() {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            "当前分钟行情计价仅支持最长 31 天的区间".into(),
+        ));
+    }
+    let Some(anchor) = nav::store::load(&s.pool, id, start).await? else {
+        return Ok(nav::Report::unavailable(
+            id,
+            0,
+            start,
+            end,
+            0,
+            "所选起点之前没有原生起始持仓快照；请先建立快照或选择其后的时间范围".into(),
+        ));
+    };
+    let read_anchor = anchor.clone();
+    let cut = with_nav_source(s, id, move |source, db, through| {
+        let fills = nav::source::fills(source, db, &read_anchor, end)?;
+        // Lifecycle and heartbeat events do not extend financial coverage.
+        let through = fills
+            .iter()
+            .filter(|fill| fill.live_origin)
+            .map(|fill| fill.received_us)
+            .fold(through, i64::max);
+        Ok((fills, through))
+    })
+    .await?;
+    let (mut fills, through) = match cut {
+        Ok(values) => values,
+        Err(error) => {
+            tracing::warn!(source_id=id,error=?error,"native NAV source cut unavailable");
+            return Ok(nav::Report::unavailable(
+                id,
                 anchor.snapshot_us,
                 start,
                 end,
@@ -707,19 +832,77 @@ async fn native_nav(
             ));
         }
     };
-    body(
-        nav::service::timeline(
-            &anchor,
-            fills,
-            s.market_data.as_deref(),
-            s.reference_service.as_deref(),
-            start,
-            end,
-            through,
-            max_points,
+    let (end, symbols, symbol_curves, interval_us) = if let Some(browser) = browser {
+        // The browser normally asks for wall-clock now. Return the exact
+        // evidenced cut as the effective end. Never move the requested start.
+        let effective_end = end.min(through);
+        if effective_end < start {
+            return Ok(nav::Report::unavailable(
+                id,
+                anchor.snapshot_us,
+                start,
+                end,
+                through,
+                "所选区间晚于最近一次完整账户回报；请选择已有执行证据的时间".into(),
+            ));
+        }
+        fills.retain(|fill| fill.received_us <= effective_end);
+        (
+            effective_end,
+            browser.symbols,
+            browser.symbol_curves,
+            Some(browser.interval_us),
         )
-        .await,
+    } else {
+        (end, &[][..], false, None)
+    };
+    Ok(nav::service::timeline(
+        &anchor,
+        fills,
+        s.market_data.as_deref(),
+        s.reference_service.as_deref(),
+        nav::service::Query {
+            start_us: start,
+            end_us: end,
+            through_us: through,
+            max_points,
+            symbols,
+            symbol_curves,
+            interval_us,
+        },
     )
+    .await)
+}
+
+fn load_cost_reference(
+    config: &Config,
+    source: &str,
+    day: &str,
+) -> (Option<reference::Pack>, bool) {
+    if config.reference_root.is_none() {
+        return (None, false);
+    }
+    match reference::load(config, source, day) {
+        Ok(pack) => (pack, false),
+        Err(error) => {
+            tracing::warn!(?error, "domestic reference unavailable");
+            (None, true)
+        }
+    }
+}
+
+async fn augment_cost_reference(
+    s: &Service,
+    pack: &mut Option<reference::Pack>,
+    now_us: i64,
+) -> bool {
+    if let (Some(feed), Some(pack)) = (&s.market_data, pack)
+        && let Err(error) = feed.augment(pack, now_us).await
+    {
+        tracing::warn!(?error, "domestic market data unavailable");
+        return true;
+    }
+    false
 }
 
 async fn cost_report(
@@ -748,18 +931,7 @@ async fn cost_report(
     let read_id = id.clone();
     let (mut pack, facts, reference_error) = tokio::task::spawn_blocking(move || -> Result<_> {
         let _guard = guard;
-        let loaded = if config.reference_root.is_some() {
-            reference::load(&config, &read_id, &read_day)
-        } else {
-            Ok(None)
-        };
-        let (pack, error) = match loaded {
-            Ok(pack) => (pack, false),
-            Err(e) => {
-                tracing::warn!(error=?e,"domestic reference unavailable");
-                (None, true)
-            }
-        };
+        let (pack, error) = load_cost_reference(&config, &read_id, &read_day);
         let facts = reader::with_db(&rocks, &source, |db| {
             reader::read_cost_facts_from_db(&source, db, &read_day)
         })?;
@@ -767,19 +939,15 @@ async fn cost_report(
     })
     .await
     .map_err(anyhow::Error::from)??;
-    let mut market_error = None;
-    if let (Some(feed), Some(pack)) = (&s.market_data, &mut pack) {
-        if let Err(e) = feed.augment(pack, super::now_us()).await {
-            tracing::warn!(error=?e,"domestic market data unavailable");
-            market_error = Some("行情接口或缓存暂不可用；保留已覆盖参考与事实成交".to_owned());
-        }
-    }
+    let market_error = augment_cost_reference(&s, &mut pack, super::now_us()).await;
     let mut report = tokio::task::spawn_blocking(move || {
         cost::build(&id, &day, pack.as_ref(), facts, super::now_us())
     })
     .await
     .map_err(anyhow::Error::from)??;
-    report.market_data_error = market_error;
+    if market_error {
+        report.market_data_error = Some("行情接口或缓存暂不可用；保留已覆盖参考与事实成交".into());
+    }
     if reference_error {
         report.reason = Some("参考文件读取或校验失败；保留事实成交，请检查数据维护记录".into());
     }
@@ -787,9 +955,10 @@ async fn cost_report(
 }
 async fn source_grants(
     State(s): State<Service>,
-    Extension(access): Extension<Arc<SourceAccess>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult {
+    let (_guard, _, access) = catalog_actor(&s, &headers).await?;
     if !access.configure.contains(&id) {
         return Err(forbidden());
     }
@@ -797,33 +966,29 @@ async fn source_grants(
 }
 async fn save_source_grants(
     State(s): State<Service>,
-    Extension(access): Extension<Arc<SourceAccess>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(r): Json<auth::SetSourceGrantsRequest>,
 ) -> ApiResult {
+    let (_guard, _, access) = catalog_actor(&s, &headers).await?;
     if !access.configure.contains(&id) {
         return Err(forbidden());
     }
-    let _barrier = s.catalog_lock.lock().await;
     body(
         auth::set_source_grants(&s.pool, &id, &r.grants, &s.config.source_ids())
             .await
             .map_err(bad)?,
     )
 }
-async fn strategies(State(s): State<Service>, Extension(user): Extension<AuthUser>) -> ApiResult {
-    let visibility = strategy_catalog::list_position_visibility(&s.pool)
-        .await?
-        .into_iter()
-        .map(|v| (v.strategy_name.clone(), v))
-        .collect::<BTreeMap<_, _>>();
+async fn strategies(State(s): State<Service>, headers: HeaderMap) -> ApiResult {
+    let (_guard, user, access) = catalog_actor(&s, &headers).await?;
+    let scope = manager::Scope::load(&s, &access, &user).await?;
     let mut rows = vec![];
-    for strategy in strategy_catalog::list_position_strategies(&s.pool).await? {
-        if let Some(v) = visibility
-            .get(&strategy.strategy_name)
-            .filter(|v| user.is_admin() || v.user_can_view(user.user_id))
-        {
-            rows.push(json!({"strategy":strategy,"can_configure":user.is_admin() || v.user_can_configure(user.user_id)}));
+    for mut strategy in strategy_catalog::list_position_strategies(&s.pool).await? {
+        if scope.can_view(&strategy.strategy_name) {
+            strategy.symbol_order_strategy_overrides.clear();
+            let can_configure = scope.can_edit_targets(&strategy.strategy_name);
+            rows.push(json!({"strategy":strategy,"can_configure":can_configure}));
         }
     }
     body(rows)
@@ -852,70 +1017,32 @@ fn validate_strategy(r: &SavePositionStrategyRequest) -> Result<()> {
 }
 async fn save_strategy(
     State(s): State<Service>,
-    Extension(user): Extension<AuthUser>,
+    headers: HeaderMap,
     Json(r): Json<SavePositionStrategyRequest>,
 ) -> ApiResult {
-    validate_strategy(&r).map_err(bad)?;
-    let _guard = s.catalog_lock.lock().await;
-    let now = super::now_us();
-    if strategy_catalog::load_position_access(&s.pool, &r.strategy_name)
-        .await?
-        .is_none()
-    {
-        strategy_catalog::create_position_strategy(&s.pool, &r, user.user_id, now).await?;
-    }
-    let access = strategy_catalog::load_position_access(&s.pool, &r.strategy_name)
-        .await?
-        .ok_or_else(forbidden)?;
-    if !user.is_admin() && !access.user_can_configure(user.user_id) {
-        return Err(forbidden());
-    }
-    let managed: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM cta_native_netting_members WHERE strategy_name=$1)",
-    )
-    .bind(&r.strategy_name)
-    .fetch_one(&s.pool)
-    .await
-    .map_err(anyhow::Error::from)?;
-    if managed {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "该策略属于批量归因组合，请整批提交目标".into(),
-        ));
-    }
-
-    body(strategy_catalog::store_position_strategy(&s.pool, &r, Some(user.user_id), now).await?)
+    body(manager::persist_position(&s, &headers, &r).await?)
 }
 async fn strategy_grants(
     State(s): State<Service>,
-    Extension(user): Extension<AuthUser>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> ApiResult {
-    let access = strategy_catalog::load_position_access(&s.pool, &name)
+    let (_guard, user, access) = catalog_actor(&s, &headers).await?;
+    if !manager::Scope::load(&s, &access, &user)
         .await?
-        .ok_or_else(forbidden)?;
-    if !user.is_admin() && !access.user_can_manage_grants(user.user_id) {
+        .can_configure(&name)
+    {
         return Err(forbidden());
     }
-    body(strategy_catalog::position_access_view(&s.pool, &name).await?)
+    body(manager::position_access_view(&s, &name).await?)
 }
 async fn save_strategy_grants(
     State(s): State<Service>,
-    Extension(user): Extension<AuthUser>,
+    headers: HeaderMap,
     Path(name): Path<String>,
     Json(r): Json<strategy_catalog::SavePositionGrantsRequest>,
 ) -> ApiResult {
-    let _guard = s.catalog_lock.lock().await;
-    let access = strategy_catalog::load_position_access(&s.pool, &name)
-        .await?
-        .ok_or_else(forbidden)?;
-    if !user.is_admin() && !access.user_can_manage_grants(user.user_id) {
-        return Err(forbidden());
-    }
-    strategy_catalog::set_position_grants(&s.pool, &name, &r.grants, r.open_visibility)
-        .await
-        .map_err(bad)?;
-    body(strategy_catalog::position_access_view(&s.pool, &name).await?)
+    body(manager::persist_position_grants(&s, &headers, &name, r).await?)
 }
 
 #[cfg(test)]

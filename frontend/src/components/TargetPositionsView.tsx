@@ -50,7 +50,7 @@ export function TargetPositionsView({
             <tr className="border-b border-border-soft text-left text-[11px] uppercase tracking-[0.12em] text-subtle">
               <th className="px-4 py-2 font-medium">品种</th>
               <th className="px-3 py-2 font-medium">方向</th>
-              <th className="px-4 py-2 text-right font-medium">数量</th>
+              <th className="px-4 py-2 text-right font-medium">手数</th>
               <th className="px-3 py-2 font-medium">Signal</th>
             </tr>
           </thead>

@@ -71,6 +71,8 @@ export interface SourceNavReport extends NavTotals {
   maker_fee_rate: number | null
   taker_fee_rate: number | null
   quote_fee_rates: Record<string, QuoteFeeRates>
+  nav_as_of_ts_us?: number | null
+  nav_is_historical?: boolean
   initial_position_snapshot_ts_us: number | null
   initial_position_count: number
   order_event_count: number
@@ -105,9 +107,10 @@ export interface DashboardAccount {
   access_level?: 'view' | 'configure' | null
   can_edit_alias?: boolean
   display_alias?: string | null
+  account_pnl_only?: boolean
   account_pnl_start_ts_us?: number | null
   strategy_pnl_start_ts_us?: number | null
-  live_equity_usdt?: number | null
+  live_equity_quote?: number | null
   live_equity_status?: 'ok' | 'stale' | string | null
   /** Account monitor has published an OKX unified AccountRisk sample. */
   unified_account?: boolean
@@ -441,7 +444,7 @@ export interface TheoreticalNavPoint {
   estimated_trading_fee_quote: number
 }
 
-export type TheoreticalExecutionModel = 'twap5m' | 'vwap3m' | 'twap3m' | 'instant_taker'
+export type TheoreticalExecutionModel = 'native_reference' | 'native_twap' | 'native_vwap' | 'twap5m' | 'vwap3m' | 'twap3m' | 'instant_taker'
 
 export interface TheoreticalNavTimeline {
   execution_model: TheoreticalExecutionModel | null
@@ -471,55 +474,55 @@ export interface AcquisitionCostTotals {
   zero_volume_fallback_sample_count: number
   zero_volume_skipped_sample_count: number
   comparable_delta_count: number
-  virtual_turnover_usdt: number
-  virtual_fee_usdt: number
+  virtual_turnover_quote: number
+  virtual_fee_quote: number
   actual_fill_count: number
-  actual_turnover_usdt: number
-  actual_fee_usdt: number
-  matched_virtual_turnover_usdt: number
-  actual_matched_turnover_usdt: number
-  actual_matched_fee_usdt: number
+  actual_turnover_quote: number
+  actual_fee_quote: number
+  matched_virtual_turnover_quote: number
+  actual_matched_turnover_quote: number
+  actual_matched_fee_quote: number
   matched_fill_count: number
   unmatched_fill_count: number
-  unmatched_fill_notional_usdt: number
+  unmatched_fill_notional_quote: number
   opposite_fill_count: number
-  opposite_fill_notional_usdt: number
+  opposite_fill_notional_quote: number
   stale_reference_fill_count: number
-  stale_reference_fill_notional_usdt: number
-  price_shortfall_usdt: number
-  first_minute_shortfall_usdt: number
-  five_sample_drift_usdt: number
-  fee_shortfall_usdt: number
-  after_fee_shortfall_usdt: number
+  stale_reference_fill_notional_quote: number
+  price_shortfall_quote: number
+  first_minute_shortfall_quote: number
+  five_sample_drift_quote: number
+  fee_shortfall_quote: number
+  after_fee_shortfall_quote: number
   price_shortfall_bps: number
   after_fee_shortfall_bps: number
   first_minute_shortfall_bps: number
   matched_turnover_coverage: number
-  actual_fill_reference_coverage: number
+  actual_fill_reference_coverage: number | null
 }
 
 export interface AcquisitionCostPoint {
   ts_us: number
-  virtual_turnover_usdt: number
-  actual_matched_turnover_usdt: number
-  price_shortfall_usdt: number
-  after_fee_shortfall_usdt: number
+  virtual_turnover_quote: number
+  actual_matched_turnover_quote: number
+  price_shortfall_quote: number
+  after_fee_shortfall_quote: number
 }
 
 export interface AcquisitionCostBreakdown {
   bucket: string
   fill_count: number
-  reference_turnover_usdt: number
-  actual_turnover_usdt: number
-  actual_fee_usdt: number
-  virtual_fee_usdt: number
-  price_shortfall_usdt: number
-  first_minute_shortfall_usdt: number
-  five_sample_drift_usdt: number
+  reference_turnover_quote: number
+  actual_turnover_quote: number
+  actual_fee_quote: number
+  virtual_fee_quote: number
+  price_shortfall_quote: number
+  first_minute_shortfall_quote: number
+  five_sample_drift_quote: number
   price_shortfall_bps: number
   after_fee_shortfall_bps: number
   first_minute_shortfall_bps: number
-  after_fee_shortfall_usdt: number
+  after_fee_shortfall_quote: number
 }
 
 export interface AcquisitionFillDiagnostic {
@@ -539,10 +542,10 @@ export interface AcquisitionFillDiagnostic {
   virtual_price: number
   target_delay_us: number
   order_delay_us: number
-  reference_turnover_usdt: number
-  price_shortfall_usdt: number
-  first_minute_shortfall_usdt: number
-  five_sample_drift_usdt: number
+  reference_turnover_quote: number
+  price_shortfall_quote: number
+  first_minute_shortfall_quote: number
+  five_sample_drift_quote: number
   price_shortfall_bps: number
 }
 
@@ -582,17 +585,17 @@ export interface AcquisitionCostRow {
   zero_volume_fallback_sample_count: number
   zero_volume_skipped_sample_count: number
   virtual_vwap: number
-  virtual_turnover_usdt: number
-  virtual_fee_usdt: number
+  virtual_turnover_quote: number
+  virtual_fee_quote: number
   actual_matched_qty: number
   actual_vwap: number | null
-  actual_matched_turnover_usdt: number
-  actual_matched_fee_usdt: number
+  actual_matched_turnover_quote: number
+  actual_matched_fee_quote: number
   matched_fill_count: number
   fill_ratio: number
-  price_shortfall_usdt: number | null
-  fee_shortfall_usdt: number | null
-  after_fee_shortfall_usdt: number | null
+  price_shortfall_quote: number | null
+  fee_shortfall_quote: number | null
+  after_fee_shortfall_quote: number | null
   price_shortfall_bps: number | null
   after_fee_shortfall_bps: number | null
   execution: AcquisitionExecution

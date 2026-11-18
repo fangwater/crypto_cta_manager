@@ -8,7 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct NativeKey {
     session: String,
@@ -16,12 +16,37 @@ struct NativeKey {
 }
 
 // Field order matches Exec's serialized cn_uniform_orders key.
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeOrderIdentity {
     trading_day: String,
     venue: String,
     native: NativeKey,
+}
+
+impl NativeOrderIdentity {
+    pub(in crate::native_futures) fn for_fill(fill: &Value) -> Result<Option<Self>> {
+        let key = &fill["order_key"];
+        if key.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            trading_day: fill["identity"]["trading_day"]
+                .as_str()
+                .context("missing native fill trading day")?
+                .into(),
+            venue: fill["identity"]["venue"]
+                .as_str()
+                .context("missing native fill venue")?
+                .into(),
+            native: serde_json::from_value(key.clone())
+                .context("invalid factual fill order key")?,
+        }))
+    }
+
+    pub(in crate::native_futures) fn trading_day(&self) -> &str {
+        &self.trading_day
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -2,7 +2,7 @@
 
 基于 `crypto_cta_manager` 共同 Git 历史的国内期货 fork。第一阶段支持易达 SHFE / INE 的账户、策略、权限和只读订单／成交／今昨仓观察。
 
-后端入口为 `cn_futures_web`；前端使用 `npm run build:cn-futures`。原有 Crypto 构建和 API 保留。详细配置、接口、状态机对齐及验证方法见 [国内期货说明](docs/native_futures.md)。
+后端入口为 `cn_futures_web`。网页沿用 Crypto CTA Manager 的入口、页面和交互，以 `npm run build` 构建。国内资产按原生合约、手数和 CNY 展示。详细配置、接口及验证方法见 [国内期货说明](docs/native_futures.md)。
 
 ```bash
 cargo build --release --bin cn_futures_web

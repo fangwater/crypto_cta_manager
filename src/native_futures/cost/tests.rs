@@ -289,3 +289,123 @@ fn atomic_maintenance_preserves_revisions_requires_explicit_replace_and_rejects_
     config.reference_root = Some(config.secondary_root.join("bad"));
     assert!(config.validate().is_err());
 }
+
+fn manager_query(pack: &Pack) -> acquisition::Query {
+    let start = reference::timestamp(&pack.signals[0].received_at).unwrap();
+    acquisition::Query {
+        source_id: pack.source_id.clone(),
+        now_us: start + 5 * MINUTE_US,
+        start_us: start,
+        end_us: start + MINUTE_US,
+        strategy_name: None,
+        row_symbol: None,
+        row_strategy: None,
+        row_sort: crate::acquisition_cost::AcquisitionRowSort::PriceShortfall,
+        page: 1,
+        page_size: 1,
+    }
+}
+
+#[test]
+fn browser_cost_uses_cny_lots_and_explicit_native_trade_identity() {
+    let p = pack();
+    let q = manager_query(&p);
+    let native = report(&p, facts(&p));
+    let r = acquisition::report(&q, &[native], vec![], None);
+    let t = &r["totals"];
+    assert_eq!(r["quote_currency"], "CNY");
+    assert_eq!(r["quantity_unit"], "lot");
+    assert_eq!(t["actual_lots"], 2);
+    assert_eq!(t["actual_turnover_quote"], 1200.0);
+    assert_eq!(t["matched_virtual_turnover_quote"], 1050.0);
+    assert_eq!(t["price_shortfall_quote"], 150.0);
+    assert_eq!(t["fee_shortfall_quote"], 1.0);
+    assert_eq!(t["after_fee_shortfall_quote"], 151.0);
+    assert_eq!(r["by_offset"][0]["bucket"], "open");
+    assert_eq!(r["by_symbol"][0]["after_fee_shortfall_quote"], 151.0);
+    assert!(r["by_liquidity"].as_array().unwrap().is_empty());
+    let row = &r["rows"][0];
+    assert_eq!(row["delta_qty"], 2);
+    assert_eq!(row["trading_day"], "20261113");
+    assert_eq!(row["received_at_us"], q.start_us);
+    assert_eq!(
+        row["execution"]["fills"][0]["order_ref"],
+        "18446744073709551614"
+    );
+    assert!(row["execution"]["qty_weighted_order_delay_us"].is_null());
+    assert!(row["strategy_name"].is_null());
+}
+
+#[test]
+fn browser_cost_aggregates_before_detail_filtering_and_pagination() {
+    let mut p = pack();
+    let mut other_signal = p.signals[0].clone();
+    other_signal.id = "other-without-fills".into();
+    other_signal.side = "sell".into();
+    p.signals.push(other_signal);
+    let native = [report(&p, facts(&p))];
+    let mut q = manager_query(&p);
+    let first = acquisition::report(&q, &native, vec![], None);
+    assert_eq!(first["page_count"], 2);
+    assert_eq!(first["rows"][0]["native_signal_id"], "reference-001");
+    assert_eq!(first["totals"]["virtual_delta_count"], 2);
+    q.page = 2;
+    let next = acquisition::report(&q, &native, vec![], None);
+    assert_eq!(next["rows"][0]["native_signal_id"], "other-without-fills");
+    assert_eq!(next["totals"], first["totals"]);
+    q.row_symbol = Some("SHFE:ag2612".into());
+    let filtered = acquisition::report(&q, &native, vec![], None);
+    assert_eq!(filtered["filtered_row_count"], 0);
+    assert_eq!(filtered["totals"], first["totals"]);
+}
+
+#[test]
+fn browser_cost_keeps_price_comparisons_when_factual_commission_is_missing() {
+    let p = pack();
+    let mut f = facts(&p);
+    f.fills[0]["commission"] = Value::Null;
+    let r = acquisition::report(&manager_query(&p), &[report(&p, f)], vec![], None);
+    assert_eq!(r["totals"]["price_shortfall_quote"], 150.0);
+    assert!(r["totals"]["actual_fee_quote"].is_null());
+    assert!(r["totals"]["after_fee_shortfall_quote"].is_null());
+    assert!(r["by_symbol"][0]["after_fee_shortfall_bps"].is_null());
+    assert!(r["rows"][0]["after_fee_shortfall_quote"].is_null());
+}
+
+#[test]
+fn browser_cost_keeps_unmatched_facts_and_uses_joined_order_multiplier() {
+    let p = pack();
+    let native = build(
+        &p.source_id,
+        &p.trading_day,
+        None,
+        facts(&p),
+        manager_query(&p).now_us,
+    )
+    .unwrap();
+    let r = acquisition::report(&manager_query(&p), &[native], vec![], None);
+    assert_eq!(r["totals"]["actual_turnover_quote"], 1200.0);
+    assert_eq!(r["totals"]["unmatched_fill_count"], 1);
+    assert_eq!(r["totals"]["matched_fill_count"], 0);
+    assert!(r["totals"]["virtual_turnover_quote"].is_null());
+    assert!(r["totals"]["price_shortfall_quote"].is_null());
+}
+
+#[test]
+fn browser_cost_preserves_session_gaps_at_wall_clock_times() {
+    let mut p = pack();
+    p.sessions[0].end = "2026-11-12T21:01:00+08:00".into();
+    let mut later = p.sessions[0].clone();
+    later.start = "2026-11-12T21:10:00+08:00".into();
+    later.end = "2026-11-12T21:11:00+08:00".into();
+    p.sessions.push(later);
+    p.bars[1].open_time = "2026-11-12T21:10:00+08:00".into();
+
+    let r = acquisition::report(&manager_query(&p), &[report(&p, facts(&p))], vec![], None);
+    let row = &r["rows"][0];
+    assert_eq!(row["native_trading_minutes"], 2);
+    assert_eq!(row["execution_window_secs"], 660);
+    assert_eq!(row["sample_prices"][0], 100.0);
+    assert!(row["sample_prices"][1].is_null());
+    assert_eq!(row["sample_prices"][10], 110.0);
+}

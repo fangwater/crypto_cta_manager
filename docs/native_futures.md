@@ -1,8 +1,8 @@
 # 国内期货 CTA 管理与观察
 
-最后更新：2026-11-17 UTC。
+最后更新：2026-11-18 UTC。
 
-`cn_futures_cta_manager` 从 `crypto_cta_manager` 的 `757ea71` 建立共同历史的本地 fork，分支为 `cn-futures`，`upstream` 指向原 GitHub 仓库。未改包名和既有 Crypto API；新增原生入口、读取器和页面集中在 `src/native_futures/`、`src/bin/cn_futures_web.rs`、`frontend/src/native/`。当前尚未创建或推送独立 GitHub `origin`。
+`cn_futures_cta_manager` 从 `crypto_cta_manager` 的 `757ea71` 建立共同历史的本地 fork，分支为 `cn-futures`，`upstream` 指向原 GitHub 仓库。未改包名和既有 Crypto API；原生入口和读取器集中在 `src/native_futures/` 与 `src/bin/cn_futures_web.rs`。CN 使用 Crypto 的前端入口、页面与交互，资产字段按国内合约、手数和 CNY 展示。
 
 本阶段支持易达、CTP 的账户目录、今昨／多空持仓快照、委托、事实成交、策略目录和授权，读取范围包括 SHFE、INE、DCE、CZCE、CFFEX、GFEX 六所。使用原 Manager 的登录、密码／会话实现、账户授权和私有策略目录表。国内 Manager 必须使用独立 PostgreSQL 数据库、凭据变量与 secondary 目录。Cookie 名为 `cn_cta_session`，与 Crypto 的 `cta_session` 分离。
 
@@ -44,8 +44,7 @@ cargo run --release --bin cn_futures_web -- --config /absolute/cn-manager.toml -
 
 cd frontend
 npm ci
-npm run build:cn-futures
-# npm run build 继续构建上游 Crypto 页面。
+npm run build
 ```
 
 HTTP API 只监听 loopback，前端保留 `/manager/` 和同源 `/manager/api/` 网关约定。本机 PM2 运行 Manager 和接收器，经 SSH 反向转发及腾讯云既有 Nginx 提供网页；云端单独运行只读导出器。具体路径与启停方式见[部署说明](cn_futures_pm2.md)，不要使用复制来的 Crypto 生产部署脚本操作国内环境。

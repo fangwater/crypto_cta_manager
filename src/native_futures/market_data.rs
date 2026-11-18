@@ -7,7 +7,7 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 use cn_market_proto::{
-    Exchange, GetMinuteBarsRequest, GetMinuteBarsResponse,
+    Exchange, GetMinuteBarsRequest, GetMinuteBarsResponse, TimeRange,
     cn_futures_market_client::CnFuturesMarketClient, get_minute_bars_request::Range,
 };
 use serde::{Deserialize, Serialize};
@@ -18,8 +18,11 @@ use std::{
     io::{Read, Write},
     os::fd::AsRawFd,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Weak},
-    time::Duration,
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
 use tonic::transport::{Channel, Endpoint};
@@ -74,12 +77,33 @@ struct Cache {
 }
 
 type MarketLocks = BTreeMap<String, Weak<tokio::sync::Mutex<()>>>;
+const MAX_REQUESTS: usize = 4;
+const MAX_MULTIPLIERS: usize = 1024;
+const MULTIPLIER_TTL: Duration = Duration::from_secs(600);
+const MISSING_MULTIPLIER_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Default, Serialize)]
+pub(super) struct CacheStatus {
+    enabled: bool,
+    active_backfills: usize,
+    requests: u64,
+    fetched_candles: u64,
+    cache_hits: u64,
+    last_error: Option<&'static str>,
+}
+
 pub struct Feed {
     settings: Settings,
     channel: Channel,
+    fingerprint: String,
     permits: Semaphore,
     admission: Semaphore,
     locks: Mutex<MarketLocks>,
+    multipliers: Mutex<BTreeMap<String, (Instant, Option<f64>)>>,
+    requests: AtomicU64,
+    fetched_candles: AtomicU64,
+    cache_hits: AtomicU64,
+    last_failed: AtomicBool,
 }
 impl Feed {
     pub fn new(settings: Settings) -> Result<Self> {
@@ -91,12 +115,32 @@ impl Feed {
             .timeout(Duration::from_secs(20))
             .connect_lazy();
         Ok(Self {
+            fingerprint: hex::encode(Sha256::digest(settings.grpc_url.as_bytes())),
             settings,
             channel,
-            permits: Semaphore::new(4),
+            permits: Semaphore::new(MAX_REQUESTS),
             admission: Semaphore::new(64),
             locks: Mutex::default(),
+            multipliers: Mutex::default(),
+            requests: AtomicU64::new(0),
+            fetched_candles: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            last_failed: AtomicBool::new(false),
         })
+    }
+
+    pub(super) fn cache_status(&self) -> CacheStatus {
+        CacheStatus {
+            enabled: true,
+            active_backfills: MAX_REQUESTS - self.permits.available_permits(),
+            requests: self.requests.load(Ordering::Relaxed),
+            fetched_candles: self.fetched_candles.load(Ordering::Relaxed),
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            last_error: self
+                .last_failed
+                .load(Ordering::Relaxed)
+                .then_some("原生分钟行情或缓存暂不可用"),
+        }
     }
 
     pub async fn day(
@@ -247,6 +291,16 @@ impl Feed {
     }
 
     pub async fn augment(&self, pack: &mut Pack, now_us: i64) -> Result<()> {
+        let mut remaining = usize::MAX;
+        self.augment_bounded(pack, now_us, &mut remaining).await
+    }
+
+    pub(super) async fn augment_bounded(
+        &self,
+        pack: &mut Pack,
+        now_us: i64,
+        remaining: &mut usize,
+    ) -> Result<()> {
         let needed = cost::required_minutes(pack, now_us)?;
         let existing = pack
             .bars
@@ -268,6 +322,12 @@ impl Feed {
         }
         let mut first_error = None;
         for ((venue, symbol), times) in markets {
+            if *remaining == 0 {
+                return Err(first_error.unwrap_or_else(|| {
+                    anyhow::anyhow!("native price reference query budget exhausted")
+                }));
+            }
+            *remaining -= 1;
             let result = async {
                 let day = self
                     .load(&venue, &symbol, &pack.trading_day, now_us, Some(&times))
@@ -316,73 +376,253 @@ impl Feed {
         now_us: i64,
         required: Option<&BTreeSet<i64>>,
     ) -> Result<MarketDay> {
+        let result = self
+            .load_from_cache_or_feed(venue, symbol, day, now_us, required)
+            .await;
+        self.last_failed.store(result.is_err(), Ordering::Relaxed);
+        result
+    }
+
+    async fn load_from_cache_or_feed(
+        &self,
+        venue: &str,
+        symbol: &str,
+        day: &str,
+        now_us: i64,
+        required: Option<&BTreeSet<i64>>,
+    ) -> Result<MarketDay> {
         super::validate_market(&format!("{venue}:{symbol}"))?;
         reference::valid_day(day)?;
         let _admission = self
             .admission
             .try_acquire()
             .context("native market query capacity exhausted")?;
-        let key = format!("{venue}:{symbol}:{day}");
-        let lock = {
-            let mut locks = self
-                .locks
-                .lock()
-                .map_err(|_| anyhow::anyhow!("native market lock poisoned"))?;
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-                lock
-            } else {
-                let lock = Arc::new(tokio::sync::Mutex::new(()));
-                locks.insert(key, Arc::downgrade(&lock));
-                lock
-            }
-        };
+        let lock = self.market_lock(venue, symbol, day)?;
         let _guard = lock.lock().await;
-        let root = resolved(&self.settings.cache_root)?;
-        let path = root.join(venue).join(symbol).join(format!("{day}.json"));
-        ensure!(
-            resolved(&path)?.starts_with(&root),
-            "native market cache escapes cache_root"
-        );
-        let p = path.clone();
-        let fingerprint = hex::encode(Sha256::digest(self.settings.grpc_url.as_bytes()));
-        let expected = fingerprint.clone();
-        let cached = tokio::task::spawn_blocking(move || read_cache(&p, &expected)).await??;
-        if let Some(cached) = cached {
-            validate_cached(&cached, venue, symbol, day, now_us)?;
+        let path = self.cache_path(venue, symbol, day)?;
+        if let Some(cached) = self.cached_day(&path, venue, symbol, day, now_us).await? {
             let minutes = cached
                 .bars
                 .iter()
                 .map(|b| reference::timestamp(&b.open_time))
                 .collect::<Result<BTreeSet<_>>>()?;
             if required.is_none_or(|r| r.is_subset(&minutes)) {
+                self.cache_hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(cached);
             }
         }
-        let _permit = self.permits.acquire().await?;
-        let mut client = CnFuturesMarketClient::new(self.channel.clone())
-            .max_decoding_message_size(8 * 1024 * 1024);
-        let response = client
-            .get_minute_bars(GetMinuteBarsRequest {
-                exchange: exchange(venue)? as i32,
-                contract: symbol.to_owned(),
-                range: Some(Range::TradingDay(day.parse()?)),
-                include_empty_minutes: true,
-            })
+        let response = self
+            .query_minutes(
+                exchange(venue)?,
+                symbol,
+                Range::TradingDay(day.parse()?),
+                true,
+            )
             .await
-            .context("query native market-replay minutes")?
-            .into_inner();
+            .context("query native market-replay minutes")?;
         let market = convert(response, venue, symbol, day, now_us)?;
+        self.fetched_candles
+            .fetch_add(market.bars.len() as u64, Ordering::Relaxed);
         // An in-progress day is queried again even if its latest returned bar
         // is closed locally. Missing/omitted minutes are never negative-cached.
         if market.archived && market.pending_bar_count == 0 && !market.bars.is_empty() {
             let cache = Cache {
-                feed_sha256: fingerprint,
+                feed_sha256: self.fingerprint.clone(),
                 day: market.clone(),
             };
             tokio::task::spawn_blocking(move || write_cache(&path, &cache)).await??;
         }
         Ok(market)
+    }
+
+    /// Exact-day contract economics for factual turnover only. The currently
+    /// configured provider's undated product multiplier snapshot is insufficient.
+    pub(super) async fn day_multiplier(
+        &self,
+        venue: &str,
+        symbol: &str,
+        day: &str,
+        receipt_us: i64,
+        now_us: i64,
+    ) -> Result<Option<f64>> {
+        super::validate_market(&format!("{venue}:{symbol}"))?;
+        reference::valid_day(day)?;
+        ensure!(
+            (0..=now_us).contains(&receipt_us),
+            "invalid factual fill receipt time"
+        );
+        let _admission = self
+            .admission
+            .try_acquire()
+            .context("native market query capacity exhausted")?;
+        let lock = self.market_lock(venue, symbol, day)?;
+        let _guard = lock.lock().await;
+        let key = format!("{venue}:{symbol}:{day}");
+        if let Some(multiplier) = self.cached_multiplier(&key)? {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(multiplier);
+        }
+
+        let path = self.cache_path(venue, symbol, day)?;
+        if let Some(cached) = self.cached_day(&path, venue, symbol, day, now_us).await?
+            && !cached.bars.is_empty()
+        {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.remember_multiplier(key, Some(cached.contract_multiplier))?;
+            return Ok(Some(cached.contract_multiplier));
+        }
+
+        let exchange = exchange(venue)?;
+        let minute_ms = receipt_us.div_euclid(MINUTE_US) * (MINUTE_US / 1000);
+        let day_number = day.parse()?;
+        let receipt = self
+            .query_minutes(
+                exchange,
+                symbol,
+                Range::Time(TimeRange {
+                    start_ms: minute_ms,
+                    end_ms: minute_ms,
+                }),
+                true,
+            )
+            .await;
+        let mut multiplier = match receipt {
+            Ok(response) => {
+                verified_day_multiplier(response, venue, symbol, day_number, Some(minute_ms))?
+            }
+            Err(error) if error.code() == tonic::Code::NotFound => None,
+            Err(error) => return Err(error).context("query native multiplier at the fill minute"),
+        };
+        if multiplier.is_none() {
+            // Recovery may report a factual fill after its original trading day.
+            // A receipt-minute response cannot establish those contract economics.
+            let response = self
+                .query_minutes(exchange, symbol, Range::TradingDay(day_number), false)
+                .await;
+            multiplier = match response {
+                Ok(response) => verified_day_multiplier(response, venue, symbol, day_number, None)?,
+                Err(error) if error.code() == tonic::Code::NotFound => None,
+                Err(error) => {
+                    return Err(error).context("query multiplier for the factual trading day");
+                }
+            };
+        }
+        self.remember_multiplier(key, multiplier)?;
+        Ok(multiplier)
+    }
+
+    fn cached_multiplier(&self, key: &str) -> Result<Option<Option<f64>>> {
+        let cache = self
+            .multipliers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native multiplier cache poisoned"))?;
+        Ok(cache
+            .get(key)
+            .filter(|(until, _)| *until > Instant::now())
+            .map(|(_, multiplier)| *multiplier))
+    }
+
+    fn remember_multiplier(&self, key: String, multiplier: Option<f64>) -> Result<()> {
+        let now = Instant::now();
+        let mut cache = self
+            .multipliers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native multiplier cache poisoned"))?;
+        cache.retain(|_, (until, _)| *until > now);
+        if cache.len() >= MAX_MULTIPLIERS
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (until, _))| *until)
+                .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
+        let ttl = if multiplier.is_some() {
+            MULTIPLIER_TTL
+        } else {
+            MISSING_MULTIPLIER_TTL
+        };
+        cache.insert(key, (now + ttl, multiplier));
+        Ok(())
+    }
+
+    fn market_lock(
+        &self,
+        venue: &str,
+        symbol: &str,
+        day: &str,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>> {
+        let key = format!("{venue}:{symbol}:{day}");
+        let mut locks = self
+            .locks
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native market lock poisoned"))?;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return Ok(lock);
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        Ok(lock)
+    }
+
+    fn cache_path(&self, venue: &str, symbol: &str, day: &str) -> Result<PathBuf> {
+        let root = resolved(&self.settings.cache_root)?;
+        let path = root.join(venue).join(symbol).join(format!("{day}.json"));
+        ensure!(
+            resolved(&path)?.starts_with(&root),
+            "native market cache escapes cache_root"
+        );
+        Ok(path)
+    }
+
+    async fn cached_day(
+        &self,
+        path: &Path,
+        venue: &str,
+        symbol: &str,
+        day: &str,
+        now_us: i64,
+    ) -> Result<Option<MarketDay>> {
+        let path = path.to_owned();
+        let fingerprint = self.fingerprint.clone();
+        let cached = tokio::task::spawn_blocking(move || read_cache(&path, &fingerprint)).await??;
+        if let Some(cached) = &cached {
+            validate_cached(cached, venue, symbol, day, now_us)?;
+        }
+        Ok(cached)
+    }
+
+    async fn query_minutes(
+        &self,
+        exchange: Exchange,
+        symbol: &str,
+        range: Range,
+        include_empty_minutes: bool,
+    ) -> std::result::Result<GetMinuteBarsResponse, tonic::Status> {
+        let _permit = self
+            .permits
+            .acquire()
+            .await
+            .map_err(|_| tonic::Status::unavailable("native market feed shut down"))?;
+        let mut client = CnFuturesMarketClient::new(self.channel.clone())
+            .max_decoding_message_size(8 * 1024 * 1024);
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        let response = client
+            .get_minute_bars(GetMinuteBarsRequest {
+                exchange: exchange as i32,
+                contract: symbol.to_owned(),
+                range: Some(range),
+                include_empty_minutes,
+            })
+            .await;
+        self.last_failed.store(
+            response
+                .as_ref()
+                .is_err_and(|error| error.code() != tonic::Code::NotFound),
+            Ordering::Relaxed,
+        );
+        Ok(response?.into_inner())
     }
 }
 
@@ -422,6 +662,55 @@ fn validate_contract(
         "unrecognized native market provenance"
     );
     Ok(())
+}
+
+fn verified_day_multiplier(
+    response: GetMinuteBarsResponse,
+    venue: &str,
+    symbol: &str,
+    day: u32,
+    exact_open_ms: Option<i64>,
+) -> Result<Option<f64>> {
+    let contract = response
+        .contract
+        .context("market-replay omitted contract metadata")?;
+    let state = response
+        .data_state
+        .context("market-replay omitted data state")?;
+    validate_contract(&contract, &state, venue, symbol)?;
+    let mut bars = response.bars.iter();
+    if let Some(open_ms) = exact_open_ms {
+        ensure!(
+            bars.len() <= 1,
+            "native multiplier response exceeded the requested minute"
+        );
+        if let Some(bar) = bars.clone().next() {
+            ensure!(
+                bar.open_time_ms == open_ms,
+                "native multiplier minute differs from the request"
+            );
+            if bar.trading_day != day {
+                return Ok(None);
+            }
+        }
+    } else {
+        ensure!(
+            bars.len() <= 1500 && bars.clone().all(|bar| bar.trading_day == day),
+            "wrong-day or oversized native multiplier reply"
+        );
+    }
+    // Only date and contract economics are needed here. An in-progress minute
+    // can prove the active contract day without becoming a usable price sample.
+    let dated = bars.any(|bar| {
+        bar.open_time_ms >= 0
+            && bar.open_time_ms % 60_000 == 0
+            && if bar.provisional {
+                state.live_trading_day == day
+            } else {
+                state.latest_trading_day >= day
+            }
+    });
+    Ok(dated.then_some(contract.volume_multiple))
 }
 
 fn convert(
