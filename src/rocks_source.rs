@@ -4,6 +4,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use rocksdb::{DB, Direction, IteratorMode, Options, ReadOptions};
 
+use crate::model::UNIFORM_ORDERS_CF;
+
 mod secondary;
 pub(crate) use secondary::ReaderPool;
 pub use secondary::{ReaderSession, configure as configure_source_readers};
@@ -276,22 +278,80 @@ pub fn visit_column_families_from(
     requests: &[(String, Option<Vec<u8>>)],
     visit: impl FnMut(&str, &[u8], &[u8]) -> Result<()>,
 ) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
-    visit_column_families_in_window(path, requests, None, visit)
+    let requested = requests
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    secondary::read(path, &requested, |db| visit_from(db, requests, None, visit))
 }
 
-/// Sequential scans can stop inside RocksDB at each frozen CF head.
-pub(crate) fn visit_column_families_in_window(
+#[derive(Default)]
+pub(crate) struct UniformScanOptions<'a> {
+    pub limits: Option<&'a BTreeMap<String, Option<Vec<u8>>>>,
+    pub revision: Option<u64>,
+    pub legacy_fills: bool,
+}
+
+pub(crate) struct UniformScan {
+    pub heads: BTreeMap<String, Option<Vec<u8>>>,
+    pub revision: u64,
+    pub legacy_fills: bool,
+}
+
+/// The writer advances the revision only when existing uniform records change.
+/// Read it in the same secondary view as the records and any native legacy reports.
+pub(crate) fn visit_uniform_history(
     path: &Path,
     requests: &[(String, Option<Vec<u8>>)],
-    limits: Option<&BTreeMap<String, Option<Vec<u8>>>>,
-    mut visit: impl FnMut(&str, &[u8], &[u8]) -> Result<()>,
-) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
+    options: UniformScanOptions<'_>,
+    mut visit: impl FnMut(&str, &[u8], &[u8]) -> Result<bool>,
+) -> Result<Option<UniformScan>> {
+    let (uniform, reports) = requests.split_at(1);
+    debug_assert_eq!(uniform[0].0, UNIFORM_ORDERS_CF);
     let requested = requests
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
     secondary::read(path, &requested, |db| {
-        visit_from(db, requests, limits, &mut visit)
+        let revision = db
+            .get(b"uniform_orders_revision")?
+            .map(|value| {
+                Ok::<_, anyhow::Error>(u64::from_be_bytes(
+                    value
+                        .as_slice()
+                        .try_into()
+                        .context("invalid uniform history revision")?,
+                ))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if options
+            .revision
+            .is_some_and(|expected| expected != revision)
+        {
+            return Ok(None);
+        }
+        let mut legacy_fills = options.legacy_fills;
+        let mut heads = visit_from(db, uniform, options.limits, |cf, key, value| {
+            legacy_fills |= visit(cf, key, value)?;
+            Ok(())
+        })?;
+        if legacy_fills {
+            heads.extend(visit_from(
+                db,
+                reports,
+                options.limits,
+                |cf, key, value| {
+                    visit(cf, key, value)?;
+                    Ok(())
+                },
+            )?);
+        }
+        Ok(Some(UniformScan {
+            heads,
+            revision,
+            legacy_fills,
+        }))
     })
 }
 

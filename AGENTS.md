@@ -183,10 +183,11 @@ orders. Dropping legacy tables is a separate database maintenance operation.
 All sources use the same bounded FIFO, daily checkpoints and recent-fill window,
 with one build policy for every host. Keep JSON's original numeric parsing for
 immutable allocation fingerprints; derived daily state uses an exact binary
-codec independently of JSON features. Source adapters feed only validated fills
-into the shared FIFO. Keep evidence joins in bounded Manager-owned disposable
-indexes, preserve frozen query generations, and reject incomplete or conflicting
-evidence. See `docs/nav_daily_fifo_design.md`.
+codec independently of JSON features. Read Exec-owned `uniform_orders` directly
+for every backend and feed only validated fills into the shared FIFO. Preserve
+frozen query generations using the uniform content revision for in-place writes.
+RapidX evidence joins and historical maintenance belong to Exec. See
+`docs/nav_daily_fifo_design.md`.
 
 `nav_rebuild` reconstructs CTA PnL from a PostgreSQL position snapshot plus the
 later local `uniform_orders` RocksDB history. PostgreSQL is only the immutable

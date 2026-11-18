@@ -144,8 +144,19 @@ new symbols become ready after their own complete history window.
 New order templates belong to the logged-in creator. The catalog returns
 `owner` and session-specific `can_configure`; only the owner or an administrator
 can save or delete an owned template. Existing templates without a creator stay
-shared. Ownership does not change template visibility or account binding rights.
-Renaming in the editor creates a new template owned by the current user.
+shared. Renaming in the editor creates a new template owned by the current user.
+
+Host operators can restrict the named order templates a user can list and
+select with `[dashboard.order_strategy_allowlists]`. Use a lowercase username
+and a list of exact template names. An omitted user retains the full catalog.
+Existing account bindings keep executing with their configured parameters. The
+account editor shows “模板不可见” for a binding outside the user's allowlist.
+The changes take effect when the Manager loads the host configuration.
+
+```toml
+[dashboard.order_strategy_allowlists]
+sbh = ["default_order", "sbh_attemp4_h45_o2"]
+```
 
 For an existing Manager database, explicitly apply
 `scripts/apply_grid_order_schema.sql` and

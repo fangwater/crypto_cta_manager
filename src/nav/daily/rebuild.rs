@@ -383,29 +383,7 @@ fn stage(
 
 /// All raw reads and disk ordering finish before any replay starts. At most one
 /// bounded fill batch, current FIFO state and the final recent tail stay live.
-#[cfg(test)]
 pub(in crate::nav) fn build(
-    config: AppConfig,
-    source: &SourceConfig,
-    snapshots: Arc<SourcePositionSnapshots>,
-    strategies: Arc<SourceStrategyPositionSnapshots>,
-    allocations: Arc<Vec<allocation::AllocationSnapshot>>,
-    daily: Arc<DailyFifoStore>,
-    now: i64,
-) -> Result<(NavTimelineCache, IncrementalSourceHistory, Stats)> {
-    build_with_state(
-        config,
-        source,
-        snapshots,
-        strategies,
-        allocations,
-        daily,
-        now,
-        IncrementalSourceHistory::default(),
-    )
-}
-
-pub(in crate::nav) fn build_with_state(
     mut config: AppConfig,
     source: &SourceConfig,
     snapshots: Arc<SourcePositionSnapshots>,
@@ -413,7 +391,6 @@ pub(in crate::nav) fn build_with_state(
     allocations: Arc<Vec<allocation::AllocationSnapshot>>,
     daily: Arc<DailyFifoStore>,
     now: i64,
-    mut state: IncrementalSourceHistory,
 ) -> Result<(NavTimelineCache, IncrementalSourceHistory, Stats)> {
     let boundary = day_start(now - MEMORY_WINDOW_US);
     let mut ordered = OrderedFills::open(&daily, source)?;
@@ -432,72 +409,40 @@ pub(in crate::nav) fn build_with_state(
         .iter()
         .map(|cf| (cf.to_string(), None))
         .collect::<Vec<_>>();
-    let heads = if rapidx_source(source) {
-        if state.history.source_identity != identity {
-            state = IncrementalSourceHistory::default();
-        }
-        if state.history.recovery_view.is_none() {
-            let root = daily
-                .0
-                .path()
-                .parent()
-                .context("Manager DB has no parent")?
-                .join("run/nav-recovery");
-            state.recovery = Some(fill_recovery::store::State::open(source, Some(&root))?);
-            state.refresh_recovered_source(source, false)?;
-        }
-        metadata = HistoryMetadata::from_history(&state.history);
-        stats.zero_fills = state.recovery.as_ref().map_or(0, |r| r.zero_fill_records());
-        let view = state
-            .history
-            .recovery_view
-            .clone()
-            .context("missing canonical fill view")?;
-        view.visit(|event| {
-            let receive = rocks_source::format_time_key(event.event_ts_us);
+    let mut state = IncrementalSourceHistory::default();
+    let scan = rocks_source::visit_uniform_history(
+        &source.rocksdb_path,
+        &requests,
+        rocks_source::UniformScanOptions::default(),
+        |cf, key, bytes| {
+            if last_cf != cf {
+                ordered.flush()?;
+                last_cf = cf.to_owned();
+            }
+            note_key(&mut state, cf, key)?;
+            if cf != crate::model::UNIFORM_ORDERS_CF {
+                ordered.observe_role(decode_trade_update(key, bytes)?)?;
+                return Ok(false);
+            }
+            let event: Arc<NavEvent> = decode_uniform_order(key, bytes)?.into();
+            metadata.observe(&event);
+            let legacy = event.amount_update != 0.0 && event.fill_liquidity.is_none();
             stage(
                 event,
-                receive.as_bytes(),
+                key,
                 &mut ordered,
                 &mut stats,
                 &mut cursors,
                 &mut seeds,
                 &anchors,
-            )
-        })?;
-        state.full_rebuild_required = false;
-        state.history.read_limits.clone()
-    } else {
-        state = IncrementalSourceHistory::default();
-        rocks_source::visit_column_families_from(
-            &source.rocksdb_path,
-            &requests,
-            |cf, key, bytes| {
-                if last_cf != cf {
-                    ordered.flush()?;
-                    last_cf = cf.to_owned();
-                }
-                note_key(&mut state, cf, key)?;
-                if cf != crate::model::UNIFORM_ORDERS_CF {
-                    return ordered.observe_role(decode_trade_update(key, bytes)?);
-                }
-                let event: Arc<NavEvent> = decode_uniform_order(key, bytes)?.into();
-                metadata.observe(&event);
-                stage(
-                    event,
-                    key,
-                    &mut ordered,
-                    &mut stats,
-                    &mut cursors,
-                    &mut seeds,
-                    &anchors,
-                )
-            },
-        )?
-    };
+            )?;
+            Ok(legacy)
+        },
+    )?
+    .context("missing fresh uniform history scan")?;
     ordered.flush()?;
     anyhow::ensure!(
-        heads.contains_key(crate::model::UNIFORM_ORDERS_CF),
+        scan.heads.contains_key(crate::model::UNIFORM_ORDERS_CF),
         "missing uniform_orders"
     );
     anyhow::ensure!(
@@ -519,7 +464,9 @@ pub(in crate::nav) fn build_with_state(
     }
     state.db_identity = identity.clone();
     state.history.source_identity = identity;
-    state.history.read_limits = heads;
+    state.history.read_limits = scan.heads;
+    state.history.source_revision = scan.revision;
+    state.has_legacy_fills = scan.legacy_fills;
     state.history.checkpoint_epoch = HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
     state.history.revision = HISTORY_REVISION.fetch_add(1, AtomicOrdering::Relaxed);
     state.history.allocations = allocations.clone();

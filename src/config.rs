@@ -169,6 +169,8 @@ pub struct DashboardConfig {
     /// Host-enforced account visibility cap, including administrators. Normal
     /// database grants still determine view/configure within this boundary.
     pub source_viewers: BTreeMap<String, Vec<String>>,
+    /// Named order templates accessible to each listed username.
+    pub order_strategy_allowlists: BTreeMap<String, Vec<String>>,
     pub overview_alerts: crate::account_overview::OverviewAlertSettings,
     pub nav_overview: crate::account_overview::external::Settings,
     pub external_overviews: Vec<crate::account_overview::external::Settings>,
@@ -386,6 +388,7 @@ impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
             source_viewers: BTreeMap::new(),
+            order_strategy_allowlists: BTreeMap::new(),
             overview_alerts: Default::default(),
             nav_overview: Default::default(),
             external_overviews: vec![],
@@ -601,6 +604,16 @@ impl AppConfig {
                             })
                     }),
                 "dashboard.source_viewers requires configured source IDs and nonempty valid usernames"
+            );
+        }
+        for (username, names) in &self.dashboard.order_strategy_allowlists {
+            anyhow::ensure!(
+                crate::auth::validate_username(username).is_ok_and(|name| name == *username)
+                    && *username == username.to_ascii_lowercase()
+                    && names
+                        .iter()
+                        .all(|name| crate::order_config::validate_strategy_name(name).is_ok()),
+                "dashboard.order_strategy_allowlists requires lowercase usernames and valid strategy names"
             );
         }
         let alerts = &self.dashboard.overview_alerts;

@@ -2313,6 +2313,7 @@ async fn rebuild_timeline_snapshot_projected(
                             max_points,
                             comparison,
                             as_of,
+                            false,
                         )
                         .await
                         .unwrap_or_else(theoretical_timeline_error),
@@ -2863,12 +2864,14 @@ async fn position_updates(
         )
     };
     let archive = Arc::clone(&state.position_archive);
+    let config = state.config.clone();
     let payload = tokio::task::spawn_blocking(move || {
         archive.raw_json_page_for_sources(
             after,
             limit,
             Some(&visible.0),
             allowed_strategies.as_ref(),
+            strategy_catalog::OrderTemplateAccess::for_user(&config, &user.username),
         )
     })
     .await
@@ -3133,9 +3136,10 @@ async fn list_position_strategies(
 ) -> Result<Response, ApiError> {
     let strategies = current_position_strategies(&state).await?;
     let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
+    let orders = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
     let strategies: Vec<_> = strategies
         .into_iter()
-        .filter_map(|strategy| {
+        .filter_map(|mut strategy| {
             let access = visibility
                 .iter()
                 .find(|entry| entry.strategy_name == strategy.strategy_name);
@@ -3144,6 +3148,7 @@ async fn list_position_strategies(
             }
             let can_publish = user.is_admin()
                 || access.is_some_and(|entry| entry.user_can_configure(user.user_id));
+            orders.filter_overrides(&mut strategy.symbol_order_strategy_overrides);
             Some(PositionStrategyCatalogView {
                 strategy,
                 can_publish,
@@ -3531,8 +3536,10 @@ async fn list_order_strategies(
 ) -> Result<Response, ApiError> {
     let strategies = strategy_catalog::list_order_strategies(&state.pool).await?;
     let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
+    let access = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
     let views: Vec<_> = strategies
         .into_iter()
+        .filter(|strategy| access.allows(&strategy.strategy_name))
         .map(|strategy| {
             let owner = owners.get(&strategy.strategy_name);
             OrderStrategyCatalogView {
@@ -3551,6 +3558,10 @@ async fn save_order_strategy(
     headers: HeaderMap,
     Json(request): Json<SaveOrderStrategyRequest>,
 ) -> Result<Response, ApiError> {
+    let access = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
+    if !access.allows(&request.strategy_name) {
+        return Ok(forbidden("order template is outside your allowed catalog"));
+    }
     let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
     if owners
@@ -3601,6 +3612,10 @@ async fn delete_order_strategy(
     Extension(user): Extension<AuthUser>,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
+    let access = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
+    if !access.allows(&name) {
+        return Ok(not_found("order strategy was not found"));
+    }
     let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     let owners = strategy_catalog::list_order_strategy_owners(&state.pool).await?;
     if owners
@@ -3711,12 +3726,17 @@ async fn save_account_funding(
 
 async fn get_account_studio(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
 ) -> Result<Response, ApiError> {
+    let access = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
     if let Some(account) = state.config.accounts.get(&source_id) {
         let mut execution_sources = Vec::new();
         for id in &account.source_ids {
-            execution_sources.push(strategy_catalog::load_account_studio(&state.pool, id).await?);
+            execution_sources.push(
+                access
+                    .account_studio(strategy_catalog::load_account_studio(&state.pool, id).await?),
+            );
         }
         return Ok((
             NO_STORE,
@@ -3730,7 +3750,7 @@ async fn get_account_studio(
         return Ok(response);
     }
     match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
-        Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+        Ok(studio) => Ok((NO_STORE, Json(access.account_studio(studio))).into_response()),
         Err(error) => Ok(catalog_error(error)),
     }
 }
@@ -3968,6 +3988,7 @@ async fn save_account_grants(
 
 async fn save_account_estimated_fee_rate(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Json(request): Json<SaveEstimatedFeeRateRequest>,
 ) -> Result<Response, ApiError> {
@@ -3988,8 +4009,10 @@ async fn save_account_estimated_fee_rate(
                 "account estimated fee rate updated"
             );
             state.dashboard_reload.notify_one();
+            let access =
+                strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
             match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
-                Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+                Ok(studio) => Ok((NO_STORE, Json(access.account_studio(studio))).into_response()),
                 Err(error) => Ok(catalog_error(error)),
             }
         }
@@ -4007,6 +4030,7 @@ async fn save_account_estimated_fee_rate(
 
 async fn save_account_fee_rates(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path(source_id): Path<String>,
     Json(request): Json<SaveFeeRatesRequest>,
 ) -> Result<Response, ApiError> {
@@ -4055,8 +4079,10 @@ async fn save_account_fee_rates(
                 "account fee rates updated"
             );
             state.dashboard_reload.notify_one();
+            let access =
+                strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
             match strategy_catalog::load_account_studio(&state.pool, &source_id).await {
-                Ok(studio) => Ok((NO_STORE, Json(studio)).into_response()),
+                Ok(studio) => Ok((NO_STORE, Json(access.account_studio(studio))).into_response()),
                 Err(error) => Ok(catalog_error(error)),
             }
         }
@@ -4526,6 +4552,10 @@ async fn save_account_binding(
     headers: HeaderMap,
     Json(request): Json<SaveBindingRequest>,
 ) -> Result<Response, ApiError> {
+    let access = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
+    if !access.allows(&request.order_strategy_name) {
+        return Ok(forbidden("order template is outside your allowed catalog"));
+    }
     let _configuration_guard = state.targets.edit(&state.configuration_lock).await;
     let source = match resolve_order_config_source(&state.config, &source_id) {
         Ok(source) => source,
@@ -4641,7 +4671,7 @@ async fn save_account_binding(
     {
         return Ok(publish_failure_response(failure));
     }
-    Ok((NO_STORE, Json(studio)).into_response())
+    Ok((NO_STORE, Json(access.account_studio(studio))).into_response())
 }
 
 async fn save_account_binding_shares(
@@ -4702,6 +4732,8 @@ async fn save_account_binding_shares(
         Ok(studio) => studio,
         Err(error) => return Ok(catalog_error(error)),
     };
+    let access = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
+    let studio = access.account_studio(studio);
     if request.shares > 0.0 {
         return Ok((NO_STORE, Json(studio)).into_response());
     }
@@ -4834,13 +4866,22 @@ async fn preview_account_binding_targets(
         &overrides,
         &targets,
     );
-    Ok((NO_STORE, Json(serde_json::json!({
-        "source_id": source_id, "binding_name": binding_name, "shares": shares,
-        "proxy_enabled": source.target_proxy.is_some(), "projection": projection,
-        "targets": runtime_targets,
-        "symbol_order_strategy_overrides": projection.as_ref().map_or_else(
-            || position.symbol_order_strategy_overrides.clone(), |p| p.remap(&position.symbol_order_strategy_overrides)),
-    }))).into_response())
+    let mut template_overrides = projection.as_ref().map_or_else(
+        || position.symbol_order_strategy_overrides.clone(),
+        |p| p.remap(&position.symbol_order_strategy_overrides),
+    );
+    strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username)
+        .filter_overrides(&mut template_overrides);
+    Ok((
+        NO_STORE,
+        Json(serde_json::json!({
+            "source_id": source_id, "binding_name": binding_name, "shares": shares,
+            "proxy_enabled": source.target_proxy.is_some(), "projection": projection,
+            "targets": runtime_targets,
+            "symbol_order_strategy_overrides": template_overrides,
+        })),
+    )
+        .into_response())
 }
 
 /// A user may newly bind a position strategy only when they hold its
@@ -6633,6 +6674,19 @@ mod tests {
             .klines
             .save_page("BTCUSDT", start - minute, end, &bars)
             .unwrap();
+        state.theoretical_targets.refresh();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = state.theoretical_targets.status();
+                assert!(status.last_error.is_none(), "{:?}", status.last_error);
+                if status.ready && !status.loading {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("test target history must finish warming");
         let snapshot = rebuild_timeline_snapshot_projected(
             state.clone(),
             TimelineQuery {
@@ -7633,6 +7687,8 @@ async fn list_virtual_accounts(
         let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
         accounts.retain(|account| account.user_can_view(&user, &visibility));
     }
+    let orders = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
+    accounts.retain(|account| orders.allows_virtual(account));
     let visible_virtuals: BTreeSet<_> = accounts.iter().map(|a| a.virtual_id.clone()).collect();
     for account in &mut accounts {
         account.parents.retain(|id| visible_virtuals.contains(id));
@@ -7743,6 +7799,13 @@ async fn save_virtual_account_response(
         Ok(bindings) => bindings,
         Err(error) => return Ok(catalog_error(error)),
     };
+    let access = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
+    if expanded
+        .iter()
+        .any(|binding| !access.allows(&binding.order_strategy_name))
+    {
+        return Ok(forbidden("order template is outside your allowed catalog"));
+    }
     let positions = current_position_strategies(&state).await?;
     let orders = strategy_catalog::list_order_strategies(&state.pool).await?;
     if !user.is_admin()
@@ -7852,6 +7915,8 @@ async fn virtual_account_for_user(
     for account in &mut accounts {
         account.permissions_for(user);
     }
+    let orders = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
+    accounts.retain(|account| orders.allows_virtual(account));
     let visibility = strategy_catalog::list_position_visibility(&state.pool).await?;
     let visible_ids: BTreeSet<_> = accounts
         .iter()
@@ -7913,6 +7978,7 @@ async fn save_account_configuration(
     Path(source_id): Path<String>,
     Json(request): Json<AccountConfiguration>,
 ) -> Result<Response, ApiError> {
+    let access = strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username);
     let _guard = state.targets.edit(&state.configuration_lock).await;
     if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
         return Ok(response);
@@ -7923,6 +7989,9 @@ async fn save_account_configuration(
             Err(error) => return Ok(catalog_error(error)),
         };
         for binding in &combined {
+            if !access.allows(&binding.order_strategy_name) {
+                return Ok(forbidden("order template is outside your allowed catalog"));
+            }
             if !user.is_admin()
                 && !user_can_configure_position_strategy(
                     &state.pool,
@@ -7954,7 +8023,9 @@ async fn save_account_configuration(
             state.configuration_notify.notify_one();
             Ok((
                 NO_STORE,
-                Json(strategy_catalog::load_account_studio(&state.pool, &source_id).await?),
+                Json(access.account_studio(
+                    strategy_catalog::load_account_studio(&state.pool, &source_id).await?,
+                )),
             )
                 .into_response())
         }

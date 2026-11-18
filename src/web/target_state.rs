@@ -347,10 +347,20 @@ pub(super) async fn publish(
     state: WebState,
     user: Option<Extension<AuthUser>>,
     headers: HeaderMap,
-    request: SavePositionStrategyRequest,
+    mut request: SavePositionStrategyRequest,
 ) -> Result<Response, ApiError> {
     let started = Instant::now();
     let session_user = user.as_ref().map(|Extension(user)| user);
+    let template_access = session_user.map_or_else(Default::default, |user| {
+        strategy_catalog::OrderTemplateAccess::for_user(&state.config, &user.username)
+    });
+    if request
+        .symbol_order_strategy_overrides
+        .values()
+        .any(|name| !template_access.allows(name))
+    {
+        return Ok(forbidden("order template is outside your allowed catalog"));
+    }
     let mut catalog = match state.targets.catalog() {
         Ok(catalog) => catalog,
         Err(error) => {
@@ -437,6 +447,16 @@ pub(super) async fn publish(
         return Ok(forbidden(
             "position publish requires an authorized session or publish token",
         ));
+    }
+    // A session editing the visible target keeps hidden overrides for symbols
+    // it retains unless it selects an allowed replacement.
+    for (symbol, name) in &entry.strategy.symbol_order_strategy_overrides {
+        if !template_access.allows(name) && request.targets.contains_key(symbol) {
+            request
+                .symbol_order_strategy_overrides
+                .entry(symbol.clone())
+                .or_insert_with(|| name.clone());
+        }
     }
     if let Err(message) = require_experimental_algorithm_token(
         &headers,
@@ -674,6 +694,8 @@ pub(super) async fn publish(
         );
         publishes.retain(|p| visible.contains(&p.source_id));
     }
+    let mut saved = saved;
+    template_access.filter_overrides(&mut saved.symbol_order_strategy_overrides);
     Ok((
         NO_STORE,
         Json(SavedPositionStrategyResponse {

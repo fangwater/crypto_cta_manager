@@ -473,7 +473,7 @@ export function AccountBindingsPage() {
                         <p className="text-base font-semibold text-ink">{binding.position_strategy_name}</p>
                         <p className="mt-1 flex items-center gap-1.5 text-sm text-muted">
                           <SlidersHorizontal size={14} />
-                          执行算法：{binding.order_strategy_name}
+                          执行算法：{binding.order_strategy_name || '模板不可见'}
                         </p>
                       </div>
                       <span
@@ -503,6 +503,7 @@ export function AccountBindingsPage() {
                               })
                             }
                           >
+                            {!binding.order_strategy_name && <option value="" disabled>模板不可见</option>}
                             {orders.map((item) => (
                               <option key={item.strategy_name} value={item.strategy_name}>
                                 {item.strategy_name} ({item.order_parameters.algorithm.toUpperCase()})

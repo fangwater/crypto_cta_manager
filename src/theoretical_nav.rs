@@ -431,8 +431,15 @@ impl TheoreticalTargetCache {
             .map(|(deltas, _, _)| deltas))
     }
 
-    async fn ready_for_query(self: &Arc<Self>) -> Result<bool> {
+    async fn ready_for_query(self: &Arc<Self>, wait_for_initial: bool) -> Result<bool> {
         self.refresh();
+        if !wait_for_initial && !self.ready.load(Ordering::Acquire) {
+            // A browser timeline can publish its factual curve during the initial rebuild.
+            if let Some(error) = self.error.lock().unwrap().clone() {
+                bail!("target history cache: {error}");
+            }
+            return Ok(false);
+        }
         let wait = async {
             loop {
                 let changed = self.changed.notified();
@@ -467,7 +474,7 @@ impl TheoreticalTargetCache {
         received_start: Option<i64>,
         models: ExecutionModels,
     ) -> Result<Option<(Vec<VirtualDelta>, CarriedInventory, TargetQueryRevision)>> {
-        if !self.ready_for_query().await? {
+        if !self.ready_for_query(true).await? {
             return Ok(None);
         }
         let cache = self.clone();
@@ -747,6 +754,7 @@ pub async fn load_timeline(
         max_points,
         models,
         now_us(),
+        true,
     )
     .await
 }
@@ -774,6 +782,7 @@ pub(crate) async fn load_timeline_with_models(
     max_points: usize,
     models: crate::theoretical_execution::ExecutionModels,
     as_of: i64,
+    wait_for_initial: bool,
 ) -> Result<TheoreticalNavTimeline> {
     let model = scope_model(&models);
     let mut output = TheoreticalNavTimeline {
@@ -876,9 +885,15 @@ pub(crate) async fn load_timeline_with_models(
                 })
                 .collect()
         };
-    if targets.ready_for_query().await?
-        && let Ok(state) = targets.state.try_lock()
-    {
+    let history_loading = || TheoreticalNavTimeline {
+        loading: true,
+        unavailable_reason: Some("目标历史正在后台读取，完成后自动更新曲线".into()),
+        ..output.clone()
+    };
+    if !targets.ready_for_query(wait_for_initial).await? {
+        return Ok(history_loading());
+    }
+    if let Ok(state) = targets.state.try_lock() {
         let (revision, _, _) = targets
             .archive
             .target_changes_since(state.revision, state.cursor);
@@ -910,9 +925,7 @@ pub(crate) async fn load_timeline_with_models(
         )
         .await?
     else {
-        output.loading = true;
-        output.unavailable_reason = Some("目标历史正在后台读取，完成后自动更新曲线".into());
-        return Ok(output);
+        return Ok(history_loading());
     };
     // The quantity per traded minute is known only after the full window
     // close. Bound the curve so every displayed execution has a full schedule.
@@ -2164,6 +2177,57 @@ mod tests {
         assert!(output.unavailable_reason.is_none());
         assert_eq!(output.points[0].nav_change_before_fee_quote, 0.0);
         assert!((output.points.last().unwrap().nav_change_before_fee_quote + 10.0).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn browser_theory_returns_pending_during_initial_history_rebuild() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = crate::manager_db::ManagerDb::open(dir.path()).unwrap();
+        let trading_config = dir.path().join("trade_engine.toml");
+        std::fs::write(&trading_config, "local_ips = [\"198.51.100.9\"]").unwrap();
+        let store = KlineStore::from_db(
+            db.clone(),
+            crate::config::KlineConfig {
+                enabled: true,
+                local_ip: Some("10.1.1.2".parse().unwrap()),
+                public_ip: Some("198.51.100.4".parse().unwrap()),
+                trade_engine_configs: vec![trading_config],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let start = now_us() - 60 * MINUTE_US;
+        let archive = Arc::new(PositionArchive::open(db).unwrap());
+        let config: AppConfig =
+            toml::from_str(include_str!("../config/cta-manager.example.toml")).unwrap();
+        let source_ids = vec![config.sources[0].id.clone()];
+        let models = resolve_models(&config, &source_ids).unwrap();
+        let targets = TheoreticalTargetCache::new(Arc::new(config), archive);
+        targets.loading.store(true, Ordering::Release);
+        let curve = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            load_timeline_with_models(
+                BTreeMap::new(),
+                &targets,
+                &store,
+                start,
+                start + 5 * MINUTE_US,
+                &source_ids,
+                100,
+                models,
+                now_us(),
+                false,
+            ),
+        )
+        .await
+        .expect("browser theory must not wait for the initial target history")
+        .unwrap();
+        assert!(curve.loading);
+        assert!(curve.points.is_empty());
+        assert_eq!(
+            curve.unavailable_reason.as_deref(),
+            Some("目标历史正在后台读取，完成后自动更新曲线")
+        );
     }
 
     #[tokio::test]
