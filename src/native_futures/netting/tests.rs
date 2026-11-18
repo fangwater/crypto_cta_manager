@@ -88,6 +88,113 @@ fn factual(lots: i64) -> FactualFill {
 }
 
 #[test]
+fn scope_extension_preserves_factual_fifo_and_adds_only_flat_targets() {
+    let state = portfolio(2, -1);
+    let added = "CZCE:SA701";
+    let extension = ExtendScope {
+        event_id: "add-soda-ash".into(),
+        expected_revision: state.revision,
+        strategy_group: "test".into(),
+        members: BTreeSet::from(["sa-1h".into()]),
+        contracts: BTreeMap::from([(added.into(), Contract { multiplier: 20.0 })]),
+        snapshot_evidence_sequence: 11,
+        note: "verified new contract flat".into(),
+    };
+    let mut proof = state.anchor.clone();
+    proof.snapshot_us = AT;
+    proof.evidence_sequence = 11;
+    proof.note = extension.note.clone();
+    let expanded = state.extend_scope(&extension, &proof).unwrap();
+    assert_eq!(expanded.revision, state.revision + 1);
+    assert_eq!(expanded.target_revision, state.target_revision);
+    assert_eq!(expanded.account[MARKET], state.account[MARKET]);
+    assert_eq!(
+        expanded.positions["a-1h"][MARKET],
+        state.positions["a-1h"][MARKET]
+    );
+    assert_eq!(expanded.positions["sa-1h"][MARKET].quantity(), 0);
+    assert_eq!(expanded.account[added].quantity(), 0);
+    assert_eq!(expanded.targets["a-1h"][added], 0);
+    assert_eq!(expanded.targets["sa-1h"][added], 0);
+    assert!(expanded.extend_scope(&extension, &proof).is_err());
+    let (open, _) = state.batch(&batch(&state, 4, -1), AT).unwrap();
+    assert!(
+        open.extend_scope(
+            &ExtendScope {
+                expected_revision: open.revision,
+                ..extension
+            },
+            &proof
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn scope_extension_can_register_a_product_group_with_an_independent_clock() {
+    let state = portfolio(2, -1);
+    let market = "SHFE:rb2701";
+    let group = "cn-futures-01-rb";
+    let member = "cn-futures-01-rb-1h";
+    let extension = ExtendScope {
+        event_id: "add-rebar-group".into(),
+        expected_revision: state.revision,
+        strategy_group: group.into(),
+        members: BTreeSet::from([member.into()]),
+        contracts: BTreeMap::from([(market.into(), Contract { multiplier: 10.0 })]),
+        snapshot_evidence_sequence: 11,
+        note: "verified new contract flat".into(),
+    };
+    let mut proof = state.anchor.clone();
+    proof.snapshot_us = AT;
+    proof.evidence_sequence = 11;
+    proof.note = extension.note.clone();
+    assert!(
+        state
+            .extend_scope(
+                &ExtendScope {
+                    members: BTreeSet::new(),
+                    ..extension.clone()
+                },
+                &proof
+            )
+            .is_err()
+    );
+
+    let extended = state.extend_scope(&extension, &proof).unwrap();
+    assert_eq!(
+        extended.strategy_groups["test"].members,
+        state.strategy_groups["test"].members
+    );
+    assert_eq!(extended.strategy_groups[group].members, extension.members);
+    assert_eq!(
+        extended.positions["a-1h"][MARKET],
+        state.positions["a-1h"][MARKET]
+    );
+    let mut request = batch(&extended, 2, -1);
+    request.strategy_group = group.into();
+    request.decision_us = AT + 1;
+    request.strategies = BTreeMap::from([(
+        member.into(),
+        BTreeMap::from([(MARKET.into(), 0), (market.into(), 1)]),
+    )]);
+    request.quotes.clear();
+    let (published, receipt) = extended.batch(&request, request.decision_us).unwrap();
+    assert_eq!(
+        published.strategy_groups["test"].decision_us,
+        state.strategy_groups["test"].decision_us
+    );
+    assert_eq!(
+        published.strategy_groups[group].decision_us,
+        request.decision_us
+    );
+    assert_eq!(published.targets["a-1h"], extended.targets["a-1h"]);
+    assert_eq!(published.targets["b-1h"], extended.targets["b-1h"]);
+    assert_eq!(receipt.external_demands[member][market], 1);
+    assert!(receipt.internal_crosses.is_empty());
+}
+
+#[test]
 fn ctaker_lease_is_bound_to_the_active_batch_with_a_native_trading_day() {
     let state = portfolio(0, 0);
     let mut request = batch(&state, 1, 0);

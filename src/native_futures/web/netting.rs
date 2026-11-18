@@ -13,6 +13,10 @@ pub(super) fn routes() -> Router<Service> {
         )
         .route("/api/native/sources/{id}/target-batches", post(batch))
         .route(
+            "/api/native/sources/{id}/netting/extend-scope",
+            post(extend_scope),
+        )
+        .route(
             "/api/native/sources/{id}/netting/execution-plan",
             get(execution_plan),
         )
@@ -257,6 +261,85 @@ async fn read(
         json!({"portfolio":state,"net_targets":state.net_targets()?,"external_demands":state.external_demands(),"execution_enabled":false,
         "account_basis":"explicit_snapshot_allocation_plus_imported_fills"}),
     )
+}
+
+async fn extend_scope(
+    State(s): State<Service>,
+    Extension(user): Extension<AuthUser>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    Json(request): Json<model::ExtendScope>,
+) -> ApiResult {
+    let _guard = s.catalog_lock.lock().await;
+    let state = authorized(&s, &user, &access, &id, true).await?;
+    authorize(&s, &user, &access, &id, request.members.iter(), true).await?;
+    model::valid_id(&request.event_id).map_err(bad)?;
+    if let Some(receipt) = store::replay(
+        &s.pool,
+        &id,
+        &format!("scope:{}", request.event_id),
+        &request,
+    )
+    .await
+    .map_err(failure)?
+    {
+        return body(receipt);
+    }
+    let snapshot = observed(&s, &id).await?;
+    let now = crate::native_futures::now_us();
+    if !snapshot
+        .state_observed_us
+        .is_some_and(|t| t <= now && now - t <= s.config.stale_secs as i64 * 1_000_000)
+        || snapshot.state_evidence_sequence != Some(request.snapshot_evidence_sequence)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "需要当前、完整且未变更的账户快照".into(),
+        ));
+    }
+    let note = request.note.clone();
+    let current_anchor = state.anchor;
+    let contracts = request.contracts.clone();
+    let sequence = request.snapshot_evidence_sequence;
+    let proof = with_source(&s, &id, move |source, db| {
+        use crate::native_futures::evidence::{
+            capture_current, no_unsettled_orders, validate_anchor,
+        };
+        validate_anchor(source, db, &current_anchor)?;
+        let proof = capture_current(source, db, &snapshot, sequence, note)?;
+        for row in &snapshot.positions {
+            let market = format!(
+                "{}:{}",
+                row["venue"].as_str().context("position venue")?,
+                row["symbol"].as_str().context("position symbol")?
+            );
+            if contracts.contains_key(&market) {
+                model::require(
+                    row["position"]["today"].as_i64() == Some(0)
+                        && row["position"]["yesterday"].as_i64() == Some(0),
+                    "new contracts must have no gross factual positions",
+                )?;
+            }
+        }
+        let cf = db
+            .cf_handle("cn_trading_events")
+            .context("native state evidence CF")?;
+        let bytes = db
+            .get_cf(cf, sequence.to_be_bytes())?
+            .context("native state evidence")?;
+        let value: Value = serde_json::from_slice(&bytes)?;
+        model::require(
+            no_unsettled_orders(&value["value"]["state"]),
+            "scope extension requires a snapshot with no working orders or unsettled executions",
+        )?;
+        Ok(proof)
+    })
+    .await?;
+    let receipt = store::extend_scope(&s.pool, &id, &request, &proof, user.user_id)
+        .await
+        .map_err(failure)?;
+    s.plan_changed(&id);
+    body(receipt)
 }
 
 async fn batch(

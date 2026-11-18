@@ -15,7 +15,7 @@ CREATE TABLE cta_native_netting_events (
     source_id text NOT NULL REFERENCES cta_native_netting_portfolios(source_id),
     event_id text NOT NULL,
     revision bigint NOT NULL CHECK (revision >= 0),
-    kind text NOT NULL CHECK (kind IN ('initialize','target_batch','exchange_fill_allocation','external_demand_release')),
+    kind text NOT NULL CHECK (kind IN ('initialize','target_batch','exchange_fill_allocation','external_demand_release','scope_extension')),
     fingerprint text NOT NULL,
     batch_id text,
     factual_identity text,

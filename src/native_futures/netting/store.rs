@@ -204,6 +204,55 @@ pub async fn initialize(
     Ok(receipt)
 }
 
+pub async fn extend_scope(
+    pool: &PgPool,
+    source: &str,
+    request: &ExtendScope,
+    proof: &super::super::evidence::Anchor,
+    user_id: i64,
+) -> Result<serde_json::Value> {
+    valid_id(&request.event_id)?;
+    let id = format!("scope:{}", request.event_id);
+    let hash = fingerprint(request)?;
+    let mut tx = pool.begin().await?;
+    let state = locked(&mut tx, source).await?;
+    if let Some(previous) = existing(&mut tx, source, &id, &hash).await? {
+        return Ok(previous);
+    }
+    let next = state.extend_scope(request, proof)?;
+    for name in &request.members {
+        let result = sqlx::query("INSERT INTO cta_native_netting_members(source_id,strategy_group,strategy_name) VALUES($1,$2,$3) ON CONFLICT(strategy_name) DO NOTHING")
+            .bind(source).bind(&request.strategy_group).bind(name).execute(&mut *tx).await?;
+        require(
+            result.rows_affected() == 1,
+            "strategy already belongs to a native portfolio",
+        )?;
+    }
+    catalog(&mut tx, &next).await?;
+    let receipt = serde_json::json!({
+        "kind":"scope_extension","source_id":source,"revision":next.revision,
+        "strategy_group":request.strategy_group,"members":request.members,
+        "contracts":request.contracts,"proof":proof,
+    });
+    save(
+        &mut tx,
+        &next,
+        EventMeta {
+            id: &id,
+            kind: "scope_extension",
+            hash: &hash,
+            batch: None,
+            factual_identity: None,
+            user_id,
+        },
+        request,
+        &receipt,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(receipt)
+}
+
 pub async fn batch(
     pool: &PgPool,
     source: &str,

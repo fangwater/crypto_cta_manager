@@ -28,6 +28,7 @@
 | 方法与路径 | 行为 |
 |---|---|
 | POST `/api/native/sources/{id}/netting` | 显式初始化一次，核对事实快照；禁止隐式覆盖旧账本 |
+| POST `/api/native/sources/{id}/netting/extend-scope` | 用新鲜的对账快照注册新组，或向现有组添加策略和零仓合约 |
 | GET `/api/native/sources/{id}/netting` | 当前策略 FIFO、完整净目标、revision 和已归属手数 |
 | POST `/api/native/sources/{id}/target-batches` | 原子更新指定组全部策略的完整目标 |
 | GET `/api/native/sources/{id}/netting/events?after=-1&limit=50` | 按 revision 分页读取不可变审计，最多 100 条 |
@@ -70,7 +71,14 @@
 }
 ```
 
-每批指定 `strategy_group`，必须包含该组全部登记策略，每个策略必须包含全部登记合约，包括显式零目标。移除因子或换月时保留旧身份、旧合约及必要的零目标，不能省略后被当作平仓；改变名单/合约范围需要单独、明确的账本迁移，当前不提供自动迁移。
+每批指定 `strategy_group`，必须包含该组全部登记策略，每个策略必须包含全部登记合约，包括显式零目标。移除因子或换月时保留旧身份、旧合约及必要的零目标。
+
+扩充范围使用会话授权的 `extend-scope`，请求包含 `event_id`、`expected_revision`、
+`strategy_group`、新增 `members`、新增 `contracts`、`snapshot_evidence_sequence` 和 `note`。
+新组至少登记一个成员。先创建并授权新增目录策略。服务端核对旧归因锚点、新鲜且完整的同源事实快照、新合约无多空持仓、
+无未决委托或外部需求，再原子写入扩充事件。现有 FIFO、策略目标、归因锚点和目标批次保留，
+新增维度初始化为零，账户 revision 递增。已有数据库先显式应用
+`scripts/apply_native_netting_scope_schema.sql`。
 
 `batch_id` 在账户内幂等：完全相同的请求重试返回原收据，即使后续批次已经提交。相同编号内容不同、revision 不一致或决策时间回退返回 409。新批次决策不得早于锚点，必须在接收时最近 120 秒内；幂等重试先查已提交事件，不受后续时间推移影响。任何校验或存储失败都回滚整批。
 

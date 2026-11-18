@@ -53,6 +53,18 @@ pub struct Initialize {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ExtendScope {
+    pub event_id: String,
+    pub expected_revision: i64,
+    pub strategy_group: String,
+    pub members: BTreeSet<String>,
+    pub contracts: BTreeMap<String, Contract>,
+    pub snapshot_evidence_sequence: i64,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Quote {
     pub bid: f64,
     pub ask: f64,
@@ -450,6 +462,98 @@ impl Portfolio {
         portfolio.check()?;
         Ok(portfolio)
     }
+    pub fn extend_scope(
+        &self,
+        request: &ExtendScope,
+        proof: &super::evidence::Anchor,
+    ) -> Result<Self> {
+        require(
+            self.revision == request.expected_revision,
+            "portfolio revision changed",
+        )?;
+        require(
+            !self.external_demand_open,
+            "settle external demand before extending scope",
+        )?;
+        proof.validate()?;
+        ensure!(
+            proof.source_id == self.source_id
+                && proof.store_id == self.anchor.store_id
+                && proof.evidence_sequence == request.snapshot_evidence_sequence
+                && proof.evidence_sequence > self.anchor.evidence_sequence
+                && proof.snapshot_us > self.anchor.snapshot_us.max(self.decision_us)
+                && proof.note == request.note,
+            "scope extension requires a later factual snapshot from the same execution store"
+        );
+        ensure!(
+            (!request.members.is_empty() || !request.contracts.is_empty())
+                && self.targets.len() + request.members.len() <= 128
+                && self.contracts.len() + request.contracts.len() <= 64,
+            "invalid attribution scope extension size"
+        );
+        valid_id(&request.strategy_group)?;
+        ensure!(
+            self.strategy_groups.contains_key(&request.strategy_group)
+                || (!request.members.is_empty() && self.strategy_groups.len() < 32),
+            "new strategy group requires members and at most 32 groups"
+        );
+        for name in &request.members {
+            crate::order_config::validate_strategy_name(name).map_err(anyhow::Error::msg)?;
+            ensure!(
+                !self.targets.contains_key(name),
+                "strategy {name} already registered"
+            );
+        }
+        for (market, contract) in &request.contracts {
+            super::validate_market(market)?;
+            ensure!(
+                !self.contracts.contains_key(market),
+                "contract {market} already registered"
+            );
+            ensure!(
+                contract.multiplier.is_finite() && contract.multiplier > 0.0,
+                "invalid contract multiplier"
+            );
+        }
+
+        let mut next = self.clone();
+        next.strategy_groups
+            .entry(request.strategy_group.clone())
+            .or_insert_with(|| StrategyGroup {
+                members: BTreeSet::new(),
+                decision_us: 0,
+                held: false,
+            })
+            .members
+            .extend(request.members.iter().cloned());
+        next.contracts.extend(request.contracts.clone());
+        for market in request.contracts.keys() {
+            next.account.insert(market.clone(), Position::default());
+            for targets in next.targets.values_mut() {
+                targets.insert(market.clone(), 0);
+            }
+            for positions in next.positions.values_mut() {
+                positions.insert(market.clone(), Position::default());
+            }
+        }
+        for name in &request.members {
+            next.targets.insert(
+                name.clone(),
+                next.contracts.keys().map(|m| (m.clone(), 0)).collect(),
+            );
+            next.positions.insert(
+                name.clone(),
+                next.account
+                    .keys()
+                    .map(|m| (m.clone(), Position::default()))
+                    .collect(),
+            );
+        }
+        next.revision = self.revision.checked_add(1).context("revision overflow")?;
+        next.check()?;
+        Ok(next)
+    }
+
     pub fn external_demands(&self) -> Strategies {
         if !self.external_demand_open {
             return BTreeMap::new();
