@@ -21,6 +21,24 @@ repository and follow its own `AGENTS.md`. Keep the projects operationally
 independent: do not add relative-path or shared-runtime coupling from Manager
 to `mkt_signal`.
 
+## Crypto and CN Manager frontend
+
+Crypto CTA Manager owns the frontend and its browser API contract. CN Manager
+uses the same frontend entry point, pages, navigation, layouts and interactions.
+Implement domestic adaptations in the CN backend under `src/native_futures/`.
+Limit visible differences to asset details such as the contract, venue, CNY
+amounts, lot quantities and open/close flags. Preserve account-scoped permissions
+and report missing financial data as unavailable.
+
+For CN parity work, fetch the current upstream source and identify the frontend
+release served by Crypto. Verify the CN bundle against that release using the
+SHA-256 hashes of the HTML, JavaScript and CSS. Also open the same pages with
+CN accounts to verify the API data, units and account selection.
+
+Commit and publish CN product changes on `cn-futures` and deploy them to CN
+Manager only. A change to Crypto `main` or a Crypto production release requires
+an explicit request covering that target.
+
 ## Working Directory
 
 Work directly in `/home/fanghaizhou/crypto_cta_manager`. Make edits, run checks,
