@@ -314,7 +314,7 @@ fn scans_inclusive_overlap_and_preserves_heads_and_missing_families() {
     let mut found = Vec::new();
     let heads = pool
         .read(&path, &requested, |reader| {
-            visit_from(reader, &requests, |_, k, _| {
+            visit_from(reader, &requests, None, |_, k, _| {
                 found.push(k.to_vec());
                 Ok(())
             })
@@ -324,6 +324,22 @@ fn scans_inclusive_overlap_and_preserves_heads_and_missing_families() {
     assert_eq!(heads["fills"], Some(b"300".to_vec()));
     assert_eq!(heads["roles"], None);
     assert!(!heads.contains_key("absent"));
+
+    db.put_cf(db.cf_handle("fills").unwrap(), b"200\0", b"late")
+        .unwrap();
+    let limits = BTreeMap::from([("fills".into(), Some(b"200".to_vec()))]);
+    let mut bounded = Vec::new();
+    let heads = pool
+        .read(&path, &requested, |reader| {
+            visit_from(reader, &requests, Some(&limits), |_, k, _| {
+                bounded.push(k.to_vec());
+                Ok(())
+            })
+        })
+        .unwrap();
+    assert_eq!(bounded, [b"200".to_vec()]);
+    assert_eq!(heads["fills"], Some(b"200".to_vec()));
+    assert_eq!(heads["roles"], None);
 }
 
 #[test]

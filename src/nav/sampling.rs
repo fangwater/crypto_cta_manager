@@ -38,9 +38,6 @@ impl Samples {
             ..Default::default()
         }
     }
-    pub fn is_empty(&self) -> bool {
-        self.count == 0
-    }
     pub fn len(&self) -> usize {
         self.count
     }

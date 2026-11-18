@@ -32,11 +32,13 @@ without fills, tiny nonzero holdings, rebates and opposing strategy funding are
 not filtered by a notional or epsilon threshold. The source/symbol catalog and
 all underlying history remain intact.
 
-The factual request sets includeTheoretical=false. Once it completes, a
-separate view=theoretical request supplies the overlay without retransmitting
-the factual report or recalculating funding. Funding coverage and theoretical
-coverage retry separately. An unavailable theoretical overlay leaves factual
-NAV visible. Range and scope changes cancel pending requests.
+For a full-symbol window up to 30 days, one browser request starts factual FIFO
+and theoretical valuation together. Both use the resolved start and a common
+request time for the theoretical execution cutoff. The factual replay captures
+the exact comparison endpoints for slippage without rebuilding a second curve.
+A later view=theoretical request can retry pending coverage without sending the
+factual report or funding again. An unavailable theoretical overlay leaves
+factual NAV visible. Range and scope changes cancel pending requests.
 
 Only Protobuf responses use the API's gzip middleware; target publication stays
 outside that compression predicate. Manager Nginx configurations also enable

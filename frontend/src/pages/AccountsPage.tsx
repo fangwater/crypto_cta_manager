@@ -15,7 +15,7 @@ import {
   Settings,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getDashboard, getHealth } from '../api'
+import { ApiError, getDashboard, getHealth } from '../api'
 import { AppShell, PageIntro, StatTile } from '../components/AppShell'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
@@ -62,30 +62,43 @@ export function AccountsPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [navHistoryLoading, setNavHistoryLoading] = useState(false)
 
   const refresh = useCallback(async (signal?: AbortSignal, manual = false) => {
     if (manual) setRefreshing(true)
     try {
-      const [nextDashboard, nextHealth] = await Promise.all([
+      const [nextDashboard, nextHealth] = await Promise.allSettled([
         getDashboard(signal),
         getHealth(signal),
       ])
-      setDashboard(nextDashboard)
-      setHealth(nextHealth)
+      if (signal?.aborted) return
+      if (nextHealth.status === 'fulfilled') setHealth(nextHealth.value)
+      if (nextDashboard.status === 'rejected') throw nextDashboard.reason
+      setDashboard(nextDashboard.value)
+      setNavHistoryLoading(false)
+      if (nextHealth.status === 'rejected') throw nextHealth.reason
       setError(null)
     } catch (reason: unknown) {
-      if (reason instanceof DOMException && reason.name === 'AbortError') return
+      if (signal?.aborted || (reason instanceof DOMException && reason.name === 'AbortError')) return
+      if (reason instanceof ApiError && reason.historyLoading) {
+        setNavHistoryLoading(true)
+        setError(null)
+        return
+      }
+      setNavHistoryLoading(false)
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setLoading(false)
-      if (manual) setRefreshing(false)
+      if (!signal?.aborted) {
+        setLoading(false)
+        if (manual) setRefreshing(false)
+      }
     }
   }, [])
 
   useEffect(() => {
     const controller = new AbortController()
     void refresh(controller.signal)
-    const timer = window.setInterval(() => void refresh(), UI_POLL_MS)
+    const timer = window.setInterval(() => void refresh(controller.signal), UI_POLL_MS)
     return () => {
       controller.abort()
       window.clearInterval(timer)
@@ -125,8 +138,8 @@ export function AccountsPage() {
       icon={LayoutDashboard}
       actions={
         <div className="flex items-center gap-2">
-          <Badge tone={health?.status === 'ok' ? 'success' : health || error ? 'warning' : 'neutral'} className="hidden sm:inline-flex">
-            {health ? health.status === 'ok' ? '服务在线' : '数据延迟' : error ? '连接失败' : '检查中'}
+          <Badge tone={health?.status === 'ok' && !navHistoryLoading ? 'success' : error || health?.status === 'degraded' ? 'warning' : 'neutral'} className="hidden sm:inline-flex">
+            {navHistoryLoading || health?.status === 'loading' ? '净值加载中' : health ? health.status === 'ok' ? '服务在线' : '数据延迟' : error ? '连接失败' : '检查中'}
           </Badge>
           <Button
             type="button"
@@ -153,6 +166,7 @@ export function AccountsPage() {
       />
 
       {error && <Alert tone="error" className="mb-4">数据请求失败：{error}</Alert>}
+      {navHistoryLoading && <div className="chart-notice mb-4" role="status">净值历史正在后台加载，完成后自动显示。</div>}
       {health?.last_refresh_error && (
         <Alert tone="warning" className="mb-4">
           最近一次服务端重算失败，当前显示上一份有效数据
@@ -196,7 +210,7 @@ export function AccountsPage() {
         <span className="text-xs text-muted">重算 {dashboard?.generation_duration_ms ?? 0} ms</span>
       </div>
 
-      {loading && !dashboard ? (
+      {(loading || navHistoryLoading) && !dashboard ? (
         <div className="grid gap-4 md:grid-cols-2">
           <div className="h-56 animate-pulse rounded-2xl bg-border-soft" />
           <div className="h-56 animate-pulse rounded-2xl bg-border-soft" />

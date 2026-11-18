@@ -682,6 +682,7 @@ dependencies = [
  "chrono",
  "clap",
  "flate2",
+ "futures-executor",
  "hex",
  "hmac 0.12.1",
  "iceoryx2",

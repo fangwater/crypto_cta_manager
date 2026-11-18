@@ -124,7 +124,7 @@ impl NavTimelineCache {
         if self.needs_history(&[source_id.to_owned()], None) {
             let _budget = daily::replay_lock();
             return self
-                .restore_window(&[source_id.to_owned()], None)?
+                .restore_window(&[source_id.to_owned()], None, true)?
                 .funding_daily_fingerprints(source_id, cutoffs);
         }
         let source = self
@@ -183,6 +183,7 @@ impl NavTimelineCache {
             symbol_points: Vec::new(),
             strategy_points: Vec::new(),
             sampled: false,
+            aligned_summaries: BTreeMap::new(),
         })
     }
 
@@ -294,7 +295,7 @@ impl NavTimelineCache {
             if self.needs_history(&report.selected_source_ids, Some(earliest)) {
                 let _budget = daily::replay_lock();
                 return self
-                    .restore_window(&report.selected_source_ids, Some(earliest))?
+                    .restore_window(&report.selected_source_ids, Some(earliest), allocation)?
                     .estimate_funding_records(report, allocation, rates);
             }
         }

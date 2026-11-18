@@ -1270,6 +1270,7 @@ mod tests {
             symbol_points: vec![],
             strategy_points: vec![],
             sampled: true,
+            aligned_summaries: BTreeMap::new(),
         };
         let record = |symbol: &str, ts_us, income_quote| FundingRecord {
             source_id: "a".into(),

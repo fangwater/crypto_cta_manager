@@ -737,6 +737,44 @@ pub async fn load_timeline(
 ) -> Result<TheoreticalNavTimeline> {
     let mut models = resolve_models(&targets.config, source_ids)?;
     crate::theoretical_execution::select_reference(&mut models, reference_model);
+    load_timeline_with_models(
+        fees,
+        targets,
+        store,
+        start,
+        end,
+        source_ids,
+        max_points,
+        models,
+        now_us(),
+    )
+    .await
+}
+
+pub(crate) fn effective_timeline_end(
+    models: &crate::theoretical_execution::ExecutionModels,
+    end: i64,
+    as_of: i64,
+) -> i64 {
+    let sample_count = models
+        .values()
+        .map(|model| model.sample_count())
+        .max()
+        .unwrap_or(5) as i64;
+    end.min(as_of.div_euclid(MINUTE_US) * MINUTE_US - (sample_count - 1) * MINUTE_US)
+}
+
+pub(crate) async fn load_timeline_with_models(
+    fees: BTreeMap<String, TheoreticalFeeRates>,
+    targets: &Arc<TheoreticalTargetCache>,
+    store: &KlineStore,
+    start: i64,
+    end: i64,
+    source_ids: &[String],
+    max_points: usize,
+    models: crate::theoretical_execution::ExecutionModels,
+    as_of: i64,
+) -> Result<TheoreticalNavTimeline> {
     let model = scope_model(&models);
     let mut output = TheoreticalNavTimeline {
         execution_model: model,
@@ -800,16 +838,7 @@ pub async fn load_timeline(
             )
         })
         .collect();
-    let effective_end = end.min(
-        now_us().div_euclid(MINUTE_US) * MINUTE_US
-            - (models
-                .values()
-                .map(|model| model.sample_count())
-                .max()
-                .unwrap_or(5) as i64
-                - 1)
-                * MINUTE_US,
-    );
+    let effective_end = effective_timeline_end(&models, end, as_of);
     if effective_end < start {
         output.loading = true;
         output.unavailable_reason = Some(if model == Some(ExecutionModel::InstantTaker) {
@@ -893,22 +922,25 @@ pub async fn load_timeline(
     let mut fills = Vec::<(i64, usize, usize)>::new();
     let mut ranges = BTreeMap::new();
     for (index, delta) in deltas.iter().enumerate() {
+        let first_slice = fills.len();
         for slice in 0..delta.execution_model.sample_count() {
             let ts = delta.slice_ts_us(slice);
             if ts <= end {
                 fills.push((ts, index, slice));
-                if matches!(
-                    delta.venue.as_str(),
-                    "binance-futures" | "binance-margin" | "okex-futures" | "okex-margin"
-                ) {
-                    add_range(
-                        &mut ranges,
-                        &crate::market_data::market_key(&delta.venue, &delta.symbol)?,
-                        baseline_open.min(delta.open_ts_us(0)),
-                        end.max(delta.pricing_end_ts_us()),
-                    );
-                }
             }
+        }
+        if fills.len() > first_slice
+            && matches!(
+                delta.venue.as_str(),
+                "binance-futures" | "binance-margin" | "okex-futures" | "okex-margin"
+            )
+        {
+            add_range(
+                &mut ranges,
+                &crate::market_data::market_key(&delta.venue, &delta.symbol)?,
+                baseline_open.min(delta.open_ts_us(0)),
+                end.max(delta.pricing_end_ts_us()),
+            );
         }
     }
     carry.retain(|_, qty| clean_zero(*qty) != 0.0);

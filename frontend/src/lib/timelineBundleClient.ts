@@ -14,7 +14,7 @@ interface Query {
   view?: 'portfolio' | 'symbols' | 'strategies'
   signal?: AbortSignal
 }
-type ApiErrorClass = new (message: string, status: number, pricing?: PricingState) => Error
+type ApiErrorClass = new (message: string, status: number, pricing?: PricingState, historyLoading?: boolean) => Error
 const factual = new Map<string, TimelineSnapshot>()
 
 export async function requestNavTimeline(path: string, query: Query, ApiError: ApiErrorClass): Promise<TimelineSnapshot> {
@@ -29,7 +29,7 @@ export async function requestNavTimeline(path: string, query: Query, ApiError: A
   const loadFactual = async () => {
     params.set('includeTheoretical', 'false')
     const result = await fetchTimeline('/manager/api' + path + '?' + params, query.signal,
-      (message, status, pricing) => new ApiError(message, status, pricing))
+      (message, status, pricing, historyLoading) => new ApiError(message, status, pricing, historyLoading))
     if (!result.report) throw new Error('净值响应缺少报表')
     factual.delete(key)
     factual.set(key, result as TimelineSnapshot)
@@ -44,7 +44,7 @@ export async function requestNavTimeline(path: string, query: Query, ApiError: A
   params.set('includeTheoretical', 'true')
   try {
     const overlay = await fetchTimeline('/manager/api' + path + '?' + params, query.signal,
-      (message, status, pricing) => new ApiError(message, status, pricing))
+      (message, status, pricing, historyLoading) => new ApiError(message, status, pricing, historyLoading))
     return { ...base, theoretical: overlay.theoretical, execution_slippage: overlay.execution_slippage,
       generation_duration_ms: base.generation_duration_ms + overlay.generation_duration_ms }
   } catch (reason) {

@@ -2,12 +2,27 @@
 //! are never replaced. Missing prices reject the whole minute-priced curve.
 use super::*;
 use crate::kline::{KlineStore, MINUTE_US, first_complete_open, now_us, warm_ranges};
-use std::sync::Mutex;
+use std::sync::{Mutex, Weak};
+use tokio::sync::OnceCell;
 
 pub const VALUATION: &str = "quantity_fifo_closed_1m_window_delta";
 type Market = (String, i16);
 pub(super) type Requests = BTreeMap<Market, BTreeSet<i64>>;
 type Prices = BTreeMap<Market, BTreeMap<i64, f64>>;
+type PricedQuery = OnceCell<Arc<NavTimelineReport>>;
+pub(super) type PendingPricedQueries = Mutex<BTreeMap<TimelineCacheKey, Weak<PricedQuery>>>;
+
+#[derive(Debug)]
+pub(super) struct MarkPlan {
+    factual: Arc<Requests>,
+    aligned: Arc<Requests>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Alignment<'a> {
+    pub ends: &'a [i64],
+    pub marks: &'a MinuteMarks,
+}
 
 fn price_ranges(requests: &Requests) -> Result<BTreeMap<String, (i64, i64)>> {
     requests
@@ -276,6 +291,7 @@ impl NavTimelineCache {
                 &self.histories,
                 Some((self, allocation)),
                 Some(&prices),
+                None,
             )
         })
         .map(Arc::new)
@@ -289,17 +305,22 @@ impl NavTimelineCache {
     /// Daily equity reconstruction continues to use strict `rebuild_priced`.
     pub async fn rebuild_available(
         self: &Arc<Self>,
-        mut request: NavTimelineRequest,
+        request: NavTimelineRequest,
         allocation: bool,
         store: Arc<KlineStore>,
     ) -> Result<Arc<NavTimelineReport>> {
-        let sources = select_sources(&self.config, &request.selected_source_ids)?;
-        let start = request.resolved_start_ts_us(
-            sources
-                .iter()
-                .filter_map(|s| self.start_ts_us(&s.id, request.end_ts_us, allocation))
-                .min(),
-        );
+        self.rebuild_available_aligned(request, allocation, store, Vec::new())
+            .await
+    }
+
+    pub(crate) async fn rebuild_available_aligned(
+        self: &Arc<Self>,
+        mut request: NavTimelineRequest,
+        allocation: bool,
+        store: Arc<KlineStore>,
+        ends: Vec<i64>,
+    ) -> Result<Arc<NavTimelineReport>> {
+        let start = self.resolve_timeline_window(&request, allocation)?.0;
         request.start_ts_us = Some(start);
         let baseline_open = start.div_euclid(MINUTE_US) * MINUTE_US - MINUTE_US;
         let now = now_us();
@@ -310,7 +331,8 @@ impl NavTimelineCache {
             let cache = self.clone();
             return tokio::task::spawn_blocking(move || cache.rebuild(request, allocation)).await?;
         }
-        self.rebuild_priced(request, allocation, store).await
+        self.rebuild_priced_aligned(request, allocation, store, ends)
+            .await
     }
 
     fn strategy_with_prices(
@@ -324,7 +346,7 @@ impl NavTimelineCache {
         if self.needs_history(&ids, None) {
             let _budget = daily::replay_lock();
             return self
-                .restore_window(&ids, None)?
+                .restore_window(&ids, None, true)?
                 .strategy_with_prices(request, prices);
         }
         rebuild_strategy_pnl_with_prices(
@@ -388,27 +410,35 @@ impl NavTimelineCache {
     /// diagnostics remain explicitly identifiable by their valuation string.
     pub async fn rebuild_priced(
         self: &Arc<Self>,
+        request: NavTimelineRequest,
+        allocation: bool,
+        store: Arc<KlineStore>,
+    ) -> Result<Arc<NavTimelineReport>> {
+        self.rebuild_priced_aligned(request, allocation, store, Vec::new())
+            .await
+    }
+
+    async fn rebuild_priced_aligned(
+        self: &Arc<Self>,
         mut request: NavTimelineRequest,
         allocation: bool,
         store: Arc<KlineStore>,
+        mut ends: Vec<i64>,
     ) -> Result<Arc<NavTimelineReport>> {
         if !self.uses_minute_marks(&request.selected_source_ids) {
             let cache = self.clone();
             return tokio::task::spawn_blocking(move || cache.rebuild(request, allocation)).await?;
         }
-        let sources = select_sources(&self.config, &request.selected_source_ids)?;
-        let start = request.resolved_start_ts_us(
-            sources
-                .iter()
-                .filter_map(|s| self.start_ts_us(&s.id, request.end_ts_us, allocation))
-                .min(),
-        );
+        let start = self.resolve_timeline_window(&request, allocation)?.0;
         request.start_ts_us = Some(start);
         validate(&store, start, request.end_ts_us)?;
         request.selected_source_ids.sort();
         request.selected_source_ids.dedup();
         request.selected_symbols.sort();
         request.selected_symbols.dedup();
+        ends.retain(|ts| (start..request.end_ts_us).contains(ts));
+        ends.sort_unstable();
+        ends.dedup();
         let plan_key = TimelineCacheKey {
             start: request.start_ts_us,
             end: request.end_ts_us,
@@ -418,10 +448,72 @@ impl NavTimelineCache {
             tick_interval_us: request.tick_interval_us,
             strategy_allocation: allocation,
             minute_marks_revision: None,
+            alignment_ends: ends,
+            alignment_marks_revision: None,
         };
+        if self.needs_history(&request.selected_source_ids, request.start_ts_us) {
+            let pending = {
+                let mut queries = self.pending_priced.lock().unwrap();
+                queries.retain(|_, query| query.strong_count() != 0);
+                let entry = queries.entry(plan_key.clone()).or_default();
+                entry.upgrade().unwrap_or_else(|| {
+                    let query = Arc::new(OnceCell::new());
+                    *entry = Arc::downgrade(&query);
+                    query
+                })
+            };
+            return pending
+                .get_or_try_init(|| async {
+                    let budget = Arc::new(daily::replay_lock_async().await);
+                    let cache = self.clone();
+                    let sources = request.selected_source_ids.clone();
+                    let restore_budget = budget.clone();
+                    let restored = tokio::task::spawn_blocking(move || {
+                        let _budget = restore_budget;
+                        let started = std::time::Instant::now();
+                        let restored = cache.restore_window(&sources, Some(start), allocation)?;
+                        tracing::info!(
+                            source_count = restored.histories.len(),
+                            fill_count = restored
+                                .histories
+                                .values()
+                                .map(|h| h.events.len())
+                                .sum::<usize>(),
+                            start_ts_us = start,
+                            duration_ms = started.elapsed().as_millis(),
+                            "restored NAV query fills"
+                        );
+                        Ok::<_, anyhow::Error>(Arc::new(restored))
+                    })
+                    .await??;
+                    restored
+                        .rebuild_priced_prepared(request, allocation, store, plan_key, Some(budget))
+                        .await
+                })
+                .await
+                .cloned();
+        }
+        self.clone()
+            .rebuild_priced_prepared(request, allocation, store, plan_key, None)
+            .await
+    }
+
+    async fn rebuild_priced_prepared(
+        self: Arc<Self>,
+        request: NavTimelineRequest,
+        allocation: bool,
+        store: Arc<KlineStore>,
+        plan_key: TimelineCacheKey,
+        replay_budget: Option<Arc<daily::ReplayGuard>>,
+    ) -> Result<Arc<NavTimelineReport>> {
         if let Some(plan) = self.mark_plans.get(&plan_key) {
             let key = TimelineCacheKey {
-                minute_marks_revision: Some(store.range_revision(&price_ranges(&plan)?)),
+                minute_marks_revision: Some(store.range_revision(&price_ranges(&plan.factual)?)),
+                alignment_marks_revision: (!plan_key.alignment_ends.is_empty())
+                    .then(|| {
+                        Ok::<_, anyhow::Error>(store.range_revision(&price_ranges(&plan.aligned)?))
+                    })
+                    .transpose()?,
                 ..plan_key.clone()
             };
             if let Some(report) = self.results.get(&key) {
@@ -430,26 +522,70 @@ impl NavTimelineCache {
         }
         let cache = self.clone();
         let plan_request = request.clone();
+        let plan_budget = replay_budget.clone();
+        let ends = plan_key.alignment_ends.clone();
         let requests = tokio::task::spawn_blocking(move || {
+            let _budget = plan_budget;
             let recent = cache.daily.is_none() || request_cacheable(&plan_key);
+            let ends = plan_key.alignment_ends.clone();
             cache.mark_plans.get_or_compute_if(
                 plan_key,
                 || {
                     let collector = MinuteMarks::Collect(Mutex::new(Requests::new()));
-                    cache.rebuild_with_prices(plan_request, allocation, Some(&collector))?;
+                    let aligned = MinuteMarks::Collect(Mutex::new(Requests::new()));
+                    cache.rebuild_timeline(
+                        plan_request,
+                        allocation,
+                        Some(&collector),
+                        (!ends.is_empty()).then_some(Alignment {
+                            ends: &ends,
+                            marks: &aligned,
+                        }),
+                    )?;
                     let MinuteMarks::Collect(requests) = collector else {
                         unreachable!()
                     };
-                    Ok(requests.into_inner().unwrap())
+                    let MinuteMarks::Collect(aligned) = aligned else {
+                        unreachable!()
+                    };
+                    Ok(MarkPlan {
+                        factual: Arc::new(requests.into_inner().unwrap()),
+                        aligned: Arc::new(aligned.into_inner().unwrap()),
+                    })
                 },
                 |_| recent,
             )
         })
         .await??;
-        let prices = load_prices(store, requests, start, request.end_ts_us).await?;
-        let cache = self.clone();
+        let prices = load_prices(
+            store.clone(),
+            requests.factual.clone(),
+            request.start_ts_us.context("missing resolved NAV start")?,
+            request.end_ts_us,
+        )
+        .await?;
         tokio::task::spawn_blocking(move || {
-            cache.rebuild_with_prices(request, allocation, Some(&prices))
+            let aligned = if ends.is_empty() {
+                None
+            } else {
+                let load = || {
+                    let revision = store.range_revision(&price_ranges(&requests.aligned)?);
+                    let (prices, _) = read_prices(&store, &requests.aligned)?;
+                    Ok::<_, anyhow::Error>(MinuteMarks::Loaded { revision, prices })
+                };
+                load().ok()
+            };
+            let report = self.rebuild_timeline(
+                request,
+                allocation,
+                Some(&prices),
+                aligned
+                    .as_ref()
+                    .map(|marks| Alignment { ends: &ends, marks }),
+            );
+            drop(self);
+            drop(replay_budget);
+            report
         })
         .await?
     }
@@ -488,6 +624,123 @@ mod tests {
         db.db()
             .put_cf(&db.db().cf_handle("klines_1m").unwrap(), key, value)
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn historical_marks_share_one_query_and_match_full_history() {
+        use super::super::tests::{app_config, source_at, strategy_event_at, write_events};
+
+        let (dir, db, store) = fixture();
+        let now = now_us();
+        let start = crate::funding_daily::day_start(now - 10 * crate::funding_daily::DAY_US);
+        let end = start + 60 * MINUTE_US;
+        let exec = dir.path().join("exec");
+        let mut source = source_at("trade01", &exec, -0.0002);
+        source.venue = "binance-futures".into();
+        write_events(
+            &exec,
+            &[
+                strategy_event_at(
+                    start - MINUTE_US,
+                    start - MINUTE_US,
+                    "BTCUSDT",
+                    1,
+                    1,
+                    100.0,
+                    2.0,
+                    "alpha",
+                ),
+                strategy_event_at(
+                    start + 17 * MINUTE_US,
+                    start + 17 * MINUTE_US,
+                    "BTCUSDT",
+                    1,
+                    2,
+                    115.0,
+                    1.0,
+                    "alpha",
+                ),
+            ],
+        );
+        for (i, open) in (start - MINUTE_US..end)
+            .step_by(MINUTE_US as usize)
+            .enumerate()
+        {
+            if open != start + 10 * MINUTE_US {
+                candle(&db, "BTCUSDT", open, 105.0 + i as f64 / 10.0);
+            }
+        }
+        let config = app_config(vec![source]);
+        let full = NavTimelineCache::build(
+            config.clone(),
+            Arc::default(),
+            Arc::default(),
+            Arc::new(load_nav_source_histories(&config, &[]).unwrap()),
+        )
+        .unwrap();
+        let recent = Arc::new(
+            NavTimelineCache::refresh_daily(
+                config,
+                Arc::default(),
+                Arc::default(),
+                &BTreeMap::new(),
+                &mut NavHistoryStore::default(),
+                None,
+                Arc::new(daily::DailyFifoStore::open(db).unwrap()),
+                now,
+            )
+            .unwrap(),
+        );
+        let request = NavTimelineRequest {
+            start_ts_us: Some(start),
+            end_ts_us: end,
+            selected_source_ids: vec!["trade01".into()],
+            selected_symbols: vec![],
+            max_points: 200,
+            tick_interval_us: None,
+        };
+        assert!(recent.needs_history(&request.selected_source_ids, Some(start)));
+        let (first, duplicate) = tokio::join!(
+            recent.rebuild_priced(request.clone(), true, store.clone()),
+            recent.rebuild_priced(request.clone(), true, store.clone()),
+        );
+        let first = first.unwrap();
+        assert!(Arc::ptr_eq(&first, &duplicate.unwrap()));
+        let expected = full
+            .rebuild_from_minute_reader(request.clone(), true, |_, _, open| {
+                Ok(Some(105.0 + ((open - start) / MINUTE_US + 1) as f64 / 10.0))
+            })
+            .unwrap();
+        assert_eq!(first, expected);
+        let cuts = [start, start + 15 * MINUTE_US, start + 17 * MINUTE_US];
+        let missing_cut = start + 11 * MINUTE_US;
+        let mut paired = recent
+            .rebuild_available_aligned(
+                request.clone(),
+                true,
+                store.clone(),
+                [cuts.as_slice(), &[missing_cut]].concat(),
+            )
+            .await
+            .unwrap();
+        assert!(!paired.aligned_summaries.contains_key(&missing_cut));
+        for cut in cuts {
+            let standalone = recent
+                .rebuild_priced(
+                    NavTimelineRequest {
+                        end_ts_us: cut,
+                        ..request.clone()
+                    },
+                    true,
+                    store.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(paired.aligned_summaries[&cut], standalone.summary);
+        }
+        Arc::make_mut(&mut paired).aligned_summaries.clear();
+        assert_eq!(paired, expected);
+        assert_eq!(store.status().requests, 0);
     }
 
     #[tokio::test]
