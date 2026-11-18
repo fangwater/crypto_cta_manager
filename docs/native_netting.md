@@ -113,6 +113,22 @@
 
 本轮已完成信号整批推送到 Manager、组隔离、净目标输出和可拆分归因。按用户确认，不新增原生自动报撤单适配器，不把计划接纳当作实际成交；`execution_enabled=false` 仍然准确。
 
+## 执行计划状态
+
+`GET /api/native/sources/{id}/netting/ctaker-plan` 在已鉴权的计划响应中提供 `X-CTA-Plan-Status`。已知批次还带有 `X-CTA-Plan-Batch-Id` 和 `X-CTA-Plan-Target-Revision`。`200` 保留原有完整目标 JSON，`204` 的响应体为空。gRPC `ManagerPlans.Watch` 在 `PlanUpdate.status`、`batch_id` 和 `target_revision` 中提供相同信息。
+
+| 状态 | 含义 |
+|---|---|
+| `ready` | 当前批次通过账户和有效期校验，可以交给 Exec 准入 |
+| `no_batch` / `no_external_demand` | 尚无已提交批次，或当前批次没有外部需求 |
+| `observe_only` | 只读订阅收到有外部需求的目标观测，执行有效期为零 |
+| `missing_trading_day` / `decision_in_future` / `lease_expired` | 批次缺少原生交易日、决策时间在未来，或尚有需求但执行有效期已结束 |
+| `replica_not_ready` / `account_not_ready` / `account_snapshot_stale` | 副本不可用或滞后、账户尚未就绪，或账户快照超出有效期 |
+| `trading_day_mismatch` / `account_positions_unconfirmed` / `evidence_error` | 交易日不匹配、事实仓位未与账本确认，或证据校验失败 |
+| `refreshing` | 读取期间账户 revision 变化，Manager 正在重查 |
+
+执行订阅只交付 `ready` 的完整目标。有效期结束或账户快照过期时，Manager 重新检查并在状态变化时通知订阅方。Exec 按批次和状态变化记录 `manager_plan_status`，正常空闲记为 `info`，阻塞状态记为 `warn`。只读订阅仍可收到无外部需求的零有效期目标。已接纳的目标继续受原有有效期和 Exec 风控约束。
+
 ## 数据维护与验证
 
 新库由当前 `migrations/schema.sql` 显式初始化；已有国内 Manager 数据库首次启用净额归因时须审核并执行 `scripts/apply_native_netting_schema.sql`，不在正常启动时执行 DDL。该脚本只创建 Manager 自有组合、成员、事件、外部需求预算和组级发布令牌表，执行库不变。已安装旧净额表或存在归因账本的数据库需要单独审核迁移，不能重跑建表脚本或覆盖账本。本次代码改动不自动执行线上 DDL 或重启服务。

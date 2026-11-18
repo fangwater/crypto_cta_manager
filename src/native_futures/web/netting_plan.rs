@@ -1,7 +1,10 @@
 //! Dedicated source-scoped readers see only the calculated account target.
 //! The Exec process owns target admission and order submission.
 use super::{netting::account_lots, netting::observed, *};
-use crate::native_futures::netting::{Quantities, store};
+use crate::native_futures::{
+    netting::{Quantities, store},
+    reader::Snapshot,
+};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::{collections::BTreeSet, pin::Pin, time::Duration};
@@ -12,7 +15,7 @@ mod wire {
     tonic::include_proto!("cn_futures_target");
 }
 use wire::{
-    ContractTarget, PlanSubscription, PlanUpdate, PositionTarget,
+    ContractTarget, PlanStatus, PlanSubscription, PlanUpdate, PositionTarget,
     manager_plans_server::{ManagerPlans, ManagerPlansServer},
 };
 
@@ -85,6 +88,68 @@ struct Plan {
     net_targets: Quantities,
 }
 
+struct PlanCheck {
+    status: PlanStatus,
+    batch_id: String,
+    target_revision: i64,
+    target: Option<Plan>,
+    recheck_us: Option<i64>,
+}
+
+impl PlanCheck {
+    fn without_batch(status: PlanStatus) -> Self {
+        Self {
+            status,
+            batch_id: String::new(),
+            target_revision: 0,
+            target: None,
+            recheck_us: None,
+        }
+    }
+
+    fn into_update(self) -> Result<PlanUpdate> {
+        Ok(PlanUpdate {
+            status: self.status.into(),
+            batch_id: self.batch_id,
+            target_revision: self.target_revision,
+            target: self.target.map(PositionTarget::try_from).transpose()?,
+        })
+    }
+
+    fn http_response(self, error: Option<ApiError>) -> Result<Response, ApiError> {
+        let mut response = match (error, self.target) {
+            (Some(error), _) => error.into_response(),
+            (None, Some(plan)) => Json(plan).into_response(),
+            (None, None) => StatusCode::NO_CONTENT.into_response(),
+        };
+        let headers = response.headers_mut();
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        );
+        let status = self
+            .status
+            .as_str_name()
+            .trim_start_matches("PLAN_STATUS_")
+            .to_ascii_lowercase();
+        headers.insert(
+            "x-cta-plan-status",
+            header::HeaderValue::from_str(&status).map_err(anyhow::Error::from)?,
+        );
+        if !self.batch_id.is_empty() {
+            headers.insert(
+                "x-cta-plan-batch-id",
+                header::HeaderValue::from_str(&self.batch_id).map_err(anyhow::Error::from)?,
+            );
+            headers.insert(
+                "x-cta-plan-target-revision",
+                header::HeaderValue::from(self.target_revision),
+            );
+        }
+        Ok(response)
+    }
+}
+
 fn authorize_reader(service: &Service, id: &str, token: Option<&str>) -> Result<(), ApiError> {
     let value = token
         .filter(|v| valid_token(v))
@@ -110,99 +175,145 @@ async fn read(
         &id,
         headers.get(PLAN_TOKEN).and_then(|v| v.to_str().ok()),
     )?;
-    let (reply, _) = plan(&service, &id, false).await?;
-    let mut response = match reply {
-        Some(plan) => Json(plan).into_response(),
-        None => StatusCode::NO_CONTENT.into_response(),
-    };
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    );
-    Ok(response)
+    match plan(&service, &id, false, false).await {
+        Ok(result) => result.http_response(None),
+        Err(error) if error.0 == StatusCode::SERVICE_UNAVAILABLE => {
+            PlanCheck::without_batch(PlanStatus::ReplicaNotReady).http_response(Some(error))
+        }
+        Err(error) => Err(error),
+    }
 }
 
-// The deadline is returned only when an active plan is waiting for account evidence.
 async fn plan(
     service: &Service,
     id: &str,
     wait_for_replica: bool,
-) -> Result<(Option<Plan>, Option<i64>), ApiError> {
+    observe_only: bool,
+) -> Result<PlanCheck, ApiError> {
     let Some(state) = store::load(&service.pool, id).await? else {
-        return Ok((None, None));
+        return Ok(PlanCheck::without_batch(PlanStatus::NoBatch));
     };
-    let (Some(day), Some(batch), Some((decision_us, expires_at_us))) = (
-        state.target_trading_day.as_ref(),
-        state.batch_id.as_ref(),
-        state.ctaker_lease(),
-    ) else {
-        return Ok((None, None));
+    let Some(batch) = state.batch_id.as_ref() else {
+        return Ok(PlanCheck::without_batch(PlanStatus::NoBatch));
+    };
+    let check = |status, target, recheck_us| PlanCheck {
+        status,
+        batch_id: batch.clone(),
+        target_revision: state.target_revision,
+        target,
+        recheck_us,
+    };
+    let payload = |trading_day, decision_us, expires_at_us| -> Result<Plan> {
+        Ok(Plan {
+            source_id: id.to_owned(),
+            batch_id: batch.clone(),
+            target_revision: state.target_revision,
+            trading_day,
+            decision_us,
+            expires_at_us,
+            net_targets: state.execution_plan()?.net_targets,
+        })
+    };
+    if observe_only {
+        let status = if state.external_demand_open {
+            PlanStatus::ObserveOnly
+        } else {
+            PlanStatus::NoExternalDemand
+        };
+        return Ok(check(
+            status,
+            Some(payload(
+                state.target_trading_day.clone().unwrap_or_default(),
+                state.decision_us,
+                0,
+            )?),
+            None,
+        ));
+    }
+    if !state.external_demand_open {
+        return Ok(check(PlanStatus::NoExternalDemand, None, None));
+    }
+    let Some(day) = state.target_trading_day.as_ref() else {
+        return Ok(check(PlanStatus::MissingTradingDay, None, None));
+    };
+    let Some((decision_us, expires_at_us)) = state.ctaker_lease() else {
+        return Ok(check(PlanStatus::EvidenceError, None, None));
     };
     let now = crate::native_futures::now_us();
-    if !state.external_demand_open || decision_us > now || expires_at_us <= now {
-        return Ok((None, None));
+    if decision_us > now {
+        return Ok(check(PlanStatus::DecisionInFuture, None, Some(decision_us)));
     }
-    let pending = (None, Some(expires_at_us));
+    if expires_at_us <= now {
+        return Ok(check(PlanStatus::LeaseExpired, None, None));
+    }
+    let pending = |status| check(status, None, Some(expires_at_us));
     let snapshot = match observed(service, id).await {
         Err(error) if wait_for_replica && error.0 == StatusCode::SERVICE_UNAVAILABLE => {
-            return Ok(pending);
+            return Ok(pending(PlanStatus::ReplicaNotReady));
         }
         outcome => outcome?,
     };
-    if !snapshot.snapshot_ready
-        || !snapshot.snapshot_current_runtime
-        || snapshot.replication_stale
-        || snapshot.positions_may_lag
-        || snapshot.projection_errors != 0
-        || snapshot.trading_day.as_ref() != Some(day)
-        || !snapshot
-            .state_observed_us
-            .is_some_and(|at| at <= now && now - at <= service.config.stale_secs as i64 * 1_000_000)
-    {
-        return Ok(pending);
+    if let Some(status) = snapshot_blocker(
+        &snapshot,
+        day,
+        service.config.stale_secs,
+        crate::native_futures::now_us(),
+    ) {
+        return Ok(pending(status));
     }
     let actual = account_lots(&snapshot, &state.contracts)?;
     if !state.account.iter().all(|(market, position)| {
         actual.get(market).copied().unwrap_or_default() == position.quantity()
     }) {
-        return Ok(pending);
+        return Ok(pending(PlanStatus::AccountPositionsUnconfirmed));
     }
-    let targets = state.execution_plan()?.net_targets;
     let current_revision = store::load(&service.pool, id).await?.map(|s| s.revision);
-    if current_revision != Some(state.revision) || crate::native_futures::now_us() >= expires_at_us
-    {
-        return Ok(pending);
+    if current_revision != Some(state.revision) {
+        return Ok(pending(PlanStatus::Refreshing));
     }
-    Ok((
-        Some(Plan {
-            source_id: id.to_owned(),
-            batch_id: batch.clone(),
-            target_revision: state.target_revision,
-            trading_day: day.clone(),
-            decision_us,
-            expires_at_us,
-            net_targets: targets,
-        }),
-        None,
+    if crate::native_futures::now_us() >= expires_at_us {
+        return Ok(check(PlanStatus::LeaseExpired, None, None));
+    }
+    let freshness_deadline = snapshot.state_observed_us.map(|observed| {
+        observed
+            .saturating_add(service.config.stale_secs as i64 * 1_000_000)
+            .saturating_add(1)
+    });
+    Ok(check(
+        PlanStatus::Ready,
+        Some(payload(day.clone(), decision_us, expires_at_us)?),
+        Some(
+            freshness_deadline
+                .unwrap_or(expires_at_us)
+                .min(expires_at_us),
+        ),
     ))
 }
 
-async fn observe_plan(service: &Service, id: &str) -> Result<Option<Plan>, ApiError> {
-    let Some(state) = store::load(&service.pool, id).await? else {
-        return Ok(None);
-    };
-    let Some(batch) = state.batch_id.as_ref() else {
-        return Ok(None);
-    };
-    Ok(Some(Plan {
-        source_id: id.to_owned(),
-        batch_id: batch.clone(),
-        target_revision: state.target_revision,
-        trading_day: state.target_trading_day.clone().unwrap_or_default(),
-        decision_us: state.decision_us,
-        expires_at_us: 0,
-        net_targets: state.execution_plan()?.net_targets,
-    }))
+fn snapshot_blocker(
+    snapshot: &Snapshot,
+    day: &str,
+    stale_secs: u64,
+    now: i64,
+) -> Option<PlanStatus> {
+    if snapshot.replication_stale {
+        Some(PlanStatus::ReplicaNotReady)
+    } else if snapshot.projection_errors != 0 {
+        Some(PlanStatus::EvidenceError)
+    } else if !snapshot.snapshot_ready || !snapshot.snapshot_current_runtime {
+        Some(PlanStatus::AccountNotReady)
+    } else if snapshot.trading_day.as_deref() != Some(day) {
+        Some(PlanStatus::TradingDayMismatch)
+    } else if snapshot.positions_may_lag {
+        Some(PlanStatus::AccountPositionsUnconfirmed)
+    } else if !snapshot
+        .state_observed_us
+        .is_some_and(|at| at <= now && now.saturating_sub(at) <= stale_secs as i64 * 1_000_000)
+    {
+        Some(PlanStatus::AccountSnapshotStale)
+    } else {
+        None
+    }
 }
 
 impl TryFrom<Plan> for PositionTarget {
@@ -266,21 +377,20 @@ impl ManagerPlans for PlanStream {
             let mut delay = Duration::from_millis(25);
             while !*shutdown.borrow() {
                 changes.borrow_and_update();
-                let (plan, deadline) = if observe_only {
-                    observe_plan(&service, &id).await.map(|plan| (plan, None))
-                } else {
-                    plan(&service, &id, true).await
-                }.map_err(|_| Status::unavailable("read Manager plan"))?;
-                let target = plan.map(PositionTarget::try_from).transpose()
+                let check = plan(&service, &id, true, observe_only).await
+                    .map_err(|_| Status::unavailable("read Manager plan"))?;
+                let recheck_us = check.recheck_us;
+                let wait_for_deadline = matches!(check.status, PlanStatus::Ready | PlanStatus::DecisionInFuture);
+                let update = check.into_update()
                     .map_err(|_| Status::internal("invalid Manager target"))?;
-                if previous.as_ref() != Some(&target) {
-                    previous = Some(target.clone());
-                    yield PlanUpdate { target };
+                if previous.as_ref() != Some(&update) {
+                    previous = Some(update.clone());
+                    yield update;
                 }
                 tokio::select! {
                     _ = shutdown.changed() => break,
                     _ = changes.changed() => delay = Duration::from_millis(25),
-                    _ = retry_snapshot(deadline, delay) => {
+                    _ = retry_snapshot(recheck_us, delay, wait_for_deadline) => {
                         delay = (delay * 2).min(Duration::from_secs(1));
                     }
                 }
@@ -290,10 +400,16 @@ impl ManagerPlans for PlanStream {
     }
 }
 
-async fn retry_snapshot(deadline: Option<i64>, delay: Duration) {
+async fn retry_snapshot(deadline: Option<i64>, delay: Duration, wait_for_deadline: bool) {
     if let Some(deadline) = deadline {
         let remaining = deadline.saturating_sub(crate::native_futures::now_us());
-        tokio::time::sleep(delay.min(Duration::from_micros(remaining.max(0) as u64))).await;
+        let remaining = Duration::from_micros(remaining.max(0) as u64);
+        tokio::time::sleep(if wait_for_deadline {
+            remaining
+        } else {
+            delay.min(remaining)
+        })
+        .await;
     } else {
         std::future::pending().await
     }
@@ -303,6 +419,28 @@ async fn retry_snapshot(deadline: Option<i64>, delay: Duration) {
 mod tests {
     use super::*;
     use wire::manager_plans_client::ManagerPlansClient;
+
+    #[test]
+    fn empty_http_plans_expose_distinct_statuses_without_a_target() {
+        for (status, name) in [
+            (PlanStatus::NoExternalDemand, "no_external_demand"),
+            (PlanStatus::AccountNotReady, "account_not_ready"),
+            (PlanStatus::LeaseExpired, "lease_expired"),
+        ] {
+            let check = PlanCheck {
+                status,
+                batch_id: "batch-7".into(),
+                target_revision: 7,
+                target: None,
+                recheck_us: None,
+            };
+            let response = check.http_response(None).unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.headers()["x-cta-plan-status"], name);
+            assert_eq!(response.headers()["x-cta-plan-batch-id"], "batch-7");
+            assert_eq!(response.headers()["x-cta-plan-target-revision"], "7");
+        }
+    }
 
     #[tokio::test]
     async fn manager_http_port_routes_grpc_with_source_scoped_plan_auth() {
