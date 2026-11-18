@@ -1,15 +1,13 @@
-import { ArrowDown, ArrowDownUp, ArrowUp, ChevronDown, Filter, LayoutDashboard, RefreshCw, Search, X } from 'lucide-react'
+import { ArrowDown, ArrowDownUp, ArrowUp, LayoutDashboard } from 'lucide-react'
 import { useState } from 'react'
 import { AppShell } from '../components/AppShell'
-import { useAuth } from '../components/AuthGate'
 import { Alert } from '../components/ui/Badge'
-import { Button } from '../components/ui/Button'
 import { useAccountOverview } from '../hooks/useAccountOverview'
 import { money } from '../format'
 import { routes } from '../lib/routes'
 import { accountVenueLabel } from '../lib/workspace'
 import { overviewAlertCount, overviewTotal, isExternalOverview, type OverviewRow } from '../lib/accountOverview'
-import './workspace.css'
+import { AccountOverviewTable, OverviewStat } from '../components/AccountOverviewTable'
 
 type ValueKey = 'yesterday_equity' | 'equity' | 'today_profit' | 'profit_percent' | 'long_position' | 'short_position' | 'long_leverage' | 'short_leverage' | 'net_position' | 'max_drawdown_15d_percent' | 'margin' | 'margin_percent' | 'date_ms' | 'queried_at_ms'
 type SortKey = 'account' | ValueKey
@@ -36,11 +34,9 @@ const sideClass = (key: SortKey) => key === 'long_position' || key === 'long_lev
 export function WorkspacePage() {
   const [date, setDate] = useState('')
   const { data, error, refreshing, autoRefresh, setAutoRefresh, countdown, refresh } = useAccountOverview(date)
-  const { user } = useAuth()
   const [search, setSearch] = useState('')
   const [venue, setVenue] = useState('all')
   const [kind, setKind] = useState('all')
-  const [filterOpen, setFilterOpen] = useState(false)
   const [hidden, setHidden] = useState<Set<string>>(new Set())
   const [sort, setSort] = useState<{ key: SortKey; descending: boolean }>({ key: 'account', descending: false })
   const accounts = data?.accounts ?? []
@@ -74,42 +70,22 @@ export function WorkspacePage() {
         <label className="overview-auto"><input type="checkbox" checked={autoRefresh} onChange={event => setAutoRefresh(event.target.checked)} />自动刷新<span>{refreshing ? '更新中' : autoRefresh ? `${countdown} 秒` : '已暂停'}</span></label>
       </div>
       <div className="overview-stats" aria-live="polite">
-        <Summary label="账户数" value={data ? String(rows.length) : '—'} />
-        <Summary label="总权益" value={number(data && !externalPending ? overviewTotal(rows, 'equity') : null)} title="当前筛选账户的权益合计；有账户缺失或过期数据时不显示不完整合计" />
-        <Summary label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；CTA 使用权益变化，FR/MM 使用已实现净收益" />
-        <Summary label="杠杆告警" value={leverageAlerts == null ? '—' : String(leverageAlerts)} title={data?.alerts.long_leverage_limit == null || data?.alerts.short_leverage_limit == null ? '尚未提供原页面的杠杆告警阈值' : `多头 > ${data.alerts.long_leverage_limit}，空头 > ${data.alerts.short_leverage_limit}`} warn={!!leverageAlerts} />
-        <Summary label="超时告警" value={timeoutAlerts == null ? '—' : String(timeoutAlerts)} title={data?.alerts.timeout_secs == null ? '尚未提供原页面的超时告警阈值' : `权益数据超过 ${data.alerts.timeout_secs} 秒未更新`} warn={!!timeoutAlerts} />
+        <OverviewStat label="账户数" value={data ? String(rows.length) : '—'} />
+        <OverviewStat label="总权益" value={number(data && !externalPending ? overviewTotal(rows, 'equity') : null)} title="当前筛选账户的权益合计；有账户缺失或过期数据时不显示不完整合计" />
+        <OverviewStat label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；CTA 使用权益变化，FR/MM 使用已实现净收益" />
+        <OverviewStat label="杠杆告警" value={leverageAlerts == null ? '—' : String(leverageAlerts)} title={data?.alerts.long_leverage_limit == null || data?.alerts.short_leverage_limit == null ? '尚未提供原页面的杠杆告警阈值' : `多头 > ${data.alerts.long_leverage_limit}，空头 > ${data.alerts.short_leverage_limit}`} warn={!!leverageAlerts} />
+        <OverviewStat label="超时告警" value={timeoutAlerts == null ? '—' : String(timeoutAlerts)} title={data?.alerts.timeout_secs == null ? '尚未提供原页面的超时告警阈值' : `权益数据超过 ${data.alerts.timeout_secs} 秒未更新`} warn={!!timeoutAlerts} />
       </div>
     </section>
     {error && <Alert tone="error" className="mb-4">更新失败：{error}。{data ? '当前保留上次数据。' : '请刷新重试。'}</Alert>}
     {externalIssues && <Alert tone="warning" className="mb-4">外部账户正在同步或数据已过期。已有数据继续展示；含缺失或过期账户的汇总暂不显示。</Alert>}
     {rows.some(row => row.account_kind === 'fr' || row.account_kind === 'mm') && <p className="mb-4 text-sm text-muted">FR/MM 今日盈利 = 已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息，约每 5 分钟更新。{rows.some(row => row.account_kind === 'fr') && 'FR 减仓留下的单腿盈亏，按数量计入两腿平仓或恢复对冲的当天。'}权益及权益回撤反映账户净值。</p>}
-    <section className="overview-panel" aria-labelledby="overview-table-title">
-      <div className="overview-table-toolbar">
-        <div className="overview-table-title"><h2 id="overview-table-title">账户监控</h2><span>{user.username}</span></div>
-        <div className="overview-table-actions">
-          <label className="overview-search"><Search size={16} /><input type="search" aria-label="搜索账户" placeholder="搜索账户" value={search} onChange={event => setSearch(event.target.value)} /></label>
-          <Button type="button" onClick={() => setFilterOpen(value => !value)} aria-expanded={filterOpen} aria-controls="overview-account-filter"><Filter size={14} />账户筛选<ChevronDown size={13} /></Button>
-          <Button type="button" onClick={() => void refresh()} disabled={refreshing} aria-label="刷新数据"><RefreshCw size={14} /></Button>
-        </div>
-      </div>
-      {filterOpen && <div id="overview-account-filter" className="overview-account-filter">
-        <div><strong>选择展示的账户</strong><button type="button" onClick={() => setHidden(new Set())}>全选</button><button type="button" onClick={() => setHidden(new Set(accounts.map(account => account.source_id)))}>全不选</button><button type="button" aria-label="收起账户筛选" onClick={() => setFilterOpen(false)}><X size={16} /></button></div>
-        <fieldset><legend className="sr-only">展示账户</legend>{accounts.map(account => <label key={account.source_id}><input type="checkbox" checked={!hidden.has(account.source_id)} onChange={() => setHidden(previous => { const next = new Set(previous); if (next.has(account.source_id)) next.delete(account.source_id); else next.add(account.source_id); return next })} />{account.account}</label>)}</fieldset>
-      </div>}
-      <div className="overview-table-scroll" tabIndex={0} role="region" aria-label="账户监控数据表，可横向滚动" aria-busy={refreshing || data?.loading}>
-        <table className="overview-table">
-          <thead><tr><th scope="col" className="overview-index">#</th>{sortColumn('account', '账号')}{columns.map(column => sortColumn(column.key, column.label))}</tr></thead>
-          <tbody>{!data && !error ? Array.from({ length: 6 }, (_, index) => <tr key={index} className="overview-skeleton" aria-hidden="true">{Array.from({ length: 16 }, (_, col) => <td key={col}><span /></td>)}</tr>) : rows.map((row, index) => <AccountRow key={row.source_id} row={row} index={index} />)}</tbody>
-        </table>
-        {data && rows.length === 0 && <div className="overview-empty">没有匹配的账户</div>}
-      </div>
-    </section>
+    <AccountOverviewTable accounts={accounts} search={search} setSearch={setSearch} hidden={hidden} setHidden={setHidden}
+      refresh={refresh} refreshing={refreshing} loading={data?.loading} empty={!!data && rows.length === 0}
+      headings={<><th scope="col" className="overview-index">#</th>{sortColumn('account', '账号')}{columns.map(column => sortColumn(column.key, column.label))}</>}>
+      {!data && !error ? Array.from({ length: 6 }, (_, index) => <tr key={index} className="overview-skeleton" aria-hidden="true">{Array.from({ length: 16 }, (_, col) => <td key={col}><span /></td>)}</tr>) : rows.map((row, index) => <AccountRow key={row.source_id} row={row} index={index} />)}
+    </AccountOverviewTable>
   </AppShell>
-}
-
-function Summary({ label, value, title, warn }: { label: string; value: string; title?: string; warn?: boolean }) {
-  return <div className={`overview-stat ${warn ? 'warn' : ''}`} title={title}><p>{label}</p><strong>{value}</strong></div>
 }
 
 function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
