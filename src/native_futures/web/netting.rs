@@ -211,7 +211,6 @@ async fn initialize(
             && crate::native_futures::now_us() - t <= s.config.stale_secs as i64 * 1_000_000
     });
     if !fresh
-        || !snapshot.snapshot_ready
         || !snapshot.snapshot_current_runtime
         || snapshot.positions_may_lag
         || snapshot.replication_stale
@@ -459,8 +458,7 @@ async fn release_demands(
     }
     let snapshot = observed(&s, &id).await?;
     let now = crate::native_futures::now_us();
-    if !snapshot.snapshot_ready
-        || !snapshot.snapshot_current_runtime
+    if !snapshot.snapshot_current_runtime
         || snapshot.positions_may_lag
         || snapshot.replication_stale
         || !snapshot

@@ -104,8 +104,8 @@ pub fn capture_current(
 ) -> Result<Anchor> {
     ensure!(
         snapshot.source_id == source.id
-            && snapshot.snapshot_ready
             && snapshot.snapshot_current_runtime
+            && matches!(snapshot.status.as_str(), "observing" | "blocked")
             && !snapshot.positions_may_lag
             && !snapshot.replication_stale
             && snapshot.projection_errors == 0,
@@ -123,6 +123,11 @@ pub fn capture_current(
         .context("missing current state observation time")?;
     let raw = journal_entry(db, sequence)?;
     let event: Value = serde_json::from_slice(&raw)?;
+    let state = &event["value"]["state"];
+    // Reconciliation proves factual account completeness independently of
+    // permission to submit orders (for example, unconfirmed settlement).
+    // An arbitrary unready `state` event cannot establish that proof.
+    let reconciled = event["value"]["type"] == "reconciled";
     ensure!(
         event["sequence"].as_i64() == Some(sequence)
             && event["received_us"].as_i64() == Some(at)
@@ -131,8 +136,10 @@ pub fn capture_current(
                 event["value"]["type"].as_str(),
                 Some("state" | "reconciled")
             )
-            && event["value"]["state"]["ready"] == true
-            && event["value"]["state"]["positions"] == Value::Array(snapshot.positions.clone()),
+            && state["connected"] == true
+            && state["orders"].is_array()
+            && (state["ready"] == true || reconciled)
+            && state["positions"] == Value::Array(snapshot.positions.clone()),
         "current snapshot conflicts with immutable native state evidence"
     );
     let anchor = Anchor {

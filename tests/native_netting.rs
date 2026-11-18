@@ -44,7 +44,7 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
         .connect_with(options.clone().database(&database))
         .await?;
     postgres::initialize(&pool).await?;
-    sqlx::raw_sql("INSERT INTO cta_users(user_id,username,password_hash) VALUES(1,'operator','test-only'); INSERT INTO cta_order_sources(source_id,account_label,venue_label,rocksdb_path) VALUES('source','test','ctp','/isolated/test'); INSERT INTO cta_position_strategies(strategy_name,updated_at_us,created_by_user_id) VALUES('a-1h',1,1),('b-1h',1,1);").execute(&pool).await?;
+    sqlx::raw_sql("INSERT INTO cta_users(user_id,username,password_hash,role) VALUES(1,'operator','test-only','admin'); INSERT INTO cta_order_sources(source_id,account_label,venue_label,rocksdb_path) VALUES('source','test','ctp','/isolated/test'); INSERT INTO cta_position_strategies(strategy_name,updated_at_us,created_by_user_id) VALUES('a-1h',1,1),('b-1h',1,1);").execute(&pool).await?;
     // Rehearse explicit maintenance on an existing catalog, not only fresh DDL.
     sqlx::raw_sql("DROP TABLE cta_native_netting_publishers; DROP TABLE cta_native_netting_demands; DROP TABLE cta_native_netting_members; DROP TABLE cta_native_netting_events; DROP TABLE cta_native_netting_portfolios;").execute(&pool).await?;
     sqlx::raw_sql(include_str!("../scripts/apply_native_netting_schema.sql"))
@@ -74,7 +74,7 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
     };
     let anchor_us = now_us() - 10_000_000;
     let evidence = serde_json::to_vec(
-        &json!({"sequence":10,"received_us":anchor_us,"projection_error":null,"value":{"type":"reconciled","state":{"ready":true,"positions":[],"orders":[],"trading_day":"20261117"}}}),
+        &json!({"sequence":10,"received_us":anchor_us,"projection_error":null,"value":{"type":"reconciled","state":{"ready":false,"connected":true,"reason":"settlement not confirmed; read-only queries remain available","positions":[],"orders":[],"trading_day":"20261117"}}}),
     )?;
     native.put_cf(
         native.cf_handle("cn_trading_events").unwrap(),
@@ -109,7 +109,38 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
             note: initial.note.clone(),
         },
     )?;
-    store::initialize(&pool, &state, &initial, 1).await?;
+    let config: crypto_cta_manager::native_futures::config::Config = toml::from_str(&format!(
+        "mode = 'cn_futures'\nsecondary_root = '{}'\n[[sources]]\nid = 'source'\naccount = 'test'\nadapter = 'ctp'\nrocksdb_path = '{}'\n",
+        temp.path().join("secondary").display(),
+        primary.display()
+    ))?;
+    // Exercise real HTTP admission with complete reconciliation while broker
+    // settlement remains unconfirmed. Initialization must not enable trading.
+    {
+        let service =
+            crypto_cta_manager::native_futures::web::Service::new(config.clone(), pool.clone())?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!(
+            "http://{}/api/native/sources/source/netting",
+            listener.local_addr()?
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, service.router()).await });
+        let session = crypto_cta_manager::auth::create_session(&pool, 1).await?.0;
+        let accepted = reqwest::Client::builder()
+            .no_proxy()
+            .build()?
+            .post(url)
+            .header("Cookie", format!("cn_cta_session={session}"))
+            .json(&initial)
+            .send()
+            .await?;
+        let status = accepted.status();
+        let receipt: Value = accepted.json().await?;
+        assert_eq!(status, reqwest::StatusCode::OK, "{receipt}");
+        assert_eq!(receipt["revision"], 0);
+        server.abort();
+        let _ = server.await;
+    }
     store::initialize(&pool, &state, &initial, 1).await?;
     let mut request = netting::TargetBatch {
         strategy_group: "test".into(),
@@ -219,11 +250,6 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
     sqlx::raw_sql("UPDATE cta_users SET role='admin' WHERE user_id=1; INSERT INTO cta_users(user_id,username,password_hash) VALUES(2,'viewer','test-only'); INSERT INTO cta_user_source_permissions(user_id,source_id,access_level) VALUES(2,'source','configure');").execute(&pool).await?;
     let admin_token = crypto_cta_manager::auth::create_session(&pool, 1).await?.0;
     let viewer_token = crypto_cta_manager::auth::create_session(&pool, 2).await?.0;
-    let config: crypto_cta_manager::native_futures::config::Config = toml::from_str(&format!(
-        "mode = 'cn_futures'\nsecondary_root = '{}'\n[[sources]]\nid = 'source'\naccount = 'test'\nadapter = 'ctp'\nrocksdb_path = '{}'\n",
-        temp.path().join("secondary").display(),
-        primary.display()
-    ))?;
     let service = crypto_cta_manager::native_futures::web::Service::new(config, pool.clone())?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = format!("http://{}", listener.local_addr()?);

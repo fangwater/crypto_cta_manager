@@ -68,6 +68,64 @@ fn current_anchor_requires_the_exact_complete_snapshot_and_survives_reopen() {
 }
 
 #[test]
+fn readonly_reconciliation_proves_holdings_without_enabling_trading() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = temp.path().join("primary");
+    let db = database(&primary);
+    let src = source(&primary);
+    let now = super::super::now_us();
+    put(
+        &db,
+        1,
+        &json!({"sequence":1,"received_us":now-1,"projection_error":null,"value":{"type":"runtime_start"}}),
+    );
+    let mut event = json!({"sequence":2,"received_us":now,"projection_error":null,"value":{"type":"reconciled","state":{"ready":false,"connected":true,"reason":"settlement not confirmed; read-only queries remain available","trading_day":"20261118","positions":[],"orders":[]}}});
+    put(&db, 2, &event);
+    let snapshot = reader::read(&src, &temp.path().join("secondary"), 10, 30).unwrap();
+    assert!(!snapshot.snapshot_ready);
+    assert_eq!(snapshot.status, "blocked");
+    let anchor = capture_current(
+        &src,
+        &db,
+        &snapshot,
+        2,
+        "verified flat read-only account".into(),
+    )
+    .unwrap();
+    validate_anchor(&src, &db, &anchor).unwrap();
+    for status in ["stopped", "disconnected", "recovering", "stale"] {
+        let mut invalid = snapshot.clone();
+        invalid.status = status.into();
+        assert!(capture_current(&src, &db, &invalid, 2, "incomplete account".into()).is_err());
+    }
+    event["value"]["type"] = json!("state");
+    put(&db, 2, &event);
+    assert!(
+        capture_current(
+            &src,
+            &db,
+            &snapshot,
+            2,
+            "unready state is not reconciliation".into()
+        )
+        .is_err()
+    );
+    event["value"]["type"] = json!("reconciled");
+    event["value"]["state"]["connected"] = json!(false);
+    put(&db, 2, &event);
+    assert!(
+        capture_current(
+            &src,
+            &db,
+            &snapshot,
+            2,
+            "disconnected reconciliation".into()
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn live_fill_requires_matching_raw_identity_direction_and_live_origin() {
     let temp = tempfile::tempdir().unwrap();
     let db = database(temp.path());

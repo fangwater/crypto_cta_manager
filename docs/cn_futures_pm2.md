@@ -38,6 +38,10 @@ Manager 的 `--frontend-root` 提供已构建网页和同源 API，默认地址�
 的私有登录文件，操作者自行读取；不在日志或 Git 中保存密码。
 通过既有反向代理或 SSH 转发访问；API 保持 loopback。没有启动 Vite 开发服务器。
 
+替换已校验的 `run/current` 后，只重启网页进程使用
+`scripts/restart_native_manager.sh --execute`；省略参数先查看计划。
+脚本核对现有进程的工作目录并备份日志，不重启同步器、隧道或柜台观察进程。
+
 ## 云端
 
 云端仅安装 `sync-server`、launcher、PM2 配置及独立导出配置，路径与执行环境分离。
