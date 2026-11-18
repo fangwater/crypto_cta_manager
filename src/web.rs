@@ -6634,6 +6634,19 @@ mod tests {
             .klines
             .save_page("BTCUSDT", start - minute, end, &bars)
             .unwrap();
+        state.theoretical_targets.refresh();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = state.theoretical_targets.status();
+                assert!(status.last_error.is_none(), "{:?}", status.last_error);
+                if status.ready && !status.loading {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("test target history must finish warming");
         let snapshot = rebuild_timeline_snapshot_projected(
             state.clone(),
             TimelineQuery {
