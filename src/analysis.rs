@@ -4,28 +4,49 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
 
-static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+static POOL: OnceLock<AnalysisPools> = OnceLock::new();
+
+struct AnalysisPools {
+    general: rayon::ThreadPool,
+    recent_nav: rayon::ThreadPool,
+}
+
+impl AnalysisPools {
+    fn new(threads: usize) -> Result<Self> {
+        Ok(Self {
+            general: rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|index| format!("cta-analysis-{index}"))
+                .build()?,
+            // Recent immutable FIFO queries must not wait behind a long archive
+            // replay or theoretical calculation in a single-thread general pool.
+            // One worker bounds concurrency; historical replay keeps its budget.
+            recent_nav: rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .thread_name(|_| "cta-nav-query".to_owned())
+                .build()?,
+        })
+    }
+}
 
 pub fn initialize(threads: usize) -> Result<()> {
     if POOL.get().is_none() {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|index| format!("cta-analysis-{index}"))
-            .build()?;
+        let pool = AnalysisPools::new(threads)?;
         let _ = POOL.set(pool);
     }
     Ok(())
 }
 
 pub fn run<T: Send>(work: impl FnOnce() -> T + Send) -> T {
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(default_threads())
-            .thread_name(|index| format!("cta-analysis-{index}"))
-            .build()
-            .expect("create analysis CPU pool")
-    })
-    .install(work)
+    POOL.get_or_init(|| AnalysisPools::new(default_threads()).expect("create analysis CPU pools"))
+        .general
+        .install(work)
+}
+
+pub(crate) fn run_recent_nav<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    POOL.get_or_init(|| AnalysisPools::new(default_threads()).expect("create analysis CPU pools"))
+        .recent_nav
+        .install(work)
 }
 
 pub fn default_threads() -> usize {
@@ -137,6 +158,43 @@ impl<K: Ord + Clone, V> QueryCache<K, V> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn recent_nav_completes_while_single_general_worker_is_busy() {
+        use std::sync::{Condvar, mpsc};
+        use std::time::Duration;
+
+        let pools = Arc::new(AnalysisPools::new(1).unwrap());
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (entered, started) = mpsc::channel();
+        let background = {
+            let pools = pools.clone();
+            let release = release.clone();
+            std::thread::spawn(move || {
+                pools.general.install(|| {
+                    entered.send(()).unwrap();
+                    let (ready, changed) = &*release;
+                    drop(
+                        changed
+                            .wait_while(ready.lock().unwrap(), |ready| !*ready)
+                            .unwrap(),
+                    );
+                });
+            })
+        };
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (completed, received) = mpsc::channel();
+        let query = std::thread::spawn(move || {
+            completed.send(pools.recent_nav.install(|| 42)).unwrap();
+        });
+        let result = received.recv_timeout(Duration::from_secs(5));
+        let (ready, changed) = &*release;
+        *ready.lock().unwrap() = true;
+        changed.notify_all();
+        background.join().unwrap();
+        query.join().unwrap();
+        assert_eq!(result.unwrap(), 42);
+    }
 
     #[test]
     fn coalesces_concurrent_queries_and_retries_errors() {

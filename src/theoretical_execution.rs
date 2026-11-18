@@ -98,20 +98,22 @@ pub fn select_reference(models: &mut ExecutionModels, reference: ExecutionModel)
 
 pub fn references(config: &AppConfig, sources: &[String]) -> Result<Vec<ExecutionModel>> {
     let models = resolve_models(config, sources)?;
-    Ok(
-        if models
-            .values()
-            .any(|model| *model == ExecutionModel::Vwap3m)
-        {
-            vec![
-                ExecutionModel::Vwap3m,
-                ExecutionModel::Twap3m,
-                ExecutionModel::InstantTaker,
-            ]
-        } else {
-            vec![ExecutionModel::Twap5m]
-        },
-    )
+    Ok(references_for_models(&models))
+}
+
+pub(crate) fn references_for_models(models: &ExecutionModels) -> Vec<ExecutionModel> {
+    if models
+        .values()
+        .any(|model| *model == ExecutionModel::Vwap3m)
+    {
+        vec![
+            ExecutionModel::Vwap3m,
+            ExecutionModel::Twap3m,
+            ExecutionModel::InstantTaker,
+        ]
+    } else {
+        vec![ExecutionModel::Twap5m]
+    }
 }
 
 pub fn resolve_models(config: &AppConfig, sources: &[String]) -> Result<ExecutionModels> {

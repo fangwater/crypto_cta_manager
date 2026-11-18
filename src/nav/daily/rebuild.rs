@@ -576,6 +576,7 @@ pub(in crate::nav) fn build_with_state(
         inputs,
         results: Arc::new(crate::analysis::QueryCache::new(0)),
         mark_plans: Arc::new(crate::analysis::QueryCache::new(0)),
+        pending_priced: Default::default(),
         daily: Some(daily.clone()),
         funding_fingerprints: BTreeMap::new(),
         funding_prefixes: BTreeMap::new(),

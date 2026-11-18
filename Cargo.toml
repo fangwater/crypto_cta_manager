@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 flate2 = "1"
+futures-executor = "0.3"
 arrow-array = "59.1.0"
 arrow-ipc = { version = "59.1.0", features = ["zstd"] }
 arrow-schema = "59.1.0"

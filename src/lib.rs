@@ -30,6 +30,7 @@ pub mod redis_runtime;
 pub mod reload_notify;
 pub mod rocks_source;
 pub mod runtime_mode;
+pub mod shares_history;
 pub mod snapshot;
 pub mod strategy_catalog;
 pub mod target_proxy;

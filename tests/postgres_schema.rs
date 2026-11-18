@@ -3,6 +3,9 @@
 //! Each test creates and removes its own database. TCP and production sockets
 //! are deliberately excluded.
 
+#[path = "postgres_schema/shares_history.rs"]
+mod shares_history;
+
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -259,7 +262,7 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
         name: "Legacy alias".into(),
         bindings: vec![],
     };
-    virtual_accounts::save(&db.pool, "model", &legacy, 1).await?;
+    virtual_accounts::save(&db.pool, "model", &legacy, 1, None).await?;
     let mut tasks = Vec::new();
     for index in 1..=8 {
         let pool = db.pool.clone();
@@ -297,7 +300,7 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
             multiplier: 2.0,
         }],
     };
-    virtual_accounts::set_configuration(&db.pool, "test-source", &follow, 10).await?;
+    virtual_accounts::set_configuration(&db.pool, "test-source", &follow, 10, None).await?;
     virtual_accounts::save(
         &db.pool,
         "virtual01",
@@ -307,6 +310,7 @@ async fn virtual_numbers_allocate_concurrently_and_alias_edits_preserve_identity
             bindings: vec![],
         },
         11,
+        None,
     )
     .await?;
     assert_eq!(
@@ -370,9 +374,15 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
         children,
     };
     let config = |follows| AccountConfiguration::Follow { follows };
-    virtual_accounts::save(pool, "a", &request(vec![leaf(2.0)], None), 1).await?;
-    virtual_accounts::set_configuration(pool, "other-source", &config(vec![child("a", 3.0)]), 2)
-        .await?;
+    virtual_accounts::save(pool, "a", &request(vec![leaf(2.0)], None), 1, None).await?;
+    virtual_accounts::set_configuration(
+        pool,
+        "other-source",
+        &config(vec![child("a", 3.0)]),
+        2,
+        None,
+    )
+    .await?;
     let original = strategy_catalog::load_account_studio(pool, "other-source").await?;
     let catalog_before = serde_json::to_value(virtual_accounts::list(pool).await?)?;
     // Add the new table to a previous-schema database without changing any targets or history.
@@ -397,6 +407,7 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
         "b",
         &request(vec![leaf(1.0)], Some(vec![child("a", 3.0)])),
         3,
+        None,
     )
     .await?;
     virtual_accounts::save(
@@ -404,6 +415,7 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
         "root",
         &request(vec![], Some(vec![child("a", 0.5), child("b", 4.0)])),
         4,
+        None,
     )
     .await?;
     // root = a*0.5 + (1 + a*3)*4 = 29; account also follows a directly.
@@ -412,6 +424,7 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
         "test-source",
         &config(vec![child("root", 2.0), child("a", 1.0)]),
         5,
+        None,
     )
     .await?;
     let studio = strategy_catalog::load_account_studio(pool, "test-source").await?;
@@ -443,7 +456,7 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
     sqlx::query("DELETE FROM cta_follow_publish_queue")
         .execute(pool)
         .await?;
-    virtual_accounts::save(pool, "a", &request(vec![leaf(4.0)], None), 6).await?;
+    virtual_accounts::save(pool, "a", &request(vec![leaf(4.0)], None), 6, None).await?;
     // Both the direct path and diamond ancestors recompute; one queue update per account/binding.
     let updated = strategy_catalog::load_account_studio(pool, "test-source").await?;
     assert_eq!(updated.bindings[0].shares, 112.0);
@@ -491,7 +504,11 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
                 .await
                 .is_err()
         );
-        assert!(virtual_accounts::save(pool, "a", &bad, 7).await.is_err());
+        assert!(
+            virtual_accounts::save(pool, "a", &bad, 7, None)
+                .await
+                .is_err()
+        );
         assert_eq!(
             serde_json::to_value(virtual_accounts::list(pool).await?)?,
             before
@@ -504,7 +521,7 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
         assert_eq!(queue_after, queue_before);
     }
     // Old clients can rename a parent without erasing its children.
-    virtual_accounts::save(pool, "root", &request(vec![], None), 8).await?;
+    virtual_accounts::save(pool, "root", &request(vec![], None), 8, None).await?;
     assert_eq!(
         strategy_catalog::load_account_studio(pool, "test-source").await?,
         updated
@@ -521,7 +538,7 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
     );
 
     // Explicitly clearing root keeps the separate direct follow of a active.
-    virtual_accounts::save(pool, "root", &request(vec![], Some(vec![])), 9).await?;
+    virtual_accounts::save(pool, "root", &request(vec![], Some(vec![])), 9, None).await?;
     assert_eq!(
         strategy_catalog::load_account_studio(pool, "test-source")
             .await?
@@ -529,8 +546,14 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
             .shares,
         4.0
     );
-    virtual_accounts::set_configuration(pool, "test-source", &config(vec![child("root", 1.0)]), 10)
-        .await?;
+    virtual_accounts::set_configuration(
+        pool,
+        "test-source",
+        &config(vec![child("root", 1.0)]),
+        10,
+        None,
+    )
+    .await?;
     let stopped = strategy_catalog::load_account_studio(pool, "test-source").await?;
     assert_eq!(stopped.bindings.len(), 1);
     assert_eq!(stopped.bindings[0].shares, 0.0);
@@ -551,6 +574,7 @@ async fn nested_virtuals_preserve_maintenance_state_propagate_and_rollback() -> 
         "other-source",
         &AccountConfiguration::Independent,
         11,
+        None,
     )
     .await?;
     assert!(virtual_accounts::delete(pool, "a").await?);
@@ -593,7 +617,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
         name: "A".into(),
         bindings: vec![binding("shared", shares), binding("only-a", 4.0)],
     };
-    virtual_accounts::save(&db.pool, "a", &template(2.0), 1).await?;
+    virtual_accounts::save(&db.pool, "a", &template(2.0), 1, None).await?;
     virtual_accounts::save(
         &db.pool,
         "b",
@@ -603,6 +627,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
             bindings: vec![binding("shared", 5.0), binding("only-b", 6.0)],
         },
         1,
+        None,
     )
     .await?;
     // Recreate the old single-follow key and prove maintenance preserves its rows.
@@ -635,7 +660,8 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
             }]
         }
     );
-    virtual_accounts::set_configuration(&db.pool, "test-source", &config(3.0, 0.5), 2).await?;
+    virtual_accounts::set_configuration(&db.pool, "test-source", &config(3.0, 0.5), 2, None)
+        .await?;
     let studio = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
     assert_eq!(studio.configuration, config(3.0, 0.5));
     assert_eq!(
@@ -658,7 +684,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
             .len(),
         3
     );
-    virtual_accounts::save(&db.pool, "a", &template(4.0), 3).await?;
+    virtual_accounts::save(&db.pool, "a", &template(4.0), 3, None).await?;
     let updated = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
     assert_eq!(
         updated
@@ -680,7 +706,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
         );
     }
     assert!(
-        virtual_accounts::save(&db.pool, "a", &conflict, 4)
+        virtual_accounts::save(&db.pool, "a", &conflict, 4, None)
             .await
             .is_err()
     );
@@ -705,7 +731,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
         ],
     };
     assert!(
-        virtual_accounts::set_configuration(&db.pool, "test-source", &bad_config, 4)
+        virtual_accounts::set_configuration(&db.pool, "test-source", &bad_config, 4, None)
             .await
             .is_err()
     );
@@ -713,7 +739,8 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
         strategy_catalog::load_account_studio(&db.pool, "test-source").await?,
         updated
     );
-    virtual_accounts::set_configuration(&db.pool, "test-source", &config(0.0, 0.5), 5).await?;
+    virtual_accounts::set_configuration(&db.pool, "test-source", &config(0.0, 0.5), 5, None)
+        .await?;
     let paused = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
     assert_eq!(
         paused
@@ -734,7 +761,8 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
         0.0
     );
     // Removing B's shared row keeps A's contribution when A is resumed.
-    virtual_accounts::set_configuration(&db.pool, "test-source", &config(3.0, 0.5), 6).await?;
+    virtual_accounts::set_configuration(&db.pool, "test-source", &config(3.0, 0.5), 6, None)
+        .await?;
     virtual_accounts::save(
         &db.pool,
         "b",
@@ -744,6 +772,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
             bindings: vec![binding("only-b", 6.0)],
         },
         7,
+        None,
     )
     .await?;
     assert_eq!(
@@ -763,7 +792,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
             multiplier: 0.5,
         }],
     };
-    virtual_accounts::set_configuration(&db.pool, "test-source", &only_b, 8).await?;
+    virtual_accounts::set_configuration(&db.pool, "test-source", &only_b, 8, None).await?;
     let detached = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
     assert_eq!(
         detached
@@ -779,6 +808,7 @@ async fn multiple_virtual_follows_migrate_combine_recompute_and_rollback_atomica
         "test-source",
         &AccountConfiguration::Independent,
         9,
+        None,
     )
     .await?;
     assert_eq!(
@@ -823,7 +853,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
         order_strategy_name: "order-a".into(),
         shares: 9.0,
     };
-    strategy_catalog::save_binding(&db.pool, "test-source", &independent, 1).await?;
+    strategy_catalog::save_binding(&db.pool, "test-source", &independent, 1, None).await?;
     let template = |shares, order: &str| SaveVirtualAccount {
         children: None,
         name: "Model".into(),
@@ -834,7 +864,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
             shares,
         }],
     };
-    virtual_accounts::save(&db.pool, "model", &template(2.0, "order-a"), 2).await?;
+    virtual_accounts::save(&db.pool, "model", &template(2.0, "order-a"), 2, None).await?;
     // Virtual identity never enters the Exec account catalog.
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -855,6 +885,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
                 }],
             },
             3,
+            None,
         )
         .await?;
     }
@@ -901,6 +932,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
             }],
         },
         3,
+        None,
     )
     .await?;
     // Explicit follow application republishes even unchanged desired bindings
@@ -912,7 +944,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
         2
     );
     assert!(
-        strategy_catalog::save_binding(&db.pool, "test-source", &independent, 4)
+        strategy_catalog::save_binding(&db.pool, "test-source", &independent, 4, None)
             .await
             .is_err()
     );
@@ -930,7 +962,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
             .any(|p| p.error.as_deref() == Some("runtime unavailable"))
     );
     restarted_pool.close().await;
-    virtual_accounts::save(&db.pool, "model", &template(4.0, "order-b"), 5).await?;
+    virtual_accounts::save(&db.pool, "model", &template(4.0, "order-b"), 5, None).await?;
     let studio = strategy_catalog::load_account_studio(&db.pool, "test-source").await?;
     let active = studio
         .bindings
@@ -959,7 +991,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
         }],
     };
     assert!(
-        virtual_accounts::save(&db.pool, "model", &incompatible, 6)
+        virtual_accounts::save(&db.pool, "model", &incompatible, 6, None)
             .await
             .is_err()
     );
@@ -987,6 +1019,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
             }],
         },
         7,
+        None,
     )
     .await?;
     assert!(
@@ -1001,6 +1034,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
         "test-source",
         &AccountConfiguration::Independent,
         8,
+        None,
     )
     .await?;
     assert!(matches!(
@@ -1022,6 +1056,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
             bindings: vec![],
         },
         9,
+        None,
     )
     .await?;
     assert_eq!(
@@ -1036,6 +1071,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
         "other-source",
         &AccountConfiguration::Independent,
         10,
+        None,
     )
     .await?;
     assert!(virtual_accounts::delete(&db.pool, "model").await?);
@@ -1043,7 +1079,7 @@ async fn virtual_follow_replaces_scales_stops_and_preserves_durable_delivery() -
     sqlx::query("DELETE FROM cta_follow_publish_queue")
         .execute(&db.pool)
         .await?;
-    strategy_catalog::save_binding(&db.pool, "test-source", &independent, 11).await?;
+    strategy_catalog::save_binding(&db.pool, "test-source", &independent, 11, None).await?;
     assert_eq!(
         strategy_catalog::load_account_studio(&db.pool, "test-source")
             .await?
@@ -1086,6 +1122,7 @@ async fn virtual_owner_and_manager_grants_survive_edits_and_revoke_immediately()
             bindings: vec![],
         },
         2,
+        None,
     )
     .await?;
     let mut account = virtual_accounts::list(&db.pool).await?.remove(0);

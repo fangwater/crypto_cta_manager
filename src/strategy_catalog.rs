@@ -1148,6 +1148,7 @@ pub async fn save_binding(
     source_id: &str,
     request: &SaveBindingRequest,
     updated_at_us: i64,
+    actor: Option<&crate::auth::AuthUser>,
 ) -> Result<AccountStudio> {
     crate::virtual_accounts::require_independent(pool, source_id).await?;
     validate_strategy_name(&request.binding_name).map_err(|error| anyhow::anyhow!(error))?;
@@ -1173,6 +1174,8 @@ pub async fn save_binding(
     {
         bail!("order strategy is unknown: {}", request.order_strategy_name);
     }
+    let mut tx = pool.begin().await?;
+    let before = crate::shares_history::capture(&mut tx, source_id).await?;
     sqlx::query(
         r#"
         INSERT INTO cta_account_strategy_bindings (
@@ -1192,7 +1195,7 @@ pub async fn save_binding(
     .bind(&request.order_strategy_name)
     .bind(request.shares)
     .bind(updated_at_us)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .with_context(|| {
         format!(
@@ -1200,6 +1203,8 @@ pub async fn save_binding(
             request.position_strategy_name, request.order_strategy_name, request.binding_name
         )
     })?;
+    crate::shares_history::record(&mut tx, before, updated_at_us, actor, "manual").await?;
+    tx.commit().await?;
     load_account_studio(pool, source_id).await
 }
 
@@ -1209,11 +1214,14 @@ pub async fn save_binding_shares(
     binding_name: &str,
     request: &SaveBindingSharesRequest,
     updated_at_us: i64,
+    actor: Option<&crate::auth::AuthUser>,
 ) -> Result<AccountStudio> {
     crate::virtual_accounts::require_independent(pool, source_id).await?;
     validate_strategy_name(binding_name).map_err(|error| anyhow::anyhow!(error))?;
     validate_nonnegative_multiplier(request.shares, "shares")
         .map_err(|error| anyhow::anyhow!(error))?;
+    let mut tx = pool.begin().await?;
+    let before = crate::shares_history::capture(&mut tx, source_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE cta_account_strategy_bindings
@@ -1225,12 +1233,14 @@ pub async fn save_binding_shares(
     .bind(binding_name)
     .bind(request.shares)
     .bind(updated_at_us)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .with_context(|| format!("failed to save shares for {binding_name} on {source_id}"))?;
     if result.rows_affected() == 0 {
         bail!("binding is unknown: {binding_name}");
     }
+    crate::shares_history::record(&mut tx, before, updated_at_us, actor, "manual").await?;
+    tx.commit().await?;
     load_account_studio(pool, source_id).await
 }
 

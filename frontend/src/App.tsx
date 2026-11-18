@@ -258,6 +258,7 @@ function NavPage() {
   const [error, setError] = useState<string | null>(null)
   const [timelineError, setTimelineError] = useState<string | null>(null)
   const [navPricingLoading, setNavPricingLoading] = useState(false)
+  const [navHistoryLoading, setNavHistoryLoading] = useState(false)
   const [timelineRevision, setTimelineRevision] = useState(0)
   const timelineView = chartMode === 'symbols' ? 'symbols' : chartMode === 'strategies' || chartMode === 'strategyFunding' ? 'strategies' : 'portfolio'
   const initialized = useRef(false)
@@ -267,19 +268,31 @@ function NavPage() {
     async (signal?: AbortSignal, manual = false) => {
       if (manual) setRefreshing(true)
       try {
-        const [nextDashboard, nextHealth] = await Promise.all([
+        const [nextDashboard, nextHealth] = await Promise.allSettled([
           getDashboard(signal),
           getHealth(signal),
         ])
-        setDashboard(nextDashboard)
-        setHealth(nextHealth)
+        if (signal?.aborted) return
+        if (nextHealth.status === 'fulfilled') setHealth(nextHealth.value)
+        if (nextDashboard.status === 'rejected') throw nextDashboard.reason
+        setDashboard(nextDashboard.value)
+        setNavHistoryLoading(false)
+        if (nextHealth.status === 'rejected') throw nextHealth.reason
         setError(null)
       } catch (reason: unknown) {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        if (signal?.aborted || (reason instanceof DOMException && reason.name === 'AbortError')) return
+        if (reason instanceof ApiError && reason.historyLoading) {
+          setNavHistoryLoading(true)
+          setError(null)
+          return
+        }
+        setNavHistoryLoading(false)
         setError(reason instanceof Error ? reason.message : String(reason))
       } finally {
-        setLoading(false)
-        if (manual) setRefreshing(false)
+        if (!signal?.aborted) {
+          setLoading(false)
+          if (manual) setRefreshing(false)
+        }
       }
     },
     [],
@@ -288,7 +301,7 @@ function NavPage() {
   useEffect(() => {
     const controller = new AbortController()
     void refreshDashboard(controller.signal)
-    const timer = window.setInterval(() => void refreshDashboard(), UI_POLL_MS)
+    const timer = window.setInterval(() => void refreshDashboard(controller.signal), UI_POLL_MS)
     return () => {
       controller.abort()
       window.clearInterval(timer)
@@ -366,6 +379,7 @@ function NavPage() {
     let factual: TimelineSnapshot | null = null
     let overlay: TimelineOverlay | null = null
     let overlayStarted = false
+    const pairedWindow = selectedSymbols === null && endMs - startMs <= 30 * DAY_MS
     let fundingRetry: number | undefined
     const publish = () => {
       if (!factual || controller.signal.aborted) return
@@ -409,19 +423,36 @@ function NavPage() {
     }
     const load = async () => {
       try {
-        const next = await loadTimeline({ ...request, includeTheoretical: false })
+        const paired = pairedWindow && !factual
+        const next = await loadTimeline({ ...request, includeTheoretical: paired })
         if (controller.signal.aborted || adjustRange(next.theoretical)) return
         factual = next
+        if (paired) {
+          overlay = {
+            generated_at_us: next.generated_at_us,
+            generation_duration_ms: 0,
+            theoretical: next.theoretical,
+            execution_slippage: next.execution_slippage,
+          }
+        }
         publish()
         setNavPricingLoading(false)
+        setNavHistoryLoading(false)
         setTimelineError(null)
-        if (!overlayStarted && next.theoretical.some(reference => reference.loading)) {
+        if (!overlayStarted && (paired || !pairedWindow) && next.theoretical.some(reference => reference.loading)) {
           overlayStarted = true
-          void loadOverlay()
+          if (paired) retryTimer = window.setTimeout(() => void loadOverlay(), 10_000)
+          else void loadOverlay()
         }
         if (next.estimated_funding?.loading) fundingRetry = window.setTimeout(() => void load(), 10_000)
       } catch (reason) {
         if (controller.signal.aborted) return
+        if (reason instanceof ApiError && reason.historyLoading) {
+          setNavHistoryLoading(true)
+          setTimelineError(null)
+          fundingRetry = window.setTimeout(() => void load(), 10_000)
+          return
+        }
         if (reason instanceof ApiError && reason.navPricing) {
           setNavPricingLoading(reason.navPricing.loading)
           const nextStart = retainedQuickRangeStartMs(activeRange, startMs, endMs,
@@ -687,12 +718,12 @@ function NavPage() {
         <div className="flex items-center gap-3 rounded-xl border border-border-soft bg-canvas/80 px-3 py-2">
           <span
             className={`h-2 w-2 shrink-0 rounded-full ${
-              health?.status === 'ok' ? 'bg-emerald-500' : health || error ? 'bg-amber-500' : 'bg-slate-400'
+              health?.status === 'ok' && !navHistoryLoading ? 'bg-emerald-500' : error || health?.status === 'degraded' ? 'bg-amber-500' : 'bg-slate-400'
             }`}
           />
           <div className="hidden min-w-0 sm:block">
             <p className="text-xs font-medium text-ink">
-              {health ? health.status === 'ok' ? '运行正常' : '数据延迟' : error ? '连接失败' : '检查中'}
+              {navHistoryLoading || health?.status === 'loading' ? '净值加载中' : health ? health.status === 'ok' ? '运行正常' : '数据延迟' : error ? '连接失败' : '检查中'}
             </p>
             <time className="text-[11px] text-subtle">
               {timestampUs(
@@ -714,6 +745,7 @@ function NavPage() {
       }
     >
         {error && <div className="error-banner">数据请求失败：{error}</div>}
+        {navHistoryLoading && <div className="chart-notice" role="status">净值历史正在后台加载，完成后自动显示。</div>}
         {timelineError && (
           <div className={navPricingLoading ? 'chart-notice' : 'error-banner'} role="status">
             {navPricingLoading ? '' : '净值重算失败：'}{timelineError}
@@ -981,13 +1013,13 @@ function NavPage() {
                 noStrategiesSelected && (
                   <div className="chart-empty">当前未选择策略</div>
                 )}
-              {!timeline && !timelineLoading && !navPricingLoading && (
+              {!timeline && !timelineLoading && !navPricingLoading && !navHistoryLoading && (
                 <div className="chart-empty">暂无净值时间线</div>
               )}
-              {(timelineLoading || (navPricingLoading && !timeline)) && (
+              {(timelineLoading || ((navPricingLoading || navHistoryLoading) && !timeline)) && (
                 <div className="chart-loading">
                   <LoaderCircle size={20} />
-                  <span>{navPricingLoading ? '补齐分钟估值价' : '计算中'}</span>
+                  <span>{navHistoryLoading ? '加载净值历史' : navPricingLoading ? '补齐分钟估值价' : '计算中'}</span>
                 </div>
               )}
             </div>

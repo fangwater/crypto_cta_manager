@@ -3,7 +3,6 @@ use super::*;
 use crate::manager_db::ManagerDb;
 use rocksdb::{Direction, IteratorMode, WriteBatch};
 use sha2::{Digest, Sha256};
-use std::sync::{Mutex, OnceLock};
 
 pub const CF: &str = "nav_fifo_daily";
 pub const MEMORY_WINDOW_US: i64 = 7 * crate::funding_daily::DAY_US;
@@ -23,9 +22,9 @@ impl std::error::Error for FullHistoryRequired {}
 
 // Historical replays and cold source builds share one memory budget. The guard
 // stays in the blocking worker, including when its HTTP caller disconnects.
-static REPLAY: OnceLock<Mutex<()>> = OnceLock::new();
+static REPLAY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 pub(crate) struct ReplayGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _permit: tokio::sync::SemaphorePermit<'static>,
 }
 
 impl Drop for ReplayGuard {
@@ -44,11 +43,15 @@ impl Drop for ReplayGuard {
 }
 
 pub(crate) fn replay_lock() -> ReplayGuard {
+    futures_executor::block_on(replay_lock_async())
+}
+
+pub(super) async fn replay_lock_async() -> ReplayGuard {
     ReplayGuard {
-        _lock: REPLAY
-            .get_or_init(Mutex::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
+        _permit: REPLAY
+            .acquire()
+            .await
+            .expect("NAV replay semaphore is never closed"),
     }
 }
 
@@ -445,19 +448,11 @@ fn load_history_window_from(
     let mut roles = LiquidityByOrder::new();
     let mut wanted = BTreeSet::new();
     let mut metadata = HistoryMetadata::default();
-    let heads = rocks_source::visit_column_families_from(
+    let heads = rocks_source::visit_column_families_in_window(
         &source.rocksdb_path,
         &requests,
+        limits,
         |cf, key, value| {
-            if let Some(limits) = limits {
-                if limits
-                    .get(cf)
-                    .and_then(Option::as_ref)
-                    .is_none_or(|last| key > last.as_slice())
-                {
-                    return Ok(());
-                }
-            }
             if cf == crate::model::UNIFORM_ORDERS_CF {
                 let event: Arc<NavEvent> = decode_uniform_order(key, value)?.into();
                 metadata.observe(&event);
@@ -807,6 +802,7 @@ impl NavTimelineCache {
             inputs,
             results: Arc::new(crate::analysis::QueryCache::new(4)),
             mark_plans: Arc::new(crate::analysis::QueryCache::new(4)),
+            pending_priced: Default::default(),
             daily: Some(daily),
             funding_fingerprints,
             funding_prefixes,
@@ -825,7 +821,12 @@ impl NavTimelineCache {
             })
     }
     /// Caller owns the replay budget until the returned temporary cache is dropped.
-    pub(super) fn restore_window(&self, ids: &[String], start: Option<i64>) -> Result<Self> {
+    pub(super) fn restore_window(
+        &self,
+        ids: &[String],
+        start: Option<i64>,
+        allocation: bool,
+    ) -> Result<Self> {
         let mut config = self.config.clone();
         config
             .sources
@@ -855,62 +856,60 @@ impl NavTimelineCache {
                 .into_iter()
                 .filter(|e| e.amount_update > 0.0)
                 .collect();
-            for mode in [false, true] {
-                let old = &self.sources[&(source.id.clone(), mode)];
-                let mut prepared = old.prepared.clone();
-                prepared.fill_events.clear();
-                for event in &history.events {
-                    if prepared
-                        .snapshot_ts_us
-                        .is_some_and(|ts| fifo_ts_us(event) <= ts)
-                    {
-                        continue;
-                    }
-                    if let Some(side) = validated_fill_side(source, event)? {
-                        let mut fill = PreparedFill {
-                            event: event.clone(),
-                            side,
-                            fill_ts_us: fifo_ts_us(event),
-                            liquidity: liquidity_role_for_event(event, &history.liquidity_by_order),
-                            initial_position_close: false,
-                        };
-                        fill.attribute_initial_position(
-                            prepared.strategy_allocation_active,
-                            &prepared.initial_states,
-                        );
-                        prepared.fill_events.push_back(fill);
-                    }
+            let old = &self.sources[&(source.id.clone(), allocation)];
+            let mut prepared = old.prepared.clone();
+            prepared.fill_events.clear();
+            for event in &history.events {
+                if prepared
+                    .snapshot_ts_us
+                    .is_some_and(|ts| fifo_ts_us(event) <= ts)
+                {
+                    continue;
                 }
-                prepared.fill_events.sort_by(fill_order);
-                let checkpoints = entry
-                    .as_ref()
-                    .map(|entry| {
-                        vec![Arc::new(FifoCheckpoint {
-                            ts_us: entry.boundary_us,
-                            next_fill: 0,
-                            state: if mode {
-                                entry.strategy.clone()
-                            } else {
-                                entry.account.clone()
-                            },
-                        })]
-                    })
-                    .unwrap_or_default();
-                // The query performs the replay itself. Do not eagerly replay
-                // and retain another complete set of historical hourly states.
-                let built = CachedTimelineSource {
-                    prepared,
-                    checkpoints,
-                    symbols: old.symbols.clone(),
-                    strategies: old.strategies.clone(),
-                    report: old.report.clone(),
-                    end_state: old.end_state.clone(),
-                    next_checkpoint: None,
-                    replayed_fills: 0,
-                    retained_from_us: from,
-                };
-                sources.insert((source.id.clone(), mode), Arc::new(built));
+                if let Some(side) = validated_fill_side(source, event)? {
+                    let mut fill = PreparedFill {
+                        event: event.clone(),
+                        side,
+                        fill_ts_us: fifo_ts_us(event),
+                        liquidity: liquidity_role_for_event(event, &history.liquidity_by_order),
+                        initial_position_close: false,
+                    };
+                    fill.attribute_initial_position(
+                        prepared.strategy_allocation_active,
+                        &prepared.initial_states,
+                    );
+                    prepared.fill_events.push_back(fill);
+                }
             }
+            prepared.fill_events.sort_by(fill_order);
+            let checkpoints = entry
+                .as_ref()
+                .map(|entry| {
+                    vec![Arc::new(FifoCheckpoint {
+                        ts_us: entry.boundary_us,
+                        next_fill: 0,
+                        state: if allocation {
+                            entry.strategy.clone()
+                        } else {
+                            entry.account.clone()
+                        },
+                    })]
+                })
+                .unwrap_or_default();
+            // The query performs the replay itself. Do not eagerly replay
+            // and retain another complete set of historical hourly states.
+            let built = CachedTimelineSource {
+                prepared,
+                checkpoints,
+                symbols: old.symbols.clone(),
+                strategies: old.strategies.clone(),
+                report: old.report.clone(),
+                end_state: old.end_state.clone(),
+                next_checkpoint: None,
+                replayed_fills: 0,
+                retained_from_us: from,
+            };
+            sources.insert((source.id.clone(), allocation), Arc::new(built));
             histories.insert(source.id.clone(), history);
         }
         Ok(Self {
@@ -922,6 +921,7 @@ impl NavTimelineCache {
             inputs: self.inputs.clone(),
             results: Arc::new(crate::analysis::QueryCache::new(0)),
             mark_plans: Arc::new(crate::analysis::QueryCache::new(0)),
+            pending_priced: Default::default(),
             daily: None,
             funding_fingerprints: BTreeMap::new(),
             funding_prefixes: BTreeMap::new(),

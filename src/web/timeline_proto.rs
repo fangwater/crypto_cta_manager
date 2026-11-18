@@ -417,6 +417,7 @@ mod tests {
                     points,
                 }],
                 sampled: false,
+                aligned_summaries: BTreeMap::new(),
             },
             theoretical: vec![Default::default()],
             execution_slippage: vec![Default::default()],

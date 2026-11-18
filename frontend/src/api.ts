@@ -1,4 +1,6 @@
 import { fetchTimeline } from './lib/timelineRequest'
+import { ApiError, parseApiError } from './lib/apiError'
+export { ApiError } from './lib/apiError'
 import type { TimelinePayload } from './lib/timelineProto'
 import type { TimelineOverlay } from './types'
 import type { AccountOverview } from './lib/accountOverview'
@@ -22,21 +24,13 @@ import type {
   PositionStrategy,
   SavedPositionStrategy,
   SavedSymbolContractLeverage,
+  SharesHistory,
+  SharesHistoryCursor,
   AcquisitionCostSnapshot,
   TimelineSnapshot,
 } from './types'
 
 const API_BASE = import.meta.env.VITE_CTA_API_BASE ?? '/manager/api'
-
-export class ApiError extends Error {
-  constructor(
-    message: string,
-    public readonly status: number,
-    public readonly navPricing?: { loading: boolean; availableFromUs: number },
-  ) {
-    super(message)
-  }
-}
 
 interface RequestOptions {
   signal?: AbortSignal
@@ -80,10 +74,7 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
     const payload = (await response.json().catch(() => null)) as
       | { error?: string; code?: string; loading?: boolean; available_from_us?: number }
       | null
-    throw new ApiError(payload?.error ?? `HTTP ${response.status}`, response.status,
-      payload?.code === 'nav_pricing_unavailable' && typeof payload.available_from_us === 'number'
-        ? { loading: payload.loading === true, availableFromUs: payload.available_from_us }
-        : undefined)
+    throw parseApiError(response.status, payload)
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
@@ -259,7 +250,7 @@ async function getTimelineFromPath(path: string, query: TimelineQuery, view: str
   if (query.includeTheoretical !== undefined) params.set('includeTheoretical', String(query.includeTheoretical))
   params.set('view', view)
   return fetchTimeline(`${API_BASE}${path}?${params}`, query.signal,
-    (message, status, pricing) => new ApiError(message, status, pricing),
+    (message, status, pricing, historyLoading) => new ApiError(message, status, pricing, historyLoading),
     value => serverClock.observe(value))
 }
 
@@ -626,6 +617,22 @@ export function saveBindingShares(
         ? { 'X-Experimental-Algorithm-Token': experimentalAlgorithmToken }
         : undefined,
     },
+  )
+}
+
+export function getAccountSharesHistory(
+  sourceId: string,
+  cursor: SharesHistoryCursor | null = null,
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams({ limit: '50' })
+  if (cursor) {
+    params.set('before_at_us', String(cursor.at_us))
+    params.set('before_id', String(cursor.change_id))
+  }
+  return requestJson<SharesHistory>(
+    `/catalog/accounts/${encodeURIComponent(sourceId)}/shares-history?${params}`,
+    { signal },
   )
 }
 

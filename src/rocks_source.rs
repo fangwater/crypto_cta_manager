@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use rocksdb::{DB, Direction, IteratorMode, Options};
+use rocksdb::{DB, Direction, IteratorMode, Options, ReadOptions};
 
 mod secondary;
 pub(crate) use secondary::ReaderPool;
@@ -274,18 +274,31 @@ mod tests {
 pub fn visit_column_families_from(
     path: &Path,
     requests: &[(String, Option<Vec<u8>>)],
+    visit: impl FnMut(&str, &[u8], &[u8]) -> Result<()>,
+) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
+    visit_column_families_in_window(path, requests, None, visit)
+}
+
+/// Sequential scans can stop inside RocksDB at each frozen CF head.
+pub(crate) fn visit_column_families_in_window(
+    path: &Path,
+    requests: &[(String, Option<Vec<u8>>)],
+    limits: Option<&BTreeMap<String, Option<Vec<u8>>>>,
     mut visit: impl FnMut(&str, &[u8], &[u8]) -> Result<()>,
 ) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
     let requested = requests
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
-    secondary::read(path, &requested, |db| visit_from(db, requests, &mut visit))
+    secondary::read(path, &requested, |db| {
+        visit_from(db, requests, limits, &mut visit)
+    })
 }
 
 fn visit_from(
     db: &DB,
     requests: &[(String, Option<Vec<u8>>)],
+    limits: Option<&BTreeMap<String, Option<Vec<u8>>>>,
     mut visit: impl FnMut(&str, &[u8], &[u8]) -> Result<()>,
 ) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
     let mut heads = BTreeMap::new();
@@ -293,15 +306,33 @@ fn visit_from(
         let Some(cf) = db.cf_handle(name) else {
             continue;
         };
-        let mode = start.as_ref().map_or(IteratorMode::Start, |key| {
-            IteratorMode::From(key, Direction::Forward)
-        });
-        let mut head = None;
-        for item in db.iterator_cf(cf, mode) {
-            let (key, value) = item?;
-            visit(name, &key, &value)?;
-            head = Some(key.to_vec());
+        let mut options = ReadOptions::default();
+        if let Some(limits) = limits {
+            let Some(Some(end)) = limits.get(name) else {
+                heads.insert(name.clone(), None);
+                continue;
+            };
+            // The default comparator is bytewise. Appending NUL gives the
+            // smallest key strictly after the inclusive generation head.
+            let mut upper_bound = end.clone();
+            upper_bound.push(0);
+            options.set_iterate_upper_bound(upper_bound);
+            options.set_readahead_size(256 * 1024);
         }
+        let mut iterator = db.raw_iterator_cf_opt(cf, options);
+        match start {
+            Some(key) => iterator.seek(key),
+            None => iterator.seek_to_first(),
+        }
+        let mut head = None::<Vec<u8>>;
+        while let Some((key, value)) = iterator.item() {
+            visit(name, key, value)?;
+            let last = head.get_or_insert_with(Vec::new);
+            last.clear();
+            last.extend_from_slice(key);
+            iterator.next();
+        }
+        iterator.status()?;
         heads.insert(name.clone(), head);
     }
     Ok(heads)

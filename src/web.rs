@@ -762,6 +762,10 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         )
         .route("/api/catalog/accounts/{source_id}", get(get_account_studio))
         .route(
+            "/api/catalog/accounts/{source_id}/shares-history",
+            get(get_account_shares_history),
+        )
+        .route(
             "/api/catalog/accounts/{source_id}/funding",
             get(get_account_funding).put(save_account_funding),
         )
@@ -2055,10 +2059,13 @@ async fn browser_timeline_response(
                 .any(|v| v.trim() == timeline_proto::CONTENT_TYPE)
         });
     let view = query.view.unwrap_or_default();
-    let snapshot = match rebuild_timeline_snapshot(state, query, allocation, visible).await? {
-        Ok(snapshot) => snapshot,
-        Err(response) => return Ok(response),
-    };
+    let snapshot =
+        match rebuild_timeline_snapshot_projected(state, query, allocation, visible, protobuf)
+            .await?
+        {
+            Ok(snapshot) => snapshot,
+            Err(response) => return Ok(response),
+        };
     if !protobuf {
         return Ok((NO_STORE, Json(snapshot)).into_response());
     }
@@ -2121,9 +2128,26 @@ async fn timeline_arrow_response(
 
 async fn rebuild_timeline_snapshot(
     state: WebState,
+    query: TimelineQuery,
+    use_strategy_allocation: bool,
+    visible_source_ids: BTreeSet<String>,
+) -> Result<std::result::Result<TimelineSnapshot, Response>, ApiError> {
+    rebuild_timeline_snapshot_projected(
+        state,
+        query,
+        use_strategy_allocation,
+        visible_source_ids,
+        false,
+    )
+    .await
+}
+
+async fn rebuild_timeline_snapshot_projected(
+    state: WebState,
     mut query: TimelineQuery,
     use_strategy_allocation: bool,
     visible_source_ids: BTreeSet<String>,
+    protobuf: bool,
 ) -> Result<std::result::Result<TimelineSnapshot, Response>, ApiError> {
     let overlay_only = query.view == Some(timeline_proto::View::Theoretical);
     if overlay_only {
@@ -2168,7 +2192,6 @@ async fn rebuild_timeline_snapshot(
         return Ok(Err(bad_request(message)));
     }
     let selected_symbols = parse_csv(query.symbols.as_deref(), true);
-    let theoretical_symbols = selected_symbols.clone();
     let start_ts_us = match query.start_ms {
         Some(value) => match milliseconds_to_microseconds(value, "startMs") {
             Ok(value) => Some(value),
@@ -2218,90 +2241,164 @@ async fn rebuild_timeline_snapshot(
         max_points,
         tick_interval_us,
     };
-    let aligned_request = request.clone();
-    let aligned_timelines = nav_timelines.clone();
-    let funding_timelines = nav_timelines.clone();
-    let report = nav_timelines
-        .rebuild_available(request, use_strategy_allocation, state.klines.clone())
-        .await;
-    let report = match report {
-        Ok(report) => report,
-        Err(error) if is_timeline_request_error(&error) => {
-            return Ok(Err(bad_request(error.to_string())));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let actual_duration_ms = started.elapsed().as_millis();
-    let theoretical = if theoretical_symbols.is_empty() && query.include_theoretical.unwrap_or(true)
-    {
-        let mut references = Vec::new();
-        for reference_model in
-            crate::theoretical_execution::references(&state.config, &report.selected_source_ids)
-                // Model errors belong to the theoretical overlay, never the factual report.
-                .unwrap_or_else(|_| vec![crate::theoretical_execution::ExecutionModel::Twap5m])
-        {
-            references.push(
-                crate::theoretical_nav::load_timeline(
-                    theoretical_fees.as_ref().clone(),
-                    &state.theoretical_targets,
-                    &state.klines,
-                    report.start_ts_us,
-                    report.end_ts_us,
-                    &report.selected_source_ids,
-                    max_points,
-                    reference_model,
+    let (resolved_start, sources) =
+        match nav_timelines.resolve_timeline_window(&request, use_strategy_allocation) {
+            Ok(window) => window,
+            Err(error) if is_timeline_request_error(&error) => {
+                return Ok(Err(bad_request(error.to_string())));
+            }
+            Err(error) => return Err(error.into()),
+        };
+    let overlay_projection = protobuf && overlay_only && request.selected_symbols.is_empty();
+    let include_theory =
+        request.selected_symbols.is_empty() && query.include_theoretical.unwrap_or(true);
+    let as_of = unix_now_us();
+    let models = include_theory.then(|| {
+        let models = crate::theoretical_execution::resolve_models(&state.config, &sources)?;
+        Ok::<_, anyhow::Error>(
+            crate::theoretical_execution::references_for_models(&models)
+                .into_iter()
+                .map(|reference| {
+                    let mut comparison = models.clone();
+                    crate::theoretical_execution::select_reference(&mut comparison, reference);
+                    comparison
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    let aligned_ends =
+        models
+            .as_ref()
+            .and_then(|v| v.as_ref().ok())
+            .map_or_else(Vec::new, |models| {
+                models
+                    .iter()
+                    .map(|m| crate::theoretical_nav::effective_timeline_end(m, end_ts_us, as_of))
+                    .collect()
+            });
+    let factual = async {
+        let result = if overlay_projection {
+            // The browser already has the factual report.
+            Ok(Arc::new(nav::NavTimelineReport {
+                start_ts_us: resolved_start,
+                end_ts_us,
+                selected_source_ids: sources.clone(),
+                ..Default::default()
+            }))
+        } else {
+            nav_timelines
+                .rebuild_available_aligned(
+                    request.clone(),
+                    use_strategy_allocation,
+                    state.klines.clone(),
+                    aligned_ends,
                 )
                 .await
-                .unwrap_or_else(|error| {
-                    warn!(%error, "minute-candle theoretical NAV unavailable");
-                    crate::theoretical_nav::TheoreticalNavTimeline {
-                        unavailable_reason: Some("理论分析暂不可用，请稍后重试".into()),
-                        ..Default::default()
-                    }
-                }),
-            );
-        }
-        references
-    } else if theoretical_symbols.is_empty() && state.klines.enabled() {
-        vec![crate::theoretical_nav::TheoreticalNavTimeline {
-            loading: true,
-            unavailable_reason: Some("理论曲线正在计算".into()),
-            ..Default::default()
-        }]
-    } else {
-        vec![crate::theoretical_nav::TheoreticalNavTimeline::default()]
+        };
+        Ok::<_, anyhow::Error>((result?, started.elapsed().as_millis()))
     };
-    let mut execution_slippage = Vec::new();
-    for reference in &theoretical {
-        execution_slippage.push(if let Some(point) = reference.points.last().copied() {
-            let aligned = nav::NavTimelineRequest {
-                start_ts_us: Some(report.start_ts_us),
-                end_ts_us: point.ts_us,
-                ..aligned_request.clone()
-            };
-            match aligned_timelines
-                .rebuild_priced(aligned, use_strategy_allocation, state.klines.clone())
-                .await
-            {
-                Ok(actual) => crate::execution_slippage::ExecutionSlippage::calculate(
-                    report.start_ts_us,
-                    actual.summary,
-                    point,
-                ),
-                Err(error) => crate::execution_slippage::ExecutionSlippage::unavailable(
-                    report.start_ts_us,
-                    format!("滑点所需的分钟估值暂不可用：{error}"),
-                ),
+    let theory = async {
+        let result = match models {
+            Some(Ok(models)) => {
+                let mut references = Vec::with_capacity(models.len());
+                for comparison in models {
+                    references.push(
+                        crate::theoretical_nav::load_timeline_with_models(
+                            theoretical_fees.as_ref().clone(),
+                            &state.theoretical_targets,
+                            &state.klines,
+                            resolved_start,
+                            end_ts_us,
+                            &sources,
+                            max_points,
+                            comparison,
+                            as_of,
+                        )
+                        .await
+                        .unwrap_or_else(theoretical_timeline_error),
+                    );
+                }
+                references
             }
-        } else {
-            crate::execution_slippage::ExecutionSlippage::unavailable(
+            Some(Err(error)) => vec![theoretical_timeline_error(error)],
+            None if request.selected_symbols.is_empty() && state.klines.enabled() => {
+                vec![crate::theoretical_nav::TheoreticalNavTimeline {
+                    loading: true,
+                    unavailable_reason: Some("理论曲线正在计算".into()),
+                    ..Default::default()
+                }]
+            }
+            None => vec![crate::theoretical_nav::TheoreticalNavTimeline::default()],
+        };
+        Ok::<_, anyhow::Error>((result, started.elapsed().as_millis()))
+    };
+    let ((report, actual_duration_ms), (theoretical, theoretical_duration_ms)) =
+        match tokio::try_join!(factual, theory) {
+            Ok(results) => results,
+            Err(error) if is_timeline_request_error(&error) => {
+                return Ok(Err(bad_request(error.to_string())));
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+    let mut execution_slippage = Vec::new();
+    let mut aligned_totals = BTreeMap::new();
+    for reference in &theoretical {
+        let Some(point) = reference.points.last().copied() else {
+            execution_slippage.push(crate::execution_slippage::ExecutionSlippage::unavailable(
                 report.start_ts_us,
                 reference.unavailable_reason.clone().unwrap_or_else(|| {
                     "完整理论净值不可用；需要全部币种及 K 线保留范围内的数据".into()
                 }),
-            )
+            ));
+            continue;
+        };
+        let totals = match aligned_totals.entry(point.ts_us) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let shared = report
+                    .aligned_summaries
+                    .get(&point.ts_us)
+                    .copied()
+                    .or_else(|| {
+                        (!overlay_projection
+                            && report.end_ts_us == point.ts_us
+                            && (report.valuation == nav::minute_marks::VALUATION
+                                || !nav_timelines.uses_minute_marks(&report.selected_source_ids)))
+                        .then_some(report.summary)
+                    });
+                let totals = match shared {
+                    Some(totals) => Ok(totals),
+                    None => nav_timelines
+                        .rebuild_priced(
+                            nav::NavTimelineRequest {
+                                start_ts_us: Some(report.start_ts_us),
+                                end_ts_us: point.ts_us,
+                                ..request.clone()
+                            },
+                            use_strategy_allocation,
+                            state.klines.clone(),
+                        )
+                        .await
+                        .map(|aligned| aligned.summary)
+                        .map_err(|error| format!("滑点所需的分钟估值暂不可用：{error}")),
+                };
+                entry.insert(totals)
+            }
+        };
+        execution_slippage.push(match totals {
+            Ok(totals) => crate::execution_slippage::ExecutionSlippage::calculate(
+                report.start_ts_us,
+                *totals,
+                point,
+            ),
+            Err(reason) => crate::execution_slippage::ExecutionSlippage::unavailable(
+                report.start_ts_us,
+                reason.clone(),
+            ),
         });
     }
+    let funding_timelines = nav_timelines;
     let estimate_report = report.clone();
     let public_rates = state.funding_rates.clone();
     let supported =
@@ -2369,9 +2466,7 @@ async fn rebuild_timeline_snapshot(
     let generation_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     info!(
         actual_duration_ms,
-        theoretical_duration_ms = generation_duration_ms.saturating_sub(actual_duration_ms as u64),
-        generation_duration_ms,
-        "built CTA timeline"
+        theoretical_duration_ms, generation_duration_ms, "built CTA timeline"
     );
 
     Ok(Ok(TimelineSnapshot {
@@ -2383,6 +2478,16 @@ async fn rebuild_timeline_snapshot(
         funding,
         estimated_funding,
     }))
+}
+
+fn theoretical_timeline_error(
+    error: anyhow::Error,
+) -> crate::theoretical_nav::TheoreticalNavTimeline {
+    warn!(%error, "minute-candle theoretical NAV unavailable");
+    crate::theoretical_nav::TheoreticalNavTimeline {
+        unavailable_reason: Some("理论分析暂不可用，请稍后重试".into()),
+        ..Default::default()
+    }
 }
 
 async fn strategy_pnl(
@@ -3630,6 +3735,29 @@ async fn get_account_studio(
     }
 }
 
+async fn get_account_shares_history(
+    State(state): State<WebState>,
+    Path(source_id): Path<String>,
+    Query(query): Query<crate::shares_history::HistoryQuery>,
+) -> Result<Response, ApiError> {
+    if let Err(error) = query.validate() {
+        return Ok(bad_request(error.to_string()));
+    }
+    let source_ids = if let Some(account) = state.config.accounts.get(&source_id) {
+        account.source_ids.clone()
+    } else {
+        if let Err(response) = resolve_order_config_source(&state.config, &source_id) {
+            return Ok(response);
+        }
+        vec![source_id]
+    };
+    Ok((
+        NO_STORE,
+        Json(crate::shares_history::list(&state.pool, &source_ids, &query).await?),
+    )
+        .into_response())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SaveAccountAliasRequest {
@@ -4500,6 +4628,7 @@ async fn save_account_binding(
         &source_id,
         &request,
         updated_at_us,
+        Some(&user),
     )
     .await
     {
@@ -4517,6 +4646,7 @@ async fn save_account_binding(
 
 async fn save_account_binding_shares(
     State(state): State<WebState>,
+    Extension(user): Extension<AuthUser>,
     Path((source_id, binding_name)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<SaveBindingSharesRequest>,
@@ -4565,6 +4695,7 @@ async fn save_account_binding_shares(
         &binding_name,
         &request,
         updated_at_us,
+        Some(&user),
     )
     .await
     {
@@ -6459,6 +6590,78 @@ mod tests {
         (dir, state, id, start, end)
     }
 
+    #[tokio::test]
+    async fn paired_timeline_values_slippage_at_the_theoretical_cutoff() {
+        let (dir, mut state, id, _, end) = timeline_test_state(90);
+        let minute = crate::kline::MINUTE_US;
+        let end = end.div_euclid(minute) * minute;
+        let start = end - 60 * minute;
+        let trading = dir.path().join("test-egress.toml");
+        std::fs::write(&trading, "local_ips=['198.51.100.4']").unwrap();
+        let db = ManagerDb::open(&dir.path().join("marks")).unwrap();
+        state.klines = Arc::new(
+            KlineStore::from_db(
+                db,
+                crate::config::KlineConfig {
+                    enabled: true,
+                    local_ip: Some("198.51.100.50".parse().unwrap()),
+                    public_ip: Some("198.51.100.50".parse().unwrap()),
+                    trade_engine_configs: vec![trading],
+                    ..state.config.kline.clone()
+                },
+            )
+            .unwrap(),
+        );
+        let bars = (start - minute..end)
+            .step_by(minute as usize)
+            .enumerate()
+            .map(|(index, open_ts_us)| {
+                let price = 120.0 + index as f64;
+                crate::kline::Kline {
+                    open_ts_us,
+                    open: price,
+                    high: price,
+                    low: price,
+                    close: price,
+                    base_volume: 0.0,
+                    quote_volume: 0.0,
+                    trades: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        state
+            .klines
+            .save_page("BTCUSDT", start - minute, end, &bars)
+            .unwrap();
+        let snapshot = rebuild_timeline_snapshot_projected(
+            state.clone(),
+            TimelineQuery {
+                start_ms: Some(start / 1000),
+                end_ms: Some(end / 1000),
+                source_ids: Some(id.clone()),
+                include_theoretical: Some(true),
+                ..Default::default()
+            },
+            true,
+            BTreeSet::from([id.clone()]),
+            true,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("paired timeline: {}", e.0))
+        .unwrap();
+        let cutoff = snapshot.theoretical[0].points.last().unwrap().ts_us;
+        assert!(cutoff < end);
+        assert_eq!(snapshot.report.end_ts_us, end);
+        assert_eq!(snapshot.execution_slippage[0].end_ts_us, Some(cutoff));
+        let aligned = snapshot.report.aligned_summaries[&cutoff];
+        assert_ne!(aligned, snapshot.report.summary);
+        assert_eq!(
+            snapshot.execution_slippage[0].before_fee_gap_quote,
+            Some(-aligned.nav_change_before_fee_quote)
+        );
+        assert_eq!(state.klines.status().requests, 0);
+    }
+
     async fn assert_long_window_timeline_handlers(history_days: i64) {
         let (_dir, state, id, start, end) = timeline_test_state(history_days);
         let day = crate::funding_rates::DAY_US;
@@ -6564,6 +6767,7 @@ mod tests {
                     points,
                 }],
                 sampled: false,
+                aligned_summaries: BTreeMap::new(),
             },
             theoretical: Vec::new(),
             execution_slippage: Default::default(),
@@ -7244,6 +7448,35 @@ mod tests {
     }
 
     #[test]
+    fn shares_history_requires_view_permission_for_its_account() {
+        let access = auth::SourceAccess {
+            view: BTreeSet::from(["account-a".into()]),
+            configure: BTreeSet::new(),
+        };
+        for is_admin in [false, true] {
+            for (source, expected) in [
+                ("account-a", None),
+                (
+                    "account-b",
+                    Some("you are not authorized to view or configure this account"),
+                ),
+            ] {
+                let path = format!("/api/catalog/accounts/{source}/shares-history");
+                assert_eq!(
+                    request_permission_error(
+                        is_admin,
+                        true,
+                        source_id_from_path(&path),
+                        &path,
+                        &access
+                    ),
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn source_grants_allow_only_their_account_mutations() {
         let access = auth::SourceAccess {
             view: BTreeSet::from([
@@ -7567,7 +7800,7 @@ async fn save_virtual_account_response(
         }
     }
     let saved_id = match virtual_id {
-        Some(id) => virtual_accounts::save(&state.pool, id, &request, unix_now_us())
+        Some(id) => virtual_accounts::save(&state.pool, id, &request, unix_now_us(), Some(user))
             .await
             .map(|()| id.to_string()),
         None => {
@@ -7708,8 +7941,14 @@ async fn save_account_configuration(
             return Ok(bad_request(message));
         }
     }
-    match virtual_accounts::set_configuration(&state.pool, &source_id, &request, unix_now_us())
-        .await
+    match virtual_accounts::set_configuration(
+        &state.pool,
+        &source_id,
+        &request,
+        unix_now_us(),
+        Some(&user),
+    )
+    .await
     {
         Ok(()) => {
             state.configuration_notify.notify_one();

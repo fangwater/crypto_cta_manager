@@ -22,6 +22,7 @@ import {
 import { FundingSettingsPanel } from '../../components/FundingSettingsPanel'
 import { AccountFollowPanel } from '../../components/AccountFollowPanel'
 import { BindingTargetPreview } from '../../components/BindingTargetPreview'
+import { AccountStrategySharesHistory } from '../../components/AccountStrategySharesHistory'
 import { ConfigShell } from '../../components/ConfigShell'
 import { Alert } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
@@ -266,6 +267,7 @@ export function AccountBindingsPage() {
           </Card>
           {!selectedPublicAccount?.execution_sources?.length && !estimatedFundingOnly(sourceId) && <FundingSettingsPanel key={sourceId} sourceId={sourceId} />}
           <AccountFollowPanel sourceId={sourceId} studio={studio} onChange={applyStudio} />
+          <AccountStrategySharesHistory key={sourceId} sourceId={sourceId} revision={studio} />
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
