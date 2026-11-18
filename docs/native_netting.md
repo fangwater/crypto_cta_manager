@@ -33,6 +33,7 @@
 | POST `/api/native/sources/{id}/target-batches` | 原子更新指定组全部策略的完整目标 |
 | GET `/api/native/sources/{id}/netting/events?after=-1&limit=50` | 按 revision 分页读取不可变审计，最多 100 条 |
 | POST `/api/native/sources/{id}/netting/fill-allocations` | 引用源库事实记录，将真实成交分配到冻结需求 |
+| POST `/api/native/sources/{id}/netting/ctaker-fill-allocations` | 核对 CTP 或易达的原生报单、成交与目标批次后，从冻结需求分配成交 |
 | POST `/api/native/sources/{id}/netting/release-demands` | 用新的完整、无委托且持仓一致的事实快照释放已撤销的剩余需求 |
 | POST `/api/native/sources/{id}/netting/valuation` | 用完整、有效的报价统一估值，返回策略和账户归因 FIFO 损益 |
 
@@ -122,6 +123,8 @@
 本轮已完成信号整批推送到 Manager、组隔离、净目标输出和可拆分归因。按用户确认，不新增原生自动报撤单适配器，不把计划接纳当作实际成交；`execution_enabled=false` 仍然准确。
 
 ## 执行计划状态
+
+配置 `ctaker_plan_readers` 时，启用的 CTP 和易达来源都可使用各自的计划读取令牌。
 
 `GET /api/native/sources/{id}/netting/ctaker-plan` 在已鉴权的计划响应中提供 `X-CTA-Plan-Status`。已知批次还带有 `X-CTA-Plan-Batch-Id` 和 `X-CTA-Plan-Target-Revision`。`200` 保留原有完整目标 JSON，`204` 的响应体为空。gRPC `ManagerPlans.Watch` 在 `PlanUpdate.status`、`batch_id` 和 `target_revision` 中提供相同信息。
 

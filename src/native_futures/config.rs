@@ -202,16 +202,13 @@ impl Config {
                     && env.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
                     && env != &self.database.url_env
                     && plan_envs.insert(env)
-                    && self
-                        .sources
-                        .iter()
-                        .any(|s| &s.id == id && s.enabled && s.adapter == "ctp")
+                    && self.sources.iter().any(|s| &s.id == id && s.enabled)
                     && self
                         .sources
                         .iter()
                         .all(|s| s.sync.as_ref().is_none_or(|s| &s.token_env != env))
             }),
-            "ctaker plan readers require enabled CTP sources and distinct dedicated token variables"
+            "ctaker plan readers require enabled native sources and distinct dedicated token variables"
         );
         if let Some(reference) = &self.reference_service {
             reference.validate()?;

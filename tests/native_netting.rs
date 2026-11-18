@@ -594,10 +594,192 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
         allocated,
         store::allocate_ctaker(&pool, "source", &auto, &fill, &proof, 1).await?
     );
+    verify_yida_ctaker_round_trip(&pool).await?;
     pool.close().await;
     sqlx::raw_sql(AssertSqlSafe(format!("DROP DATABASE {database}")))
         .execute(&admin)
         .await?;
     admin.close().await;
+    Ok(())
+}
+
+async fn verify_yida_ctaker_round_trip(pool: &sqlx::PgPool) -> Result<()> {
+    use crypto_cta_manager::native_futures::{config, evidence, web};
+
+    let source_id = "paper-yida";
+    let strategy = "paper-yida-1h";
+    let market = "SHFE:cu2612";
+    let day = "20261112";
+    let dir = tempfile::tempdir()?;
+    let primary = dir.path().join("yida-native");
+    let config: config::Config = toml::from_str(&format!(
+        "mode = 'cn_futures'\nsecondary_root = '{}'\n[[sources]]\nid = '{source_id}'\naccount = 'paper'\nadapter = 'yida'\nrocksdb_path = '{}'\n",
+        dir.path().join("secondary").display(),
+        primary.display()
+    ))?;
+    web::register_sources(pool, &config).await?;
+    sqlx::query("INSERT INTO cta_position_strategies(strategy_name,updated_at_us,created_by_user_id) VALUES($1,1,1)")
+        .bind(strategy).execute(pool).await?;
+    let mut opts = rocksdb::Options::default();
+    opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
+    let db = rocksdb::DB::open_cf(
+        &opts,
+        &primary,
+        ["cn_trading_events", "cn_uniform_orders", "cn_trade_facts"],
+    )?;
+    let events = db.cf_handle("cn_trading_events").unwrap();
+    let put_event = |seq: i64, at: i64, value: Value| -> Result<String> {
+        let raw = serde_json::to_vec(
+            &json!({"sequence":seq,"received_us":at,"projection_error":null,"value":value}),
+        )?;
+        db.put_cf(&events, seq.to_be_bytes(), &raw)?;
+        Ok(hex::encode(Sha256::digest(raw)))
+    };
+    let now = now_us();
+    let hash = put_event(
+        1,
+        now - 1,
+        json!({"type":"reconciled","state":{"ready":true,"connected":true,"positions":[],"orders":[],"trading_day":day}}),
+    )?;
+    let init = netting::Initialize {
+        strategy_groups: BTreeMap::from([(strategy.into(), BTreeSet::from([strategy.into()]))]),
+        contracts: BTreeMap::from([(market.into(), netting::Contract { multiplier: 5.0 })]),
+        positions: BTreeMap::new(),
+        snapshot_evidence_sequence: 1,
+        note: "isolated Yida flat snapshot".into(),
+    };
+    let state = netting::Portfolio::initialize(
+        source_id,
+        &init,
+        &BTreeMap::new(),
+        evidence::Anchor {
+            source_id: source_id.into(),
+            snapshot_us: now - 1,
+            trading_day: day.into(),
+            evidence_sequence: 1,
+            evidence_sha256: hash,
+            store_id: evidence::generation(&config.sources[0], &db)?,
+            note: init.note.clone(),
+        },
+    )?;
+    store::initialize(pool, &state, &init, 1).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let route = format!(
+        "http://{}/api/native/sources/{source_id}/netting",
+        listener.local_addr()?
+    );
+    let app = web::Service::new(config, pool.clone())?.router();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await });
+    let cookie = format!(
+        "cn_cta_session={}",
+        crypto_cta_manager::auth::create_session(pool, 1).await?.0
+    );
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let valuation = || async {
+        let at = now_us();
+        client.post(format!("{route}/valuation")).header("Cookie", &cookie)
+            .json(&json!({"at_us":at,"quotes":{market:{"bid":105330.0,"ask":105340.0,"observed_us":at,"source":"isolated_replay"}}}))
+            .send().await?.error_for_status()?.json::<Value>().await
+    };
+
+    // Prices, multiplier and fees from an archived official Yida paper round trip.
+    for (index, (side, offset, native_offset, price, commission, target_lots)) in [
+        ("buy", "open", 0, 105340.0, 26.785, 1),
+        ("sell", "close_today", 3, 105330.0, 52.915, 0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let index = index as i64;
+        let at = now_us();
+        let batch = netting::TargetBatch {
+            trading_day: Some(day.into()),
+            strategy_group: strategy.into(),
+            batch_id: format!("paper-leg-{index}"),
+            expected_revision: 2 * index,
+            decision_us: at,
+            signal_times: BTreeMap::new(),
+            strategies: BTreeMap::from([(
+                strategy.into(),
+                BTreeMap::from([(market.into(), target_lots)]),
+            )]),
+            quotes: BTreeMap::new(),
+        };
+        let receipt = store::batch(pool, source_id, &batch, 1).await?;
+        let target = json!({"source_id":source_id,"batch_id":batch.batch_id,"target_revision":receipt["execution_plan"]["target_revision"],
+            "trading_day":day,"expires_at_us":at+60_000_000,"net_targets":{market:target_lots}});
+        let sequence = 2 + index * 3;
+        let order_ref = (index + 2).to_string();
+        let system_id = (index + 3).to_string();
+        let key = json!({"session":"yida:20261112:group:1","order_ref":order_ref});
+        let link = json!({"trading_day":day,"venue":"SHFE","native":key});
+        let intent = json!({"venue":"SHFE","symbol":"cu2612","side":side,"offset":offset,"lots":1});
+        let identity = json!({"venue":"SHFE","symbol":"cu2612","trading_day":day,"side":side,"trade_id":(index+1).to_string()});
+        let raw = |group| {
+            json!({"type":"yida_event","received_us":at+2,"event":{
+            "kind":11,"replay":0,"day":20261112,"exchange":"SHFE","symbol":"cu2612","trade_id":index+1,
+            "system_id":index+3,"reference":index+2,"order_group":group,"offset":native_offset,
+            "direction":index,"lots":1,"price":price,"commission":commission}})
+        };
+        put_event(
+            sequence,
+            at + 1,
+            json!({"type":"prepared_submit","key":key,"intent":intent,"prepared_at_us":at+1,"ctaker_target":target}),
+        )?;
+        put_event(sequence + 1, at + 2, raw(2))?;
+        put_event(
+            sequence + 2,
+            at + 2,
+            json!({"type":"normalized_trade","identity":identity,"order_link":link,"origin":"live_report"}),
+        )?;
+        let fill = json!({"evidence_seq":sequence+2,"received_us":at+2,"commission_currency":"CNY","commission":commission,"fill":{
+            "identity":identity,"system_id":system_id,"order_ref":order_ref,"offset":offset,"lots":1,"price":price}});
+        let packed_key = format!(
+            r#"{{"trading_day":"{day}","venue":"SHFE","native":{{"session":"yida:{day}:group:1","order_ref":"{order_ref}"}}}}"#
+        );
+        let projection = json!({"identity":link,"order":{"key":key,"system_id":system_id,"request":intent},
+            "locally_submitted":true,"submitted_intent":intent,"prepared_evidence_seq":sequence});
+        db.put_cf(
+            &db.cf_handle("cn_uniform_orders").unwrap(),
+            packed_key.as_bytes(),
+            serde_json::to_vec(&projection)?,
+        )?;
+        let fill_key = [index as u8 + 1];
+        db.put_cf(
+            &db.cf_handle("cn_trade_facts").unwrap(),
+            fill_key,
+            serde_json::to_vec(&fill)?,
+        )?;
+        let allocate = || {
+            client
+                .post(format!("{route}/ctaker-fill-allocations"))
+                .header("Cookie", &cookie)
+                .json(&json!({"evidence_key":hex::encode(fill_key)}))
+        };
+        assert!(!allocate().send().await?.status().is_success());
+        put_event(sequence + 1, at + 2, raw(1))?;
+        let allocation: Value = allocate().send().await?.error_for_status()?.json().await?;
+        assert_eq!(allocation["revision"], 2 * index + 2);
+        assert_eq!(allocation["net_targets"][market]["residual_lots"], 0);
+        if target_lots != 0 {
+            let valued = valuation().await?;
+            let account = &valued["account"][market];
+            assert_eq!(account, &valued["strategies"][strategy][market]);
+            assert_eq!(account["lots"], 1);
+            assert_eq!(account["realized_cny"], 0.0);
+            assert_eq!(account["floating_cny"], -25.0);
+            assert!((account["pnl_after_fees_cny"].as_f64().unwrap() + 51.785).abs() < 1e-8);
+        }
+    }
+    let valued = valuation().await?;
+    let account = &valued["account"][market];
+    assert_eq!(account, &valued["strategies"][strategy][market]);
+    assert_eq!(account["lots"], 0);
+    assert_eq!(account["realized_cny"], -50.0);
+    assert_eq!(account["floating_cny"], 0.0);
+    assert!((account["known_fees_cny"].as_f64().unwrap() - 79.70).abs() < 1e-8);
+    assert!((account["pnl_after_fees_cny"].as_f64().unwrap() + 129.70).abs() < 1e-8);
+    task.abort();
     Ok(())
 }

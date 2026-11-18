@@ -211,7 +211,7 @@ fn verified_live_origin(
     db: &DB,
     record: &Value,
     seq: i64,
-    require_ctp_order_ref: bool,
+    require_order_link: bool,
 ) -> Result<bool> {
     let original: Value = serde_json::from_slice(&journal_entry(db, seq)?)?;
     let id = &record["fill"]["identity"];
@@ -248,7 +248,7 @@ fn verified_live_origin(
             let direction = if id["side"] == "buy" { 48 } else { 49 };
             return Ok(event["kind"].as_i64() == Some(10)
                 && event["direction"].as_i64() == Some(direction)
-                && (!require_ctp_order_ref
+                && (!require_order_link
                     || (raw["projection_error"].is_null()
                         && value["shutdown_tail"] != true
                         && event["order_ref"] == record["fill"]["order_ref"]
@@ -272,9 +272,35 @@ fn verified_live_origin(
             && event["price"] == record["fill"]["price"]
         {
             let side = if id["side"] == "buy" { 0 } else { 1 };
+            let link = &original["value"]["order_link"]["native"];
+            let group = event["order_group"].as_i64();
+            let session = id["trading_day"].as_str().zip(group).map(|(day, group)| {
+                if group == 0 {
+                    format!("yida:{day}")
+                } else {
+                    format!("yida:{day}:group:{group}")
+                }
+            });
             return Ok(event["kind"].as_i64() == Some(11)
                 && event["replay"].as_i64() == Some(0)
-                && event["direction"].as_i64() == Some(side));
+                && event["direction"].as_i64() == Some(side)
+                && (!require_order_link
+                    || (raw["projection_error"].is_null()
+                        && value["shutdown_tail"] != true
+                        && group.is_some_and(|g| (0..=255).contains(&g))
+                        && session.as_deref() == link["session"].as_str()
+                        && event["reference"]
+                            .as_i64()
+                            .map(|v| v.to_string())
+                            .as_deref()
+                            == record["fill"]["order_ref"].as_str()
+                        && event["commission"] == record["commission"]
+                        && match event["offset"].as_i64() {
+                            Some(0) => Some("open"),
+                            Some(3) => Some("close_today"),
+                            Some(4) => Some("close_yesterday"),
+                            _ => None,
+                        } == record["fill"]["offset"].as_str())));
         }
     }
     Ok(false)

@@ -50,9 +50,6 @@ pub fn ctaker_fill_proof(
     db: &DB,
     record: &Value,
 ) -> Result<Option<CtakerFillProof>> {
-    if source.adapter != "ctp" {
-        return Ok(None);
-    }
     let fill_seq = record["evidence_seq"]
         .as_i64()
         .context("fill evidence sequence")?;
@@ -71,10 +68,13 @@ pub fn ctaker_fill_proof(
             && id["venue"] == order.venue
             && fill["order_ref"] == order.native.order_ref
             && !order.native.order_ref.is_empty()
-            && order.native.session.starts_with("ctp:")
+            && order
+                .native
+                .session
+                .starts_with(&format!("{}:", source.adapter))
             && fill["system_id"].as_str().is_some_and(|id| !id.is_empty())
             && verified_live_origin(source, db, record, fill_seq, true)?,
-        "invalid immutable CTP fill/order link"
+        "invalid immutable native fill/order link"
     );
     let bytes = db
         .get_cf(
