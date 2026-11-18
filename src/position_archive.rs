@@ -766,15 +766,16 @@ impl PositionArchive {
 
     /// Preserve the external JSON contract while reading split binary records.
     pub fn raw_json_page(&self, after: Option<(i64, u32)>, limit: usize) -> Result<Vec<u8>> {
-        self.raw_json_page_for_sources(after, limit, None, None)
+        self.raw_json_page_for_sources(after, limit, None, None, Default::default())
     }
 
-    pub fn raw_json_page_for_sources(
+    pub(crate) fn raw_json_page_for_sources(
         &self,
         after: Option<(i64, u32)>,
         limit: usize,
         allowed_source_ids: Option<&BTreeSet<String>>,
         allowed_strategy_names: Option<&BTreeSet<String>>,
+        order_templates: crate::strategy_catalog::OrderTemplateAccess<'_>,
     ) -> Result<Vec<u8>> {
         let _retention = self.retention_read();
         anyhow::ensure!(
@@ -827,6 +828,7 @@ impl PositionArchive {
                     continue;
                 }
             }
+            order_templates.filter_overrides(&mut message.strategy.symbol_order_strategy_overrides);
             let value = serde_json::to_vec(&message)
                 .context("failed to encode filtered position update")?;
             if !first {

@@ -95,6 +95,49 @@ pub struct SaveOrderStrategyRequest {
     pub order_parameters: OrderParameters,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct OrderTemplateAccess<'a>(Option<&'a [String]>);
+
+impl<'a> OrderTemplateAccess<'a> {
+    pub fn for_user(config: &'a crate::config::AppConfig, username: &str) -> Self {
+        Self(
+            config
+                .dashboard
+                .order_strategy_allowlists
+                .get(&username.to_ascii_lowercase())
+                .map(Vec::as_slice),
+        )
+    }
+
+    pub fn allows(self, name: &str) -> bool {
+        self.0
+            .is_none_or(|names| names.iter().any(|allowed| allowed == name))
+    }
+
+    pub fn filter_overrides(self, overrides: &mut BTreeMap<String, String>) {
+        if self.0.is_some() {
+            overrides.retain(|_, name| self.allows(name));
+        }
+    }
+
+    pub fn account_studio(self, mut studio: AccountStudio) -> AccountStudio {
+        for binding in &mut studio.bindings {
+            if !self.allows(&binding.order_strategy_name) {
+                binding.order_strategy_name.clear();
+            }
+        }
+        studio
+    }
+
+    pub fn allows_virtual(self, account: &crate::virtual_accounts::VirtualAccount) -> bool {
+        account
+            .bindings
+            .iter()
+            .chain(&account.expanded_bindings)
+            .all(|binding| self.allows(&binding.order_strategy_name))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SaveSymbolContractLeverageRequest {
     pub symbol: String,
@@ -1452,6 +1495,56 @@ fn parse_execution_algorithm(value: &str) -> Result<ExecutionAlgorithm> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_template_allowlist_filters_catalog_references_by_user() {
+        let mut config =
+            crate::config::AppConfig::load(std::path::Path::new("config/cta-manager.example.toml"))
+                .unwrap();
+        config.dashboard.order_strategy_allowlists.insert(
+            "sbh".into(),
+            vec!["default_order".into(), "sbh_attemp4_h45_o2".into()],
+        );
+        config.validate().unwrap();
+        let restricted = OrderTemplateAccess::for_user(&config, "SBH");
+        let unrestricted = OrderTemplateAccess::for_user(&config, "other");
+        assert!(restricted.allows("default_order"));
+        assert!(restricted.allows("sbh_attemp4_h45_o2"));
+        assert!(!restricted.allows("attemp4_h45_o2"));
+        assert!(unrestricted.allows("attemp4_h45_o2"));
+
+        let mut overrides = BTreeMap::from([
+            ("BTCUSDT".into(), "attemp4_h45_o2".into()),
+            ("ETHUSDT".into(), "sbh_attemp4_h45_o2".into()),
+        ]);
+        restricted.filter_overrides(&mut overrides);
+        assert_eq!(
+            overrides,
+            BTreeMap::from([("ETHUSDT".into(), "sbh_attemp4_h45_o2".into())]),
+        );
+
+        let studio = AccountStudio::from_parts(
+            "source".into(),
+            FeeRates {
+                maker: 0.0,
+                taker: 0.0,
+                by_quote: BTreeMap::new(),
+            },
+            0.0,
+            vec![AccountBinding {
+                source_id: "source".into(),
+                binding_name: "position".into(),
+                position_strategy_name: "position".into(),
+                order_strategy_name: "attemp4_h45_o2".into(),
+                shares: 1.0,
+                updated_at_us: 1,
+            }],
+        );
+        let redacted = restricted.account_studio(studio.clone());
+        assert_eq!(redacted.bindings[0].order_strategy_name, "");
+        assert_eq!(redacted.bindings[0].shares, studio.bindings[0].shares);
+        assert_eq!(unrestricted.account_studio(studio.clone()), studio);
+    }
 
     #[test]
     fn position_creator_permissions_agree_for_catalog_and_write_checks() {

@@ -116,7 +116,7 @@ pub struct AddPublishTokenRequest {
     pub publish_token: Option<String>,
 }
 
-fn validate_username(username: &str) -> Result<String> {
+pub(crate) fn validate_username(username: &str) -> Result<String> {
     let username = username.trim().to_string();
     if username.len() < 3 || username.len() > 64 {
         bail!("username must be between 3 and 64 characters");

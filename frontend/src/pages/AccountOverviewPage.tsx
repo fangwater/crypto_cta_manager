@@ -359,12 +359,12 @@ export function AccountOverviewPage() {
                         )}
                         <div className="grid gap-3 sm:grid-cols-2">
                           <MiniStat label="仓位策略" value={binding.position_strategy_name} mono />
-                          <MiniStat label="执行算法" value={binding.order_strategy_name} mono />
+                          <MiniStat label="执行算法" value={binding.order_strategy_name || '模板不可见'} mono />
                           <MiniStat label="份数" value={binding.shares == null ? '按市场配置' : String(binding.shares)} />
                         </div>
                         {markets.length > 0 && <div className="space-y-2 text-sm">{binding.markets.map(item => <div key={item.source_id} className="flex flex-wrap gap-x-4 gap-y-1 text-muted">
                           <span>{accountVenueLabel(markets.find(m => m.source_id === item.source_id)?.venue ?? '')}</span>
-                          <span>{item.order_strategy_name}</span><span>{item.shares} 份</span>
+                          <span>{item.order_strategy_name || '模板不可见'}</span><span>{item.shares} 份</span>
                         </div>)}</div>}
                         {position && (
                           <div>
