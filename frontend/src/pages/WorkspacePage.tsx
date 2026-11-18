@@ -83,7 +83,7 @@ export function WorkspacePage() {
     </section>
     {error && <Alert tone="error" className="mb-4">更新失败：{error}。{data ? '当前保留上次数据。' : '请刷新重试。'}</Alert>}
     {externalIssues && <Alert tone="warning" className="mb-4">外部账户正在同步或数据已过期。已有数据继续展示；含缺失或过期账户的汇总暂不显示。</Alert>}
-    {rows.some(row => row.account_kind === 'fr' || row.account_kind === 'mm') && <p className="mb-4 text-sm text-muted">FR/MM 今日盈利 = 已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息，约每 5 分钟更新。{rows.some(row => row.account_kind === 'fr') && 'FR 配对仓位的交易盈亏按两腿都平掉的数量计入平仓完成日。'}权益及权益回撤反映账户净值。</p>}
+    {rows.some(row => row.account_kind === 'fr' || row.account_kind === 'mm') && <p className="mb-4 text-sm text-muted">FR/MM 今日盈利 = 已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息，约每 5 分钟更新。{rows.some(row => row.account_kind === 'fr') && 'FR 减仓留下的单腿盈亏，按数量计入两腿平仓或恢复对冲的当天。'}权益及权益回撤反映账户净值。</p>}
     <section className="overview-panel" aria-labelledby="overview-table-title">
       <div className="overview-table-toolbar">
         <div className="overview-table-title"><h2 id="overview-table-title">账户监控</h2><span>{user.username}</span></div>
