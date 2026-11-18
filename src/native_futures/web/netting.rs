@@ -313,11 +313,11 @@ async fn batch(
         crate::native_futures::evidence::validate_anchor(source, db, &anchor)
     })
     .await?;
-    body(
-        store::batch(&s.pool, &id, &request, user.user_id)
-            .await
-            .map_err(failure)?,
-    )
+    let receipt = store::batch(&s.pool, &id, &request, user.user_id)
+        .await
+        .map_err(failure)?;
+    s.plan_changed(&id);
+    body(receipt)
 }
 
 #[derive(Deserialize)]
@@ -370,11 +370,11 @@ async fn allocate(
         return body(receipt);
     }
     let (fill, proof) = read_fill(&s, &id, state.anchor, &request.evidence_key).await?;
-    body(
-        store::allocate(&s.pool, &id, &request, &fill, user.user_id, proof.as_ref())
-            .await
-            .map_err(failure)?,
-    )
+    let receipt = store::allocate(&s.pool, &id, &request, &fill, user.user_id, proof.as_ref())
+        .await
+        .map_err(failure)?;
+    s.plan_changed(&id);
+    body(receipt)
 }
 
 async fn allocate_ctaker(
@@ -395,11 +395,11 @@ async fn allocate_ctaker(
     }
     let (fill, proof) = read_fill(&s, &id, state.anchor, &request.evidence_key).await?;
     let proof = proof.ok_or_else(|| bad("成交缺少可核验的 ctaker 原生报单证据"))?;
-    body(
-        store::allocate_ctaker(&s.pool, &id, &request, &fill, &proof, user.user_id)
-            .await
-            .map_err(failure)?,
-    )
+    let receipt = store::allocate_ctaker(&s.pool, &id, &request, &fill, &proof, user.user_id)
+        .await
+        .map_err(failure)?;
+    s.plan_changed(&id);
+    body(receipt)
 }
 
 async fn read_fill(
@@ -538,11 +538,11 @@ async fn release_demands(
             "the source still reports active orders or unsettled executions; do not release unknown outcomes");
         Ok(proof)
     }).await?;
-    body(
-        store::release(&s.pool, &id, &request, &proof, &quantities, user.user_id)
-            .await
-            .map_err(failure)?,
-    )
+    let receipt = store::release(&s.pool, &id, &request, &proof, &quantities, user.user_id)
+        .await
+        .map_err(failure)?;
+    s.plan_changed(&id);
+    body(receipt)
 }
 
 async fn execution_plan(

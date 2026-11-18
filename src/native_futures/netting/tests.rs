@@ -88,6 +88,20 @@ fn factual(lots: i64) -> FactualFill {
 }
 
 #[test]
+fn ctaker_lease_is_bound_to_the_active_batch_with_a_native_trading_day() {
+    let state = portfolio(0, 0);
+    let mut request = batch(&state, 1, 0);
+    let (analytical, _) = state.batch(&request, AT).unwrap();
+    assert_eq!(analytical.ctaker_lease(), None);
+
+    request.trading_day = Some("20261117".into());
+    let (mut live, receipt) = state.batch(&request, AT).unwrap();
+    assert!(receipt.execution_plan.publishable);
+    live.decision_us = AT + 1;
+    assert_eq!(live.ctaker_lease(), Some((AT, AT + CTAKER_LEASE_US)));
+}
+
+#[test]
 fn position_handoff_has_no_external_order_and_preserves_total_pnl() {
     let state = portfolio(1, 0);
     let (next, receipt) = state.batch(&batch(&state, 0, 1), AT).unwrap();

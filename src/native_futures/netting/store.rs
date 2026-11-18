@@ -471,6 +471,12 @@ pub async fn release(
         "there is no unsettled external demand",
     )?;
     proof.validate()?;
+    if let Some((_, expires_at_us)) = state.ctaker_lease() {
+        require(
+            proof.snapshot_us >= expires_at_us,
+            "release requires an order-free snapshot after the ctaker target lease ends",
+        )?;
+    }
     ensure!(
         proof.source_id == source
             && proof.store_id == state.anchor.store_id

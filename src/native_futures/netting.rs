@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub type Quantities = BTreeMap<String, i64>;
 pub type Strategies = BTreeMap<String, Quantities>;
 const MAX_LOTS: i64 = i32::MAX as i64;
+const CTAKER_LEASE_US: i64 = 60_000_000;
 
 #[derive(Debug)]
 pub struct Conflict(pub String);
@@ -467,6 +468,17 @@ impl Portfolio {
             })
             .collect()
     }
+    pub(crate) fn ctaker_lease(&self) -> Option<(i64, i64)> {
+        self.target_trading_day.as_ref()?;
+        let group = self
+            .strategy_groups
+            .get(self.last_strategy_group.as_ref()?)?;
+        Some((
+            group.decision_us,
+            group.decision_us.saturating_add(CTAKER_LEASE_US),
+        ))
+    }
+
     pub fn execution_plan(&self) -> Result<ExecutionPlan> {
         Ok(ExecutionPlan {
             source_id: self.source_id.clone(),

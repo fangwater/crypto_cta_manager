@@ -15,11 +15,13 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
     routing::{any, get, post, put},
+    serve::ListenerExt,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
+use tokio::sync::watch;
 
 const COOKIE: &str = "cn_cta_session";
 type ApiResult = std::result::Result<Json<Value>, ApiError>;
@@ -72,6 +74,8 @@ pub struct Service {
     catalog_lock: Arc<tokio::sync::Mutex<()>>,
     market_data: Option<Arc<Feed>>,
     reference_service: Option<Arc<reference_data::Feed>>,
+    plan_changes: Arc<BTreeMap<String, watch::Sender<()>>>,
+    plan_shutdown: watch::Sender<bool>,
 }
 
 struct RuntimeConfig {
@@ -91,6 +95,10 @@ impl Service {
     pub fn new(config: Config, pool: PgPool) -> Result<Self> {
         config.validate()?;
         let ctaker_plan_readers = netting_plan::credentials(&config)?;
+        let plan_changes = ctaker_plan_readers
+            .keys()
+            .map(|source| (source.clone(), watch::channel(()).0))
+            .collect();
         let rocks = Arc::new(crate::rocks_source::ReaderPool::new(
             &config.secondary_root,
             &config
@@ -128,10 +136,18 @@ impl Service {
             catalog_lock: Arc::default(),
             market_data,
             reference_service,
+            plan_changes: Arc::new(plan_changes),
+            plan_shutdown: watch::channel(false).0,
         })
     }
+    fn plan_changed(&self, source: &str) {
+        if let Some(wake) = self.plan_changes.get(source) {
+            wake.send_replace(());
+        }
+    }
+
     pub fn router(self) -> Router {
-        let plan_router = netting_plan::routes().with_state(self.clone());
+        let plan_router = netting_plan::routes(self.clone());
         Router::new()
             .route("/api/auth/status", get(auth_status))
             .route("/api/auth/register", post(auth_register))
@@ -201,16 +217,24 @@ pub async fn serve(
         bind.ip().is_loopback(),
         "domestic Manager API must bind to loopback behind its own authenticated gateway"
     );
-    let mut app = Service::new(config, pool)?.router();
+    let service = Service::new(config, pool)?;
+    let plan_shutdown = service.plan_shutdown.clone();
+    let mut app = service.router();
     if let Some(root) = frontend_root {
         app = with_frontend(app, root)?;
     }
     let listener = tokio::net::TcpListener::bind(bind)
         .await
-        .context("bind domestic Manager API")?;
+        .context("bind domestic Manager API")?
+        .tap_io(|socket| {
+            if let Err(error) = socket.set_nodelay(true) {
+                tracing::debug!(%error, "could not enable TCP_NODELAY for Manager connection");
+            }
+        });
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            plan_shutdown.send_replace(true);
         })
         .await
         .context("serve domestic Manager API")

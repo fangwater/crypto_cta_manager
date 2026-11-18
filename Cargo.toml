@@ -10,7 +10,8 @@ futures-executor = "0.3"
 arrow-array = "59.1.0"
 arrow-ipc = { version = "59.1.0", features = ["zstd"] }
 arrow-schema = "59.1.0"
-axum = "0.8"
+axum = { version = "0.8", features = ["http2"] }
+async-stream = "0.3"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -33,6 +34,8 @@ sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tonic = "0.14"
+tonic-prost = "0.14"
+tokio-stream = "0.1"
 toml = "0.8"
 tower-http = { version = "0.7", features = ["trace", "compression-gzip", "fs"] }
 tracing = "0.1"
@@ -44,6 +47,7 @@ prost-types = "0.14"
 
 [build-dependencies]
 prost-build = "0.14"
+tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
