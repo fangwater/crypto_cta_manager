@@ -362,7 +362,7 @@ pub(super) fn load_history_window(
     from: Option<i64>,
     limits: Option<&BTreeMap<String, Option<Vec<u8>>>>,
 ) -> Result<NavSourceHistory> {
-    load_history_window_from(source, from, limits, None, None)
+    load_history_window_from(source, from, limits, None, None, None)
 }
 
 pub(super) fn load_history_for(
@@ -371,36 +371,26 @@ pub(super) fn load_history_for(
     from: Option<i64>,
     uniform_start: Option<Vec<u8>>,
 ) -> Result<NavSourceHistory> {
-    if let Some(view) = &history.recovery_view {
-        let mut complete = history.clone();
-        complete.events.clear();
-        complete.change = None;
-        complete.retained_from_us = from;
-        view.visit(|event| {
-            if from.is_none_or(|bound| fifo_ts_us(&event) >= bound) {
-                complete.events.push_back(event);
-            }
-            Ok(())
-        })?;
-        complete
-            .events
-            .sort_by(|a, b| a.record_key.cmp(&b.record_key));
-        return Ok(complete);
-    }
-    load_history_window_from(
+    let loaded = load_history_window_from(
         source,
         from,
         Some(&history.read_limits),
         uniform_start,
         None,
-    )
+        Some(history.source_revision),
+    )?;
+    anyhow::ensure!(
+        loaded.source_identity == history.source_identity,
+        "Exec database changed after the requested NAV generation"
+    );
+    Ok(loaded)
 }
 
 pub(super) fn load_fill_history(
     source: &SourceConfig,
     symbols: &[String],
 ) -> Result<NavSourceHistory> {
-    load_history_window_from(source, None, None, None, Some(symbols))
+    load_history_window_from(source, None, None, None, Some(symbols), None)
 }
 
 fn load_history_window_from(
@@ -409,27 +399,10 @@ fn load_history_window_from(
     limits: Option<&BTreeMap<String, Option<Vec<u8>>>>,
     uniform_start: Option<Vec<u8>>,
     fill_symbols: Option<&[String]>,
+    revision: Option<u64>,
 ) -> Result<NavSourceHistory> {
     if !source.rocksdb_path.join("CURRENT").is_file() {
         return Ok(NavSourceHistory::default());
-    }
-    if rapidx_source(source) {
-        anyhow::ensure!(
-            limits.is_none(),
-            "RapidX history requires its immutable canonical fill view"
-        );
-        let mut state = IncrementalSourceHistory::default();
-        state.refresh_recovered_source(source, false)?;
-        let mut history = load_history_for(source, &state.history, from, None)?;
-        if let Some(symbols) = fill_symbols {
-            history.events = history
-                .events
-                .iter()
-                .filter(|event| symbols.is_empty() || symbols.contains(&event.symbol))
-                .cloned()
-                .collect();
-        }
-        return Ok(history);
     }
     let requests = NAV_HISTORY_COLUMN_FAMILIES
         .iter()
@@ -448,10 +421,14 @@ fn load_history_window_from(
     let mut roles = LiquidityByOrder::new();
     let mut wanted = BTreeSet::new();
     let mut metadata = HistoryMetadata::default();
-    let heads = rocks_source::visit_column_families_in_window(
+    let scan = rocks_source::visit_uniform_history(
         &source.rocksdb_path,
         &requests,
-        limits,
+        rocks_source::UniformScanOptions {
+            limits,
+            revision,
+            legacy_fills: false,
+        },
         |cf, key, value| {
             if cf == crate::model::UNIFORM_ORDERS_CF {
                 let event: Arc<NavEvent> = decode_uniform_order(key, value)?.into();
@@ -466,7 +443,8 @@ fn load_history_window_from(
                     }))
                     && from.is_none_or(|bound| fifo_ts_us(&event) >= bound)
                 {
-                    if event.fill_liquidity.is_none() {
+                    let legacy = event.fill_liquidity.is_none();
+                    if legacy {
                         wanted.insert((
                             event.symbol.clone(),
                             event.venue_code,
@@ -474,6 +452,7 @@ fn load_history_window_from(
                         ));
                     }
                     events.push_back(event);
+                    return Ok(legacy);
                 }
             } else {
                 let event = decode_trade_update(key, value)?;
@@ -486,11 +465,12 @@ fn load_history_window_from(
                     merge_liquidity_event(&mut roles, &mut BTreeSet::new(), event);
                 }
             }
-            Ok(())
+            Ok(false)
         },
-    )?;
+    )?
+    .context("uniform history changed after the requested NAV generation")?;
     anyhow::ensure!(
-        heads.contains_key(crate::model::UNIFORM_ORDERS_CF),
+        scan.heads.contains_key(crate::model::UNIFORM_ORDERS_CF),
         "missing uniform_orders"
     );
     let events = events
@@ -521,8 +501,9 @@ fn load_history_window_from(
     let mut history = NavSourceHistory {
         events,
         liquidity_by_order: Default::default(),
-        read_limits: limits.cloned().unwrap_or(heads),
+        read_limits: limits.cloned().unwrap_or(scan.heads),
         source_identity: std::fs::read(source.rocksdb_path.join("IDENTITY")).ok(),
+        source_revision: scan.revision,
         ..Default::default()
     };
     metadata.attach(&mut history);
@@ -632,7 +613,6 @@ impl NavTimelineCache {
                     .filter(|e| e.amount_update != 0.0)
                     .map(|e| fifo_ts_us(e))
                     .chain(c.earliest_liquidity_fill_ts_us)
-                    .chain(c.replaced_from_ts_us)
                     .min()
             });
             let needs_full = cold
@@ -710,7 +690,7 @@ impl NavTimelineCache {
                 Ok(built) => built,
                 Err(error) if error.is::<FullHistoryRequired>() => {
                     info!(source_id=%source.id, changed_from_us=?changed_from, "starting bounded NAV fill rebuild");
-                    let (built, next, _) = rebuild::build_with_state(
+                    let (built, next, _) = rebuild::build(
                         config.clone(),
                         source,
                         snapshots.clone(),
@@ -718,7 +698,6 @@ impl NavTimelineCache {
                         allocations.get(&source.id).cloned().unwrap_or_default(),
                         daily.clone(),
                         now,
-                        std::mem::take(state),
                     )?;
                     *state = next;
                     histories.insert(source.id.clone(), built.histories[&source.id].clone());

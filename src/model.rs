@@ -8,6 +8,17 @@ pub const ORDER_UPDATES_UNMATCHED_CF: &str = "order_updates_unmatched";
 const SIGNAL_BBO_LEG_BINARY_LEN: usize = 41;
 const SIGNAL_BBO_BINARY_LEN: usize = 83;
 const UNIFORM_ORDER_TAIL_BINARY_LEN: usize = SIGNAL_BBO_BINARY_LEN + 1;
+const MAX_UNIFORM_PROVENANCE_BYTES: usize = 64 * 1024;
+
+#[derive(serde::Deserialize)]
+struct UniformProvenance {
+    logical_record_key: String,
+    original_received_at_us: i64,
+    #[serde(default)]
+    legacy_role_absent: bool,
+    #[serde(default)]
+    legacy_report_role: Option<u8>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FillLiquidity {
@@ -192,13 +203,13 @@ fn decode_timestamp_key(key: &[u8], kind: &str) -> Result<(String, i64)> {
 }
 
 pub fn decode_uniform_order(key: &[u8], payload: &[u8]) -> Result<UniformOrderEvent> {
-    let record_key = std::str::from_utf8(key)
+    let mut record_key = std::str::from_utf8(key)
         .context("uniform order key is not UTF-8")?
         .to_string();
     if record_key.len() != 20 || !record_key.bytes().all(|byte| byte.is_ascii_digit()) {
         bail!("uniform order key is not a 20-digit timestamp: {record_key:?}");
     }
-    let event_ts_us = record_key
+    let mut event_ts_us = record_key
         .parse::<i64>()
         .context("uniform order key exceeds PostgreSQL bigint")?;
 
@@ -234,7 +245,9 @@ pub fn decode_uniform_order(key: &[u8], payload: &[u8]) -> Result<UniformOrderEv
 
     let (signal_open, signal_hedge) = match decoder.remaining() {
         0 => (None, None),
-        SIGNAL_BBO_BINARY_LEN | UNIFORM_ORDER_TAIL_BINARY_LEN => {
+        remaining
+            if remaining == SIGNAL_BBO_BINARY_LEN || remaining >= UNIFORM_ORDER_TAIL_BINARY_LEN =>
+        {
             decode_signal_bbo(decoder.bytes(SIGNAL_BBO_BINARY_LEN, "signal_bbo")?)?
         }
         remaining => {
@@ -243,11 +256,33 @@ pub fn decode_uniform_order(key: &[u8], payload: &[u8]) -> Result<UniformOrderEv
             )
         }
     };
-    let fill_liquidity = if decoder.remaining() == 1 {
+    let mut fill_liquidity = if decoder.remaining() >= 1 {
         Some(FillLiquidity::decode(decoder.u8("fill_liquidity")?)?)
     } else {
         None
     };
+    if decoder.remaining() != 0 {
+        let size = decoder.u32("uniform provenance size")? as usize;
+        anyhow::ensure!(
+            (1..=MAX_UNIFORM_PROVENANCE_BYTES).contains(&size),
+            "invalid uniform provenance length"
+        );
+        let provenance: UniformProvenance =
+            serde_json::from_slice(decoder.bytes(size, "uniform provenance")?)?;
+        anyhow::ensure!(
+            !provenance.logical_record_key.is_empty() && provenance.original_received_at_us > 0,
+            "invalid uniform provenance identity"
+        );
+        let report = provenance
+            .legacy_report_role
+            .map(FillLiquidity::decode)
+            .transpose()?;
+        if provenance.legacy_role_absent {
+            fill_liquidity = Some(report.unwrap_or(FillLiquidity::Unknown));
+        }
+        record_key = provenance.logical_record_key;
+        event_ts_us = provenance.original_received_at_us;
+    }
     if decoder.remaining() != 0 {
         bail!(
             "uniform order payload has {} trailing bytes",
