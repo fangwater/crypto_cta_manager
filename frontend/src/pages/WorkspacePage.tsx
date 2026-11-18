@@ -30,7 +30,7 @@ const columns: { key: ValueKey; label: string; digits?: number; reason: string }
   { key: 'queried_at_ms', label: '查询时间', reason: '尚未查询' },
 ]
 const dateTime = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
-const number = (value: number | null) => value === null ? '—' : money(value)
+const number = (value: number | null, currency = '') => value === null ? '—' : [money(value), currency].filter(Boolean).join(' ')
 const sideClass = (key: SortKey) => key === 'long_position' || key === 'long_leverage' ? 'overview-long' : key === 'short_position' || key === 'short_leverage' ? 'overview-short' : ''
 
 export function WorkspacePage() {
@@ -65,6 +65,7 @@ export function WorkspacePage() {
   const timeoutAlerts = data ? overviewAlertCount(rows, 'timeout_alert') : null
   const externalPending = !accounts.some(isExternalOverview) && data?.external_status?.some(status => status.status !== 'live')
   const externalIssues = data?.external_status?.some(status => status.status !== 'live')
+  const currency = rows.length > 0 && rows.every(row => row.quote_currency === 'CNY') ? 'CNY' : ''
   return <AppShell active="workspace" title="CTA 管理平台" subtitle="账户监控总览" icon={LayoutDashboard} wide className="overview-page">
     <section className="overview-toolbar" aria-label="总览筛选与统计">
       <div className="overview-filters">
@@ -75,8 +76,8 @@ export function WorkspacePage() {
       </div>
       <div className="overview-stats" aria-live="polite">
         <Summary label="账户数" value={data ? String(rows.length) : '—'} />
-        <Summary label="总权益" value={number(data && !externalPending ? overviewTotal(rows, 'equity') : null)} title="当前筛选账户的权益合计；有账户缺失或过期数据时不显示不完整合计" />
-        <Summary label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null)} title="当前筛选账户的今日盈利合计；CTA 使用权益变化，FR/MM 使用已实现净收益" />
+        <Summary label="总权益" value={number(data && !externalPending ? overviewTotal(rows, 'equity') : null, currency)} title="当前筛选账户的权益合计；有账户缺失或过期数据时不显示不完整合计" />
+        <Summary label="今日总盈利" value={number(data && !externalPending ? overviewTotal(rows, 'today_profit') : null, currency)} title="当前筛选账户的今日盈利合计；CTA 使用权益变化，FR/MM 使用已实现净收益" />
         <Summary label="杠杆告警" value={leverageAlerts == null ? '—' : String(leverageAlerts)} title={data?.alerts.long_leverage_limit == null || data?.alerts.short_leverage_limit == null ? '尚未提供原页面的杠杆告警阈值' : `多头 > ${data.alerts.long_leverage_limit}，空头 > ${data.alerts.short_leverage_limit}`} warn={!!leverageAlerts} />
         <Summary label="超时告警" value={timeoutAlerts == null ? '—' : String(timeoutAlerts)} title={data?.alerts.timeout_secs == null ? '尚未提供原页面的超时告警阈值' : `权益数据超过 ${data.alerts.timeout_secs} 秒未更新`} warn={!!timeoutAlerts} />
       </div>
@@ -121,23 +122,37 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
     <td className="overview-index">{index + 1}</td>
     <th scope="row" className="overview-account-cell"><a href={isExternalOverview(row) ? row.detail_url ?? undefined : routes.nav(row.source_id)} title={`查看 ${row.account} 的净值`}>{row.account}</a>{isExternalOverview(row) && <span className="ml-2 text-[10px] text-muted">{row.account_kind?.toUpperCase()}{row.collection_status === 'stale' ? ' · 已过期' : row.collection_status === 'loading' ? ' · 同步中' : row.collection_status === 'unavailable' ? ' · 暂不可用' : ''}</span>}{positionNotice && <details className="text-xs font-normal text-amber-700"><summary className="cursor-pointer">部分估值</summary><span>{positionNotice}</span></details>}</th>
     {columns.map(column => {
-      const value = row[column.key]
+      const indicativeEquity = column.key === 'equity' && row.equity == null && row.sdk_market_value != null
+      const value = indicativeEquity ? row.sdk_market_value : row[column.key]
       const time = column.key === 'date_ms' || column.key === 'queried_at_ms'
       const profit = column.key === 'today_profit' || column.key === 'profit_percent'
       const partialPosition = positionNotice && ['long_position', 'short_position', 'long_leverage', 'short_leverage', 'net_position'].includes(column.key)
       const alert = column.key === 'date_ms' && (row.timeout_alert || row.collection_status === 'stale') || (column.key === 'long_leverage' || column.key === 'short_leverage') && row.leverage_alert
       const className = alert ? 'overview-stale' : profit && value != null && value !== 0 ? value > 0 ? 'overview-positive' : 'overview-negative' : time ? 'overview-time' : column.key === 'equity' ? 'overview-equity' : ''
       const side = sideClass(column.key)
-      const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : money(value)
+      const formatted = value == null ? '—' : time ? dateTime.format(value) : column.digits != null ? value.toFixed(column.digits) : number(value, row.quote_currency ?? '')
+      const fundsDate = column.key === 'date_ms' && row.funds_as_of_ms != null && value === row.funds_as_of_ms
+      const historicalFunds = row.funds_status === 'historical' && (fundsDate || column.key === 'equity' || column.key === 'margin')
+      const dailyFundsMissing = row.quote_currency === 'CNY' && value == null && ['yesterday_equity', 'today_profit', 'profit_percent'].includes(column.key)
       const reconstructed = row.history_rebuilt_at_ms != null && ['yesterday_equity', 'today_profit', 'profit_percent', 'max_drawdown_15d_percent'].includes(column.key)
       const ltpMargin = row.margin_kind === 'ltp_frozen' && ['margin', 'margin_percent'].includes(column.key)
       const updated = row.history_rebuilt_at_ms == null ? '' : `；更新时间 ${dateTime.format(row.history_rebuilt_at_ms)} 上海时间`
-      const title = ltpMargin ? 'LTP 实际冻结／占用保证金；占比 = 占用保证金 ÷ 实时权益 × 100%' : partialPosition ? positionNotice : (row.account_kind === 'fr' || row.account_kind === 'mm') && profit
+      const sdkNote = indicativeEquity ? `SDK 估值 · 行情时间未核验${row.funds_trading_day ? ` · 交易日 ${row.funds_trading_day}` : ''}` : undefined
+      const title = sdkNote ?? (historicalFunds ? row.funds_historical_reason ?? '历史资金观察'
+        : fundsDate ? '柜台资金观察时间（上海时间）'
+        : dailyFundsMissing ? '缺少上海时间零点的权益依据'
+        : ltpMargin ? 'LTP 实际冻结／占用保证金；占比 = 占用保证金 ÷ 实时权益 × 100%' : partialPosition ? positionNotice : (row.account_kind === 'fr' || row.account_kind === 'mm') && profit
         ? value == null ? 'FR/MM 已实现收益历史尚不可用，或缺少正的零点权益以计算收益率' : `FR/MM 按当日已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息计算，不含未平仓浮盈亏；盈亏比例以零点权益为分母${updated}`
         : value == null ? column.reason : time ? '上海时间' : reconstructed
           ? row.account_kind === 'fr' || row.account_kind === 'mm' ? `按事实权益与 NAV 总盈亏重建，包含浮盈亏${updated}` : `按账户费后净值（含账户当前选择的资金费口径）倒算，每日重算${updated}`
-          : undefined
-      return <td key={column.key} className={className} title={title}>{side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}{ltpMargin && column.key === 'margin' && value != null && <span className="block text-[10px] text-muted">LTP 占用</span>}{partialPosition && value != null && <sup aria-label="仅已定价持仓">*</sup>}</td>
+          : undefined)
+      return <td key={column.key} className={className} title={title}>
+        {side && value != null ? <span className={`overview-side-value ${side}`}>{formatted}</span> : formatted}
+        {sdkNote && <span className="block text-[10px] text-muted">{sdkNote}</span>}
+        {historicalFunds && value != null && <span className="block text-[10px] text-muted">历史观察</span>}
+        {ltpMargin && column.key === 'margin' && value != null && <span className="block text-[10px] text-muted">LTP 占用</span>}
+        {partialPosition && value != null && <sup aria-label="仅已定价持仓">*</sup>}
+      </td>
     })}
   </tr>
 }

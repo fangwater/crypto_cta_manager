@@ -268,6 +268,28 @@ function AccountCard({
     ? accountSignalConfigPath(account.source_id)
     : undefined
   const openPositions = account.open_position_symbol_count
+  const funds = account.account_funds
+  const equity = account.live_equity_quote
+  const availableCash = equity == null ? (funds?.usable_cash ?? funds?.available) : null
+  const amount = equity ?? availableCash
+  const historical = funds?.status === 'historical' || account.live_equity_status === 'stale'
+  const assetLabel = availableCash != null
+    ? historical ? '历史可用资金' : '可用资金'
+    : historical ? '历史权益' : '实时权益'
+  const assetSource = funds?.source === 'ctp_trading_account' ? 'CTP 资金查询'
+    : funds?.source === 'yida_extended_account' ? '易达资金回报' : undefined
+  const assetUnit = equity != null ? 'CNY' : funds?.currency
+  const assetTime = funds ? `回报 ${timestampUs(funds.observed_us)}` : undefined
+  const assetDetail = [funds?.historical_reason, assetSource, assetTime, funds?.trading_day ? `交易日 ${funds.trading_day}` : undefined,
+    amount != null && !assetUnit ? '币种未回报' : undefined].filter(Boolean).join(' · ')
+  const previousSettlement = funds?.source === 'ctp_trading_account' && funds.previous_balance != null && funds.currency
+    ? `上次结算权益 ${money(funds.previous_balance)} ${funds.currency}`
+    : undefined
+  const sdkAssets = funds?.valuation_basis === 'sdk_mark_time_unverified' ? [
+    ['SDK 资金权益', funds.sdk_cash_balance],
+    ['SDK 市值权益', funds.sdk_market_value],
+    ['昨市值权益', funds.previous_balance],
+  ].flatMap(([label, value]) => typeof value === 'number' ? [[label, money(value), funds.currency].filter(Boolean).join(' ')] : []) : []
 
   return (
     <Card className={cn(!ready && 'opacity-80')}>
@@ -300,12 +322,10 @@ function AccountCard({
             title={report?.nav_as_of_ts_us ? `截至 ${timestampUs(report.nav_as_of_ts_us)}` : undefined}
           />
           <Metric
-            label="实时权益"
-            value={
-              account.live_equity_quote != null
-                ? `${money(account.live_equity_quote)} CNY`
-                : '--'
-            }
+            label={assetLabel}
+            value={amount != null ? [money(amount), assetUnit].filter(Boolean).join(' ') : '--'}
+            detail={sdkAssets.length ? <>{assetDetail}<br />{sdkAssets.join(' · ')}<br />行情估值时间未核验</> : assetDetail}
+            title={previousSettlement}
           />
           {(account.unified_account || isUnifiedVenue(account.venue)) && (
             <Metric
@@ -391,11 +411,12 @@ function uniMmrTone(value: number | null | undefined, status?: string | null) {
   return ''
 }
 
-function Metric({ label, value, tone = '', title }: { label: string; value: string; tone?: string; title?: string }) {
+function Metric({ label, value, tone = '', title, detail }: { label: string; value: string; tone?: string; title?: string; detail?: React.ReactNode }) {
   return (
     <div title={title}>
       <p className="text-xs text-muted">{label}</p>
       <p className={cn('mt-1 font-medium tabular-nums text-ink', tone)}>{value}</p>
+      {detail && <p className="mt-0.5 text-[10px] text-muted">{detail}</p>}
     </div>
   )
 }

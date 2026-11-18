@@ -14,6 +14,7 @@ pub(super) struct Projection {
     runtime: Option<(bool, i64)>,
     state: Option<State>,
     reconciled: Option<(i64, i64)>,
+    funds: super::funds::FundsProjection,
 }
 #[derive(Clone)]
 struct State {
@@ -27,22 +28,26 @@ struct State {
     positions: Vec<Value>,
 }
 #[derive(Deserialize)]
-struct Envelope<'a> {
-    sequence: i64,
+pub(super) struct Envelope<'a> {
+    pub(super) sequence: i64,
     received_us: i64,
     #[serde(default, borrow)]
-    projection_error: Option<&'a RawValue>,
+    pub(super) projection_error: Option<&'a RawValue>,
     #[serde(borrow)]
-    value: Evidence<'a>,
+    pub(super) value: Evidence<'a>,
 }
 #[derive(Deserialize)]
-struct Evidence<'a> {
+pub(super) struct Evidence<'a> {
     #[serde(rename = "type", borrow)]
-    kind: &'a str,
+    pub(super) kind: &'a str,
     #[serde(default, borrow)]
-    event: Option<&'a RawValue>,
+    pub(super) event: Option<&'a RawValue>,
     #[serde(default, borrow)]
-    state: Option<&'a RawValue>,
+    pub(super) state: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    pub(super) received_us: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    pub(super) shutdown_tail: Option<&'a RawValue>,
     #[serde(default, borrow)]
     ready: Option<&'a RawValue>,
     #[serde(default, borrow)]
@@ -61,7 +66,7 @@ struct Connection {
     #[serde(default)]
     replay: Option<i64>,
 }
-fn boolean(raw: Option<&RawValue>) -> Option<bool> {
+pub(super) fn boolean(raw: Option<&RawValue>) -> Option<bool> {
     match raw.map(RawValue::get) {
         Some("true") => Some(true),
         Some("false") => Some(false),
@@ -74,134 +79,139 @@ fn message(raw: Option<&RawValue>, fallback: &str) -> String {
 }
 
 pub(super) fn read(db: &DB, adapter: &str, previous: Option<&Projection>) -> Result<Projection> {
-    let mut next = Projection::default();
-    for item in db.iterator_cf(
-        db.cf_handle(EVENTS).context("events handle")?,
-        IteratorMode::End,
-    ) {
+    let mut next = previous.cloned().unwrap_or_default();
+    let from = previous.and_then(|old| old.last_key.as_deref());
+    let mode = from.map_or(IteratorMode::Start, |key| {
+        IteratorMode::From(key, Direction::Forward)
+    });
+    let cf = db.cf_handle(EVENTS).context("events handle")?;
+    let mut last_key = None;
+    let mut state_key = None;
+    let mut guard_error = None;
+    for item in db.iterator_cf(cf, mode) {
         let (key, bytes) = item.context("scan domestic evidence")?;
-        if previous
-            .and_then(|p| p.last_key.as_deref())
-            .is_some_and(|old| key.as_ref() <= old)
-        {
-            break;
+        if from.is_some_and(|old| key.as_ref() <= old) {
+            continue;
         }
         let event: Envelope<'_> =
             serde_json::from_slice(&bytes).context("decode domestic evidence envelope")?;
-        if next.last_key.is_none() {
-            next.last_key = Some(key.to_vec());
-            next.last_sequence = event.sequence;
-            next.last_event_us = Some(event.received_us);
-        }
         if let Some(old) = previous {
             ensure!(
                 event.sequence > old.last_sequence,
                 "late or unordered native evidence requires a full read"
             );
         }
+        next.last_sequence = event.sequence;
+        next.last_event_us = Some(event.received_us);
         next.errors += usize::from(event.projection_error.is_some());
-        let value = event.value;
+        let value = &event.value;
         let kind = value.kind;
-        if kind == "reconciled" && next.reconciled.is_none() {
+        if kind == "reconciled" {
             next.reconciled = Some((event.sequence, event.received_us));
         }
-        if kind == "runtime_start" && next.latest_start.is_none() {
+        if kind == "runtime_start" {
             next.latest_start = Some(event.sequence);
         }
-        if next.transport.is_none() {
-            if let Some(ready) = boolean(if kind == "transport_status" {
-                value.ready
-            } else {
-                value.transport_ready
+        if let Some(ready) = boolean(if kind == "transport_status" {
+            value.ready
+        } else {
+            value.transport_ready
+        }) {
+            next.transport = Some((event.sequence, ready, event.received_us));
+        }
+        let native = if matches!(
+            (adapter, kind),
+            ("ctp", "ctp_event") | ("yida", "yida_event")
+        ) {
+            match value.event.context("missing native event").and_then(|raw| {
+                serde_json::from_str::<Connection>(raw.get()).context("decode native connection")
             }) {
-                next.transport = Some((event.sequence, ready, event.received_us));
-            }
-        }
-        if next.guard.is_none() {
-            let guard = match kind {
-                "trading_blocked" => Some(("blocked", message(value.error, "execution blocked"))),
-                "reconciling" | "recovery_checkpoint" => Some(("recovering", String::new())),
-                "restart_required" => Some((
-                    "blocked",
-                    message(value.reason, "execution restart required"),
-                )),
-                "ctp_event" | "yida_event" => {
-                    let relevant = (kind == "ctp_event" && adapter == "ctp")
-                        || (kind == "yida_event" && adapter == "yida");
-                    if relevant {
-                        let raw: Connection = serde_json::from_str(
-                            value.event.context("missing native event")?.get(),
-                        )?;
-                        if kind == "yida_event" && raw.replay != Some(0) {
-                            None
-                        } else {
-                            match raw.kind {
-                                Some(1) => Some(("recovering", String::new())),
-                                Some(2) => {
-                                    let reason = if kind == "ctp_event" {
-                                        "CTP connection disconnected"
-                                    } else {
-                                        "native connection disconnected"
-                                    };
-                                    Some(("disconnected", reason.into()))
-                                }
-                                Some(14 | 16) if kind == "yida_event" => {
-                                    Some(("blocked", "native adapter invalidated or failed".into()))
-                                }
-                                _ => None,
-                            }
-                        }
-                    } else {
-                        None
-                    }
+                Ok(native) => Some(native),
+                Err(error) => {
+                    guard_error = Some(error);
+                    None
                 }
-                _ => None,
-            };
-            if let Some((phase, reason)) = guard {
-                next.guard = Some((event.sequence, phase, reason));
             }
+        } else {
+            None
+        };
+        let guard = match kind {
+            "trading_blocked" => Some(("blocked", message(value.error, "execution blocked"))),
+            "reconciling" | "recovery_checkpoint" => Some(("recovering", String::new())),
+            "restart_required" => Some((
+                "blocked",
+                message(value.reason, "execution restart required"),
+            )),
+            "ctp_event" | "yida_event" => native
+                .as_ref()
+                .filter(|raw| kind == "ctp_event" || raw.replay == Some(0))
+                .and_then(|raw| match raw.kind {
+                    Some(1) => Some(("recovering", String::new())),
+                    Some(2) => {
+                        let reason = if kind == "ctp_event" {
+                            "CTP connection disconnected"
+                        } else {
+                            "native connection disconnected"
+                        };
+                        Some(("disconnected", reason.into()))
+                    }
+                    Some(14 | 16) if kind == "yida_event" => {
+                        Some(("blocked", "native adapter invalidated or failed".into()))
+                    }
+                    _ => None,
+                }),
+            _ => None,
+        };
+        if let Some((phase, reason)) = guard {
+            guard_error = None;
+            next.guard = Some((event.sequence, phase, reason));
         }
-        if next.runtime.is_none() && matches!(kind, "runtime_start" | "runtime_stopped") {
+        if matches!(kind, "runtime_start" | "runtime_stopped") {
             next.runtime = Some((kind == "runtime_stopped", event.sequence));
         }
-        if next.state.is_none() && matches!(kind, "state" | "reconciled") {
-            let state = json(
-                value
-                    .state
-                    .context("missing execution state")?
-                    .get()
-                    .as_bytes(),
-                EVENTS,
-            )?;
-            ensure!(state.is_object(), "missing execution state");
-            next.state = Some(State {
-                sequence: event.sequence,
-                received: event.received_us,
-                ready: state["ready"].as_bool().context("missing ready state")?,
-                can_trade: boolean(value.can_trade),
-                reason: state["reason"].as_str().unwrap_or_default().into(),
-                day: state["trading_day"].as_str().map(str::to_owned),
-                budget: state["available_local_budget"].as_f64(),
-                positions: state["positions"]
-                    .as_array()
-                    .context("missing positions snapshot")?
-                    .clone(),
-            });
+        if matches!(kind, "state" | "reconciled") {
+            state_key = Some(key.clone());
         }
+        last_key = Some(key);
+        next.funds
+            .observe(adapter, &event, native.and_then(|raw| raw.kind));
     }
-    if let Some(old) = previous {
-        if next.last_key.is_none() {
-            next.last_key = old.last_key.clone();
-            next.last_sequence = old.last_sequence;
-            next.last_event_us = old.last_event_us;
-        }
-        next.errors += old.errors;
-        next.latest_start = next.latest_start.or(old.latest_start);
-        next.transport = next.transport.or(old.transport);
-        next.guard = next.guard.or_else(|| old.guard.clone());
-        next.runtime = next.runtime.or(old.runtime);
-        next.state = next.state.or_else(|| old.state.clone());
-        next.reconciled = next.reconciled.or(old.reconciled);
+    if let Some(error) = guard_error {
+        return Err(error);
+    }
+    if let Some(key) = last_key {
+        next.last_key = Some(key.into_vec());
+    }
+    if let Some(key) = state_key {
+        // Decode the latest inventory once. Older state rows can include
+        // large snapshots and are superseded by the last forward record.
+        let bytes = db
+            .get_cf(cf, key)?
+            .context("missing latest execution state")?;
+        let event: Envelope<'_> = serde_json::from_slice(&bytes)?;
+        let value = event.value;
+        let state = json(
+            value
+                .state
+                .context("missing execution state")?
+                .get()
+                .as_bytes(),
+            EVENTS,
+        )?;
+        ensure!(state.is_object(), "missing execution state");
+        next.state = Some(State {
+            sequence: event.sequence,
+            received: event.received_us,
+            ready: state["ready"].as_bool().context("missing ready state")?,
+            can_trade: boolean(value.can_trade),
+            reason: state["reason"].as_str().unwrap_or_default().into(),
+            day: state["trading_day"].as_str().map(str::to_owned),
+            budget: state["available_local_budget"].as_f64(),
+            positions: state["positions"]
+                .as_array()
+                .context("missing positions snapshot")?
+                .clone(),
+        });
     }
     Ok(next)
 }
@@ -273,5 +283,6 @@ impl Projection {
             "observing"
         }
         .into();
+        self.funds.apply(result, stale_secs);
     }
 }

@@ -112,6 +112,20 @@ export interface DashboardAccount {
   strategy_pnl_start_ts_us?: number | null
   live_equity_quote?: number | null
   live_equity_status?: 'ok' | 'stale' | string | null
+  account_funds?: {
+    source: 'ctp_trading_account' | 'yida_extended_account'
+    status: 'live' | 'historical'
+    historical_reason?: string | null
+    observed_us: number
+    trading_day?: string | null
+    currency?: string | null
+    valuation_basis?: 'sdk_mark_time_unverified' | null
+    available?: number | null
+    usable_cash?: number | null
+    previous_balance?: number | null
+    sdk_cash_balance?: number | null
+    sdk_market_value?: number | null
+  } | null
   /** Account monitor has published an OKX unified AccountRisk sample. */
   unified_account?: boolean
   /** OKX maintenance margin ratio. Higher is safer. */

@@ -680,3 +680,199 @@ fn readonly_reconciled_inventory_remains_a_historical_anchor_after_later_executi
     );
     assert_eq!(read.nav_anchor_evidence_sequence, Some(100));
 }
+
+fn funds_event(db: &DB, seq: i64, recorded_us: i64, value: Value) {
+    db.put_cf(
+        db.cf_handle("cn_trading_events").unwrap(),
+        seq.to_be_bytes(),
+        serde_json::to_vec(&json!({
+            "sequence": seq, "received_us": recorded_us, "projection_error": null, "value": value,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn broker_funds_ctp_complete_raw_query_without_trading_readiness() {
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("exec");
+    let db = db(&primary);
+    let mut source = source(&primary);
+    source.adapter = "ctp".into();
+    let pool =
+        crate::rocks_source::ReaderPool::new(&tmp.path().join("secondary"), &[&primary]).unwrap();
+    let mut cache = reader::Cache::default();
+    let mut read =
+        || reader::with_db(&pool, &source, |view| cache.read(&source, view, 10, 30)).unwrap();
+    let now = super::now_us();
+    funds_event(&db, 1, now, json!({"type":"runtime_start"}));
+    funds_event(
+        &db,
+        2,
+        now,
+        json!({"type":"ctp_event","event":{
+            "kind":4,"error_code":0,"trading_day":"20261117"
+        }}),
+    );
+    funds_event(
+        &db,
+        3,
+        now,
+        json!({"type":"reconciled","state":{
+            "connected":true,"ready":false,"trading_day":"20261117","positions":[],
+            "available_local_budget":9999.0,"reason":"settlement not confirmed"
+        }}),
+    );
+    let mut values = vec![0.0; 44];
+    values[3] = 1000.0;
+    values[7] = 12.0;
+    values[8] = 5.0;
+    values[12] = 100.0;
+    values[16] = -21.0;
+    values[17] = 985.0;
+    values[18] = 900.0;
+    let callback = |history: &[f64]| {
+        json!({"type":"ctp_event","event":{
+            "kind":7,"request_id":21,"error_code":0,"last":0,"present":1,"exchange":"CNY",
+            "trading_day":"20261117","received_us":now-100,"available":900.0,
+            "metadata":{"account_values":history}
+        }})
+    };
+    funds_event(&db, 4, now, callback(&values));
+    let pending = read();
+    assert!(pending.funds.is_none());
+    assert_eq!(pending.available_local_budget, Some(9999.0));
+
+    funds_event(
+        &db,
+        5,
+        now,
+        json!({"type":"ctp_event","event":{
+            "kind":7,"request_id":21,"error_code":0,"last":1,"present":0
+        }}),
+    );
+    let complete = read();
+    assert!(!complete.snapshot_ready);
+    assert!(complete.funds_current_runtime);
+    assert!(!complete.funds_stale);
+    let funds = complete.funds.unwrap();
+    assert_eq!(funds.source, reader::AccountFundsSource::CtpTradingAccount);
+    assert_eq!(funds.observed_us, now - 100);
+    assert_eq!(funds.evidence_sequence, 4);
+    assert_eq!(funds.trading_day.as_deref(), Some("20261117"));
+    assert_eq!(funds.currency.as_deref(), Some("CNY"));
+    assert_eq!(funds.previous_balance, Some(1000.0));
+    assert_eq!(funds.balance, Some(985.0));
+    assert_eq!(funds.available, Some(900.0));
+    assert_eq!(funds.margin, Some(100.0));
+    assert_eq!(funds.deposit, Some(12.0));
+    assert_eq!(funds.withdraw, Some(5.0));
+    assert_eq!(funds.native_fields.len(), 44);
+    assert_eq!(funds.native_fields["position_profit"], -21.0);
+    assert_eq!(funds.native_fields["frozen_cash"], 0.0);
+
+    values[17] = 986.0;
+    funds_event(&db, 4, now, callback(&values));
+    let corrected = read();
+    assert_eq!(corrected.funds.unwrap().balance, Some(986.0));
+    let newest = json!({"type":"ctp_event","event":{
+        "kind":7,"request_id":22,"error_code":0,"last":1,"present":1,"exchange":"USD",
+        "trading_day":"20261117","received_us":now-10,"available":1.0
+    }});
+    funds_event(&db, 6, now, newest);
+    let failed = read();
+    assert!(failed.funds_stale);
+    assert_eq!(failed.funds.unwrap().balance, Some(986.0));
+
+    funds_event(&db, 7, now, json!({"type":"ctp_event","event":{"kind":2}}));
+    let disconnected = read();
+    assert!(!disconnected.funds_current_runtime);
+    assert!(disconnected.funds_stale);
+    assert_eq!(disconnected.funds.unwrap().observed_us, now - 100);
+}
+
+#[test]
+fn broker_funds_yida_need_confirmed_recovery_and_keep_native_marks_distinct() {
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("exec");
+    let db = db(&primary);
+    let source = source(&primary);
+    let pool =
+        crate::rocks_source::ReaderPool::new(&tmp.path().join("secondary"), &[&primary]).unwrap();
+    let mut cache = reader::Cache::default();
+    let mut read =
+        || reader::with_db(&pool, &source, |view| cache.read(&source, view, 10, 30)).unwrap();
+    let now = super::now_us();
+    let event = |seq, value| funds_event(&db, seq, now, value);
+    let structural = |kind| json!({"type":"yida_event","received_us":now,"event":{"kind":kind,"day":20261117,"replay":0}});
+    let account = |replay, available, detail: Value| {
+        json!({
+            "type":"yida_event","received_us":now-50,"event":{
+                "kind":8,"day":20261117,"replay":replay,"error":0,"login_count":1,"right":0,
+                "available":available,"account":detail
+            }
+        })
+    };
+    event(1, json!({"type":"runtime_start"}));
+    event(2, account(0, 500.0, Value::Null));
+    event(3, structural(6));
+    event(4, account(1, 100.0, Value::Null));
+    assert!(read().funds.is_none());
+    event(5, structural(12));
+    assert!(read().funds.is_none());
+    event(
+        6,
+        json!({"type":"reconciled","state":{
+            "connected":true,"ready":true,"trading_day":"20261117","positions":[],
+            "available_local_budget":9999.0
+        }}),
+    );
+    let reconciled = read();
+    assert!(reconciled.funds_current_runtime && !reconciled.funds_stale);
+    let funds = reconciled.funds.unwrap();
+    assert_eq!(funds.usable_cash, Some(100.0));
+    assert!(funds.available.is_none());
+    assert!(funds.balance.is_none());
+    assert!(funds.margin.is_none());
+    assert!(funds.currency.is_none());
+    assert_eq!(funds.observed_us, now - 50);
+
+    event(7, account(1, 30.0, Value::Null));
+    assert_eq!(read().funds.unwrap().usable_cash, Some(100.0));
+    let detail = json!({
+        "valuation_basis":"sdk_mark_time_unverified","currency":"CNY","balance":400.0,
+        "available":200.0,"sdk_market_value":555.0,"sdk_cash_balance":501.0,
+        "pre_market_value":300.0,"pre_cash_balance":290.0,"margin":33.0,
+        "deposit":12.0,"withdraw":0.0
+    });
+    event(8, account(0, 250.0, detail));
+    let reported = read();
+    let funds = reported.funds.unwrap();
+    assert_eq!(
+        funds.source,
+        reader::AccountFundsSource::YidaExtendedAccount
+    );
+    assert_eq!(funds.currency.as_deref(), Some("CNY"));
+    assert_eq!(
+        funds.valuation_basis.as_deref(),
+        Some("sdk_mark_time_unverified")
+    );
+    assert_eq!(funds.usable_cash, Some(250.0));
+    assert_eq!(funds.available, Some(200.0));
+    assert_eq!(funds.previous_balance, Some(300.0));
+    assert!(funds.balance.is_none());
+    assert!(funds.margin.is_none());
+    assert_eq!(funds.native_fields["sdk_market_value"], 555.0);
+    assert_eq!(funds.native_fields["balance"], 400.0);
+    assert_eq!(funds.native_fields["margin"], 33.0);
+    assert_eq!(funds.withdraw, Some(0.0));
+
+    let mut tail = account(0, 1.0, Value::Null);
+    tail["shutdown_tail"] = true.into();
+    event(9, tail);
+    event(10, json!({"type":"runtime_stopped"}));
+    let stopped = read();
+    assert!(!stopped.funds_current_runtime && stopped.funds_stale);
+    assert_eq!(stopped.funds.unwrap(), funds);
+}

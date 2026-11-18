@@ -22,6 +22,17 @@ test('filtered totals preserve losses and distinguish missing data from zero', (
   assert.equal(overviewTotal([{ equity: NaN }], 'equity'), null)
 })
 
+test('previous native fund observations remain visible but cannot enter a current total', () => {
+  const live = { source_id: 'ctp', quote_currency: 'CNY', funds_status: 'live', equity: 100 }
+  const zero = { source_id: 'ctp-zero', quote_currency: 'CNY', funds_status: 'live', equity: 0 }
+  const old = { ...live, funds_status: 'historical', equity: 200 }
+  const usableOnly = { source_id: 'yida', funds_status: 'live', equity: null, usable_cash: 400, sdk_market_value: 700 }
+  assert.equal(overviewTotal([live, zero], 'equity'), 100)
+  assert.equal(overviewTotal([old], 'equity'), null)
+  assert.equal(overviewTotal([live, old], 'equity'), null)
+  assert.equal(overviewTotal([live, usableOnly], 'equity'), null)
+})
+
 test('unknown alert configuration or input does not mean zero alerts', () => {
   assert.equal(overviewAlertCount([{ leverage_alert: null }], 'leverage_alert'), null)
   assert.equal(overviewAlertCount([{ timeout_alert: false }, { timeout_alert: true }], 'timeout_alert'), 1)

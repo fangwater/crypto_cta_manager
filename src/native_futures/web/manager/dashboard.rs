@@ -98,6 +98,99 @@ impl Sample {
                 && !snapshot.positions_may_lag
         })
     }
+
+    fn funds(&self, now_us: i64, stale_secs: u64) -> Option<FundsObservation<'_>> {
+        let snapshot = self.snapshot.as_deref()?;
+        let funds = snapshot.funds.as_ref()?;
+        let stale_us = i64::try_from(stale_secs)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1_000_000);
+        let historical_reason = if snapshot.status == "stopped" {
+            Some("执行已停止")
+        } else if snapshot.status == "disconnected" {
+            Some("柜台已断线")
+        } else if !snapshot.funds_current_runtime {
+            Some("当前运行尚未收到可验证的账户资金")
+        } else if snapshot.funds_stale
+            || now_us.saturating_sub(funds.observed_us) > stale_us
+            || funds.observed_us > now_us
+        {
+            Some("当前资金观察已失效")
+        } else if self.collection() != "live" {
+            Some("当前未收到可验证的账户资金")
+        } else {
+            None
+        };
+        Some(FundsObservation {
+            funds,
+            historical_reason,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FundsObservation<'a> {
+    funds: &'a reader::AccountFunds,
+    historical_reason: Option<&'static str>,
+}
+
+impl FundsObservation<'_> {
+    fn status(self) -> &'static str {
+        if self.historical_reason.is_none() {
+            "live"
+        } else {
+            "historical"
+        }
+    }
+
+    fn with_historical_date(self) -> Self {
+        Self {
+            historical_reason: Some("所选日期的资金观察"),
+            ..self
+        }
+    }
+
+    fn sdk_market_value(self) -> Option<f64> {
+        self.funds
+            .native_fields
+            .get("sdk_market_value")
+            .copied()
+            .filter(|_| {
+                self.funds.valuation_basis.as_deref() == Some("sdk_mark_time_unverified")
+                    && self.funds.currency.as_deref() == Some("CNY")
+            })
+    }
+
+    fn card(self) -> Value {
+        let fields = &self.funds.native_fields;
+        json!({
+            "source": self.funds.source, "status": self.status(), "historical_reason": self.historical_reason,
+            "observed_us": self.funds.observed_us, "trading_day": self.funds.trading_day,
+            "currency": self.funds.currency, "valuation_basis": self.funds.valuation_basis,
+            "previous_balance": self.funds.previous_balance,
+            "available": self.funds.available, "usable_cash": self.funds.usable_cash,
+            "sdk_cash_balance": fields.get("sdk_cash_balance"), "sdk_market_value": self.sdk_market_value(),
+        })
+    }
+
+    fn apply_to(self, row: &mut OverviewRow) {
+        row.date_ms = Some(self.funds.observed_us / 1000);
+        if self.funds.currency.as_deref() != Some("CNY") {
+            return;
+        }
+        row.equity = self.funds.balance;
+        row.margin = self.funds.margin;
+        row.margin_kind = row.margin.map(|_| "initial".into());
+        row.margin_percent = self
+            .funds
+            .balance
+            .filter(|balance| *balance > 0.0)
+            .zip(self.funds.margin)
+            .map(|(balance, margin)| margin / balance * 100.0)
+            .filter(|fraction| fraction.is_finite());
+        // The broker's previous settlement balance uses the trading day.
+        // The shared dashboard's previous equity and profit use Shanghai midnight.
+    }
 }
 
 pub struct Observations(BTreeMap<String, watch::Sender<Sample>>);
@@ -388,6 +481,11 @@ struct NativeOverviewRow {
     #[serde(flatten)]
     row: OverviewRow,
     quote_currency: &'static str,
+    funds_status: Option<&'static str>,
+    funds_as_of_ms: Option<i64>,
+    funds_historical_reason: Option<&'static str>,
+    funds_trading_day: Option<String>,
+    sdk_market_value: Option<f64>,
 }
 
 pub(super) async fn overview(
@@ -403,13 +501,16 @@ pub(super) async fn overview(
         .transpose()
         .map_err(|_| bad("日期须为 YYYY-MM-DD"))?;
     let aliases = postgres::load_source_aliases(&s.pool).await?;
-    let now_ms = crate::native_futures::now_us() / 1000;
+    let now_us = crate::native_futures::now_us();
+    let now_ms = now_us / 1000;
     let mut accounts = Vec::new();
     let mut dates = BTreeSet::new();
     for source in visible(&s, &access) {
         let sample = s.overview.sample(&source.id);
+        let mut funds = sample.funds(now_us, s.config.stale_secs);
         let anchors = nav::store::list(&s.pool, &source.id).await?;
         dates.extend(anchors.iter().filter_map(|a| shanghai_date(a.snapshot_us)));
+        dates.extend(funds.and_then(|obs| shanghai_date(obs.funds.observed_us)));
         let mut row = OverviewRow {
             source_id: source.id.clone(),
             account: aliases.get(&source.id).unwrap_or(&source.account).clone(),
@@ -423,10 +524,13 @@ pub(super) async fn overview(
             let anchor = anchors
                 .iter()
                 .find(|a| shanghai_date(a.snapshot_us) == Some(day));
+            funds = funds
+                .filter(|obs| shanghai_date(obs.funds.observed_us) == Some(day))
+                .map(FundsObservation::with_historical_date);
             row.date_ms = anchor.map(|a| a.snapshot_us / 1000);
             row.queried_at_ms = now_ms;
             (
-                if anchor.is_some() {
+                if anchor.is_some() || funds.is_some() {
                     "historical"
                 } else {
                     "unavailable"
@@ -446,9 +550,17 @@ pub(super) async fn overview(
             row.short_position = Some(short);
             row.net_position = Some(long - short);
         }
+        if let Some(obs) = funds {
+            obs.apply_to(&mut row);
+        }
         accounts.push(NativeOverviewRow {
             row,
             quote_currency: "CNY",
+            funds_status: funds.map(FundsObservation::status),
+            funds_as_of_ms: funds.map(|obs| obs.funds.observed_us / 1000),
+            funds_historical_reason: funds.and_then(|obs| obs.historical_reason),
+            funds_trading_day: funds.and_then(|obs| obs.funds.trading_day.clone()),
+            sdk_market_value: funds.and_then(FundsObservation::sdk_market_value),
         });
     }
     let loading = !accounts.is_empty()
@@ -478,6 +590,20 @@ pub(super) async fn dashboard(
     for source in visible(&s, &access) {
         let id = &source.id;
         let sample = s.overview.sample(id);
+        let funds = sample.funds(now, s.config.stale_secs);
+        let equity = funds
+            .filter(|obs| obs.funds.currency.as_deref() == Some("CNY"))
+            .and_then(|obs| obs.funds.balance);
+        let equity_status = funds
+            .filter(|_| equity.is_some())
+            .map(|obs| {
+                if obs.status() == "live" {
+                    "ok"
+                } else {
+                    "stale"
+                }
+            })
+            .unwrap_or("unavailable");
         let observed = sample.snapshot.as_deref();
         let account = aliases.get(id).unwrap_or(&source.account);
         let anchor = nav::store::first(&s.pool, id).await?;
@@ -523,6 +649,8 @@ pub(super) async fn dashboard(
             "open_position_symbol_count": position_count, "account_pnl_start_ts_us": first_anchor_us,
             "strategy_pnl_start_ts_us": strategy_anchor,
             "account_pnl_only": strategy_anchor.is_none(),
+            "live_equity_quote": equity, "live_equity_status": equity_status,
+            "account_funds": funds.map(FundsObservation::card),
             "quote_currency": "CNY", "collection_status": sample.collection(),
         }));
         reports.push(json!({
@@ -558,6 +686,140 @@ pub(super) async fn dashboard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn funds_keep_broker_time_and_basis_when_settlement_blocks_execution_or_runtime_stops()
+    -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let primary = tmp.path().join("exec");
+        let mut options = rocksdb::Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = rocksdb::DB::open_cf(
+            &options,
+            &primary,
+            ["cn_trading_events", "cn_uniform_orders", "cn_trade_facts"],
+        )?;
+        let source = Source {
+            id: "test-ctp".into(),
+            account: "test".into(),
+            adapter: "ctp".into(),
+            rocksdb_path: primary.clone(),
+            enabled: true,
+            sync: None,
+        };
+        let now = crate::native_futures::now_us();
+        let observed = now - 2_000_000;
+        let events = db
+            .cf_handle("cn_trading_events")
+            .context("test events CF")?;
+        let put = |sequence: i64, at: i64, value: Value| -> Result<()> {
+            db.put_cf(
+                events,
+                sequence.to_be_bytes(),
+                serde_json::to_vec(&json!({"sequence":sequence,"received_us":at,"value":value}))?,
+            )?;
+            Ok(())
+        };
+        put(
+            10,
+            observed - 1,
+            json!({"type":"reconciled","state":{
+                "ready":false,"connected":true,"positions":[],"available_local_budget":99.0,
+                "reason":"settlement not confirmed","trading_day":"20261117"
+            }}),
+        )?;
+        let mut amounts = vec![0.0; 44];
+        amounts[3] = 1200.0;
+        amounts[12] = 250.0;
+        amounts[17] = 1250.0;
+        amounts[18] = 800.0;
+        put(
+            11,
+            observed + 10,
+            json!({"type":"ctp_event","event":{
+                "received_us":observed,"kind":7,"exchange":"CNY","trading_day":"20261117",
+                "request_id":4,"error_code":0,"present":1,"last":1,"available":800.0,
+                "metadata":{"account_values":amounts}
+            }}),
+        )?;
+        let secondary =
+            crate::rocks_source::ReaderPool::new(&tmp.path().join("secondary"), &[&primary])?;
+        let mut cache = reader::Cache::default();
+        let mut read =
+            || reader::with_db(&secondary, &source, |db| cache.read(&source, db, 10, 30));
+        let sample = observation(Sample::default(), Ok(read()?), now);
+        assert!(
+            sample.current().is_none(),
+            "settlement blocked positions are unavailable"
+        );
+        let funds = sample.funds(now, 30).context("fresh broker observation")?;
+        assert_eq!(funds.status(), "live");
+        assert_eq!(funds.funds.observed_us, observed);
+        let mut row = OverviewRow::default();
+        funds.apply_to(&mut row);
+        assert_eq!(row.date_ms, Some(observed / 1000));
+        assert_eq!(row.equity, Some(1250.0));
+        assert_eq!(row.margin, Some(250.0));
+        assert_eq!(row.margin_percent, Some(20.0));
+        assert_eq!(funds.card()["previous_balance"], 1200.0);
+        assert!(row.yesterday_equity.is_none());
+        assert!(row.today_profit.is_none());
+        assert_eq!(
+            sample.funds(now + 30_000_000, 30).unwrap().status(),
+            "historical"
+        );
+
+        put(12, now, json!({"type":"runtime_stopped"}))?;
+        let stopped = observation(sample, Ok(read()?), now);
+        let last = stopped
+            .funds(now, 30)
+            .context("retained broker observation")?;
+        assert_eq!(last.status(), "historical");
+        assert_eq!(last.historical_reason, Some("执行已停止"));
+        let mut row = OverviewRow::default();
+        last.apply_to(&mut row);
+        assert_eq!(row.date_ms, Some(observed / 1000));
+        assert_eq!(row.equity, Some(1250.0));
+        Ok(())
+    }
+
+    #[test]
+    fn yida_sdk_asset_indications_remain_separate_from_verified_equity() {
+        let funds = reader::AccountFunds {
+            source: reader::AccountFundsSource::YidaExtendedAccount,
+            evidence_sequence: 1,
+            observed_us: 2000,
+            trading_day: Some("20261118".into()),
+            currency: Some("CNY".into()),
+            valuation_basis: Some("sdk_mark_time_unverified".into()),
+            balance: None,
+            previous_balance: Some(1200.0),
+            margin: None,
+            available: Some(0.0),
+            usable_cash: Some(0.0),
+            deposit: None,
+            withdraw: None,
+            native_fields: BTreeMap::from([
+                ("sdk_cash_balance", 1250.0),
+                ("sdk_market_value", 1300.0),
+            ]),
+        };
+        let obs = FundsObservation {
+            funds: &funds,
+            historical_reason: None,
+        };
+        let card = obs.card();
+        assert_eq!(card["sdk_market_value"], 1300.0);
+        assert_eq!(card["sdk_cash_balance"], 1250.0);
+        assert_eq!(card["usable_cash"], 0.0);
+        assert_eq!(card["valuation_basis"], "sdk_mark_time_unverified");
+        let mut row = OverviewRow::default();
+        obs.apply_to(&mut row);
+        assert!(row.equity.is_none());
+        assert!(row.yesterday_equity.is_none());
+        assert!(row.today_profit.is_none());
+    }
 
     #[test]
     fn cached_cumulative_nav_keeps_stopped_cut_without_live_positions() -> Result<()> {

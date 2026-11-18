@@ -12,8 +12,10 @@ use std::{
 
 mod cache;
 mod changes;
+mod funds;
 mod projection;
 pub use cache::Cache;
+pub use funds::{AccountFunds, AccountFundsSource};
 
 const EVENTS: &str = "cn_trading_events";
 const ORDERS: &str = "cn_uniform_orders";
@@ -43,6 +45,9 @@ pub struct Snapshot {
     pub trading_day: Option<String>,
     /// A conservative local execution budget, never account equity.
     pub available_local_budget: Option<f64>,
+    pub funds: Option<AccountFunds>,
+    pub funds_current_runtime: bool,
+    pub funds_stale: bool,
     pub positions_may_lag: bool,
     pub positions: Vec<Value>,
     pub orders: Vec<super::state::ObservedOrder>,
@@ -191,6 +196,9 @@ fn read_snapshot_with_projection(
         reason: String::new(),
         trading_day: None,
         available_local_budget: None,
+        funds: None,
+        funds_current_runtime: false,
+        funds_stale: false,
         positions_may_lag: false,
         positions: vec![],
         orders: vec![],

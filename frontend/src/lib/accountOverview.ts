@@ -25,6 +25,12 @@ export interface OverviewRow {
   account_kind?: 'cta' | 'fr' | 'mm'
   detail_url?: string | null
   collection_status?: 'live' | 'historical' | 'stale' | 'loading' | 'unavailable' | null
+  quote_currency?: 'CNY' | null
+  funds_as_of_ms?: number | null
+  funds_status?: 'live' | 'historical' | null
+  funds_historical_reason?: string | null
+  funds_trading_day?: string | null
+  sdk_market_value?: number | null
 }
 
 export interface AccountOverview {
@@ -42,7 +48,9 @@ export function isExternalOverview(row: OverviewRow) {
 }
 
 export function overviewTotal(rows: OverviewRow[], key: 'equity' | 'today_profit') {
-  if (rows.some(row => row[key] == null || !Number.isFinite(row[key]) || isExternalOverview(row) && !['live', 'historical'].includes(row.collection_status ?? ''))) return null
+  if (rows.some(row => row[key] == null || !Number.isFinite(row[key])
+    || row.funds_status === 'historical'
+    || isExternalOverview(row) && !['live', 'historical'].includes(row.collection_status ?? ''))) return null
   return rows.reduce((sum, row) => sum + row[key]!, 0)
 }
 

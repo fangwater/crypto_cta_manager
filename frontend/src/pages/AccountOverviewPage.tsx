@@ -536,6 +536,13 @@ function AccountMeta({
   report: SourceNavReport
   sourceId: string
 }) {
+  const funds = account.account_funds
+  const sdkValues = funds?.valuation_basis === 'sdk_mark_time_unverified' ? [
+    ['SDK 资金权益', funds.sdk_cash_balance],
+    ['SDK 市值权益', funds.sdk_market_value],
+    ['昨市值权益', funds.previous_balance],
+    ['可用资金', funds.usable_cash],
+  ].flatMap(([label, value]) => typeof value === 'number' ? [[label, money(value), funds.currency].filter(Boolean).join(' ')] : []) : []
   return (
     <Card className="mt-8 border-border-soft bg-canvas/30">
       <CardContent className="flex flex-wrap items-center gap-4 py-4 text-sm text-muted">
@@ -559,6 +566,13 @@ function AccountMeta({
           </span>
         )}
         <span>最近成交 {timestampUs(report.last_fill_ts_us)}</span>
+        {!!sdkValues.length && funds && <span className="space-y-1">
+          <span className="block">{sdkValues.join(' · ')}</span>
+          <span className="block text-xs text-muted">{[
+            funds.historical_reason, '易达资金回报', timestampUs(funds.observed_us),
+            funds.trading_day ? `交易日 ${funds.trading_day}` : undefined, '行情估值时间未核验',
+          ].filter(Boolean).join(' · ')}</span>
+        </span>}
         <span className={signedClass(report.nav_change_after_fee_quote)}>
           累计费后 {money(report.nav_change_after_fee_quote)} CNY
         </span>
