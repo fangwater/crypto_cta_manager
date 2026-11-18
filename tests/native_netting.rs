@@ -143,6 +143,7 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
     }
     store::initialize(&pool, &state, &initial, 1).await?;
     let mut request = netting::TargetBatch {
+        trading_day: None,
         strategy_group: "test".into(),
         signal_times: BTreeMap::new(),
         batch_id: "hour1".into(),
@@ -196,24 +197,24 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
         evidence_key: "01".into(),
         allocations: BTreeMap::from([("a-1h".into(), 1)]),
     };
-    let received = store::allocate(&pool, "source", &allocation, &fill, 1).await?;
+    let received = store::allocate(&pool, "source", &allocation, &fill, 1, None).await?;
     assert_eq!(received["net_targets"][market]["residual_lots"], 0);
     assert_eq!(
-        store::allocate(&pool, "source", &allocation, &fill, 1).await?,
+        store::allocate(&pool, "source", &allocation, &fill, 1, None).await?,
         received
     );
     let mut duplicate = allocation.clone();
     duplicate.event_id = "another-id".into();
     duplicate.expected_revision = 2;
     assert!(
-        store::allocate(&pool, "source", &duplicate, &fill, 1)
+        store::allocate(&pool, "source", &duplicate, &fill, 1, None)
             .await
             .is_err()
     );
     let mut overfill = fill.clone();
     overfill.identity = "other_trade".into();
     assert!(
-        store::allocate(&pool, "source", &duplicate, &overfill, 1)
+        store::allocate(&pool, "source", &duplicate, &overfill, 1, None)
             .await
             .is_err()
     );
@@ -512,6 +513,87 @@ async fn atomic_batches_survive_reconnects_deduplicate_fills_and_serialize_write
     let plan = restored.execution_plan()?;
     assert!(!plan.publishable);
     assert_eq!(plan.net_targets[market], 1);
+
+    let mut live = request.clone();
+    live.batch_id = "ctaker-partial".into();
+    live.expected_revision = restored.revision;
+    live.decision_us = now_us();
+    live.quotes.get_mut(market).unwrap().observed_us = live.decision_us;
+    live.strategies
+        .get_mut("a-1h")
+        .unwrap()
+        .insert(market.into(), 4);
+    live.strategies
+        .get_mut("b-1h")
+        .unwrap()
+        .insert(market.into(), 1);
+    let batch = store::batch(&pool, "source", &live, 1).await?;
+    let revision = batch["execution_plan"]["target_revision"].as_i64().unwrap();
+    let day = "20261117";
+    let at = now_us();
+    let identity = json!({"venue":"SHFE","symbol":"sn2612","trading_day":day,"trade_id":"ctaker-trade","side":"buy"});
+    let native_key = json!({"session":"ctp:5:7","order_ref":"17"});
+    let order_key = br#"{"trading_day":"20261117","venue":"SHFE","native":{"session":"ctp:5:7","order_ref":"17"}}"#;
+    let order_link: Value = serde_json::from_slice(order_key)?;
+    let intent = json!({"venue":"SHFE","symbol":"sn2612","side":"buy","offset":"open","lots":4});
+    let mut target = json!({"source_id":"source","batch_id":live.batch_id,"target_revision":revision,"trading_day":day,"expires_at_us":at+10_000_000,"net_targets":{"SHFE:sn2612":5}});
+    let events = native.cf_handle("cn_trading_events").unwrap();
+    let put_event = |seq: i64, value: Value| -> Result<()> {
+        native.put_cf(
+            &events,
+            seq.to_be_bytes(),
+            serde_json::to_vec(&json!({"sequence":seq,"projection_error":null,"value":value}))?,
+        )?;
+        Ok(())
+    };
+    let prepared = |target: &Value| json!({"type":"prepared_submit","key":native_key,"intent":intent,"prepared_at_us":at-1,"ctaker_target":target});
+    put_event(
+        103,
+        json!({"type":"ctp_event","event":{"kind":10,"received_us":at,"exchange":"SHFE","symbol":"sn2612","trading_day":day,"trade_id":"ctaker-trade","system_id":"s17","order_ref":"17","direction":48,"offset":48,"volume":3,"price":102}}),
+    )?;
+    put_event(
+        104,
+        json!({"type":"normalized_trade","identity":identity,"origin":"live_report","order_link":order_link}),
+    )?;
+    let order = json!({"identity":order_link,"order":{"key":native_key,"system_id":"s17","request":intent},"submitted_intent":intent,"locally_submitted":true,"evidence_seq":104,"prepared_evidence_seq":102});
+    native.put_cf(
+        native.cf_handle("cn_uniform_orders").unwrap(),
+        order_key,
+        serde_json::to_vec(&order)?,
+    )?;
+    let record = json!({"evidence_seq":104,"received_us":at,"fill":{"identity":identity,"system_id":"s17","order_ref":"17","offset":"open","lots":3,"price":102},"commission":null});
+    let fill = netting::FactualFill::from_evidence(&record)?;
+    let auto = store::AllocateCtakerFill {
+        evidence_key: "a1".into(),
+    };
+    let read_proof = || -> Result<_> {
+        Ok(
+            crypto_cta_manager::native_futures::evidence::ctaker_fill_proof(
+                &native_source,
+                &native,
+                &record,
+            )?
+            .unwrap(),
+        )
+    };
+    target["target_revision"] = json!(revision + 1);
+    put_event(102, prepared(&target))?;
+    assert!(
+        store::allocate_ctaker(&pool, "source", &auto, &fill, &read_proof()?, 1)
+            .await
+            .is_err()
+    );
+    target["target_revision"] = json!(revision);
+    put_event(102, prepared(&target))?;
+    let proof = read_proof()?;
+    let allocated = store::allocate_ctaker(&pool, "source", &auto, &fill, &proof, 1).await?;
+    assert_eq!(allocated["allocations"], json!({"a-1h":2,"b-1h":1}));
+    assert_eq!(allocated["net_targets"][market]["residual_lots"], 1);
+    assert_eq!(allocated["ctaker_order_proof"]["prepared_sequence"], 102);
+    assert_eq!(
+        allocated,
+        store::allocate_ctaker(&pool, "source", &auto, &fill, &proof, 1).await?
+    );
     pool.close().await;
     sqlx::raw_sql(AssertSqlSafe(format!("DROP DATABASE {database}")))
         .execute(&admin)

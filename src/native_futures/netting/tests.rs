@@ -53,6 +53,7 @@ fn portfolio(a: i64, b: i64) -> Portfolio {
 }
 fn batch(state: &Portfolio, a: i64, b: i64) -> TargetBatch {
     TargetBatch {
+        trading_day: None,
         strategy_group: "test".into(),
         signal_times: BTreeMap::new(),
         batch_id: format!("hour-{}", state.revision),

@@ -1,6 +1,7 @@
 //! A portfolio row lock serializes target batches and factual allocations.
 //! State, paired internal transfers, demand budgets and catalog targets commit together.
 use super::*;
+use crate::native_futures::evidence::CtakerFillProof;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -12,6 +13,18 @@ pub struct AllocateFill {
     /// Exact cn_trade_facts RocksDB key, hex encoded. No caller-supplied price/fee.
     pub evidence_key: String,
     pub allocations: Quantities,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllocateCtakerFill {
+    pub evidence_key: String,
+}
+
+impl AllocateCtakerFill {
+    pub fn id(&self) -> Result<String> {
+        Ok(format!("ctaker-fill:{}", fingerprint(&self.evidence_key)?))
+    }
 }
 
 pub async fn load(pool: &PgPool, source: &str) -> Result<Option<Portfolio>> {
@@ -239,6 +252,7 @@ pub async fn allocate(
     request: &AllocateFill,
     fill: &FactualFill,
     user_id: i64,
+    proof: Option<&CtakerFillProof>,
 ) -> Result<serde_json::Value> {
     valid_id(&request.event_id)?;
     valid_id(&request.batch_id)?;
@@ -253,49 +267,151 @@ pub async fn allocate(
         state.revision == request.expected_revision,
         "portfolio changed; reload before allocating a fill",
     )?;
-    let prior:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cta_native_netting_events WHERE source_id=$1 AND factual_identity=$2)")
-        .bind(source).bind(&fill.identity).fetch_one(&mut *tx).await?;
-    require(!prior, "factual fill has already been allocated")?;
-    let batch:Option<serde_json::Value>=sqlx::query_scalar("SELECT receipt FROM cta_native_netting_events WHERE source_id=$1 AND event_id=$2 AND kind='target_batch'")
-        .bind(source).bind(format!("batch:{}",request.batch_id)).fetch_optional(&mut *tx).await?;
-    let batch: BatchReceipt =
-        serde_json::from_value(batch.context("unknown fill attribution batch")?)?;
-    ensure!(
-        fill.received_us >= batch.decision_us,
-        "fill precedes the referenced decision"
-    );
-    // Frozen demand budgets prevent assigning a real fill to an unrelated factor.
-    for (name, qty) in &request.allocations {
-        validate_lots(*qty)?;
-        let remaining:Option<i64>=sqlx::query_scalar("SELECT remaining_lots FROM cta_native_netting_demands WHERE source_id=$1 AND batch_id=$2 AND strategy_name=$3 AND market=$4 FOR UPDATE")
-            .bind(source).bind(&request.batch_id).bind(name).bind(&fill.market).fetch_optional(&mut *tx).await?;
-        let remaining = remaining.context("strategy has no external demand in this batch")?;
-        ensure!(
-            *qty != 0 && qty.signum() == remaining.signum() && qty.abs() <= remaining.abs(),
-            "fill allocation exceeds this strategy's remaining external demand"
-        );
-        sqlx::query("UPDATE cta_native_netting_demands SET remaining_lots=$5 WHERE source_id=$1 AND batch_id=$2 AND strategy_name=$3 AND market=$4")
-            .bind(source).bind(&request.batch_id).bind(name).bind(&fill.market).bind(remaining-qty).execute(&mut *tx).await?;
-    }
-    let next = state.fill(fill, &request.allocations)?;
-    let receipt = serde_json::json!({"kind":"exchange_fill_allocation","source_id":source,"revision":next.revision,
-        "batch_id":request.batch_id,"evidence_key":request.evidence_key,"fill":fill,"allocations":request.allocations,"net_targets":next.net_targets()?});
-    save(
+    let receipt = write_allocation(
         &mut tx,
-        &next,
+        &state,
+        &request.evidence_key,
+        &request.allocations,
+        fill,
+        proof,
         EventMeta {
             id: &id,
             kind: "exchange_fill_allocation",
             hash: &hash,
             batch: Some(&request.batch_id),
             factual_identity: Some(&fill.identity),
-            user_id: user_id,
+            user_id,
         },
         request,
-        &receipt,
     )
     .await?;
     tx.commit().await?;
+    Ok(receipt)
+}
+
+pub async fn allocate_ctaker(
+    pool: &PgPool,
+    source: &str,
+    request: &AllocateCtakerFill,
+    fill: &FactualFill,
+    proof: &CtakerFillProof,
+    user_id: i64,
+) -> Result<serde_json::Value> {
+    let id = request.id()?;
+    let hash = fingerprint(request)?;
+    let mut tx = pool.begin().await?;
+    let state = locked(&mut tx, source).await?;
+    if let Some(previous) = existing(&mut tx, source, &id, &hash).await? {
+        return Ok(previous);
+    }
+    require(
+        state.external_demand_open
+            && state.batch_id.as_deref() == Some(proof.target.batch_id.as_str())
+            && state.target_revision == proof.target.target_revision,
+        "the proven ctaker order has no active frozen demand",
+    )?;
+    let allocations = ctaker_allocations(&state, fill)?;
+    let receipt = write_allocation(
+        &mut tx,
+        &state,
+        &request.evidence_key,
+        &allocations,
+        fill,
+        Some(proof),
+        EventMeta {
+            id: &id,
+            kind: "exchange_fill_allocation",
+            hash: &hash,
+            batch: Some(&proof.target.batch_id),
+            factual_identity: Some(&fill.identity),
+            user_id,
+        },
+        request,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(receipt)
+}
+
+fn ctaker_allocations(state: &Portfolio, fill: &FactualFill) -> Result<Quantities> {
+    validate_lots(fill.lots)?;
+    ensure!(fill.lots != 0, "invalid zero-lot ctaker fill");
+    let mut left = fill.lots.abs();
+    let sign = fill.lots.signum();
+    let mut allocations = Quantities::new();
+    // Split the account fill in strategy-name order over the declared batch demands.
+    for (strategy, demands) in state.external_demands() {
+        let qty = demands.get(&fill.market).copied().unwrap_or_default();
+        if qty.signum() == sign {
+            let take = left.min(qty.abs());
+            allocations.insert(strategy, take * sign);
+            left -= take;
+            if left == 0 {
+                break;
+            }
+        }
+    }
+    ensure!(
+        left == 0,
+        "proven ctaker fill exceeds frozen same-side demand"
+    );
+    Ok(allocations)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_allocation(
+    tx: &mut Transaction<'_, Postgres>,
+    state: &Portfolio,
+    evidence_key: &str,
+    allocations: &Quantities,
+    fill: &FactualFill,
+    proof: Option<&CtakerFillProof>,
+    metadata: EventMeta<'_>,
+    request: &impl Serialize,
+) -> Result<serde_json::Value> {
+    let source = &state.source_id;
+    let batch_id = metadata.batch.context("missing allocation batch")?;
+    let prior:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cta_native_netting_events WHERE source_id=$1 AND factual_identity=$2)")
+        .bind(source).bind(&fill.identity).fetch_one(&mut **tx).await?;
+    require(!prior, "factual fill has already been allocated")?;
+    let batch:Option<serde_json::Value>=sqlx::query_scalar("SELECT receipt FROM cta_native_netting_events WHERE source_id=$1 AND event_id=$2 AND kind='target_batch'")
+        .bind(source).bind(format!("batch:{batch_id}")).fetch_optional(&mut **tx).await?;
+    let batch: BatchReceipt =
+        serde_json::from_value(batch.context("unknown fill attribution batch")?)?;
+    ensure!(
+        fill.received_us >= batch.decision_us,
+        "fill precedes the referenced decision"
+    );
+    if let Some(proof) = proof {
+        let target = &proof.target;
+        ensure!(
+            &target.source_id == source
+                && target.batch_id == batch_id
+                && target.target_revision == batch.execution_plan.target_revision
+                && target.net_targets == batch.execution_plan.net_targets
+                && proof.prepared_sequence > state.anchor.evidence_sequence,
+            "ctaker order proof differs from the immutable Manager batch"
+        );
+    }
+    for (name, qty) in allocations {
+        validate_lots(*qty)?;
+        let remaining:Option<i64>=sqlx::query_scalar("SELECT remaining_lots FROM cta_native_netting_demands WHERE source_id=$1 AND batch_id=$2 AND strategy_name=$3 AND market=$4 FOR UPDATE")
+            .bind(source).bind(batch_id).bind(name).bind(&fill.market).fetch_optional(&mut **tx).await?;
+        let remaining = remaining.context("strategy has no external demand in this batch")?;
+        ensure!(
+            *qty != 0 && qty.signum() == remaining.signum() && qty.abs() <= remaining.abs(),
+            "fill allocation exceeds this strategy's remaining external demand"
+        );
+        sqlx::query("UPDATE cta_native_netting_demands SET remaining_lots=$5 WHERE source_id=$1 AND batch_id=$2 AND strategy_name=$3 AND market=$4")
+            .bind(source).bind(batch_id).bind(name).bind(&fill.market).bind(remaining-qty).execute(&mut **tx).await?;
+    }
+    let next = state.fill(fill, allocations)?;
+    let mut receipt = serde_json::json!({"kind":"exchange_fill_allocation","source_id":source,"revision":next.revision,
+        "batch_id":batch_id,"evidence_key":evidence_key,"fill":fill,"allocations":allocations,"net_targets":next.net_targets()?});
+    if let Some(proof) = proof {
+        receipt["ctaker_order_proof"] = serde_json::to_value(proof)?;
+    }
+    save(tx, &next, metadata, request, &receipt).await?;
     Ok(receipt)
 }
 

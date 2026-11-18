@@ -1,5 +1,6 @@
 mod netting;
 mod netting_machine;
+mod netting_plan;
 
 use super::{config::Config, cost, market_data::Feed, nav, reader, reference, reference_data};
 use crate::{
@@ -64,7 +65,7 @@ fn token(headers: &HeaderMap) -> Option<String> {
 
 #[derive(Clone)]
 pub struct Service {
-    config: Arc<Config>,
+    config: Arc<RuntimeConfig>,
     pool: PgPool,
     readers: Arc<BTreeMap<String, Arc<tokio::sync::Mutex<reader::Cache>>>>,
     rocks: Arc<crate::rocks_source::ReaderPool>,
@@ -73,9 +74,23 @@ pub struct Service {
     reference_service: Option<Arc<reference_data::Feed>>,
 }
 
+struct RuntimeConfig {
+    settings: Config,
+    ctaker_plan_readers: BTreeMap<String, [u8; 32]>,
+}
+
+impl std::ops::Deref for RuntimeConfig {
+    type Target = Config;
+
+    fn deref(&self) -> &Config {
+        &self.settings
+    }
+}
+
 impl Service {
     pub fn new(config: Config, pool: PgPool) -> Result<Self> {
         config.validate()?;
+        let ctaker_plan_readers = netting_plan::credentials(&config)?;
         let rocks = Arc::new(crate::rocks_source::ReaderPool::new(
             &config.secondary_root,
             &config
@@ -104,7 +119,10 @@ impl Service {
                     .map(|s| (s.id.clone(), Arc::default()))
                     .collect(),
             ),
-            config: Arc::new(config),
+            config: Arc::new(RuntimeConfig {
+                settings: config,
+                ctaker_plan_readers,
+            }),
             pool,
             rocks,
             catalog_lock: Arc::default(),
@@ -113,6 +131,7 @@ impl Service {
         })
     }
     pub fn router(self) -> Router {
+        let plan_router = netting_plan::routes().with_state(self.clone());
         Router::new()
             .route("/api/auth/status", get(auth_status))
             .route("/api/auth/register", post(auth_register))
@@ -147,6 +166,7 @@ impl Service {
             .with_state(self.clone())
             .route_layer(middleware::from_fn_with_state(self, authenticate))
             .route_layer(tower_http::compression::CompressionLayer::new().gzip(true))
+            .merge(plan_router)
     }
 }
 

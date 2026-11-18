@@ -83,6 +83,9 @@ pub struct TargetBatch {
     pub batch_id: String,
     pub expected_revision: i64,
     pub decision_us: i64,
+    /// Explicit native day for Exec readers. Legacy planning batches stay analytical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trading_day: Option<String>,
     #[serde(default)]
     pub signal_times: BTreeMap<String, i64>,
     /// Complete roster, each with a complete contract vector (including zeros).
@@ -203,6 +206,8 @@ pub struct Portfolio {
     pub revision: i64,
     pub decision_us: i64,
     pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_trading_day: Option<String>,
     pub external_demand_open: bool,
     pub target_revision: i64,
     pub last_strategy_group: Option<String>,
@@ -417,6 +422,7 @@ impl Portfolio {
             revision: 0,
             decision_us: 0,
             batch_id: None,
+            target_trading_day: None,
             external_demand_open: false,
             target_revision: 0,
             last_strategy_group: None,
@@ -527,6 +533,9 @@ impl Portfolio {
     }
     /// Pure plan: callers persist the returned state and complete receipt together.
     pub fn batch(&self, request: &TargetBatch, now_us: i64) -> Result<(Self, BatchReceipt)> {
+        if let Some(day) = &request.trading_day {
+            super::reference::valid_day(day)?;
+        }
         valid_id(&request.batch_id)?;
         let group = self
             .strategy_groups
@@ -591,6 +600,7 @@ impl Portfolio {
         next.target_revision = next.revision;
         next.decision_us = self.decision_us.max(request.decision_us);
         next.batch_id = Some(request.batch_id.clone());
+        next.target_trading_day = request.trading_day.clone();
         let mut crosses = vec![];
         let mut external = Strategies::new();
         let effective = next.effective_targets();

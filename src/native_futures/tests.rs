@@ -232,6 +232,7 @@ fn rejects_overlapping_stores_before_creating_a_secondary() {
         stale_secs: 30,
         recent_rows: 10,
         source_viewers: Default::default(),
+        ctaker_plan_readers: Default::default(),
         sources: vec![source(&primary)],
     };
     assert!(config.validate().is_ok());

@@ -7,6 +7,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const EVENTS: &str = "cn_trading_events";
+mod ctaker;
+pub use ctaker::{CtakerFillProof, ctaker_fill_proof};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +97,34 @@ pub fn validate_anchor(source: &Source, db: &DB, anchor: &Anchor) -> Result<()> 
     Ok(())
 }
 
+/// Historical terminal orders may remain in a reconciliation snapshot. Each
+/// must be settled before the absence of active orders can release a target.
+pub fn no_unsettled_orders(state: &Value) -> bool {
+    state["orders"].as_array().is_some_and(|orders| {
+        orders.iter().all(|order| {
+            let Some((filled, cancelled, lots)) = order["filled"]
+                .as_i64()
+                .zip(order["cancelled"].as_i64())
+                .zip(order["request"]["lots"].as_i64())
+                .map(|((a, b), c)| (a, b, c))
+            else {
+                return false;
+            };
+            matches!(
+                order["status"].as_str(),
+                Some("filled" | "cancelled" | "rejected")
+            ) && order["cancel_pending"] == false
+                && order["reported_filled"].as_i64() == Some(filled)
+                && order["reserved_today"] == 0
+                && order["reserved_yesterday"] == 0
+                && filled >= 0
+                && cancelled >= 0
+                && lots > 0
+                && filled.checked_add(cancelled) == Some(lots)
+        })
+    })
+}
+
 pub fn capture_current(
     source: &Source,
     db: &DB,
@@ -173,6 +203,16 @@ fn native_text(v: &Value) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 pub fn live_origin(source: &Source, db: &DB, record: &Value, seq: i64) -> Result<bool> {
+    verified_live_origin(source, db, record, seq, false)
+}
+
+fn verified_live_origin(
+    source: &Source,
+    db: &DB,
+    record: &Value,
+    seq: i64,
+    require_ctp_order_ref: bool,
+) -> Result<bool> {
     let original: Value = serde_json::from_slice(&journal_entry(db, seq)?)?;
     let id = &record["fill"]["identity"];
     if original["value"]["type"] != "normalized_trade"
@@ -207,7 +247,13 @@ pub fn live_origin(source: &Source, db: &DB, record: &Value, seq: i64) -> Result
         {
             let direction = if id["side"] == "buy" { 48 } else { 49 };
             return Ok(event["kind"].as_i64() == Some(10)
-                && event["direction"].as_i64() == Some(direction));
+                && event["direction"].as_i64() == Some(direction)
+                && (!require_ctp_order_ref
+                    || (raw["projection_error"].is_null()
+                        && value["shutdown_tail"] != true
+                        && event["order_ref"] == record["fill"]["order_ref"]
+                        && ctp_offset(&event["offset"], id["venue"].as_str())
+                            == record["fill"]["offset"].as_str())));
         }
         if source.adapter == "yida"
             && value["type"] == "yida_event"
@@ -232,6 +278,17 @@ pub fn live_origin(source: &Source, db: &DB, record: &Value, seq: i64) -> Result
         }
     }
     Ok(false)
+}
+
+fn ctp_offset(code: &Value, venue: Option<&str>) -> Option<&'static str> {
+    let separate_date = matches!(venue, Some("SHFE" | "INE"));
+    match code.as_i64()? {
+        48 => Some("open"),
+        51 if separate_date => Some("close_today"),
+        52 if separate_date => Some("close_yesterday"),
+        49..=54 => Some("close"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

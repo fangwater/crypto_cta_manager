@@ -29,6 +29,9 @@ pub struct Config {
     pub recent_rows: usize,
     #[serde(default)]
     pub source_viewers: BTreeMap<String, Vec<String>>,
+    /// Dedicated per-source read credentials for the Exec-side plan consumer.
+    #[serde(default)]
+    pub ctaker_plan_readers: BTreeMap<String, String>,
     pub sources: Vec<Source>,
 }
 fn default_database() -> crate::config::DatabaseConfig {
@@ -191,6 +194,24 @@ impl Config {
                     && !users.is_empty()
                     && users.iter().all(|u| !u.trim().is_empty())),
             "source_viewers requires configured sources and nonempty usernames"
+        );
+        let mut plan_envs = BTreeSet::new();
+        ensure!(
+            self.ctaker_plan_readers.iter().all(|(id, env)| {
+                !env.is_empty()
+                    && env.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    && env != &self.database.url_env
+                    && plan_envs.insert(env)
+                    && self
+                        .sources
+                        .iter()
+                        .any(|s| &s.id == id && s.enabled && s.adapter == "ctp")
+                    && self
+                        .sources
+                        .iter()
+                        .all(|s| s.sync.as_ref().is_none_or(|s| &s.token_env != env))
+            }),
+            "ctaker plan readers require enabled CTP sources and distinct dedicated token variables"
         );
         if let Some(reference) = &self.reference_service {
             reference.validate()?;

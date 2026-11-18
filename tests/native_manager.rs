@@ -91,6 +91,7 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
             "hidden".into(),
             vec!["operator".into()],
         )]),
+        ctaker_plan_readers: Default::default(),
         sources: vec![
             Source {
                 id: "sim".into(),

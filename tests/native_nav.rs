@@ -283,6 +283,7 @@ async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_reco
         stale_secs: 30,
         recent_rows: 20,
         source_viewers: BTreeMap::new(),
+        ctaker_plan_readers: BTreeMap::new(),
         sources: vec![Source {
             id: "sim".into(),
             account: "synthetic".into(),

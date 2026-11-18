@@ -26,6 +26,10 @@ pub(super) fn routes() -> Router<Service> {
             post(allocate),
         )
         .route(
+            "/api/native/sources/{id}/netting/ctaker-fill-allocations",
+            post(allocate_ctaker),
+        )
+        .route(
             "/api/native/sources/{id}/netting/valuation",
             post(valuation),
         )
@@ -97,7 +101,7 @@ async fn authorized(
     Ok(state)
 }
 
-async fn observed(s: &Service, id: &str) -> Result<reader::Snapshot, ApiError> {
+pub(super) async fn observed(s: &Service, id: &str) -> Result<reader::Snapshot, ApiError> {
     let source = s
         .config
         .sources
@@ -142,7 +146,7 @@ async fn with_source<T: Send + 'static>(
     .map_err(anyhow::Error::from)??)
 }
 
-fn account_lots(
+pub(super) fn account_lots(
     snapshot: &reader::Snapshot,
     contracts: &BTreeMap<String, model::Contract>,
 ) -> Result<model::Quantities, ApiError> {
@@ -292,6 +296,18 @@ async fn batch(
     {
         return body(receipt);
     }
+    if let Some(day) = &request.trading_day {
+        let snapshot = observed(&s, &id).await?;
+        if !snapshot.snapshot_current_runtime
+            || snapshot.replication_stale
+            || snapshot.trading_day.as_ref() != Some(day)
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "批次交易日与当前事实账户不一致".into(),
+            ));
+        }
+    }
     let anchor = state.anchor.clone();
     with_source(&s, &id, move |source, db| {
         crate::native_futures::evidence::validate_anchor(source, db, &anchor)
@@ -353,12 +369,56 @@ async fn allocate(
     {
         return body(receipt);
     }
-    if request.evidence_key.is_empty() || request.evidence_key.len() > 2048 {
+    let (fill, proof) = read_fill(&s, &id, state.anchor, &request.evidence_key).await?;
+    body(
+        store::allocate(&s.pool, &id, &request, &fill, user.user_id, proof.as_ref())
+            .await
+            .map_err(failure)?,
+    )
+}
+
+async fn allocate_ctaker(
+    State(s): State<Service>,
+    Extension(user): Extension<AuthUser>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    Json(mut request): Json<store::AllocateCtakerFill>,
+) -> ApiResult {
+    let _guard = s.catalog_lock.lock().await;
+    let state = authorized(&s, &user, &access, &id, true).await?;
+    request.evidence_key.make_ascii_lowercase();
+    if let Some(receipt) = store::replay(&s.pool, &id, &request.id()?, &request)
+        .await
+        .map_err(failure)?
+    {
+        return body(receipt);
+    }
+    let (fill, proof) = read_fill(&s, &id, state.anchor, &request.evidence_key).await?;
+    let proof = proof.ok_or_else(|| bad("成交缺少可核验的 ctaker 原生报单证据"))?;
+    body(
+        store::allocate_ctaker(&s.pool, &id, &request, &fill, &proof, user.user_id)
+            .await
+            .map_err(failure)?,
+    )
+}
+
+async fn read_fill(
+    s: &Service,
+    id: &str,
+    anchor: crate::native_futures::evidence::Anchor,
+    key: &str,
+) -> Result<
+    (
+        model::FactualFill,
+        Option<crate::native_futures::evidence::CtakerFillProof>,
+    ),
+    ApiError,
+> {
+    if key.is_empty() || key.len() > 2048 {
         return Err(bad("invalid factual evidence key"));
     }
-    let key = hex::decode(&request.evidence_key).map_err(bad)?;
-    let anchor = state.anchor.clone();
-    let record = with_source(&s, &id, move |source, db| {
+    let key = hex::decode(key).map_err(bad)?;
+    with_source(s, id, move |source, db| {
         crate::native_futures::evidence::validate_anchor(source, db, &anchor)?;
         let cf = db.cf_handle("cn_trade_facts").context("factual trade CF")?;
         let bytes = db
@@ -373,15 +433,10 @@ async fn allocate(
             crate::native_futures::evidence::live_origin(source, db, &record, sequence)?,
             "recovered or unverifiable trade time cannot establish a post-anchor factual fill"
         );
-        Ok(record)
+        let proof = crate::native_futures::evidence::ctaker_fill_proof(source, db, &record)?;
+        Ok((model::FactualFill::from_evidence(&record)?, proof))
     })
-    .await?;
-    let fill = model::FactualFill::from_evidence(&record).map_err(failure)?;
-    body(
-        store::allocate(&s.pool, &id, &request, &fill, user.user_id)
-            .await
-            .map_err(failure)?,
-    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -479,8 +534,8 @@ async fn release_demands(
         let cf=db.cf_handle("cn_trading_events").context("native state evidence CF")?;
         let bytes=db.get_cf(cf,proof.evidence_sequence.to_be_bytes())?.context("native state evidence")?;
         let value:Value=serde_json::from_slice(&bytes)?;
-        anyhow::ensure!(value["value"]["state"]["orders"].as_array().is_some_and(|orders|orders.is_empty()),
-            "the source still reports orders or lacks a complete order-free state; do not release unknown outcomes");
+        anyhow::ensure!(crate::native_futures::evidence::no_unsettled_orders(&value["value"]["state"]),
+            "the source still reports active orders or unsettled executions; do not release unknown outcomes");
         Ok(proof)
     }).await?;
     body(

@@ -150,3 +150,44 @@ fn live_fill_requires_matching_raw_identity_direction_and_live_origin() {
     put(&db, 1, &raw);
     assert!(!live_origin(&src, &db, &record, 2).unwrap());
 }
+
+#[test]
+fn ctaker_fill_uses_exact_native_prepare_and_rejects_conflicting_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = database(temp.path());
+    let src = source(temp.path());
+    let identity = json!({"venue":"SHFE","symbol":"sn2612","trading_day":"20261117","trade_id":"T1","side":"buy"});
+    let key = json!({"session":"ctp:5:7","order_ref":"101"});
+    let order_key = br#"{"trading_day":"20261117","venue":"SHFE","native":{"session":"ctp:5:7","order_ref":"101"}}"#;
+    let link: Value = serde_json::from_slice(order_key).unwrap();
+    let intent =
+        json!({"venue":"SHFE","symbol":"sn2612","side":"buy","offset":"close_today","lots":2});
+    let target = json!({"source_id":"account","batch_id":"batch-7","target_revision":7,"trading_day":"20261117","expires_at_us":200,"net_targets":{"SHFE:sn2612":0}});
+    let mut prepared = json!({"sequence":3,"projection_error":null,"value":{"type":"prepared_submit","key":key,"intent":intent,"prepared_at_us":50,"ctaker_target":target}});
+    let mut raw = json!({"sequence":4,"projection_error":null,"value":{"type":"ctp_event","event":{"kind":10,"received_us":100,"exchange":"SHFE","symbol":"sn2612","trading_day":"20261117","trade_id":"T1","system_id":"S1","order_ref":"101","direction":48,"offset":51,"volume":1,"price":100}}});
+    let normalized = json!({"sequence":5,"projection_error":null,"value":{"type":"normalized_trade","identity":identity,"origin":"live_report","order_link":link}});
+    let record = json!({"evidence_seq":5,"received_us":100,"fill":{"identity":identity,"system_id":"S1","order_ref":"101","offset":"close_today","lots":1,"price":100}});
+    let projection = json!({"identity":link,"order":{"key":key,"system_id":"S1","request":intent},"submitted_intent":intent,"locally_submitted":true,"evidence_seq":22,"prepared_evidence_seq":3});
+    db.put_cf(
+        db.cf_handle("cn_uniform_orders").unwrap(),
+        order_key,
+        serde_json::to_vec(&projection).unwrap(),
+    )
+    .unwrap();
+    put(&db, 3, &prepared);
+    put(&db, 4, &raw);
+    put(&db, 5, &normalized);
+    let proof = ctaker_fill_proof(&src, &db, &record).unwrap().unwrap();
+    assert_eq!(proof.prepared_sequence, 3);
+    assert_eq!(proof.target.batch_id, "batch-7");
+    assert_eq!(proof.target.net_targets["SHFE:sn2612"], 0);
+
+    raw["value"]["event"]["offset"] = json!(52);
+    put(&db, 4, &raw);
+    assert!(ctaker_fill_proof(&src, &db, &record).is_err());
+    raw["value"]["event"]["offset"] = json!(51);
+    put(&db, 4, &raw);
+    prepared["value"]["key"]["session"] = json!("ctp:5:8");
+    put(&db, 3, &prepared);
+    assert!(ctaker_fill_proof(&src, &db, &record).is_err());
+}
