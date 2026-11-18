@@ -187,6 +187,24 @@ async fn plan(
     ))
 }
 
+async fn observe_plan(service: &Service, id: &str) -> Result<Option<Plan>, ApiError> {
+    let Some(state) = store::load(&service.pool, id).await? else {
+        return Ok(None);
+    };
+    let Some(batch) = state.batch_id.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(Plan {
+        source_id: id.to_owned(),
+        batch_id: batch.clone(),
+        target_revision: state.target_revision,
+        trading_day: state.target_trading_day.clone().unwrap_or_default(),
+        decision_us: state.decision_us,
+        expires_at_us: 0,
+        net_targets: state.execution_plan()?.net_targets,
+    }))
+}
+
 impl TryFrom<Plan> for PositionTarget {
     type Error = anyhow::Error;
 
@@ -238,15 +256,21 @@ impl ManagerPlans for PlanStream {
         })?;
         let mut changes = self.0.plan_changes[id].subscribe();
         let mut shutdown = self.0.plan_shutdown.subscribe();
-        let id = request.into_inner().source_id;
+        let PlanSubscription {
+            source_id: id,
+            observe_only,
+        } = request.into_inner();
         let service = self.0.clone();
         let updates = async_stream::try_stream! {
             let mut previous = None;
             let mut delay = Duration::from_millis(25);
             while !*shutdown.borrow() {
                 changes.borrow_and_update();
-                let (plan, deadline) = plan(&service, &id, true).await
-                    .map_err(|_| Status::unavailable("read Manager plan"))?;
+                let (plan, deadline) = if observe_only {
+                    observe_plan(&service, &id).await.map(|plan| (plan, None))
+                } else {
+                    plan(&service, &id, true).await
+                }.map_err(|_| Status::unavailable("read Manager plan"))?;
                 let target = plan.map(PositionTarget::try_from).transpose()
                     .map_err(|_| Status::internal("invalid Manager target"))?;
                 if previous.as_ref() != Some(&target) {
@@ -298,6 +322,7 @@ mod tests {
         let request = || {
             tonic::Request::new(PlanSubscription {
                 source_id: "source".into(),
+                observe_only: false,
             })
         };
         let error = client.watch(request()).await.unwrap_err();
