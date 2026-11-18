@@ -3,8 +3,8 @@
 ## Project Scope
 
 `cn_futures_cta_manager` is a Git-history-preserving fork of `crypto_cta_manager`.
-The native entry point is `cn_futures_web`, with code under `src/native_futures/`
-and `frontend/src/native/`. Keep the common library/package names and upstream
+The native backend entry point is `cn_futures_web`, with code under
+`src/native_futures/`. Keep the common library/package names and upstream
 modules stable so changes can be merged. Use the shared auth and strategy tables
 in a SEPARATE Manager database, with `CN_FUTURES_CTA_DATABASE_URL`.
 Native reads use separate RocksDB secondaries; never write execution stores,
@@ -31,6 +31,24 @@ state, exchange order submission, or exchange execution reports, inspect that
 repository and follow its own `AGENTS.md`. Keep the projects operationally
 independent: do not add relative-path or shared-runtime coupling from Manager
 to `mkt_signal`.
+
+## Crypto and CN Manager frontend
+
+Crypto CTA Manager owns the frontend and its browser API contract. CN Manager
+uses the same frontend entry point, pages, navigation, layouts and interactions.
+Implement domestic adaptations in the CN backend under `src/native_futures/`.
+Limit visible differences to asset details such as the contract, venue, CNY
+amounts, lot quantities and open/close flags. Preserve account-scoped permissions
+and report missing financial data as unavailable.
+
+For CN parity work, fetch the current upstream source and identify the frontend
+release served by Crypto. Verify the CN bundle against that release using the
+SHA-256 hashes of the HTML, JavaScript and CSS. Also open the same pages with
+CN accounts to verify the API data, units and account selection.
+
+Commit and publish CN product changes on `cn-futures` and deploy them to CN
+Manager only. A change to Crypto `main` or a Crypto production release requires
+an explicit request covering that target.
 
 ## Working Directory
 
