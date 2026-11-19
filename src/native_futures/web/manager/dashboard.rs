@@ -208,6 +208,15 @@ impl FundsObservation<'_> {
 
     fn card(self) -> Value {
         let fields = &self.funds.native_fields;
+        let trading_day_commission = if self.funds.source
+            == reader::AccountFundsSource::CtpTradingAccount
+            && self.funds.currency.as_deref() == Some("CNY")
+            && self.funds.trading_day.is_some()
+        {
+            fields.get("commission")
+        } else {
+            None
+        };
         json!({
             "source": self.funds.source, "status": self.status(), "historical_reason": self.historical_reason,
             "observed_us": self.funds.observed_us, "trading_day": self.funds.trading_day,
@@ -215,6 +224,7 @@ impl FundsObservation<'_> {
             "previous_balance": self.funds.previous_balance,
             "available": self.funds.available, "usable_cash": self.funds.usable_cash,
             "sdk_cash_balance": fields.get("sdk_cash_balance"), "sdk_market_value": self.sdk_market_value(),
+            "trading_day_commission_cny": trading_day_commission,
         })
     }
 
@@ -924,6 +934,7 @@ mod tests {
             native_fields: BTreeMap::from([
                 ("sdk_cash_balance", 1250.0),
                 ("sdk_market_value", 1300.0),
+                ("commission", 1.0),
             ]),
         };
         let obs = FundsObservation {
@@ -935,11 +946,43 @@ mod tests {
         assert_eq!(card["sdk_cash_balance"], 1250.0);
         assert_eq!(card["usable_cash"], 0.0);
         assert_eq!(card["valuation_basis"], "sdk_mark_time_unverified");
+        assert!(card["trading_day_commission_cny"].is_null());
         let mut row = OverviewRow::default();
         obs.apply_to(&mut row);
         assert!(row.equity.is_none());
         assert!(row.yesterday_equity.is_none());
         assert!(row.today_profit.is_none());
+    }
+
+    #[test]
+    fn ctp_trading_day_commission_preserves_a_reported_zero() {
+        let mut funds = reader::AccountFunds {
+            source: reader::AccountFundsSource::CtpTradingAccount,
+            evidence_sequence: 1,
+            observed_us: 2000,
+            trading_day: Some("20261120".into()),
+            currency: Some("CNY".into()),
+            valuation_basis: None,
+            balance: None,
+            previous_balance: None,
+            margin: None,
+            available: None,
+            usable_cash: None,
+            deposit: None,
+            withdraw: None,
+            native_fields: BTreeMap::from([("commission", 0.0)]),
+        };
+        let commission = |funds: &reader::AccountFunds| {
+            FundsObservation {
+                funds,
+                historical_reason: None,
+            }
+            .card()["trading_day_commission_cny"]
+                .clone()
+        };
+        assert_eq!(commission(&funds), 0.0);
+        funds.native_fields.clear();
+        assert!(commission(&funds).is_null());
     }
 
     #[test]

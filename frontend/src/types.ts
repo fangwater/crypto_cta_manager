@@ -137,6 +137,7 @@ export interface DashboardAccount extends SourceSyncState {
     previous_balance?: number | null
     sdk_cash_balance?: number | null
     sdk_market_value?: number | null
+    trading_day_commission_cny?: number | null
   } | null
   /** Account monitor has published an OKX unified AccountRisk sample. */
   unified_account?: boolean

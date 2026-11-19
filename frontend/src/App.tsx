@@ -63,6 +63,7 @@ import {
 } from './format'
 import type {
   AggregateSymbolNavReport,
+  DashboardAccount,
   DashboardSnapshot,
   FeeMode,
   HealthResponse,
@@ -925,7 +926,10 @@ function NavPage() {
           </div>
         </section>
 
-        {native ? !noSymbolsSelected && timeline?.report.fee_evidence && <NativeCommissionAnalysis evidence={timeline.report.fee_evidence} /> : dashboard && <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />}
+        {native ? <NativeCommissionAnalysis
+          evidence={noSymbolsSelected ? undefined : timeline?.report.fee_evidence}
+          funds={dashboard?.accounts?.find(account => account.source_id === scope)?.account_funds}
+        /> : dashboard && <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />}
         {!noSymbolsSelected && timeline?.execution_slippage.map((value, index) => <ExecutionSlippagePanel key={index} value={value} model={timeline.theoretical[index]?.execution_model} />)}
         {!native && !noSymbolsSelected && <FundingPanel value={timeline?.funding} accountTotals={pnlMode === 'account'} selectedForNav={displayed.kind === 'actual'} />}
         {!native && !noSymbolsSelected && <FundingEstimatePanel value={estimate} />}
@@ -1426,18 +1430,21 @@ function NavPage() {
   )
 }
 
-function NativeCommissionAnalysis({ evidence }: { evidence: NativeNavFeeEvidence }) {
+function NativeCommissionAnalysis({ evidence, funds }: { evidence?: NativeNavFeeEvidence; funds?: DashboardAccount['account_funds'] }) {
   const amount = (count: number, total: number) => count > 0 ? `${money(total)} CNY` : '—'
+  const commission = funds?.trading_day ? funds.trading_day_commission_cny : null
+  if (!evidence && commission == null) return null
   return (
     <section className="execution-section" aria-labelledby="execution-title">
       <div className="panel-heading">
-        <h2 id="execution-title">区间成交手续费</h2>
-        <span className="generation-time">{integer(evidence.fill_count)} 笔 · {money(evidence.volume_cny)} CNY</span>
+        <h2 id="execution-title">手续费</h2>
+        {evidence && <span className="generation-time">区间 {integer(evidence.fill_count)} 笔 · {money(evidence.volume_cny)} CNY</span>}
       </div>
       <div className="summary-strip nav-analysis-stats">
-        <AnalysisMetric label="实际手续费" value={amount(evidence.actual_count, evidence.actual_known_cny)} detail={`${integer(evidence.actual_count)} 笔有柜台费用回报`} />
-        <AnalysisMetric label="按历史费率估算" value={amount(evidence.estimated_count, evidence.estimated_known_cny)} detail={`${integer(evidence.estimated_count)} 笔按合约和开平估算`} />
-        {evidence.missing_count > 0 && <AnalysisMetric label="缺少费用依据" value={`${integer(evidence.missing_count)} 笔`} />}
+        {commission != null && funds?.trading_day && <AnalysisMetric label="柜台交易日手续费" value={`${money(commission)} CNY`} detail={`交易日 ${funds.trading_day} · ${timestampUs(funds.observed_us)}`} />}
+        {evidence && evidence.actual_count > 0 && <AnalysisMetric label="区间逐笔实收" value={amount(evidence.actual_count, evidence.actual_known_cny)} detail={`${integer(evidence.actual_count)} 笔有柜台费用回报`} />}
+        {evidence && <AnalysisMetric label="区间费率估算" value={amount(evidence.estimated_count, evidence.estimated_known_cny)} detail={`${integer(evidence.estimated_count)} 笔按合约和开平估算`} />}
+        {evidence && evidence.missing_count > 0 && <AnalysisMetric label="缺少费用依据" value={`${integer(evidence.missing_count)} 笔`} />}
       </div>
     </section>
   )
