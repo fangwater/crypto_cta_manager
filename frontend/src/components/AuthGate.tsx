@@ -15,6 +15,7 @@ import { Input, Label } from './ui/Field'
 
 interface AuthContextValue {
   user: AuthUser
+  autoEarnAvailable: boolean
   logout: () => Promise<void>
 }
 
@@ -57,16 +58,22 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
   if (!status) return <AuthMessage title="CTA Manager" detail="正在检查登录状态…" loading />
   if (!status.authenticated || !status.user) {
-    return <LoginPanel setupRequired={status.setup_required} onAuthenticated={setStatus} />
+    return (
+      <LoginPanel
+        setupRequired={status.setup_required}
+        onAuthenticated={(user) => setStatus({ ...status, authenticated: true, setup_required: false, user })}
+      />
+    )
   }
 
   return (
     <AuthContext.Provider
       value={{
         user: status.user,
+        autoEarnAvailable: status.auto_earn_available !== false,
         logout: async () => {
           await logout()
-          setStatus({ authenticated: false, setup_required: false, user: null })
+          setStatus({ ...status, authenticated: false, user: null })
         },
       }}
     >
@@ -80,7 +87,7 @@ function LoginPanel({
   onAuthenticated,
 }: {
   setupRequired: boolean
-  onAuthenticated: (status: AuthStatus) => void
+  onAuthenticated: (user: AuthUser) => void
 }) {
   const [mode, setMode] = useState<'login' | 'register'>(setupRequired ? 'register' : 'login')
   const [username, setUsername] = useState('')
@@ -101,7 +108,7 @@ function LoginPanel({
       const response = mode === 'register'
         ? await register(username, password)
         : await login(username, password)
-      onAuthenticated({ authenticated: true, setup_required: false, user: response.user })
+      onAuthenticated(response.user)
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {

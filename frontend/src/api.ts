@@ -55,6 +55,7 @@ export interface AuthStatus {
   authenticated: boolean
   setup_required: boolean
   user: AuthUser | null
+  auto_earn_available?: boolean
 }
 
 async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {

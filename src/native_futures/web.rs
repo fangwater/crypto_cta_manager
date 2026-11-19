@@ -226,11 +226,11 @@ pub fn with_frontend(api: Router, root: &std::path::Path) -> Result<Router> {
     );
     let api = api.route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }));
     let index = tower_http::services::ServeFile::new(index);
+    let workspace_redirect = get(|| async { Redirect::temporary("/manager/workspace/") });
     let mut app = Router::new()
-        .route(
-            "/",
-            get(|| async { Redirect::temporary("/manager/workspace/") }),
-        )
+        .route("/", workspace_redirect.clone())
+        .route("/manager/auto-earn", workspace_redirect.clone())
+        .route("/manager/auto-earn/", workspace_redirect)
         .merge(api.clone())
         .nest("/manager", api)
         .nest_service("/manager", tower_http::services::ServeDir::new(root));
@@ -247,7 +247,6 @@ pub fn with_frontend(api: Router, root: &std::path::Path) -> Result<Router> {
         "config/bindings",
         "config/virtual",
         "virtual",
-        "auto-earn",
         "docs",
         "admin",
     ] {
@@ -380,9 +379,12 @@ async fn auth_status(State(s): State<Service>, headers: HeaderMap) -> ApiResult 
     } else {
         None
     };
-    body(
-        json!({"authenticated":view.is_some(),"setup_required":!auth::has_users(&s.pool).await?,"user":view}),
-    )
+    body(json!({
+        "authenticated": view.is_some(),
+        "setup_required": !auth::has_users(&s.pool).await?,
+        "user": view,
+        "auto_earn_available": false,
+    }))
 }
 async fn session(s: &Service, user: AuthUser) -> std::result::Result<Response, ApiError> {
     let (token, _) = auth::create_session(&s.pool, user.user_id).await?;

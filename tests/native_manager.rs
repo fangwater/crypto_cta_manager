@@ -143,7 +143,6 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
         "/manager/accounts/",
         "/manager/exec/",
         "/manager/virtual/",
-        "/manager/auto-earn/",
         "/manager/docs/",
         "/manager/account/?source=sim",
         "/manager/net-value/",
@@ -156,6 +155,14 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
         let page = client.get(format!("{address}{route}")).send().await?;
         assert_eq!(page.status(), StatusCode::OK, "{route}");
         assert!(page.text().await?.contains("国内期货 CTA"), "{route}");
+    }
+    let no_redirect = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    for route in ["/manager/auto-earn", "/manager/auto-earn/"] {
+        let page = no_redirect.get(format!("{address}{route}")).send().await?;
+        assert_eq!(page.status(), StatusCode::TEMPORARY_REDIRECT, "{route}");
+        assert_eq!(page.headers()["location"], "/manager/workspace/", "{route}");
     }
     let missing = client
         .get(format!("{address}/manager/assets/missing.js"))
@@ -198,6 +205,7 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
         .json()
         .await?;
     assert_eq!(status["setup_required"], true);
+    assert_eq!(status["auto_earn_available"], false);
     assert_eq!(
         client
             .get(format!("{address}/api/native/sources"))
