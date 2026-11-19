@@ -18,8 +18,14 @@ pub async fn price_anchor(
                 .context("持有非零仓位时必须连接分钟行情，不能用本地预算或成交价代替起始计价")?;
             prices.insert(
                 key.clone(),
-                feed.nav_prices(&venue, &symbol, anchor.snapshot_us, anchor.snapshot_us)
-                    .await?,
+                feed.nav_prices(
+                    &venue,
+                    &symbol,
+                    anchor.snapshot_us,
+                    anchor.snapshot_us,
+                    false,
+                )
+                .await?,
             );
         }
         let market = &prices[&key];
@@ -141,7 +147,8 @@ pub(super) async fn prices(
         let feed = market.context("尚未配置持仓计价所需的 market-replay 行情")?;
         prices.insert(
             (venue.clone(), symbol.clone()),
-            feed.nav_prices(venue, symbol, start_us, end_us).await?,
+            feed.nav_prices(venue, symbol, start_us, end_us, false)
+                .await?,
         );
     }
     Ok(prices)

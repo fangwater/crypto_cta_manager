@@ -55,6 +55,7 @@ fn prices() -> BTreeMap<(String, String), MarketPrices> {
                 (at() + 180_000_000, 110.0),
             ]),
             sessions: vec![],
+            ..Default::default()
         },
     )])
 }

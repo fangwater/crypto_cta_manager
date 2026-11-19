@@ -43,6 +43,7 @@ import {
   NavTimelineChart,
   navSeriesMeta,
   navSeriesLabel,
+  referenceForSeries,
 } from './components/NavTimelineChart'
 import { PositionLeverageChart } from './components/PositionLeverageChart'
 import { ExecutionSlippagePanel } from './components/ExecutionSlippagePanel'
@@ -96,6 +97,8 @@ const seriesOptions: NavSeriesKey[] = [
   'nav_change_after_fee_quote',
   'theoretical_nav_before_fee_quote',
   'theoretical_nav_after_fee_quote',
+  'theoretical_native_vwap_before_fee_quote',
+  'theoretical_native_vwap_after_fee_quote',
   'theoretical_twap3m_before_fee_quote',
   'theoretical_twap3m_after_fee_quote',
   'theoretical_instant_taker_before_fee_quote',
@@ -238,6 +241,8 @@ function NavPage() {
     'nav_change_after_fee_quote',
     'theoretical_nav_before_fee_quote',
     'theoretical_nav_after_fee_quote',
+    'theoretical_native_vwap_before_fee_quote',
+    'theoretical_native_vwap_after_fee_quote',
     'theoretical_twap3m_before_fee_quote',
     'theoretical_twap3m_after_fee_quote',
     'theoretical_instant_taker_before_fee_quote',
@@ -266,6 +271,11 @@ function NavPage() {
   const timelineView = chartMode === 'symbols' ? 'symbols' : chartMode === 'strategies' || chartMode === 'strategyFunding' ? 'strategies' : 'portfolio'
   const initialized = useRef(false)
   const scopeReady = Boolean(dashboard?.report.sources.some((source) => source.source_id === scope))
+  const selectedSource = useMemo(
+    () => dashboard?.report.sources.find((source) => source.source_id === scope),
+    [dashboard, scope],
+  )
+  const native = dashboard?.report.valuation.startsWith('native_') === true || isNativeFuturesVenue(selectedSource?.configured_venue)
 
   const refreshDashboard = useCallback(
     async (signal?: AbortSignal, manual = false) => {
@@ -382,7 +392,7 @@ function NavPage() {
     let factual: TimelineSnapshot | null = null
     let overlay: TimelineOverlay | null = null
     let overlayStarted = false
-    const pairedWindow = selectedSymbols === null && endMs - startMs <= 30 * DAY_MS
+    const pairedWindow = (selectedSymbols === null || native) && endMs - startMs <= (native ? 31 : 30) * DAY_MS
     let fundingRetry: number | undefined
     const publish = () => {
       if (!factual || controller.signal.aborted) return
@@ -479,13 +489,7 @@ function NavPage() {
       window.clearTimeout(retryTimer)
       window.clearTimeout(fundingRetry)
     }
-  }, [activeRange, endMs, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision, timelineView])
-
-  const selectedSource = useMemo(
-    () => dashboard?.report.sources.find((source) => source.source_id === scope),
-    [dashboard, scope],
-  )
-  const native = dashboard?.report.valuation.startsWith('native_') === true || isNativeFuturesVenue(selectedSource?.configured_venue)
+  }, [activeRange, endMs, native, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision, timelineView])
   const availableSymbols = timeline?.report.available_symbols ?? []
   const availableStrategies = useMemo(() => activeNavStrategies(timeline), [timeline])
   const selectedSet = useMemo(
@@ -544,17 +548,24 @@ function NavPage() {
   const hasFunding = displayed.kind !== 'unavailable'
   const strategyChart = chartMode === 'strategies' || chartMode === 'strategyFunding'
   const fundingLabel = (key: NavSeriesKey) => {
-    const label = navSeriesLabel(key, timeline?.theoretical[0]?.execution_model, native)
+    const label = navSeriesLabel(key, referenceForSeries(key, timeline?.theoretical)?.execution_model, native)
     return usesEstimatedFunding ? label.replace('Funding', '估算 Funding').replace('funding', '估算 funding') : label
   }
-  const availableSeries = (key: NavSeriesKey) => (!native || !key.startsWith('theoretical_') || timeline?.theoretical.some((r) => r.points.length > 0)) && (!key.startsWith('theoretical_twap3m_') || timeline?.theoretical.some((r) => r.execution_model === 'twap3m')) && (!key.startsWith('theoretical_instant_taker_') || timeline?.theoretical.some((r) => r.execution_model === 'instant_taker')) && (hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_')))
+  const availableSeries = (key: NavSeriesKey) => {
+    if (key.startsWith('theoretical_')) {
+      const reference = referenceForSeries(key, timeline?.theoretical)
+      if (native) return Boolean(reference?.points.length)
+      if (!key.startsWith('theoretical_nav_')) return Boolean(reference)
+    }
+    return hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_'))
+  }
   const portfolioSeriesOptions = (
-    selectedSymbols === null
+    selectedSymbols === null || native
       ? seriesOptions
       : seriesOptions.filter((key) => !key.startsWith('theoretical_'))
   ).filter(availableSeries)
   const portfolioVisibleSeries = (
-    selectedSymbols === null
+    selectedSymbols === null || native
       ? visibleSeries
       : visibleSeries.filter((key) => !key.startsWith('theoretical_'))
   ).filter(availableSeries)

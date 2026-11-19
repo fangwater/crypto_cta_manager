@@ -162,6 +162,7 @@ impl Feed {
         symbol: &str,
         start_us: i64,
         end_us: i64,
+        include_references: bool,
     ) -> Result<super::nav::MarketPrices> {
         super::validate_market(&format!("{venue}:{symbol}"))?;
         ensure!(
@@ -227,6 +228,24 @@ impl Feed {
             result.multiplier = contract.volume_multiple;
             for (day, bars) in days {
                 reference::valid_day(&day)?;
+                let references: BTreeMap<_, _> = if include_references {
+                    bars.iter()
+                        .map(|bar| {
+                            let positive = |p: &f64| p.is_finite() && *p > 0.0;
+                            (
+                                bar.open_time_ms,
+                                super::nav::ReferenceMinute {
+                                    trading_day: bar.trading_day,
+                                    twap: bar.twap.filter(positive),
+                                    vwap: (bar.volume_lots > 0.0 && positive(&bar.vwap))
+                                        .then_some(bar.vwap),
+                                },
+                            )
+                        })
+                        .collect()
+                } else {
+                    BTreeMap::new()
+                };
                 let market = convert(
                     GetMinuteBarsResponse {
                         contract: Some(contract.clone()),
@@ -239,10 +258,14 @@ impl Feed {
                     super::now_us(),
                 )?;
                 for bar in market.bars {
-                    let close = reference::timestamp(&bar.open_time)? + MINUTE_US;
+                    let open = reference::timestamp(&bar.open_time)?;
+                    let close = open + MINUTE_US;
                     if close <= end_us {
                         if let Some(old) = result.closes.insert(close, bar.close) {
                             ensure!(old == bar.close, "conflicting native NAV minute close");
+                        }
+                        if let Some(reference) = references.get(&(open / 1000)) {
+                            result.references.insert(close, *reference);
                         }
                     }
                 }

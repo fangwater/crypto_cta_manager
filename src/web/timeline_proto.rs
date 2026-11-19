@@ -264,12 +264,44 @@ impl Encoder {
             ],
         );
     }
+
+    fn reference(&mut self, index: usize, points: &[crate::theoretical_nav::TheoreticalNavPoint]) {
+        self.curve(
+            CurveKind::Theoretical,
+            index.to_string(),
+            points.iter().map(|p| p.ts_us).collect(),
+            vec![
+                (
+                    Metric::NavBeforeFee,
+                    points
+                        .iter()
+                        .map(|p| p.nav_change_before_fee_quote)
+                        .collect(),
+                ),
+                (
+                    Metric::NavAfterFee,
+                    points
+                        .iter()
+                        .map(|p| p.nav_change_after_fee_quote)
+                        .collect(),
+                ),
+                (
+                    Metric::TradingFee,
+                    points
+                        .iter()
+                        .map(|p| p.estimated_trading_fee_quote)
+                        .collect(),
+                ),
+            ],
+        );
+    }
 }
 
-/// Encode a report with the same complete actual columns as the Crypto browser API.
-pub(crate) fn encode_actual_curves(
+/// Encode native actual and reference curves with the shared browser columns.
+pub(crate) fn encode_native_curves(
     metadata: Value,
     curves: Vec<(CurveKind, String, Vec<NavTimelinePoint>)>,
+    references: &[crate::native_futures::nav::comparison::Reference],
 ) -> Result<Vec<u8>> {
     let mut encoder = Encoder::default();
     let Some(prost_types::value::Kind::StructValue(metadata)) = proto_value(metadata).kind else {
@@ -278,6 +310,9 @@ pub(crate) fn encode_actual_curves(
     encoder.message.metadata = Some(metadata);
     for (kind, key, points) in curves {
         encoder.actual(kind, key, &points);
+    }
+    for (index, reference) in references.iter().enumerate() {
+        encoder.reference(index, &reference.points);
     }
     Ok(encoder.message.encode_to_vec())
 }
@@ -324,35 +359,7 @@ pub(super) fn encode(snapshot: &TimelineSnapshot, view: View) -> Result<Vec<u8>>
         );
     }
     for (index, reference) in snapshot.theoretical.iter().enumerate() {
-        let points = &reference.points;
-        encoder.curve(
-            CurveKind::Theoretical,
-            index.to_string(),
-            points.iter().map(|p| p.ts_us).collect(),
-            vec![
-                (
-                    Metric::NavBeforeFee,
-                    points
-                        .iter()
-                        .map(|p| p.nav_change_before_fee_quote)
-                        .collect(),
-                ),
-                (
-                    Metric::NavAfterFee,
-                    points
-                        .iter()
-                        .map(|p| p.nav_change_after_fee_quote)
-                        .collect(),
-                ),
-                (
-                    Metric::TradingFee,
-                    points
-                        .iter()
-                        .map(|p| p.estimated_trading_fee_quote)
-                        .collect(),
-                ),
-            ],
-        );
+        encoder.reference(index, &reference.points);
     }
     let mut bytes = Vec::with_capacity(encoder.message.encoded_len());
     encoder

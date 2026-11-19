@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    native_futures::nav::comparison,
     nav::{NavTimelinePoint, NavTotals},
     web::timeline_proto::{self, CurveKind, View},
 };
@@ -16,6 +17,7 @@ pub(super) struct TimelineQuery {
     max_points: Option<usize>,
     symbols: Option<String>,
     view: Option<View>,
+    include_theoretical: bool,
 }
 
 #[derive(Deserialize)]
@@ -94,19 +96,17 @@ pub(super) async fn nav_monitor(
 
 pub(super) async fn account(
     State(s): State<Service>,
+    Extension(user): Extension<AuthUser>,
     Extension(access): Extension<Arc<SourceAccess>>,
     Query(query): Query<TimelineQuery>,
 ) -> Result<Response, ApiError> {
     let sources = selected(&s, &access, query.source_ids.as_deref())?;
     let id = only_source(&sources)?;
     let view = query.view.unwrap_or_default();
-    if view == View::Theoretical {
-        return encode(metadata(), vec![]);
-    }
     if view == View::Strategies {
         return Err(unavailable("请通过分策略 PnL 查看可核验的策略归因"));
     }
-    account_view(&s, id, query, view).await
+    account_view(&s, &user, id, query, view).await
 }
 
 pub(super) async fn strategy(
@@ -118,22 +118,13 @@ pub(super) async fn strategy(
     let sources = selected(&s, &access, query.source_ids.as_deref())?;
     let id = only_source(&sources)?;
     let view = query.view.unwrap_or_default();
-    if view == View::Theoretical {
-        return encode(metadata(), vec![]);
-    }
     let Some(ledger) = crate::native_futures::netting::store::load(&s.pool, id).await? else {
         return Err(unavailable("该账户尚无原生策略归因起始快照"));
     };
-    if !user.is_admin() {
-        let visible = strategy_catalog::list_position_visibility(&s.pool).await?;
-        if ledger.targets.keys().any(|name| {
-            !visible
-                .iter()
-                .any(|v| v.strategy_name == *name && v.user_can_view(user.user_id))
-        }) {
-            return Err(forbidden());
-        }
+    if !can_view_targets(&s, &user, &ledger).await? {
+        return Err(forbidden());
     }
+    let revision = ledger.revision;
     let symbols = query.symbols();
     let window = query.nav_window(Some(ledger.anchor.snapshot_us))?;
     let (start, end, max_points) = window.window()?;
@@ -181,11 +172,64 @@ pub(super) async fn strategy(
             tracing::warn!(source_id=id,error=?error,"native strategy NAV valuation unavailable");
             unavailable("策略持仓证据或已完成分钟行情覆盖不足；无法形成完整策略净值曲线")
         })?;
-    project(result.report, result.strategies, end, view)
+    let references = if query.wants_comparison(view) {
+        comparisons(&s, &result.report, revision, !symbols.is_empty()).await
+    } else {
+        vec![]
+    };
+    project(result.report, result.strategies, references, end, view)
+}
+
+async fn can_view_targets(
+    s: &Service,
+    user: &AuthUser,
+    ledger: &crate::native_futures::netting::Portfolio,
+) -> Result<bool, ApiError> {
+    if user.is_admin() {
+        return Ok(true);
+    }
+    let visible = strategy_catalog::list_position_visibility(&s.pool).await?;
+    Ok(ledger.targets.keys().all(|name| {
+        visible
+            .iter()
+            .any(|v| v.strategy_name == *name && v.user_can_view(user.user_id))
+    }))
+}
+
+async fn comparisons(
+    s: &Service,
+    report: &nav::Report,
+    revision: i64,
+    filtered: bool,
+) -> Vec<comparison::Reference> {
+    if !report.ready {
+        return comparison::unavailable(
+            report
+                .reason
+                .as_deref()
+                .unwrap_or("所选区间的实际仓位基准不可用"),
+        );
+    }
+    match comparison::timeline(
+        &s.pool,
+        s.market_data.as_deref(),
+        report,
+        revision,
+        filtered,
+    )
+    .await
+    {
+        Ok(references) => references,
+        Err(error) => {
+            tracing::warn!(source_id=%report.source_id,error=?error,"native reference NAV unavailable");
+            comparison::unavailable("无法读取完整的目标批次或合约分钟行情")
+        }
+    }
 }
 
 async fn account_view(
     s: &Service,
+    user: &AuthUser,
     id: &str,
     query: TimelineQuery,
     view: View,
@@ -215,7 +259,25 @@ async fn account_view(
         }),
     )
     .await?;
-    project(report, vec![], requested_end, view)
+    let references = if query.wants_comparison(view) {
+        match crate::native_futures::netting::store::load(&s.pool, id).await {
+            Ok(Some(ledger)) if report.start_us < ledger.anchor.snapshot_us => {
+                comparison::unavailable("所选起点早于策略目标账本")
+            }
+            Ok(Some(ledger)) => match can_view_targets(s, user, &ledger).await {
+                Ok(true) => comparisons(s, &report, ledger.revision, !symbols.is_empty()).await,
+                _ => comparison::unavailable("查看参考曲线需要该账户的策略目标查看权限"),
+            },
+            Ok(None) => comparison::unavailable("该账户尚无原生策略目标账本"),
+            Err(error) => {
+                tracing::warn!(source_id=id,error=?error,"native reference NAV target ledger unavailable");
+                comparison::unavailable("策略目标账本暂不可用")
+            }
+        }
+    } else {
+        vec![]
+    };
+    project(report, vec![], references, requested_end, view)
 }
 
 fn only_source(sources: &[String]) -> Result<&str, ApiError> {
@@ -227,6 +289,10 @@ fn only_source(sources: &[String]) -> Result<&str, ApiError> {
 }
 
 impl TimelineQuery {
+    fn wants_comparison(&self, view: View) -> bool {
+        view == View::Theoretical || (view == View::Portfolio && self.include_theoretical)
+    }
+
     fn nav_window(&self, anchor_us: Option<i64>) -> Result<NavQuery, ApiError> {
         let end = self
             .end_ms
@@ -260,15 +326,17 @@ fn unavailable(message: impl ToString) -> ApiError {
     ApiError(StatusCode::UNPROCESSABLE_ENTITY, message.to_string())
 }
 
-fn metadata() -> Value {
+fn metadata(report: &nav::Report, references: &[comparison::Reference]) -> Value {
     json!({
         "generated_at_us": crate::native_futures::now_us(), "generation_duration_ms": 0,
-        "theoretical": [{
-            "valuation": "unavailable", "execution_model": "native_unavailable",
-            "loading": false, "available_from_us": null, "execution_window_secs": 0,
-            "unavailable_reason": "国内期货尚无经过验证的理论执行回放",
+        "theoretical": references.iter().map(|row| json!({
+            "valuation": "native_target_baseline_minute_reference", "execution_model": row.model.key(),
+            "loading": false, "available_from_us": report.snapshot_us, "execution_window_secs": 60,
+            "price_basis": "baseline_data_1min", "fee_basis": "actual_total_cny",
+            "latest_point_ts_us": row.points.last().map(|point| point.ts_us),
+            "unavailable_reason": row.unavailable, "sampled": report.sampled,
             "points": [],
-        }],
+        })).collect::<Vec<_>>(),
         "execution_slippage": [],
     })
 }
@@ -315,14 +383,18 @@ fn curve(kind: CurveKind, key: String, points: &[nav::Point]) -> Result<ActualCu
 fn project(
     report: nav::Report,
     strategy: Vec<nav::attribution::StrategySummary>,
+    references: Vec<comparison::Reference>,
     requested_end: i64,
     view: View,
 ) -> Result<Response, ApiError> {
+    let mut metadata = metadata(&report, &references);
+    if view == View::Theoretical {
+        return encode(metadata, vec![], &references);
+    }
     let summary = report
         .summary
         .as_ref()
         .ok_or_else(|| unavailable(report.reason.as_deref().unwrap_or("暂无可计价的账户净值")))?;
-    let mut metadata = metadata();
     let mut curves = vec![curve(CurveKind::Portfolio, String::new(), &report.points)?];
     let mut markets = Vec::with_capacity(report.markets.len());
     for market in &report.markets {
@@ -371,11 +443,15 @@ fn project(
         "income_quote": null, "loading": false, "strategies": [], "points": [],
         "unavailable_reason": "国内期货不适用加密永续合约的资金费",
     });
-    encode(metadata, curves)
+    encode(metadata, curves, &references)
 }
 
-fn encode(metadata: Value, curves: Vec<ActualCurve>) -> Result<Response, ApiError> {
-    let bytes = timeline_proto::encode_actual_curves(metadata, curves)?;
+fn encode(
+    metadata: Value,
+    curves: Vec<ActualCurve>,
+    references: &[comparison::Reference],
+) -> Result<Response, ApiError> {
+    let bytes = timeline_proto::encode_native_curves(metadata, curves, references)?;
     Ok((
         [
             (header::CONTENT_TYPE, timeline_proto::CONTENT_TYPE),

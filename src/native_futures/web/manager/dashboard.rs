@@ -391,7 +391,7 @@ async fn position_notionals(s: &Service, sample: &Sample) -> Option<(f64, f64)> 
         let prices = s
             .market_data
             .as_ref()?
-            .nav_prices(venue, contract, at, at)
+            .nav_prices(venue, contract, at, at, false)
             .await
             .ok()?;
         let lot_value = prices.mark(at).ok()? * prices.multiplier;

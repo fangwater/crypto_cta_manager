@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(crate) mod attribution;
+pub(crate) mod comparison;
 pub mod service;
 pub mod source;
 pub mod store;
@@ -279,6 +280,15 @@ pub struct MarketPrices {
     pub closes: BTreeMap<i64, f64>,
     /// Shanghai seconds since midnight, end exclusive; may cross midnight.
     pub sessions: Vec<(u32, u32)>,
+    /// Execution references by verified minute end, populated only for comparisons.
+    pub(crate) references: BTreeMap<i64, ReferenceMinute>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReferenceMinute {
+    pub(crate) trading_day: u32,
+    pub(crate) twap: Option<f64>,
+    pub(crate) vwap: Option<f64>,
 }
 impl MarketPrices {
     pub fn mark(&self, at_us: i64) -> Result<f64> {
