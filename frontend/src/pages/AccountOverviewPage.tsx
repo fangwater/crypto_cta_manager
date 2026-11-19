@@ -571,13 +571,10 @@ function AccountMeta({
           </span>
         )}
         <span>最近成交 {timestampUs(report.last_fill_ts_us)}</span>
-        {!!sdkValues.length && funds && <span className="space-y-1">
-          <span className="block">{sdkValues.join(' · ')}</span>
-          <span className="block text-xs text-muted">{[
-            funds.historical_reason, '易达资金回报', timestampUs(funds.observed_us),
-            funds.trading_day ? `交易日 ${funds.trading_day}` : undefined, '行情估值时间未核验',
-          ].filter(Boolean).join(' · ')}</span>
-        </span>}
+        {!!sdkValues.length && funds && <span title={[
+          funds.historical_reason, '易达资金回报', timestampUs(funds.observed_us),
+          funds.trading_day ? `交易日 ${funds.trading_day}` : undefined, '行情估值时间未核验',
+        ].filter(Boolean).join(' · ')}>{sdkValues.join(' · ')}</span>}
         <span className={signedClass(report.nav_change_after_fee_quote)}>
           累计费后 {money(report.nav_change_after_fee_quote)} CNY
         </span>
