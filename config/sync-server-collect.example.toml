@@ -15,6 +15,11 @@ poll_secs = 10
 timeout_secs = 30
 concurrent_sources = 4
 
+# Optional links to the execution dashboard. The URL source selects the Viz counter.
+# [execution_monitor_urls]
+# cn_live01 = "https://viz.example.com/?source=yida-sim"
+# cn_live02 = "https://viz.example.com/?source=ctp-sim"
+
 # Example loopback endpoints may be SSH tunnels to independent cloud exporters.
 [[sources]]
 id = "cn_live01"

@@ -92,6 +92,11 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
             vec!["operator".into()],
         )]),
         ctaker_plan_readers: Default::default(),
+        execution_monitor_urls: [(
+            "sim".into(),
+            "https://viz.example.test/?source=paper".into(),
+        )]
+        .into(),
         sources: vec![
             Source {
                 id: "sim".into(),
@@ -274,6 +279,10 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     assert_eq!(dashboard["accounts"].as_array().unwrap().len(), 1);
     let account = &dashboard["accounts"][0];
     assert_eq!(account["source_id"], "sim");
+    assert_eq!(
+        account["execution_monitor_url"],
+        "https://viz.example.test/?source=paper"
+    );
     assert_eq!(account["quote_currency"], "CNY");
     assert_eq!(account["can_edit_alias"], true);
     assert_eq!(account["configurable"], false);

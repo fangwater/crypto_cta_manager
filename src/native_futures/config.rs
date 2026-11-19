@@ -29,6 +29,8 @@ pub struct Config {
     pub recent_rows: usize,
     #[serde(default)]
     pub source_viewers: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub execution_monitor_urls: BTreeMap<String, String>,
     /// Dedicated per-source read credentials for the Exec-side plan consumer.
     #[serde(default)]
     pub ctaker_plan_readers: BTreeMap<String, String>,
@@ -195,6 +197,17 @@ impl Config {
                     && users.iter().all(|u| !u.trim().is_empty())),
             "source_viewers requires configured sources and nonempty usernames"
         );
+        for (id, address) in &self.execution_monitor_urls {
+            let url = reqwest::Url::parse(address).context("invalid execution monitor URL")?;
+            ensure!(
+                ids.contains(id)
+                    && matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none(),
+                "execution_monitor_urls requires configured sources and HTTP(S) links without credentials"
+            );
+        }
         let mut plan_envs = BTreeSet::new();
         ensure!(
             self.ctaker_plan_readers.iter().all(|(id, env)| {

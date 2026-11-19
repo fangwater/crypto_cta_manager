@@ -1,4 +1,5 @@
 import type { DashboardAccount } from '../types'
+import { routes } from './routes.ts'
 
 // One public account owns two execution sources. Never turn the sources into
 // separate public accounts to make their Viz pages available.
@@ -28,6 +29,12 @@ export function groupAccount(accounts: DashboardAccount[], group: ExecutionGroup
 export function accountExecutionGroup(account: DashboardAccount) {
   const group = executionGroups.find(g => g.accountId === account.source_id)
   return group && groupAccount([account], group) ? group : null
+}
+
+export function accountExecutionUrl(account: DashboardAccount) {
+  const group = accountExecutionGroup(account)
+  if (group) return routes.execViz(group.id)
+  return account.execution_monitor_url ?? (account.gateway_prefix ? `${account.gateway_prefix}/` : null)
 }
 
 export function requireGroupSources(actual: string[], expected: readonly string[]) {

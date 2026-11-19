@@ -1,4 +1,4 @@
-import { accountExecutionGroup } from '../lib/executionGroups'
+import { accountExecutionUrl } from '../lib/executionGroups'
 import { accountFeeSummary, fundingMoney } from '../format'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import { AccountAliasEditor } from '../components/AccountAliasEditor'
@@ -282,8 +282,7 @@ function AccountCard({
   const combinedNav = report && funding?.income_quote != null
     ? report.nav_change_after_fee_quote + funding.income_quote : null
   const displayedNav = funding ? combinedNav ?? (account.execution_sources?.length ? report?.nav_change_after_fee_quote : null) : report?.nav_change_after_fee_quote
-  const executionGroup = accountExecutionGroup(account)
-  const executionUrl = !ready ? null : executionGroup ? routes.execViz(executionGroup.id) : account.gateway_prefix ? `${account.gateway_prefix}/` : null
+  const executionUrl = account.enabled && (ready || native) ? accountExecutionUrl(account) : null
   const signalConfigPath = account.enabled && account.access_level === 'configure'
     ? accountSignalConfigPath(account.source_id)
     : undefined
@@ -303,20 +302,8 @@ function AccountCard({
   const assetLabel = availableCash != null
     ? historical || account.venue === 'yida' ? '最近可用资金' : '可用资金'
     : historical ? '历史权益' : '实时权益'
-  const assetSource = funds?.source === 'ctp_trading_account' ? 'CTP 资金查询'
-    : funds?.source === 'yida_extended_account' ? '易达资金回报' : undefined
   const assetUnit = equity != null ? 'CNY' : funds?.currency
-  const assetTime = funds && assetSource ? `${assetSource} ${timestampUs(funds.observed_us)}` : undefined
-  const assetDetail = [assetTime, funds?.trading_day ? `交易日 ${funds.trading_day}` : undefined,
-    amount != null && !assetUnit ? '币种未回报' : undefined].filter(Boolean).join(' · ')
-  const previousSettlement = funds?.source === 'ctp_trading_account' && funds.previous_balance != null && funds.currency
-    ? `上次结算权益 ${money(funds.previous_balance)} ${funds.currency}`
-    : undefined
-  const sdkAssets = funds?.valuation_basis === 'sdk_mark_time_unverified' ? [
-    ['SDK 资金权益', funds.sdk_cash_balance],
-    ['SDK 市值权益', funds.sdk_market_value],
-    ['昨市值权益', funds.previous_balance],
-  ].flatMap(([label, value]) => typeof value === 'number' ? [[label, money(value), funds.currency].filter(Boolean).join(' ')] : []) : []
+  const assetTime = funds ? `回报 ${timestampUs(funds.observed_us)}` : undefined
 
   return (
     <Card className={cn(!ready && 'opacity-80')}>
@@ -351,8 +338,8 @@ function AccountCard({
           <Metric
             label={assetLabel}
             value={amount != null ? [money(amount), assetUnit].filter(Boolean).join(' ') : '--'}
-            detail={sdkAssets.length ? <>{assetDetail}<br />{sdkAssets.join(' · ')}<br />行情估值时间未核验</> : assetDetail}
-            title={[funds?.historical_reason, previousSettlement].filter(Boolean).join(' · ') || undefined}
+            detail={assetTime}
+            title={funds?.historical_reason ?? undefined}
           />
           {(account.unified_account || isUnifiedVenue(account.venue)) && (
             <Metric

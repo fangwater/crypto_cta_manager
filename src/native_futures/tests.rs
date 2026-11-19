@@ -271,9 +271,19 @@ fn rejects_overlapping_stores_before_creating_a_secondary() {
         stale_secs: 30,
         recent_rows: 10,
         source_viewers: Default::default(),
+        execution_monitor_urls: Default::default(),
         ctaker_plan_readers: Default::default(),
         sources: vec![source(&primary)],
     };
+    assert!(config.validate().is_ok());
+    let id = config.sources[0].id.clone();
+    config
+        .execution_monitor_urls
+        .insert(id.clone(), "javascript:alert(1)".into());
+    assert!(config.validate().is_err());
+    config
+        .execution_monitor_urls
+        .insert(id, "https://viz.example.test/?source=paper".into());
     assert!(config.validate().is_ok());
     config.sources.push(source(&primary));
     assert!(config.validate().is_err());

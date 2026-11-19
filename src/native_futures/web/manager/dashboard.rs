@@ -754,6 +754,7 @@ pub(super) async fn dashboard(
         accounts.push(json!({
             "source_id": id, "account": account, "venue": source.adapter, "enabled": true,
             "gateway_prefix": null, "configurable": false, "target_proxy_enabled": false,
+            "execution_monitor_url": s.config.execution_monitor_urls.get(id),
             "access_level": if can_configure { "configure" } else { "view" },
             "can_edit_alias": can_configure, "display_alias": aliases.get(id),
             "open_position_symbol_count": current_position_count,

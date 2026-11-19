@@ -105,6 +105,7 @@ export interface DashboardAccount extends SourceSyncState {
   venue: string
   enabled: boolean
   gateway_prefix: string | null
+  execution_monitor_url?: string | null
   configurable: boolean
   target_proxy_enabled: boolean
   /** Count supplied by the compact dashboard projection, without symbol detail rows. */

@@ -35,6 +35,7 @@ pm2 save
 Manager 的 `--frontend-root` 提供已构建网页和同源 API，总览地址为
 `http://127.0.0.1:18211/manager/workspace/`。国内期货沿用 Crypto CTA 页面和交互，后端按相同页面接口返回账户数据。CNY、手数与原生合约字段在 CN 构建中适配。发布时校验对外静态文件与本地 CN 构建的 SHA-256。每条授权来源在 `/manager/accounts/` 独立显示，详情链接以
 `source` 参数保留账户身份。网页可匿名加载，数据 API 保持登录和来源权限检查。
+`execution_monitor_urls` 按 Manager 来源配置执行监控入口。国内 Viz 使用 URL 的 `source` 参数预选对应柜台。
 首次初始化管理员后再开放云端入口。部署可生成强随机初始密码并仅存入本机 0600
 的私有登录文件，操作者自行读取；不在日志或 Git 中保存密码。
 通过既有反向代理或 SSH 转发访问；API 保持 loopback。没有启动 Vite 开发服务器。

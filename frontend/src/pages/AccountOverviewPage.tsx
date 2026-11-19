@@ -1,4 +1,4 @@
-import { accountExecutionGroup, estimatedFundingOnly } from '../lib/executionGroups'
+import { accountExecutionUrl, estimatedFundingOnly } from '../lib/executionGroups'
 import { accountBindings } from '../lib/accountBindings'
 import { accountScope } from '../lib/accountScope'
 import { accountVenueLabel } from '../lib/workspace'
@@ -121,8 +121,7 @@ export function AccountOverviewPage() {
 
   const account = useMemo(() => (dashboard?.accounts ?? []).find(a => a.source_id === accountId || a.execution_sources?.some(s => s.source_id === sourceId)), [dashboard, accountId, sourceId])
   const publicId = account?.source_id ?? accountId
-  const executionGroup = account ? accountExecutionGroup(account) : null
-  const executionUrl = executionGroup ? routes.execViz(executionGroup.id) : account?.gateway_prefix ? `${account.gateway_prefix}/` : null
+  const executionUrl = account ? accountExecutionUrl(account) : null
   const markets = account?.execution_sources ?? []
   const marketAccount = markets.find(a => a.source_id === sourceId) ?? account
   const native = isNativeFuturesVenue(marketAccount?.venue)
