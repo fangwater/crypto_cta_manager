@@ -82,8 +82,9 @@ export const navSeriesMeta: Record<
     color: '#a33f55',
     lineType: 'dashed',
   },
-  theoretical_native_vwap_before_fee_quote: { label: '参考 1 分钟 VWAP（费前）', color: '#0891b2', lineType: 'dotted' },
-  theoretical_native_vwap_after_fee_quote: { label: '参考 1 分钟 VWAP（费后）', color: '#d97706', lineType: 'dashed' },
+  theoretical_native_vwap_after_fee_quote: { label: '1min_vwap', color: '#d97706', lineType: 'dashed' },
+  theoretical_native_twap5m_after_fee_quote: { label: '5min_twap', color: '#2563a7', lineType: 'dashed' },
+  theoretical_native_vwap5m_after_fee_quote: { label: '5min_vwap', color: '#9c4f87', lineType: 'dotted' },
   theoretical_twap3m_before_fee_quote: { label: '理论3min_twap（费前）', color: '#0891b2', lineType: 'dotted' },
   theoretical_twap3m_after_fee_quote: { label: '理论3min_twap（费后）', color: '#d97706', lineType: 'dashed' },
   theoretical_instant_taker_before_fee_quote: { label: '理论瞬时taker（费前）', color: '#65a30d', lineType: 'dotted' },
@@ -102,11 +103,11 @@ export const navSeriesMeta: Record<
 }
 
 export function navSeriesLabel(key: NavSeriesKey, model?: TheoreticalExecutionModel | null, native = false) {
-  if (native && key === 'estimated_trading_fee_quote') return '手续费'
+  if (native && key === 'nav_change_after_fee_quote') return '实际净值'
   if (key.startsWith('theoretical_')) {
     const fee = key.endsWith('before_fee_quote') ? '费前' : '费后'
-    if (key.startsWith('theoretical_native_vwap_')) return `参考 1 分钟 VWAP（${fee}）`
-    if (model === 'native_twap') return `参考 1 分钟 TWAP（${fee}）`
+    if (key.startsWith('theoretical_native_')) return navSeriesMeta[key].label
+    if (model === 'native_twap') return '1min_twap'
     if (key.startsWith('theoretical_instant_taker_')) return `理论瞬时taker（${fee}）`
     if (key.startsWith('theoretical_twap3m_')) return `理论3min_twap（${fee}）`
     if (model === 'vwap3m') return `理论3min_vwap（${fee}）`
@@ -117,6 +118,8 @@ export function navSeriesLabel(key: NavSeriesKey, model?: TheoreticalExecutionMo
 }
 
 export function referenceForSeries(key: NavSeriesKey, references: TheoreticalNavTimeline[] = []) {
+  if (key.startsWith('theoretical_native_twap5m_')) return references.find(row => row.execution_model === 'native_twap5m')
+  if (key.startsWith('theoretical_native_vwap5m_')) return references.find(row => row.execution_model === 'native_vwap5m')
   if (key.startsWith('theoretical_native_vwap_')) return references.find(row => row.execution_model === 'native_vwap')
   if (key.startsWith('theoretical_twap3m_')) return references.find(row => row.execution_model === 'twap3m')
   if (key.startsWith('theoretical_instant_taker_')) return references.find(row => row.execution_model === 'instant_taker')

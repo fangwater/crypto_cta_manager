@@ -8,6 +8,8 @@ use sqlx::PgPool;
 pub(crate) enum Model {
     Twap,
     Vwap,
+    Twap5m,
+    Vwap5m,
 }
 
 impl Model {
@@ -15,11 +17,20 @@ impl Model {
         match self {
             Self::Twap => "native_twap",
             Self::Vwap => "native_vwap",
+            Self::Twap5m => "native_twap5m",
+            Self::Vwap5m => "native_vwap5m",
+        }
+    }
+
+    pub(crate) fn window_secs(self) -> usize {
+        match self {
+            Self::Twap | Self::Vwap => 60,
+            Self::Twap5m | Self::Vwap5m => 300,
         }
     }
 }
 
-pub(crate) const MODELS: [Model; 2] = [Model::Twap, Model::Vwap];
+const MODEL_GROUPS: [[Model; 2]; 2] = [[Model::Twap, Model::Vwap], [Model::Twap5m, Model::Vwap5m]];
 
 pub(crate) struct Reference {
     pub(crate) model: Model,
@@ -28,9 +39,10 @@ pub(crate) struct Reference {
 }
 
 pub(crate) fn unavailable(reason: &str) -> Vec<Reference> {
-    MODELS
-        .iter()
-        .map(|&model| Reference {
+    MODEL_GROUPS
+        .into_iter()
+        .flatten()
+        .map(|model| Reference {
             model,
             points: vec![],
             unavailable: Some(reason.into()),
@@ -140,11 +152,11 @@ pub(crate) async fn timeline(
     let end = report.end_us;
     let samples = report.points.clone();
     tokio::task::spawn_blocking(move || {
-        let schedule = schedule(intents, &prices, end)?;
-        Ok(MODELS
-            .into_iter()
-            .map(
-                |model| match replay(model, &initial, &schedule, &prices, &samples, start, end) {
+        let mut references = Vec::new();
+        for models in MODEL_GROUPS {
+            let schedule = schedule(&intents, &prices, end, models[0].window_secs() / 60)?;
+            references.extend(models.into_iter().map(|model| {
+                match replay(model, &initial, &schedule, &prices, &samples, start, end) {
                     Ok(points) => Reference {
                         model,
                         points,
@@ -155,22 +167,29 @@ pub(crate) async fn timeline(
                         points: vec![],
                         unavailable: Some(error.to_string()),
                     },
-                },
-            )
-            .collect())
+                }
+            }));
+        }
+        Ok(references)
     })
     .await?
 }
 
-type Schedule = BTreeMap<(i64, Market), Intent>;
+struct Execution<'a> {
+    intent: &'a Intent,
+    minute_ends: [i64; 5],
+}
 
-fn schedule(
-    intents: Vec<Intent>,
+type Schedule<'a> = BTreeMap<(i64, Market), Execution<'a>>;
+
+fn schedule<'a>(
+    intents: &'a [Intent],
     prices: &BTreeMap<Market, MarketPrices>,
     end: i64,
-) -> Result<Schedule> {
+    minutes: usize,
+) -> Result<Schedule<'a>> {
     let mut result = BTreeMap::new();
-    for intent in intents {
+    'intent: for intent in intents {
         let first = intent
             .accepted_us
             .checked_add(MINUTE_US - 1)
@@ -179,36 +198,93 @@ fn schedule(
             * MINUTE_US;
         let sessions = &prices[&intent.market].sessions;
         ensure!(!sessions.is_empty(), "缺少参考执行交易时段");
-        let second = (first / 1_000_000 + 8 * 3600).rem_euclid(86400) as u32;
-        let active = |second| {
-            sessions.iter().any(|&(start, end)| {
-                if start < end {
-                    (start..end).contains(&second)
-                } else {
-                    second >= start || second < end
-                }
-            })
-        };
-        let wait_seconds = if active(second) {
-            0
-        } else {
-            sessions
-                .iter()
-                .map(|&(open, _)| (open + 86400 - second) % 86400)
-                .min()
-                .unwrap()
-        };
-        let open = first + i64::from(wait_seconds.div_ceil(60)) * MINUTE_US;
-        if open + MINUTE_US <= end {
+        let mut open = first;
+        let mut minute_ends = [0; 5];
+        for close in &mut minute_ends[..minutes] {
+            let second = shanghai_second(open);
+            if !active(sessions, second) {
+                let wait = sessions
+                    .iter()
+                    .map(|&(session_open, _)| (session_open + 86400 - second) % 86400)
+                    .min()
+                    .unwrap();
+                open += i64::from(wait.div_ceil(60)) * MINUTE_US;
+            }
+            *close = open + MINUTE_US;
+            if *close > end {
+                continue 'intent;
+            }
             ensure!(
-                active((open / 1_000_000 + 8 * 3600).rem_euclid(86400) as u32),
+                active(sessions, shanghai_second(open)),
                 "缺少完整的参考执行分钟"
             );
-            // Targets accepted for the same contract and minute share a price.
-            result.insert((open + MINUTE_US, intent.market.clone()), intent);
+            open = *close;
         }
+        // The latest target for the same contract and execution window wins.
+        result.insert(
+            (open, intent.market.clone()),
+            Execution {
+                intent,
+                minute_ends,
+            },
+        );
     }
     Ok(result)
+}
+
+fn shanghai_second(timestamp: i64) -> u32 {
+    (timestamp / 1_000_000 + 8 * 3600).rem_euclid(86400) as u32
+}
+
+fn active(sessions: &[(u32, u32)], second: u32) -> bool {
+    sessions.iter().any(|&(start, end)| {
+        if start < end {
+            (start..end).contains(&second)
+        } else {
+            second >= start || second < end
+        }
+    })
+}
+
+fn execution_price(model: Model, execution: &Execution<'_>, prices: &MarketPrices) -> Result<f64> {
+    let mut day = execution.intent.trading_day;
+    let mut traded_minutes = 0;
+    let mut price_sum = 0.0;
+    let mut lots = 0.0;
+    let mut turnover = 0.0;
+    for &end in &execution.minute_ends[..model.window_secs() / 60] {
+        let minute = prices.references.get(&end).with_context(|| {
+            let open = chrono::DateTime::from_timestamp_micros(end - MINUTE_US)
+                .and_then(|t| t.checked_add_signed(chrono::Duration::hours(8)))
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            format!("缺少北京时间 {open} 的合约分钟行情")
+        })?;
+        ensure!(
+            *day.get_or_insert(minute.trading_day) == minute.trading_day,
+            "参考执行窗口超出目标交易日"
+        );
+        match model {
+            Model::Twap => return minute.twap.context("缺少合约分钟 TWAP"),
+            Model::Vwap => return minute.vwap.context("缺少合约分钟 VWAP"),
+            Model::Twap5m | Model::Vwap5m if minute.volume_lots == 0.0 => continue,
+            Model::Twap5m => {
+                price_sum += minute.vwap.context("缺少合约分钟 VWAP")?;
+                traded_minutes += 1;
+            }
+            Model::Vwap5m => {
+                lots += minute.volume_lots;
+                turnover += minute.turnover_cny;
+            }
+        }
+    }
+    let price = match model {
+        Model::Twap5m => price_sum / f64::from(traded_minutes),
+        Model::Vwap5m => turnover / lots / prices.multiplier,
+        _ => unreachable!("single-minute models return the supplied minute price"),
+    };
+    ensure!(price.is_finite() && price > 0.0, "参考窗口缺少有效成交价格");
+    Ok(price)
 }
 
 #[cfg(test)]
@@ -233,6 +309,8 @@ mod tests {
                         trading_day: 20261119,
                         twap: Some(102.0),
                         vwap: Some(104.0),
+                        volume_lots: 1.0,
+                        turnover_cny: 1040.0,
                     },
                 )]),
             },
@@ -245,8 +323,8 @@ mod tests {
                 trading_day: Some(20261119),
                 target_lots,
             })
-            .collect();
-        let schedule = schedule(intents, &prices, end)?;
+            .collect::<Vec<_>>();
+        let schedule = schedule(&intents, &prices, end, 1)?;
         assert_eq!(schedule.len(), 1);
         assert_eq!(schedule.keys().next().unwrap().0, execution);
         let sample = |timestamp_us, fee| Point {
@@ -318,12 +396,84 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn five_minute_comparison_requires_closed_minutes_from_one_trading_day() -> Result<()> {
+        let start = reference::timestamp("2026-11-19T02:13:00Z")?;
+        let market = ("SHFE".into(), "rb2701".into());
+        let intents = [Intent {
+            market: market.clone(),
+            accepted_us: start + 1,
+            trading_day: Some(20261119),
+            target_lots: -2,
+        }];
+        // One minute before the recess and four after it.
+        let minute_ends = [2, 18, 19, 20, 21].map(|offset| start + offset * MINUTE_US);
+        let references = minute_ends
+            .into_iter()
+            .zip([
+                (100.0, 1.0),
+                (110.0, 2.0),
+                (120.0, 0.0),
+                (130.0, 3.0),
+                (140.0, 4.0),
+            ])
+            .map(|(end, (vwap, volume_lots))| {
+                (
+                    end,
+                    ReferenceMinute {
+                        trading_day: 20261119,
+                        twap: Some(100.0),
+                        vwap: (volume_lots > 0.0).then_some(vwap),
+                        volume_lots,
+                        turnover_cny: vwap * volume_lots * 10.0,
+                    },
+                )
+            })
+            .collect();
+        let mut prices = BTreeMap::from([(
+            market.clone(),
+            MarketPrices {
+                multiplier: 10.0,
+                closes: BTreeMap::new(),
+                sessions: vec![
+                    (9 * 3600, 10 * 3600 + 15 * 60),
+                    (10 * 3600 + 30 * 60, 11 * 3600 + 30 * 60),
+                ],
+                references,
+            },
+        )]);
+        let end = minute_ends[4];
+        assert!(schedule(&intents, &prices, end - 1, 5)?.is_empty());
+        let scheduled = schedule(&intents, &prices, end, 5)?;
+        let execution = &scheduled[&(end, market.clone())];
+        assert_eq!(execution.minute_ends, minute_ends);
+        assert_eq!(
+            execution_price(Model::Twap5m, execution, &prices[&market])?,
+            120.0
+        );
+        assert_eq!(
+            execution_price(Model::Vwap5m, execution, &prices[&market])?,
+            127.0
+        );
+
+        let window = prices.get_mut(&market).unwrap();
+        window
+            .references
+            .get_mut(&minute_ends[4])
+            .unwrap()
+            .trading_day = 20261120;
+        assert!(execution_price(Model::Twap5m, execution, window).is_err());
+        window.references.remove(&minute_ends[4]);
+        assert!(execution_price(Model::Vwap5m, execution, window).is_err());
+        Ok(())
+    }
 }
 
 fn replay(
     model: Model,
     initial: &BTreeMap<Market, i64>,
-    schedule: &Schedule,
+    schedule: &Schedule<'_>,
     prices: &BTreeMap<Market, MarketPrices>,
     samples: &[Point],
     start: i64,
@@ -348,9 +498,8 @@ fn replay(
     times.extend(samples.clone().map(|point| point.timestamp_us));
     let mut points = Vec::new();
     for at in times {
-        while let Some(((execute_us, _), intent)) =
-            due.next_if(|((execute_us, _), _)| *execute_us <= at)
-        {
+        while let Some((_, execution)) = due.next_if(|((execute_us, _), _)| *execute_us <= at) {
+            let intent = execution.intent;
             let lots = inventory.get(&intent.market).copied().unwrap_or_default();
             let delta = intent
                 .target_lots
@@ -360,28 +509,8 @@ fn replay(
                 continue;
             }
             let prices = &prices[&intent.market];
-            let price = prices
-                .references
-                .get(execute_us)
-                .filter(|minute| {
-                    intent
-                        .trading_day
-                        .is_none_or(|day| minute.trading_day == day)
-                })
-                .and_then(|minute| match model {
-                    Model::Twap => minute.twap,
-                    Model::Vwap => minute.vwap,
-                })
-                .with_context(|| {
-                    let minute = chrono::DateTime::from_timestamp_micros(*execute_us - MINUTE_US)
-                        .and_then(|t| t.checked_add_signed(chrono::Duration::hours(8)))
-                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_default();
-                    format!(
-                        "{} 缺少北京时间 {minute} 的合约分钟参考价",
-                        market_name(&intent.market)
-                    )
-                })?;
+            let price = execution_price(model, execution, prices)
+                .map_err(|error| anyhow::anyhow!("{} {error}", market_name(&intent.market)))?;
             cash -= delta as f64 * prices.multiplier * price;
             if intent.target_lots == 0 {
                 inventory.remove(&intent.market);

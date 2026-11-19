@@ -289,6 +289,8 @@ pub(crate) struct ReferenceMinute {
     pub(crate) trading_day: u32,
     pub(crate) twap: Option<f64>,
     pub(crate) vwap: Option<f64>,
+    pub(crate) volume_lots: f64,
+    pub(crate) turnover_cny: f64,
 }
 impl MarketPrices {
     pub fn mark(&self, at_us: i64) -> Result<f64> {

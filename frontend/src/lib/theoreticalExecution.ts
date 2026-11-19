@@ -17,6 +17,8 @@ export function nativeOffsetLabel(offset?: string) {
 export function theoreticalExecutionLabel(model?: TheoreticalExecutionModel | null) {
   if (model === 'native_twap') return '合约 TWAP'
   if (model === 'native_vwap') return '合约 VWAP'
+  if (model === 'native_twap5m') return '5min_twap'
+  if (model === 'native_vwap5m') return '5min_vwap'
   if (model === 'native_reference') return '合约参考价'
   if (model === 'vwap3m') return '理论3min_vwap'
   if (model === 'twap3m') return '理论3min_twap'

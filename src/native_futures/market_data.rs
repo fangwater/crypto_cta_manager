@@ -239,6 +239,8 @@ impl Feed {
                                     twap: bar.twap.filter(positive),
                                     vwap: (bar.volume_lots > 0.0 && positive(&bar.vwap))
                                         .then_some(bar.vwap),
+                                    volume_lots: bar.volume_lots,
+                                    turnover_cny: bar.turnover_cny,
                                 },
                             )
                         })

@@ -482,7 +482,7 @@ export interface TheoreticalNavPoint {
   estimated_trading_fee_quote: number
 }
 
-export type TheoreticalExecutionModel = 'native_reference' | 'native_twap' | 'native_vwap' | 'twap5m' | 'vwap3m' | 'twap3m' | 'instant_taker'
+export type TheoreticalExecutionModel = 'native_reference' | 'native_twap' | 'native_vwap' | 'native_twap5m' | 'native_vwap5m' | 'twap5m' | 'vwap3m' | 'twap3m' | 'instant_taker'
 
 export interface TheoreticalNavTimeline {
   execution_model: TheoreticalExecutionModel | null
@@ -705,8 +705,9 @@ export type ActualNavSeriesKey =
 export type TheoreticalNavSeriesKey =
   | 'theoretical_nav_before_fee_quote'
   | 'theoretical_nav_after_fee_quote'
-  | 'theoretical_native_vwap_before_fee_quote'
   | 'theoretical_native_vwap_after_fee_quote'
+  | 'theoretical_native_twap5m_after_fee_quote'
+  | 'theoretical_native_vwap5m_after_fee_quote'
   | 'theoretical_twap3m_before_fee_quote'
   | 'theoretical_twap3m_after_fee_quote'
   | 'theoretical_instant_taker_before_fee_quote'

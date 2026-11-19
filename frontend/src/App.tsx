@@ -98,8 +98,6 @@ const seriesOptions: NavSeriesKey[] = [
   'nav_change_after_fee_quote',
   'theoretical_nav_before_fee_quote',
   'theoretical_nav_after_fee_quote',
-  'theoretical_native_vwap_before_fee_quote',
-  'theoretical_native_vwap_after_fee_quote',
   'theoretical_twap3m_before_fee_quote',
   'theoretical_twap3m_after_fee_quote',
   'theoretical_instant_taker_before_fee_quote',
@@ -110,6 +108,14 @@ const seriesOptions: NavSeriesKey[] = [
   'funding_income_quote',
   'total_nav_before_fee_quote',
   'total_nav_after_fee_quote',
+]
+
+const domesticSeriesOptions: NavSeriesKey[] = [
+  'nav_change_after_fee_quote',
+  'theoretical_nav_after_fee_quote',
+  'theoretical_native_vwap_after_fee_quote',
+  'theoretical_native_twap5m_after_fee_quote',
+  'theoretical_native_vwap5m_after_fee_quote',
 ]
 
 const ZERO_TOTALS: NavTotals = {
@@ -234,16 +240,13 @@ function NavPage() {
   const [timeline, setTimeline] = useState<TimelineSnapshot | null>(null)
   const [scope, setScope] = useState(initialScope)
   const [pnlMode, setPnlMode] = useState<PnlMode>('strategy')
-  const [feeMode, setFeeMode] = useState<FeeMode>('after')
+  const [feePreference, setFeeMode] = useState<FeeMode>('after')
   const [chartMode, setChartMode] =
     useState<TimelineChartMode>('portfolio')
   const [visibleSeries, setVisibleSeries] = useState<NavSeriesKey[]>([
+    ...domesticSeriesOptions,
     'nav_change_before_fee_quote',
-    'nav_change_after_fee_quote',
     'theoretical_nav_before_fee_quote',
-    'theoretical_nav_after_fee_quote',
-    'theoretical_native_vwap_before_fee_quote',
-    'theoretical_native_vwap_after_fee_quote',
     'theoretical_twap3m_before_fee_quote',
     'theoretical_twap3m_after_fee_quote',
     'theoretical_instant_taker_before_fee_quote',
@@ -277,6 +280,7 @@ function NavPage() {
     [dashboard, scope],
   )
   const native = dashboard?.report.valuation.startsWith('native_') === true || isNativeFuturesVenue(selectedSource?.configured_venue)
+  const feeMode = native ? 'after' : feePreference
 
   const refreshDashboard = useCallback(
     async (signal?: AbortSignal, manual = false) => {
@@ -560,16 +564,13 @@ function NavPage() {
     }
     return hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_'))
   }
-  const portfolioSeriesOptions = (
-    selectedSymbols === null || native
+  const portfolioSeriesOptions = (native
+    ? domesticSeriesOptions
+    : selectedSymbols === null
       ? seriesOptions
       : seriesOptions.filter((key) => !key.startsWith('theoretical_'))
   ).filter(availableSeries)
-  const portfolioVisibleSeries = (
-    selectedSymbols === null || native
-      ? visibleSeries
-      : visibleSeries.filter((key) => !key.startsWith('theoretical_'))
-  ).filter(availableSeries)
+  const portfolioVisibleSeries = visibleSeries.filter((key) => portfolioSeriesOptions.includes(key))
   const totals = noSymbolsSelected
     ? ZERO_TOTALS
     : (timeline?.report.summary ?? null)
@@ -850,8 +851,8 @@ function NavPage() {
                 {selectedSource?.account ?? '暂无可查看账户'}
               </h2>
             </div>
-            <div className="control-row">
-              <div className="segmented segmented--compact" aria-label={native ? '手续费口径' : '费率口径'}>
+            {!native && <div className="control-row">
+              <div className="segmented segmented--compact" aria-label="费率口径">
                 <button
                   type="button"
                   className={feeMode === 'after' ? 'is-active' : ''}
@@ -867,7 +868,7 @@ function NavPage() {
                   费前
                 </button>
               </div>
-            </div>
+            </div>}
           </div>
 
           <div className="segmented segmented--accounts" role="group" aria-label="账户范围">

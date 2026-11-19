@@ -331,7 +331,8 @@ fn metadata(report: &nav::Report, references: &[comparison::Reference]) -> Value
         "generated_at_us": crate::native_futures::now_us(), "generation_duration_ms": 0,
         "theoretical": references.iter().map(|row| json!({
             "valuation": "native_target_baseline_minute_reference", "execution_model": row.model.key(),
-            "loading": false, "available_from_us": report.snapshot_us, "execution_window_secs": 60,
+            "loading": false, "available_from_us": report.snapshot_us,
+            "execution_window_secs": row.model.window_secs(),
             "price_basis": "baseline_data_1min", "fee_basis": "actual_total_cny",
             "latest_point_ts_us": row.points.last().map(|point| point.ts_us),
             "unavailable_reason": row.unavailable, "sampled": report.sampled,
