@@ -69,9 +69,19 @@ fn check_families(source: &Source, families: &[String]) -> Result<()> {
             *name != "default" && (source.sync.is_none() || !super::sync::internal(name))
         })
         .collect();
+    // The Exec's persist_manager database also holds crypto column families;
+    // only the two domestic logs are read. A store still carrying the retired
+    // JSON layout is a cutover mistake, not extra data.
+    const RETIRED: [&str; 4] = [
+        "cn_trading_meta",
+        "cn_trading_events",
+        "cn_trade_facts",
+        "cn_strategy_ledger",
+    ];
     ensure!(
-        found == BTreeSet::from(records::COLUMN_FAMILIES),
-        "execution store must contain exactly {ORDERS} and {TRADES}; found {found:?}"
+        records::COLUMN_FAMILIES.iter().all(|cf| found.contains(cf))
+            && !RETIRED.iter().any(|cf| found.contains(cf)),
+        "execution store must contain {ORDERS} and {TRADES} and no retired domestic layout; found {found:?}"
     );
     Ok(())
 }
@@ -379,4 +389,37 @@ fn recent_trades(db: &DB, limit: usize) -> Result<Vec<Trade>> {
         records::decode_trade(&key, &value)
     })
     .collect()
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+
+    #[test]
+    fn exec_store_may_hold_crypto_families_but_needs_both_domestic_logs() {
+        let source: Source = toml::from_str(
+            r#"id = "s"
+account = "a"
+adapter = "ctp"
+rocksdb_path = "/tmp/x"
+enabled = true"#,
+        )
+        .unwrap();
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(
+            check_families(
+                &source,
+                &names(&["default", ORDERS, TRADES, "uniform_orders", "trade_updates"])
+            )
+            .is_ok()
+        );
+        assert!(check_families(&source, &names(&["default", ORDERS])).is_err());
+        assert!(
+            check_families(
+                &source,
+                &names(&["default", ORDERS, TRADES, "cn_trading_events"])
+            )
+            .is_err()
+        );
+    }
 }
