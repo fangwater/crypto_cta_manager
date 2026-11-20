@@ -57,12 +57,7 @@ impl Replica {
             "replica path is outside its source directory"
         );
         std::fs::create_dir_all(&root)?;
-        let cfs = [
-            NativeCf::Events.name(),
-            NativeCf::Orders.name(),
-            NativeCf::Fills.name(),
-            STAGING,
-        ];
+        let cfs = [NativeCf::Orders.name(), NativeCf::Trades.name(), STAGING];
         let db = open_owned(&path, "cn_futures_replica", &source.id, &cfs)?;
         if get::<ReplicaStatus>(&db, STATE)?.is_none() {
             ensure!(
@@ -209,12 +204,10 @@ impl Replica {
                 .db
                 .cf_handle(change.column_family.name())
                 .context("native replica column family")?;
-            if change.column_family == NativeCf::Events {
-                ensure!(
-                    self.db.get_cf(cf, &key)?.is_none_or(|old| old == value),
-                    "immutable native evidence conflict in local replica"
-                );
-            }
+            ensure!(
+                self.db.get_cf(cf, &key)?.is_none_or(|old| old == value),
+                "append-only native record conflict in local replica"
+            );
             bytes += key.len() + value.len();
             batch.put_cf(cf, key, value);
             cursor = change.sequence;

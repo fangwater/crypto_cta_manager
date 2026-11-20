@@ -158,7 +158,7 @@ async fn account(
             for name in group.members.iter().filter(|name| scope.can_view(name)) {
                 bindings.push(json!({
                     "source_id": id, "binding_name": name, "position_strategy_name": name,
-                    "order_strategy_name": if s.config.ctaker_plan_readers.contains_key(&id) { "ctaker" } else { "" },
+                    "order_strategy_name": if s.config.exec_plan_readers.contains_key(&id) { "exec" } else { "" },
                     "shares": null, "updated_at_us": group.decision_us,
                 }));
             }

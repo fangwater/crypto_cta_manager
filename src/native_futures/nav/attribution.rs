@@ -1,6 +1,13 @@
-//! Historical strategy valuation from the immutable native attribution ledger.
+//! Historical strategy valuation: the Manager attribution anchor plus Exec's
+//! strategy fill shares and internal-cross legs in `cn_uniform_orders` after it,
+//! valued crypto-style (price × lots × multiplier, commission per record).
 use super::*;
-use crate::native_futures::{config::Source, evidence, market_data, netting, reference_data};
+use crate::native_futures::{
+    config::Source,
+    market_data, netting,
+    records::{self, ORDERS, Uniform},
+    reference_data,
+};
 use rocksdb::DB;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -8,37 +15,32 @@ use sqlx::PgPool;
 type PositionKey = (String, Market);
 
 struct Scope {
-    proof: evidence::Anchor,
+    anchor: netting::Anchor,
     multiplier: f64,
 }
 
 #[derive(Deserialize)]
 struct Extension {
-    proof: evidence::Anchor,
+    anchor: netting::Anchor,
     contracts: BTreeMap<String, netting::Contract>,
-}
-
-#[derive(Deserialize)]
-struct Allocation {
-    evidence_key: String,
-    fill: netting::FactualFill,
-    allocations: netting::Quantities,
 }
 
 struct Move {
     at: i64,
     market: Market,
+    strategy: String,
+    /// Signed lots for `strategy`.
+    lots: i64,
     price: f64,
-    allocations: netting::Quantities,
+    /// The exchange-fill share; `None` for an internal-cross leg (no fee).
     fill: Option<Fill>,
 }
 
 pub(crate) struct Replay {
-    anchor: evidence::Anchor,
+    anchor: netting::Anchor,
     markets: BTreeMap<Market, Scope>,
     positions: BTreeMap<PositionKey, netting::Position>,
     moves: Vec<Move>,
-    allocations: BTreeMap<Vec<u8>, (usize, netting::FactualFill)>,
     members: BTreeSet<String>,
 }
 
@@ -98,8 +100,7 @@ impl Replay {
                 && initial.revision == initial_revision
                 && initial.baseline_revision == initial_revision
                 && initial.source_id == portfolio.source_id
-                && serde_json::to_value(&initial.anchor)?
-                    == serde_json::to_value(&portfolio.anchor)?,
+                && initial.anchor == portfolio.anchor,
             "native attribution initialization receipt conflicts with portfolio"
         );
         let mut replay = Self {
@@ -107,8 +108,11 @@ impl Replay {
             markets: BTreeMap::new(),
             positions: BTreeMap::new(),
             moves: vec![],
-            allocations: BTreeMap::new(),
-            members: portfolio.targets.into_keys().collect(),
+            members: portfolio
+                .targets
+                .into_keys()
+                .chain([netting::UNALLOCATED.to_owned()])
+                .collect(),
         };
         replay.add_scope(&replay.anchor.clone(), initial.contracts)?;
         for (name, positions) in initial.positions {
@@ -136,63 +140,13 @@ impl Replay {
             );
             match kind.as_str() {
                 "scope_extension" => {
-                    let Extension { proof, contracts } = serde_json::from_value(value)?;
-                    replay.add_scope(&proof, contracts)?;
+                    let Extension { anchor, contracts } = serde_json::from_value(value)?;
+                    replay.add_scope(&anchor, contracts)?;
                 }
-                "target_batch" => {
-                    let batch: netting::BatchReceipt = serde_json::from_value(value)?;
-                    for cross in batch.internal_crosses {
-                        let mid = cross.quote.mid(batch.decision_us)?;
-                        ensure!(
-                            cross.kind == "internal_cross"
-                                && cross.lots > 0
-                                && cross.fee_cny == 0.0
-                                && cross.buyer != cross.seller
-                                && (cross.price - mid).abs() <= mid.abs() * 4.0 * f64::EPSILON,
-                            "invalid immutable internal-cross receipt"
-                        );
-                        replay.moves.push(Move {
-                            at: batch.decision_us,
-                            market: market_key(&cross.market)?,
-                            price: cross.price,
-                            allocations: BTreeMap::from([
-                                (cross.buyer, cross.lots),
-                                (cross.seller, -cross.lots),
-                            ]),
-                            fill: None,
-                        });
-                    }
-                }
-                "exchange_fill_allocation" => {
-                    let Allocation {
-                        evidence_key,
-                        fill,
-                        allocations,
-                    } = serde_json::from_value(value)?;
-                    let at = fill.received_us;
-                    let market = market_key(&fill.market)?;
-                    ensure!(
-                        replay
-                            .allocations
-                            .insert(hex::decode(evidence_key)?, (replay.moves.len(), fill))
-                            .is_none(),
-                        "duplicate native fill allocation"
-                    );
-                    replay.moves.push(Move {
-                        at,
-                        market,
-                        price: 0.0,
-                        allocations,
-                        fill: None,
-                    });
-                }
-                "external_demand_release" => {}
+                // Targets never move positions; Exec records do.
+                "target_batch" => {}
                 _ => anyhow::bail!("unknown native attribution event kind"),
             }
-            ensure!(
-                replay.moves.len() <= 250_000,
-                "native attribution movement budget exceeded"
-            );
         }
 
         Ok(replay)
@@ -200,15 +154,15 @@ impl Replay {
 
     fn add_scope(
         &mut self,
-        proof: &evidence::Anchor,
+        anchor: &netting::Anchor,
         contracts: BTreeMap<String, netting::Contract>,
     ) -> Result<()> {
-        proof.validate()?;
+        anchor.validate()?;
         ensure!(
-            proof.source_id == self.anchor.source_id
-                && proof.store_id == self.anchor.store_id
-                && proof.snapshot_us >= self.anchor.snapshot_us
-                && proof.evidence_sequence >= self.anchor.evidence_sequence,
+            anchor.source_id == self.anchor.source_id
+                && anchor.store_id == self.anchor.store_id
+                && anchor.snapshot_us >= self.anchor.snapshot_us
+                && anchor.orders_key >= self.anchor.orders_key,
             "attribution scope source/generation mismatch"
         );
         for (market, contract) in contracts {
@@ -220,7 +174,7 @@ impl Replay {
                         .insert(
                             market_key(&market)?,
                             Scope {
-                                proof: proof.clone(),
+                                anchor: anchor.clone(),
                                 multiplier: contract.multiplier,
                             }
                         )
@@ -231,113 +185,77 @@ impl Replay {
         Ok(())
     }
 
-    pub(in crate::native_futures) fn validate_fills(
+    /// Reads Exec's strategy records after each contract's anchor cut.
+    pub(in crate::native_futures) fn read_records(
         &mut self,
         source: &Source,
         db: &DB,
-        commissions: &commission::History,
         start: i64,
         end: i64,
         symbols: &[String],
     ) -> Result<()> {
-        evidence::validate_anchor(source, db, &self.anchor)?;
+        self.anchor.verify(source, db)?;
         let selected = select_markets(&self.available(end), symbols)?;
-        // Preserve committed FIFO order in each selected market. A later
-        // allocation with a backdated observation cannot move in front of
-        // an earlier committed operation, even across the request boundary.
-        let mut clocks = BTreeMap::new();
-        for mv in &self.moves {
-            if selected.contains(&mv.market) {
-                let previous = clocks.insert(&mv.market, mv.at);
-                ensure!(
-                    mv.at > end
-                        || (mv.at >= self.markets[&mv.market].proof.snapshot_us
-                            && previous.is_none_or(|old| old <= mv.at)
-                            && mv
-                                .allocations
-                                .keys()
-                                .all(|name| self.members.contains(name))),
-                    "attribution operations are out of causal market order or scope"
-                );
-            }
-        }
-        let mut checked_scopes = BTreeSet::from([self.anchor.evidence_sequence]);
+        let mut checked = BTreeSet::from([self.anchor.orders_key]);
         for key in &selected {
-            let proof = &self.markets[key].proof;
-            if checked_scopes.insert(proof.evidence_sequence) {
-                evidence::validate_anchor(source, db, proof)?;
+            let anchor = &self.markets[key].anchor;
+            if checked.insert(anchor.orders_key) {
+                anchor.verify(source, db)?;
             }
         }
-        source::scan_fills(
-            db,
-            self.anchor.evidence_sequence,
-            end,
-            |key, value, seq, received| {
-                let id = &value["fill"]["identity"];
-                let market = (
-                    id["venue"]
-                        .as_str()
-                        .context("native fill venue")?
-                        .to_owned(),
-                    id["symbol"]
-                        .as_str()
-                        .context("native fill contract")?
-                        .to_owned(),
-                );
-                if !selected.contains(&market)
-                    || seq <= self.markets[&market].proof.evidence_sequence
-                {
-                    return Ok(());
-                }
-                let (index, stored) = self
-                    .allocations
-                    .remove(key)
-                    .context("合约存在未归因的真实成交；请先完成明确的成交归因")?;
-                let mut fill = source::parse_fill(source, db, key, value, seq, received)?;
-                commissions.enrich(&mut fill);
-                let verified = netting::FactualFill::from_evidence(value)?;
-                ensure!(
-                    fill.live_origin
-                        && fill.received_us >= self.markets[&market].proof.snapshot_us
-                        && fill.trading_day >= self.markets[&market].proof.trading_day
-                        && verified.evidence_sha256 == stored.evidence_sha256
-                        && verified.identity == stored.identity
-                        && verified.market == stored.market
-                        && verified.lots == stored.lots
-                        && verified.evidence_sequence == stored.evidence_sequence
-                        && verified.received_us == stored.received_us,
-                    "策略分配与真实成交回报不符或回报时间不可核验"
-                );
-                let mv = &mut self.moves[index];
-                let sum = mv.allocations.values().try_fold(0i64, |sum, qty| {
-                    ensure!(
-                        *qty != 0 && qty.signum() == stored.lots.signum(),
-                        "fill allocation side mismatch"
-                    );
-                    sum.checked_add(*qty)
-                        .context("attribution fill allocation overflow")
-                })?;
-                ensure!(
-                    sum == stored.lots,
-                    "attribution fill allocation quantity mismatch"
-                );
-                mv.price = fill.price;
-                mv.fill = Some(fill);
-                Ok(())
-            },
-        )?;
-        ensure!(
-            self.allocations.values().all(|(i, _)| {
-                let mv = &self.moves[*i];
-                mv.at > end || !selected.contains(&mv.market)
-            }),
-            "策略分配所引用的真实成交在当前执行证据中缺失"
-        );
+        let mut moves = Vec::new();
+        records::scan(db, ORDERS, self.anchor.orders_key, |key, value| {
+            let at = records::key_us(key)?;
+            if at > end {
+                return Ok(false);
+            }
+            let Uniform::Fill(fill) = records::decode_uniform(key, value)? else {
+                return Ok(true);
+            };
+            let market = market_key(&fill.market())?;
+            if !selected.contains(&market) || at <= self.markets[&market].anchor.orders_key {
+                return Ok(true);
+            }
+            ensure!(
+                self.members.contains(&fill.strategy),
+                "Exec attribution names an unregistered strategy {}",
+                fill.strategy
+            );
+            let lots = fill.signed_lots();
+            let share = (!fill.internal_cross)
+                .then(|| -> Result<Fill> {
+                    Ok(Fill {
+                        key_us: at,
+                        source_id: source.id.clone(),
+                        venue: fill.venue.clone(),
+                        symbol: fill.symbol.clone(),
+                        trading_day: fill.trading_day.clone(),
+                        trade_id: fill.trade_id.clone().context("strategy fill trade id")?,
+                        side: fill.side,
+                        offset: fill.offset.context("strategy fill offset")?,
+                        lots: fill.lots,
+                        price: fill.price,
+                        received_us: at,
+                        commission_cny: fill.commission_cny,
+                    })
+                })
+                .transpose()?;
+            moves.push(Move {
+                at,
+                market,
+                strategy: fill.strategy,
+                lots,
+                price: fill.price,
+                fill: share,
+            });
+            ensure!(
+                moves.len() <= 250_000,
+                "native attribution movement budget exceeded"
+            );
+            Ok(true)
+        })?;
         ensure!(start >= self.anchor.snapshot_us, "所选起点早于策略归因快照");
-        self.allocations.clear();
-        self.moves
-            .retain(|mv| mv.at <= end && selected.contains(&mv.market));
-        self.moves.sort_by_key(|mv| mv.at);
+        self.moves = moves;
         self.positions.retain(|(_, key), _| selected.contains(key));
         Ok(())
     }
@@ -345,7 +263,7 @@ impl Replay {
     fn available(&self, end: i64) -> BTreeSet<Market> {
         self.markets
             .iter()
-            .filter(|(_, scope)| scope.proof.snapshot_us <= end)
+            .filter(|(_, scope)| scope.anchor.snapshot_us <= end)
             .map(|(key, _)| key.clone())
             .collect()
     }
@@ -493,14 +411,12 @@ fn apply(
     rates: Option<&Vec<AccountRates>>,
     window: Option<&mut WindowFees>,
 ) -> Result<()> {
+    let position = positions
+        .entry((mv.strategy.clone(), mv.market.clone()))
+        .or_default();
+    // Crosses carry no fee; fees before the window are outside its totals.
     let Some((fill, window)) = mv.fill.as_ref().zip(window) else {
-        for (name, lots) in &mv.allocations {
-            positions
-                .entry((name.clone(), mv.market.clone()))
-                .or_default()
-                .apply(*lots, mv.price, multiplier, Some(0.0))?;
-        }
-        return Ok(());
+        return position.apply(mv.lots, mv.price, multiplier, Some(0.0));
     };
     let estimated = fill.estimated_fee(multiplier, rates.map(Vec::as_slice))?;
     let volume = fill.price * multiplier * fill.lots as f64;
@@ -512,31 +428,17 @@ fn apply(
         fill.commission_cny,
         estimated,
     )?;
-
-    let fee = fill.commission_cny.or(estimated);
-    let mut assigned = 0.0;
-    for (i, (name, lots)) in mv.allocations.iter().enumerate() {
-        let share = lots.unsigned_abs() as f64 / fill.lots as f64;
-        let fee_share = fee.map(|total| {
-            let part = if i + 1 == mv.allocations.len() {
-                total - assigned
-            } else {
-                total * share
-            };
-            assigned += part;
-            part
-        });
-        positions
-            .entry((name.clone(), mv.market.clone()))
-            .or_default()
-            .apply(*lots, mv.price, multiplier, fee_share)?;
-        window.strategies.entry(name.clone()).or_default().add(
-            fill.price * multiplier * lots.unsigned_abs() as f64,
-            fill.commission_cny.and(fee_share),
-            estimated.and(fee_share),
-        )?;
-    }
-    Ok(())
+    window
+        .strategies
+        .entry(mv.strategy.clone())
+        .or_default()
+        .add(volume, fill.commission_cny, estimated)?;
+    position.apply(
+        mv.lots,
+        mv.price,
+        multiplier,
+        fill.commission_cny.or(estimated),
+    )
 }
 
 struct WindowCurves {
@@ -626,12 +528,10 @@ impl Replay {
             }
         }
         for mv in &self.moves[first..] {
-            for name in mv.allocations.keys() {
-                activity
-                    .entry(name.clone())
-                    .or_default()
-                    .insert(mv.market.clone());
-            }
+            activity
+                .entry(mv.strategy.clone())
+                .or_default()
+                .insert(mv.market.clone());
         }
 
         let ticks = evaluation_times(start, end, self.moves[first..].iter().map(|mv| mv.at));
@@ -764,5 +664,182 @@ impl Replay {
             },
             strategies,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native_futures::records::fixture;
+
+    const BASE: i64 = 1_794_000_000_000_000;
+    const M: &str = "SHFE:cu2612";
+    const DAY: &str = "20261117";
+
+    fn order(reference: &str) -> fixture::Order {
+        fixture::Order::new(
+            M,
+            DAY,
+            "ctp:1:2",
+            reference,
+            Side::Buy,
+            Offset::Open,
+            1,
+            101.0,
+        )
+    }
+
+    fn fill(trade: &str) -> fixture::Fill {
+        fixture::Fill {
+            trade_id: trade.into(),
+            lots: 1,
+            price: 101.0,
+            commission: Some(2.0),
+            order_id: 7,
+        }
+    }
+
+    fn fixture(temp: &std::path::Path, before: impl FnOnce(&DB)) -> (DB, Source, Replay) {
+        let db = fixture::open(temp);
+        before(&db);
+        let source = Source {
+            id: "account".into(),
+            account: "test".into(),
+            adapter: "ctp".into(),
+            rocksdb_path: temp.into(),
+            enabled: true,
+            sync: None,
+        };
+        let request = netting::Initialize {
+            strategy_groups: BTreeMap::from([(
+                "g".into(),
+                BTreeSet::from(["alpha".into(), "beta".into()]),
+            )]),
+            contracts: BTreeMap::from([(M.into(), netting::Contract { multiplier: 10.0 })]),
+            positions: BTreeMap::new(),
+            note: "flat synthetic anchor".into(),
+        };
+        let (mut anchor, ledger) =
+            netting::Anchor::capture(&source, &db, request.note.clone()).unwrap();
+        anchor.snapshot_us = BASE;
+        let portfolio =
+            netting::Portfolio::initialize("account", &request, &ledger, anchor).unwrap();
+        let receipt = serde_json::to_value(&portfolio).unwrap();
+        let replay =
+            Replay::from_receipts(portfolio, vec![(0, "initialize".into(), receipt)]).unwrap();
+        (db, source, replay)
+    }
+
+    #[test]
+    fn crosses_and_fill_shares_after_the_cut_replay_with_their_own_commission() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db, source, mut replay) = fixture(temp.path(), |db| {
+            // Before the anchor cut: already in the anchor allocation.
+            fixture::put_order(
+                db,
+                BASE - 5,
+                &order("1").share(
+                    &fill("t0"),
+                    netting::UNALLOCATED,
+                    1,
+                    Some(2.0),
+                    fixture::FILLED,
+                    BASE - 5,
+                ),
+            );
+        });
+        let quote = BASE + 9;
+        for (leg, (side, name)) in [(Side::Buy, "alpha"), (Side::Sell, "beta")]
+            .into_iter()
+            .enumerate()
+        {
+            fixture::put_order(
+                &db,
+                BASE + 10 + leg as i64,
+                &fixture::cross_leg(M, DAY, quote, 0, side, name, 1, 100.0, BASE + 10),
+            );
+        }
+        let two = fixture::Fill {
+            lots: 2,
+            ..fill("t1")
+        };
+        let mut placed = order("2");
+        placed.lots = 2;
+        fixture::put_order(
+            &db,
+            BASE + 19,
+            &placed.lifecycle(fixture::NEW, "exec", BASE + 19, BASE + 19),
+        );
+        fixture::put_trade(
+            &db,
+            BASE + 20,
+            &placed.trade(&two, 2, Some(fixture::FILLED), BASE + 20),
+        );
+        fixture::put_order(
+            &db,
+            BASE + 21,
+            &placed.share(&two, "alpha", 1, Some(1.5), fixture::FILLED, BASE + 21),
+        );
+        fixture::put_order(
+            &db,
+            BASE + 22,
+            &placed.share(
+                &two,
+                netting::UNALLOCATED,
+                1,
+                Some(1.5),
+                fixture::FILLED,
+                BASE + 22,
+            ),
+        );
+        replay
+            .read_records(&source, &db, BASE, BASE + 100, &[])
+            .unwrap();
+        let moves: Vec<_> = replay
+            .moves
+            .iter()
+            .map(|mv| {
+                (
+                    mv.at,
+                    mv.strategy.as_str(),
+                    mv.lots,
+                    mv.price,
+                    mv.fill.as_ref().map(|f| f.commission_cny),
+                )
+            })
+            .collect();
+        assert_eq!(
+            moves,
+            vec![
+                (BASE + 10, "alpha", 1, 100.0, None),
+                (BASE + 11, "beta", -1, 100.0, None),
+                (BASE + 21, "alpha", 1, 101.0, Some(Some(1.5))),
+                (BASE + 22, netting::UNALLOCATED, 1, 101.0, Some(Some(1.5))),
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_strategy_or_foreign_store_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db, source, mut replay) = fixture(temp.path(), |_| {});
+        fixture::put_order(
+            &db,
+            BASE + 10,
+            &fixture::cross_leg(M, DAY, BASE, 0, Side::Buy, "gamma", 1, 100.0, BASE + 10),
+        );
+        assert!(
+            replay
+                .read_records(&source, &db, BASE, BASE + 100, &[])
+                .is_err()
+        );
+
+        let other = tempfile::tempdir().unwrap();
+        let (_, _, mut foreign) = fixture(other.path(), |_| {});
+        assert!(
+            foreign
+                .read_records(&source, &db, BASE, BASE + 100, &[])
+                .is_err()
+        );
     }
 }

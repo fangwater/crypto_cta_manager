@@ -1,7 +1,13 @@
 //! No SDK, PostgreSQL, external endpoint or execution process is used.
 use super::{store::*, *};
 use crate::{
-    native_futures::{config::Config, reader},
+    native_futures::{
+        config::Config,
+        nav::{Offset, Side},
+        netting::UNALLOCATED,
+        reader,
+        records::{self, fixture},
+    },
     runtime_mode::RuntimeMode,
 };
 use rocksdb::{DB, Options, WriteBatch};
@@ -22,9 +28,9 @@ async fn maximum_configured_export_pages_are_accepted_and_durable_across_collect
     let mut batch = WriteBatch::default();
     for n in 0..MAX_PAGE_RECORDS + 17 {
         batch.put_cf(
-            db.cf_handle(NativeCf::Events.name()).unwrap(),
-            (n as u64).to_be_bytes(),
-            b"{\"type\":\"bounded-sync-fixture\"}",
+            db.cf_handle(NativeCf::Orders.name()).unwrap(),
+            records::key(BASE + 100 + n as i64),
+            order().lifecycle(fixture::NEW, "exec", BASE, BASE + 100 + n as i64),
         );
     }
     db.write(batch).unwrap();
@@ -78,7 +84,7 @@ fn live_secondary_can_read_original_column_family_wal_batches() {
     let db = primary(&cloud.sources[0].rocksdb_path);
     seed(&db);
     let old = db.latest_sequence_number();
-    let handle = db.cf_handle(NativeCf::Fills.name()).unwrap();
+    let handle = db.cf_handle(NativeCf::Trades.name()).unwrap();
     // The C API reads the live handle's declared ID; no storage ID is guessed.
     let cf_id = unsafe { librocksdb_sys::rocksdb_column_family_handle_get_id(handle.inner()) };
     let mut batch = WriteBatch::default();
@@ -101,7 +107,7 @@ fn live_secondary_can_read_original_column_family_wal_batches() {
 }
 
 #[test]
-fn wal_incremental_cuts_preserve_repeated_mutations_and_resume_from_exact_source_sequence() {
+fn wal_incremental_cuts_preserve_every_append_and_resume_from_exact_source_sequence() {
     let temp = tempfile::tempdir().unwrap();
     let (mut cloud, local) = configs(temp.path());
     cloud.sync_export.as_mut().unwrap().batch_records = 1000;
@@ -111,15 +117,12 @@ fn wal_incremental_cuts_preserve_repeated_mutations_and_resume_from_exact_source
     let replica = Replica::open(&local, &local.sources[0]).unwrap();
     replica.accept(&first).unwrap();
     replica.apply().unwrap();
-    // A new mutable key changes twice, including returning to an older value.
-    // Every original mutation must survive, with one final row in its CF.
-    for value in [b"first".as_slice(), b"second", b"first"] {
-        db.put_cf(
-            db.cf_handle(NativeCf::Orders.name()).unwrap(),
-            b"new-order",
-            value,
-        )
-        .unwrap();
+    // Lifecycle updates are new records under later keys; each one survives.
+    for (n, status) in [fixture::PARTIALLY_FILLED, fixture::FILLED, fixture::FILLED]
+        .into_iter()
+        .enumerate()
+    {
+        put_order(&db, BASE + 10 + n as i64, status);
     }
     let next = super::export::page(
         &cloud,
@@ -146,12 +149,12 @@ fn wal_incremental_cuts_preserve_repeated_mutations_and_resume_from_exact_source
         &[],
     )
     .unwrap();
-    let head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+    let head: Value = get(&journal, b"meta/head/v3").unwrap().unwrap();
     assert_eq!(
         head["source_sequence"].as_u64(),
         Some(db.latest_sequence_number())
     );
-    assert_eq!(head["counts"], json!([1, 2, 1]));
+    assert_eq!(head["counts"], json!([5, 1]));
     drop(journal);
     let unchanged = super::export::page(
         &cloud,
@@ -167,24 +170,22 @@ fn wal_incremental_cuts_preserve_repeated_mutations_and_resume_from_exact_source
 }
 
 #[test]
-fn wal_catches_old_evidence_conflicts_even_when_new_events_are_appended() {
+fn wal_catches_rewritten_records_even_when_new_records_are_appended() {
     let temp = tempfile::tempdir().unwrap();
     let (cloud, _) = configs(temp.path());
     let db = primary(&cloud.sources[0].rocksdb_path);
     seed(&db);
     let first = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
-    let mut changed = fixture()["state"].clone();
-    changed["projection_error"] = json!("rewritten");
     let mut batch = WriteBatch::default();
     batch.put_cf(
-        db.cf_handle(NativeCf::Events.name()).unwrap(),
-        b"evidence\x00",
-        serde_json::to_vec(&changed).unwrap(),
+        db.cf_handle(NativeCf::Orders.name()).unwrap(),
+        records::key(BASE),
+        order().lifecycle(fixture::CANCELED, "exec", BASE, BASE),
     );
     batch.put_cf(
-        db.cf_handle(NativeCf::Events.name()).unwrap(),
-        b"evidence\x01",
-        b"new event",
+        db.cf_handle(NativeCf::Orders.name()).unwrap(),
+        records::key(BASE + 10),
+        order().lifecycle(fixture::FILLED, "exec", BASE, BASE + 10),
     );
     db.write(batch).unwrap();
     let result = super::export::page(
@@ -195,7 +196,7 @@ fn wal_catches_old_evidence_conflicts_even_when_new_events_are_appended() {
             Some(first.until_sha256),
         ),
     );
-    assert!(result.unwrap_err().to_string().contains("immutable"));
+    assert!(result.unwrap_err().to_string().contains("append-only"));
     let journal = open_owned(
         &cloud
             .sync_export
@@ -208,7 +209,7 @@ fn wal_catches_old_evidence_conflicts_even_when_new_events_are_appended() {
         &[],
     )
     .unwrap();
-    let head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+    let head: Value = get(&journal, b"meta/head/v3").unwrap().unwrap();
     assert_eq!(head["cursor"], 3);
 }
 
@@ -226,14 +227,14 @@ fn a_source_sequence_gap_audits_the_fixed_view_instead_of_skipping_history() {
         .journal_root
         .join(&cloud.sources[0].id);
     let journal = open_owned(&path, "cn_futures_sync_export", &cloud.sources[0].id, &[]).unwrap();
-    let mut head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+    let mut head: Value = get(&journal, b"meta/head/v3").unwrap().unwrap();
     head["source_sequence"] = json!(1);
     let mut batch = WriteBatch::default();
-    batch.put(b"meta/head", serde_json::to_vec(&head).unwrap());
+    batch.put(b"meta/head/v3", serde_json::to_vec(&head).unwrap());
     write(&journal, batch).unwrap();
     drop(journal);
     db.put_cf(
-        db.cf_handle(NativeCf::Fills.name()).unwrap(),
+        db.cf_handle(NativeCf::Trades.name()).unwrap(),
         b"another-fill",
         b"durable-original",
     )
@@ -278,14 +279,14 @@ fn unchanged_verified_cut_adoption_requires_earlier_source_baseline_and_receiver
         .journal_root
         .join(&cloud.sources[0].id);
     let journal = open_owned(&path, "cn_futures_sync_export", &cloud.sources[0].id, &[]).unwrap();
-    let mut head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+    let mut head: Value = get(&journal, b"meta/head/v3").unwrap().unwrap();
     let mut cut: Value = get(&journal, &seq_key(b'B', first.until)).unwrap().unwrap();
     head["source_sequence"] = Value::Null;
     head["source_cf_ids"] = Value::Null;
     cut["source_sequence"] = Value::Null;
     cut["source_cf_ids"] = Value::Null;
     let mut batch = WriteBatch::default();
-    batch.put(b"meta/head", serde_json::to_vec(&head).unwrap());
+    batch.put(b"meta/head/v3", serde_json::to_vec(&head).unwrap());
     batch.put(
         seq_key(b'B', first.until),
         serde_json::to_vec(&cut).unwrap(),
@@ -298,7 +299,7 @@ fn unchanged_verified_cut_adoption_requires_earlier_source_baseline_and_receiver
             &cloud.sources[0].id,
             &baseline,
             first.until,
-            &GENESIS
+            GENESIS
         )
         .is_err()
     );
@@ -315,7 +316,7 @@ fn unchanged_verified_cut_adoption_requires_earlier_source_baseline_and_receiver
         Some(db.latest_sequence_number())
     );
     db.put_cf(
-        db.cf_handle(NativeCf::Fills.name()).unwrap(),
+        db.cf_handle(NativeCf::Trades.name()).unwrap(),
         b"changed",
         b"new value",
     )
@@ -333,7 +334,7 @@ fn unchanged_verified_cut_adoption_requires_earlier_source_baseline_and_receiver
 }
 
 #[test]
-fn wal_rejects_new_event_conflicts_and_column_family_replacement_without_advancing() {
+fn wal_rejects_new_record_conflicts_and_column_family_replacement_without_advancing() {
     for replace_cf in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let (cloud, _) = configs(temp.path());
@@ -342,14 +343,14 @@ fn wal_rejects_new_event_conflicts_and_column_family_replacement_without_advanci
         let first =
             super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
         if replace_cf {
-            db.drop_cf(NativeCf::Fills.name()).unwrap();
-            db.create_cf(NativeCf::Fills.name(), &Options::default())
+            db.drop_cf(NativeCf::Trades.name()).unwrap();
+            db.create_cf(NativeCf::Trades.name(), &Options::default())
                 .unwrap();
         } else {
             let mut batch = WriteBatch::default();
-            let cf = db.cf_handle(NativeCf::Events.name()).unwrap();
-            batch.put_cf(cf, b"new-event", b"first evidence");
-            batch.put_cf(cf, b"new-event", b"conflicting evidence");
+            let cf = db.cf_handle(NativeCf::Orders.name()).unwrap();
+            batch.put_cf(cf, b"new-record", b"first record");
+            batch.put_cf(cf, b"new-record", b"conflicting record");
             db.write(batch).unwrap();
         }
         let result = super::export::page(
@@ -365,7 +366,7 @@ fn wal_rejects_new_event_conflicts_and_column_family_replacement_without_advanci
             error.contains(if replace_cf {
                 "column families"
             } else {
-                "immutable"
+                "append-only"
             }),
             "{error}"
         );
@@ -381,7 +382,7 @@ fn wal_rejects_new_event_conflicts_and_column_family_replacement_without_advanci
             &[],
         )
         .unwrap();
-        let head: Value = get(&journal, b"meta/head").unwrap().unwrap();
+        let head: Value = get(&journal, b"meta/head/v3").unwrap().unwrap();
         assert_eq!(head["cursor"], 3);
     }
 }
@@ -421,35 +422,73 @@ fn configs(root: &Path) -> (Config, Config) {
     local.validate().unwrap();
     (cloud, local)
 }
-fn fixture() -> Value {
-    serde_json::from_str(include_str!(
-        "../../../tests/fixtures/yida_native_records.json"
-    ))
-    .unwrap()
+const BASE: i64 = 1_794_877_200_000_000;
+const DAY: &str = "20261113";
+
+fn order() -> fixture::Order {
+    fixture::Order::new(
+        "SHFE:cu2612",
+        DAY,
+        "yida:20261113:group:1",
+        "18446744073709551614",
+        Side::Buy,
+        Offset::Open,
+        2,
+        100000.0,
+    )
+}
+fn fill(trade_id: &str, commission: Option<f64>) -> fixture::Fill {
+    fixture::Fill {
+        trade_id: trade_id.into(),
+        lots: 1,
+        price: 100000.0,
+        commission,
+        order_id: 1234,
+    }
 }
 fn primary(path: &Path) -> DB {
-    let mut options = Options::default();
-    options.create_if_missing(true);
-    options.create_missing_column_families(true);
-    DB::open_cf(&options, path, NativeCf::ALL.map(NativeCf::name)).unwrap()
+    fixture::open(path)
 }
+fn put_order(db: &DB, at: i64, status: u8) {
+    fixture::put_order(db, at, &order().lifecycle(status, "exec", BASE, at));
+}
+fn put_trade(db: &DB, at: i64, trade_id: &str, commission: Option<f64>, cumulative: i64) {
+    fixture::put_trade(
+        db,
+        at,
+        &order().trade(&fill(trade_id, commission), cumulative, None, at),
+    );
+}
+/// Three records: the order's lifecycle, its unallocated fill share and the
+/// factual fill with an unknown commission.
 fn seed(db: &DB) {
-    let f = fixture();
-    let mut fill = f["fill"].clone();
-    fill["commission"] = Value::Null;
-    let mut state = f["state"].clone();
-    state["received_us"] = json!(crate::native_futures::now_us());
+    let fill = fill("000000008888", None);
     let mut batch = WriteBatch::default();
-    for (cf, key, value) in [
-        (NativeCf::Events, &b"evidence\x00"[..], &state),
-        (NativeCf::Orders, &b"order\x00"[..], &f["order"]),
-        (NativeCf::Fills, &b"trade\x00"[..], &fill),
+    for (cf, at, value) in [
+        (
+            NativeCf::Orders,
+            BASE,
+            order().lifecycle(fixture::NEW, "exec", BASE, BASE),
+        ),
+        (
+            NativeCf::Orders,
+            BASE + 1,
+            order().share(
+                &fill,
+                UNALLOCATED,
+                1,
+                None,
+                fixture::PARTIALLY_FILLED,
+                BASE + 1,
+            ),
+        ),
+        (
+            NativeCf::Trades,
+            BASE + 1,
+            order().trade(&fill, 1, None, BASE + 1),
+        ),
     ] {
-        batch.put_cf(
-            db.cf_handle(cf.name()).unwrap(),
-            key,
-            serde_json::to_vec(value).unwrap(),
-        );
+        batch.put_cf(db.cf_handle(cf.name()).unwrap(), records::key(at), value);
     }
     db.write(batch).unwrap();
 }
@@ -501,30 +540,44 @@ fn client() -> reqwest::Client {
 }
 
 #[tokio::test]
-async fn ctp_http_sync_and_restart_preserve_unknown_fees_and_connection_evidence() {
+async fn ctp_http_sync_and_restart_preserve_unknown_fees_and_appended_records() {
     let temp = tempfile::tempdir().unwrap();
     let (mut cloud, mut local) = configs(temp.path());
     cloud.sources[0].adapter = "ctp".into();
     local.sources[0].adapter = "ctp".into();
     let db = primary(&cloud.sources[0].rocksdb_path);
-    let mut fixture: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/ctp_native_records.json"
-    ))
-    .unwrap();
-    fixture["state"]["received_us"] = json!(crate::native_futures::now_us());
-    let mut batch = WriteBatch::default();
-    for (cf, key, value) in [
-        (NativeCf::Events, &b"evidence\x00"[..], &fixture["state"]),
-        (NativeCf::Orders, &b"order\x00"[..], &fixture["order"]),
-        (NativeCf::Fills, &b"trade\x00"[..], &fixture["fill"]),
-    ] {
-        batch.put_cf(
-            db.cf_handle(cf.name()).unwrap(),
-            key,
-            serde_json::to_vec(value).unwrap(),
-        );
-    }
-    db.write(batch).unwrap();
+    let ctp = fixture::Order::new(
+        "CZCE:SR701",
+        "20261117",
+        "ctp:7:11",
+        "000000000042",
+        Side::Sell,
+        Offset::CloseYesterday,
+        2,
+        6000.0,
+    );
+    let fill = fixture::Fill {
+        trade_id: "000000008888".into(),
+        lots: 2,
+        price: 6000.0,
+        commission: None,
+        order_id: 1234,
+    };
+    fixture::put_order(
+        &db,
+        BASE,
+        &ctp.lifecycle(fixture::NEW, "observed", BASE, BASE),
+    );
+    fixture::put_trade(
+        &db,
+        BASE + 1,
+        &ctp.trade(&fill, 2, Some(fixture::FILLED), BASE + 1),
+    );
+    fixture::put_order(
+        &db,
+        BASE + 2,
+        &ctp.lifecycle(fixture::FILLED, "observed", BASE, BASE + 2),
+    );
     let original = all_bytes(&db);
     let (url, server) = serve(cloud).await;
     local.sources[0].sync.as_mut().unwrap().url = url;
@@ -535,17 +588,25 @@ async fn ctp_http_sync_and_restart_preserve_unknown_fees_and_connection_evidence
     assert_eq!(all_bytes(&replica.db), original);
     let snapshot =
         reader::read(&local.sources[0], &local.secondary_root.join("ctp"), 10, 30).unwrap();
-    assert_eq!(snapshot.status, "observing");
-    assert_eq!(snapshot.orders[0].record, fixture["order"]);
-    assert_eq!(snapshot.fills[0], fixture["fill"]);
-    assert!(snapshot.fills[0]["commission"].is_null());
-    let disconnected = json!({"sequence":101,"received_us":crate::native_futures::now_us(),"projection_error":null,"value":{"type":"ctp_event","event":{"kind":2,"error_code":4097}}});
-    db.put_cf(
-        db.cf_handle(NativeCf::Events.name()).unwrap(),
-        b"evidence\x01",
-        serde_json::to_vec(&disconnected).unwrap(),
-    )
-    .unwrap();
+    assert_eq!(snapshot.through_us, state.source_captured_at_us);
+    assert_eq!(snapshot.orders.len(), 1);
+    let order = &snapshot.orders[0];
+    assert_eq!(
+        order.phase,
+        crate::native_futures::state::OrderPhase::Filled
+    );
+    assert_eq!(order.filled_lots, 2);
+    assert_eq!(order.order.order.order_ref, "000000000042");
+    assert_eq!(order.order.offset, Offset::CloseYesterday);
+    assert_eq!(snapshot.fills[0].trade_id, "000000008888");
+    assert!(snapshot.fills[0].commission_cny.is_none());
+    let late = fixture::Fill {
+        trade_id: "000000008889".into(),
+        ..fill
+    };
+    let mut other = ctp.clone();
+    other.order_ref = "000000000043".into();
+    fixture::put_trade(&db, BASE + 3, &other.trade(&late, 2, None, BASE + 3));
     let state = replica.sync_once(&client(), TEST_TOKEN).await.unwrap();
     assert_eq!(state.committed_cursor, 4);
     assert_eq!(all_bytes(&replica.db), all_bytes(&db));
@@ -556,13 +617,13 @@ async fn ctp_http_sync_and_restart_preserve_unknown_fees_and_connection_evidence
     assert_eq!(resumed.store_id, state.store_id);
     let snapshot =
         reader::read(&local.sources[0], &local.secondary_root.join("ctp"), 10, 30).unwrap();
-    assert_eq!(snapshot.status, "disconnected");
-    assert_eq!(snapshot.fills[0], fixture["fill"]);
+    assert_eq!(snapshot.total_fills, 2);
+    assert_eq!(snapshot.fills[0].trade_id, "000000008889");
     server.abort();
 }
 
 #[tokio::test]
-async fn http_bootstrap_incremental_old_order_and_fee_updates_preserve_source_bytes() {
+async fn http_bootstrap_and_incremental_appends_preserve_source_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let (cloud, mut local) = configs(temp.path());
     let db = primary(&cloud.sources[0].rocksdb_path);
@@ -593,7 +654,7 @@ async fn http_bootstrap_incremental_old_order_and_fee_updates_preserve_source_by
     assert_eq!(
         all_bytes(&replica.db),
         before,
-        "keys, JSON bytes and native identities must be copied exactly"
+        "keys, record bytes and native identities must be copied exactly"
     );
     let snapshot = reader::read(
         &local.sources[0],
@@ -626,20 +687,17 @@ async fn http_bootstrap_incremental_old_order_and_fee_updates_preserve_source_by
         .unwrap();
     assert!(unchanged.changes.is_empty());
     assert_eq!(unchanged.until, 3);
-    let mut f = fixture();
-    f["order"]["order"]["limit_price"] = json!(115000);
-    f["fill"]["commission"] = json!(26.785);
-    let old_sequence = f["fill"]["evidence_seq"].clone();
+    // A later lifecycle and fill are appended under new keys.
     let mut batch = WriteBatch::default();
     batch.put_cf(
         db.cf_handle(NativeCf::Orders.name()).unwrap(),
-        b"order\x00",
-        serde_json::to_vec(&f["order"]).unwrap(),
+        records::key(BASE + 2),
+        order().lifecycle(fixture::FILLED, "exec", BASE, BASE + 2),
     );
     batch.put_cf(
-        db.cf_handle(NativeCf::Fills.name()).unwrap(),
-        b"trade\x00",
-        serde_json::to_vec(&f["fill"]).unwrap(),
+        db.cf_handle(NativeCf::Trades.name()).unwrap(),
+        records::key(BASE + 2),
+        order().trade(&fill("000000008889", Some(26.785)), 2, None, BASE + 2),
     );
     db.write(batch).unwrap();
     let changed = all_bytes(&db);
@@ -654,11 +712,14 @@ async fn http_bootstrap_incremental_old_order_and_fee_updates_preserve_source_by
         30,
     )
     .unwrap();
-    assert_eq!(snapshot.fills[0]["commission"], json!(26.785));
-    assert_eq!(snapshot.fills[0]["evidence_seq"], old_sequence);
+    assert_eq!(snapshot.fills[0].commission_cny, Some(26.785));
+    assert_eq!(snapshot.fills[1].commission_cny, None);
+    assert_eq!(snapshot.total_orders, 2);
+    assert_eq!(snapshot.orders.len(), 1);
+    assert_eq!(snapshot.orders[0].filled_lots, 2);
     assert_eq!(
-        snapshot.orders[0].record["order"]["limit_price"],
-        json!(115000)
+        snapshot.orders[0].phase,
+        crate::native_futures::state::OrderPhase::Filled
     );
     server.abort();
 }
@@ -675,14 +736,7 @@ fn frozen_pages_and_resume_never_publish_an_incomplete_cut() {
     replica.accept(&first).unwrap();
     assert_eq!(replica.status().unwrap().received_cursor, 1);
     assert!(!replica.status().unwrap().initialized);
-    let mut changed = fixture()["order"].clone();
-    changed["updated_us"] = json!(crate::native_futures::now_us());
-    db.put_cf(
-        db.cf_handle(NativeCf::Orders.name()).unwrap(),
-        b"order\x00",
-        serde_json::to_vec(&changed).unwrap(),
-    )
-    .unwrap();
+    put_order(&db, BASE + 10, fixture::FILLED);
     drop(replica);
     let replica = Replica::open(&local, &local.sources[0]).unwrap();
     let mut after = replica.status().unwrap().received_cursor;
@@ -700,20 +754,16 @@ fn frozen_pages_and_resume_never_publish_an_incomplete_cut() {
         replica.accept(&page).unwrap();
         replica.apply().unwrap();
     }
-    let copied: Value = serde_json::from_slice(
-        &replica
+    assert!(
+        replica
             .db
             .get_cf(
                 replica.db.cf_handle(NativeCf::Orders.name()).unwrap(),
-                b"order\x00",
+                records::key(BASE + 10),
             )
             .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_ne!(
-        copied["updated_us"], changed["updated_us"],
-        "a frozen cut must not mix later source updates into earlier pages"
+            .is_none(),
+        "a frozen cut must not mix later source records into earlier pages"
     );
     assert!(replica.status().unwrap().initialized);
     let next = super::export::page(
@@ -867,15 +917,7 @@ async fn multiple_sources_keep_independent_cursors_and_a_failed_source_cannot_bl
     assert_eq!(all_bytes(&good.db), all_bytes(&db));
     let recovered = primary(&temp.path().join("missing-execution"));
     seed(&recovered);
-    let mut fill = fixture()["fill"].clone();
-    fill["commission"] = json!(123.0);
-    recovered
-        .put_cf(
-            recovered.cf_handle(NativeCf::Fills.name()).unwrap(),
-            b"trade\x00",
-            serde_json::to_vec(&fill).unwrap(),
-        )
-        .unwrap();
+    put_trade(&recovered, BASE + 5, "000000009999", Some(123.0), 2);
     bad.sync_once(&c, TEST_TOKEN).await.unwrap();
     assert_eq!(all_bytes(&bad.db), all_bytes(&recovered));
     assert_eq!(all_bytes(&good.db), all_bytes(&db));
@@ -929,8 +971,11 @@ fn source_deletion_and_unknown_local_database_are_never_accepted_silently() {
     let db = primary(&cloud.sources[0].rocksdb_path);
     seed(&db);
     let first = super::export::page(&cloud, &cloud.sources[0].id, request(0, None, None)).unwrap();
-    db.delete_cf(db.cf_handle(NativeCf::Fills.name()).unwrap(), b"trade\x00")
-        .unwrap();
+    db.delete_cf(
+        db.cf_handle(NativeCf::Trades.name()).unwrap(),
+        records::key(BASE + 1),
+    )
+    .unwrap();
     assert!(
         super::export::page(
             &cloud,
@@ -993,15 +1038,21 @@ fn interrupted_export_capture_is_discarded_or_completed_before_serving_a_cut() {
     let id = &cloud.sources[0].id;
     let first = super::export::page(&cloud, id, request(0, None, None)).unwrap();
     let journal_path = cloud.sync_export.as_ref().unwrap().journal_root.join(id);
-    let mut revised = fixture()["order"].clone();
-    revised["updated_us"] = json!(crate::native_futures::now_us());
-    let raw = serde_json::to_vec(&revised).unwrap();
-    let change = Change::new(4, NativeCf::Orders, b"order\x00", &raw, &first.until_sha256).unwrap();
+    let raw = order().lifecycle(fixture::FILLED, "exec", BASE, BASE + 5);
+    let appended = records::key(BASE + 5);
+    let change = Change::new(
+        4,
+        NativeCf::Orders,
+        appended.as_bytes(),
+        &raw,
+        &first.until_sha256,
+    )
+    .unwrap();
     for ready in [false, true] {
         let journal = open_owned(&journal_path, "cn_futures_sync_export", id, &[]).unwrap();
         let mut batch = WriteBatch::default();
         batch.put(seq_key(b'J', 4), serde_json::to_vec(&change).unwrap());
-        batch.put(b"meta/pending",serde_json::to_vec(&serde_json::json!({"after":3,"until":4,"counts":[1,1,1],"captured_at_us":crate::native_futures::now_us(),"ready":ready})).unwrap());
+        batch.put(b"meta/pending/v3",serde_json::to_vec(&serde_json::json!({"after":3,"until":4,"counts":[3,1],"captured_at_us":crate::native_futures::now_us(),"ready":ready})).unwrap());
         write(&journal, batch).unwrap();
         drop(journal);
         let until = if ready { 4 } else { 3 };
@@ -1020,7 +1071,7 @@ fn interrupted_export_capture_is_discarded_or_completed_before_serving_a_cut() {
             assert_eq!(page.next, 4);
             assert_eq!(
                 journal
-                    .get(hash_key(NativeCf::Orders, b"order\x00"))
+                    .get(hash_key(NativeCf::Orders, appended.as_bytes()))
                     .unwrap()
                     .unwrap(),
                 Sha256::digest(&raw).to_vec()
@@ -1029,7 +1080,7 @@ fn interrupted_export_capture_is_discarded_or_completed_before_serving_a_cut() {
             assert!(page.changes.is_empty());
             assert!(journal.get(seq_key(b'J', 4)).unwrap().is_none());
         }
-        assert!(journal.get(b"meta/pending").unwrap().is_none());
+        assert!(journal.get(b"meta/pending/v3").unwrap().is_none());
     }
 }
 
@@ -1061,13 +1112,11 @@ fn journal_generation_and_checkpoint_hash_detect_reset_and_rewritten_prefix() {
     )
     .unwrap();
     let previous: Change = get(&journal, &seq_key(b'J', 2)).unwrap().unwrap();
-    let mut fill = fixture()["fill"].clone();
-    fill["commission"] = json!(1);
     let replacement = Change::new(
         3,
-        NativeCf::Fills,
-        b"trade\x00",
-        &serde_json::to_vec(&fill).unwrap(),
+        NativeCf::Trades,
+        records::key(BASE + 1).as_bytes(),
+        &order().trade(&fill("000000008888", Some(1.0)), 1, None, BASE + 1),
         &previous.record_sha256,
     )
     .unwrap();
@@ -1193,7 +1242,7 @@ async fn http_pages_reuse_one_live_journal_and_negotiate_compression() {
 }
 
 #[test]
-fn cached_replica_queries_release_apply_barriers_and_read_later_committed_fees() {
+fn cached_replica_queries_release_apply_barriers_and_read_later_committed_fills() {
     let temp = tempfile::tempdir().unwrap();
     let (mut cloud, local) = configs(temp.path());
     cloud.sync_export.as_mut().unwrap().batch_records = 1000;
@@ -1215,15 +1264,10 @@ fn cached_replica_queries_release_apply_barriers_and_read_later_committed_fees()
         })
         .unwrap()
     };
-    assert!(read().fills[0]["commission"].is_null());
-    let mut fill = fixture()["fill"].clone();
-    fill["commission"] = json!(42.0);
-    db.put_cf(
-        db.cf_handle(NativeCf::Fills.name()).unwrap(),
-        b"trade\x00",
-        serde_json::to_vec(&fill).unwrap(),
-    )
-    .unwrap();
+    let before = read();
+    assert!(before.fills[0].commission_cny.is_none());
+    assert_eq!(before.orders[0].filled_lots, 1);
+    put_trade(&db, BASE + 2, "000000008889", Some(42.0), 2);
     let next = super::export::page(
         &cloud,
         &cloud.sources[0].id,
@@ -1235,5 +1279,8 @@ fn cached_replica_queries_release_apply_barriers_and_read_later_committed_fees()
     .unwrap();
     replica.accept(&next).unwrap();
     replica.apply().unwrap();
-    assert_eq!(read().fills[0]["commission"], 42.0);
+    let after = read();
+    assert_eq!(after.fills[0].commission_cny, Some(42.0));
+    assert_eq!(after.total_fills, 2);
+    assert_eq!(after.orders[0].filled_lots, 2);
 }

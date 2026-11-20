@@ -1,6 +1,7 @@
 use super::*;
 use crate::native_futures::{
     config::{Config, Source},
+    records::{self, fixture},
     reference,
 };
 use serde_json::json;
@@ -11,31 +12,48 @@ fn pack() -> Pack {
     ))
     .unwrap()
 }
-fn facts(pack: &Pack) -> CostFacts {
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/yida_native_records.json"
-    ))
-    .unwrap();
+fn native_order(pack: &Pack) -> fixture::Order {
     let link = &pack.order_links[0];
     let signal = &pack.signals[0];
-    let mut order = fixture["order"].clone();
-    order["identity"] = json!({"trading_day":pack.trading_day,"venue":link.venue,"native":{"session":link.session,"order_ref":link.order_ref}});
-    order["order"]["request"]["side"] = json!(signal.side);
-    order["order"]["request"]["offset"] = json!(signal.offset);
-    order["first_received_us"] = json!(reference::timestamp(&signal.received_at).unwrap() + 1);
-    let mut fill = fixture["fill"].clone();
-    fill["fill"]["identity"]["trading_day"] = json!(pack.trading_day);
-    fill["fill"]["identity"]["side"] = json!(signal.side);
-    fill["fill"]["offset"] = json!(signal.offset);
-    fill["fill"]["order_key"] = order["identity"]["native"].clone();
-    fill["fill"]["lots"] = json!(2);
-    fill["fill"]["price"] = json!(120);
-    fill["commission"] = json!(5);
-    fill["received_us"] = json!(reference::timestamp(&signal.received_at).unwrap() + 2);
+    fixture::Order::new(
+        &format!("{}:{}", link.venue, signal.symbol),
+        &pack.trading_day,
+        &link.session,
+        &link.order_ref,
+        serde_json::from_value(json!(signal.side)).unwrap(),
+        serde_json::from_value(json!(signal.offset)).unwrap(),
+        2,
+        120.0,
+    )
+}
+fn trade(order: &fixture::Order, trade_id: &str, at: i64) -> records::Trade {
+    let fill = fixture::Fill {
+        trade_id: trade_id.into(),
+        lots: 2,
+        price: 120.0,
+        commission: Some(5.0),
+        order_id: 1234,
+    };
+    records::decode_trade(
+        records::key(at).as_bytes(),
+        &order.trade(&fill, 2, Some(fixture::FILLED), at),
+    )
+    .unwrap()
+}
+fn facts(pack: &Pack) -> CostFacts {
+    let received = reference::timestamp(&pack.signals[0].received_at).unwrap();
+    let order = native_order(pack);
+    let records::Uniform::Order(lifecycle) = records::decode_uniform(
+        records::key(received + 1).as_bytes(),
+        &order.lifecycle(fixture::FILLED, "exec", received + 1, received + 1),
+    )
+    .unwrap() else {
+        panic!("lifecycle record")
+    };
     CostFacts {
         replication: None,
-        orders: vec![order],
-        fills: vec![fill],
+        orders: vec![crate::native_futures::state::observe(lifecycle, 2).unwrap()],
+        fills: vec![trade(&order, "000000008888", received + 2)],
     }
 }
 fn report(p: &Pack, f: CostFacts) -> Report {
@@ -93,7 +111,7 @@ fn per_notional_and_close_today_fees_are_independent_and_missing_fees_remain_unk
     near(r.fills[0].theoretical_commission_cny, 9.05);
     near(r.fee_shortfall_cny, -4.05);
     let mut f = facts(&p);
-    f.fills[0]["commission"] = Value::Null;
+    f.fills[0].commission_cny = None;
     let r = report(&p, f);
     near(r.price_shortfall_cny, 150.0);
     assert!(r.fee_shortfall_cny.is_none() && r.total_shortfall_cny.is_none() && !r.complete);
@@ -177,10 +195,10 @@ fn incomplete_missing_and_zero_volume_windows_never_return_partial_prices() {
 fn full_native_group_identity_and_explicit_links_are_required_without_guessing() {
     let p = pack();
     let mut f = facts(&p);
-    let mut unlinked = f.fills[0].clone();
-    unlinked["fill"]["identity"]["trade_id"] = json!("another");
-    unlinked["fill"]["order_key"]["session"] = json!("yida:20261113:group:2");
-    f.fills.push(unlinked);
+    let mut other = native_order(&p);
+    other.session = "yida:20261113:group:2".into();
+    let received = reference::timestamp(&p.signals[0].received_at).unwrap();
+    f.fills.push(trade(&other, "another", received + 3));
     let r = report(&p, f);
     assert_eq!(r.fill_count, 2);
     assert_eq!(r.priced_fill_count, 1);
@@ -189,19 +207,16 @@ fn full_native_group_identity_and_explicit_links_are_required_without_guessing()
     assert!(r.price_shortfall_cny.is_none());
     near(r.covered_price_shortfall_cny, 150.0);
     let mut f = facts(&p);
-    f.fills[0]["fill"]["order_key"] = Value::Null;
-    assert!(report(&p, f).fills[0].theoretical_price.is_none());
-    let mut f = facts(&p);
-    f.orders[0]["instrument"]["contract_multiple"] = json!(10);
+    f.orders.clear();
     assert!(
         report(&p, f).fills[0]
             .reason
             .as_deref()
             .unwrap()
-            .contains("规则冲突")
+            .contains("委托记录")
     );
     let mut f = facts(&p);
-    f.orders[0]["first_received_us"] = json!(1);
+    f.orders[0].order.created_us = 1;
     assert!(
         report(&p, f).fills[0]
             .reason
@@ -363,7 +378,7 @@ fn browser_cost_aggregates_before_detail_filtering_and_pagination() {
 fn browser_cost_keeps_price_comparisons_when_factual_commission_is_missing() {
     let p = pack();
     let mut f = facts(&p);
-    f.fills[0]["commission"] = Value::Null;
+    f.fills[0].commission_cny = None;
     let r = acquisition::report(&manager_query(&p), &[report(&p, f)], vec![], None);
     assert_eq!(r["totals"]["price_shortfall_quote"], 150.0);
     assert!(r["totals"]["actual_fee_quote"].is_null());
@@ -373,9 +388,9 @@ fn browser_cost_keeps_price_comparisons_when_factual_commission_is_missing() {
 }
 
 #[test]
-fn browser_cost_keeps_unmatched_facts_and_uses_joined_order_multiplier() {
+fn browser_cost_keeps_unmatched_facts_with_a_market_data_multiplier() {
     let p = pack();
-    let native = build(
+    let mut native = build(
         &p.source_id,
         &p.trading_day,
         None,
@@ -383,6 +398,10 @@ fn browser_cost_keeps_unmatched_facts_and_uses_joined_order_multiplier() {
         manager_query(&p).now_us,
     )
     .unwrap();
+    // Records carry no instrument rules; without a reference the browser path
+    // fills the multiplier from market data before aggregating.
+    assert!(native.fills[0].contract_multiplier.is_none());
+    native.fills[0].contract_multiplier = Some(5.0);
     let r = acquisition::report(&manager_query(&p), &[native], vec![], None);
     assert_eq!(r["totals"]["actual_turnover_quote"], 1200.0);
     assert_eq!(r["totals"]["unmatched_fill_count"], 1);

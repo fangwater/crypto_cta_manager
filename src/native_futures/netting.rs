@@ -1,4 +1,7 @@
-//! Manager-owned virtual attribution. Exchange evidence is never synthesized.
+//! Strategy target roster and attribution anchor. Like crypto, Exec owns the live
+//! strategy ledger: it crosses strategy gaps, trades the net and attributes its
+//! fills in `cn_uniform_orders`. Manager only routes complete strategy targets
+//! and folds those records.
 pub mod store;
 #[cfg(test)]
 mod tests;
@@ -8,10 +11,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+/// Account position no named strategy explains; Exec's implicit remainder.
+pub const UNALLOCATED: &str = "__unallocated__";
+
 pub type Quantities = BTreeMap<String, i64>;
 pub type Strategies = BTreeMap<String, Quantities>;
 const MAX_LOTS: i64 = i32::MAX as i64;
-const CTAKER_LEASE_US: i64 = 60_000_000;
+const EXEC_LEASE_US: i64 = 60_000_000;
 
 #[derive(Debug)]
 pub struct Conflict(pub String);
@@ -41,13 +47,71 @@ pub struct InitialPosition {
     pub price: f64,
 }
 
+/// A cut of the Exec `cn_uniform_orders` log in one execution store
+/// generation. Records with a later key are attribution changes after it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Anchor {
+    pub source_id: String,
+    /// Manager time of the cut.
+    pub snapshot_us: i64,
+    /// Last `cn_uniform_orders` key folded into the anchor; 0 for an empty log.
+    pub orders_key: i64,
+    pub store_id: String,
+    pub note: String,
+}
+impl Anchor {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.source_id.is_empty()
+                && self.snapshot_us > 0
+                && self.orders_key >= 0
+                && !self.store_id.is_empty()
+                && !self.note.trim().is_empty()
+                && self.note.len() <= 4096,
+            "invalid native attribution anchor"
+        );
+        Ok(())
+    }
+
+    /// Cuts the source's uniform-order log at its current tip and folds the
+    /// named-strategy positions through it.
+    pub fn capture(
+        source: &super::config::Source,
+        db: &rocksdb::DB,
+        note: String,
+    ) -> Result<(Self, ExecLedger)> {
+        let orders_key = super::records::tip(db, super::records::ORDERS)?;
+        let anchor = Self {
+            source_id: source.id.clone(),
+            snapshot_us: super::now_us(),
+            orders_key,
+            store_id: super::records::generation(source, db)?,
+            note,
+        };
+        anchor.validate()?;
+        Ok((anchor, super::records::strategy_positions(db, orders_key)?))
+    }
+
+    /// The anchor's store generation is the one being read and its cut exists.
+    pub fn verify(&self, source: &super::config::Source, db: &rocksdb::DB) -> Result<()> {
+        self.validate()?;
+        ensure!(
+            self.source_id == source.id
+                && super::records::generation(source, db)? == self.store_id
+                && self.orders_key <= super::records::tip(db, super::records::ORDERS)?,
+            "attribution anchor belongs to a different source or execution store generation"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Initialize {
     pub strategy_groups: BTreeMap<String, BTreeSet<String>>,
     pub contracts: BTreeMap<String, Contract>,
     pub positions: BTreeMap<String, BTreeMap<String, InitialPosition>>,
-    pub snapshot_evidence_sequence: i64,
     pub note: String,
 }
 
@@ -56,9 +120,13 @@ pub struct Initialize {
 pub struct Rebase {
     pub event_id: String,
     pub expected_revision: i64,
-    pub snapshot_evidence_sequence: i64,
     pub strategy_groups: BTreeMap<String, BTreeSet<String>>,
+    /// Signed opening lots per strategy (including [`UNALLOCATED`]) and contract.
     pub positions: BTreeMap<String, Quantities>,
+    /// Native trading day of the opening inventory.
+    pub trading_day: String,
+    /// The account's opening gross inventory, valued at the cut's minute close.
+    pub inventory: Vec<super::nav::Inventory>,
     pub note: String,
 }
 
@@ -70,34 +138,7 @@ pub struct ExtendScope {
     pub strategy_group: String,
     pub members: BTreeSet<String>,
     pub contracts: BTreeMap<String, Contract>,
-    pub snapshot_evidence_sequence: i64,
     pub note: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Quote {
-    pub bid: f64,
-    pub ask: f64,
-    pub observed_us: i64,
-    pub source: String,
-}
-impl Quote {
-    pub fn mid(&self, at_us: i64) -> Result<f64> {
-        ensure!(
-            self.bid.is_finite()
-                && self.ask.is_finite()
-                && self.bid > 0.0
-                && self.ask >= self.bid
-                && self.observed_us > 0
-                && self.observed_us <= at_us
-                && at_us - self.observed_us <= 5_000_000
-                && !self.source.trim().is_empty()
-                && self.source.len() <= 256,
-            "internal crossing requires a positive, non-crossed BBO no older than five seconds at the decision"
-        );
-        Ok(self.bid / 2.0 + self.ask / 2.0)
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -114,7 +155,6 @@ pub struct TargetBatch {
     pub signal_times: BTreeMap<String, i64>,
     /// Complete roster, each with a complete contract vector (including zeros).
     pub strategies: Strategies,
-    pub quotes: BTreeMap<String, Quote>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -221,7 +261,6 @@ pub struct Valuation {
 pub struct StrategyGroup {
     pub members: BTreeSet<String>,
     pub decision_us: i64,
-    pub held: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -234,39 +273,21 @@ pub struct Portfolio {
     pub batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_trading_day: Option<String>,
-    pub external_demand_open: bool,
     pub target_revision: i64,
     pub last_strategy_group: Option<String>,
     pub strategy_groups: BTreeMap<String, StrategyGroup>,
     pub contracts: BTreeMap<String, Contract>,
     pub targets: Strategies,
+    /// Strategy allocation at the anchor, including [`UNALLOCATED`]. Later changes
+    /// are Exec's uniform-order records; Manager never advances these rows itself.
     pub positions: BTreeMap<String, BTreeMap<String, Position>>,
-    /// Account attribution anchor + imported factual fills; never target quantity.
+    /// Account allocation at the anchor: the sum of all strategy rows.
     pub account: BTreeMap<String, Position>,
-    pub anchor: super::evidence::Anchor,
+    pub anchor: Anchor,
 }
 
 fn is_zero_revision(revision: &i64) -> bool {
     *revision == 0
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct InternalCross {
-    pub kind: String,
-    pub market: String,
-    pub buyer: String,
-    pub seller: String,
-    pub lots: i64,
-    pub price: f64,
-    pub fee_cny: f64,
-    pub quote: Quote,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NetTarget {
-    pub target_lots: i64,
-    pub attributed_lots: i64,
-    pub residual_lots: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -276,9 +297,7 @@ pub struct BatchReceipt {
     pub batch_id: String,
     pub revision: i64,
     pub decision_us: i64,
-    pub internal_crosses: Vec<InternalCross>,
-    pub external_demands: Strategies,
-    pub net_targets: BTreeMap<String, NetTarget>,
+    pub net_targets: Quantities,
     pub execution_plan: ExecutionPlan,
 }
 
@@ -288,86 +307,35 @@ pub struct ExecutionPlan {
     pub batch_id: Option<String>,
     pub target_revision: i64,
     pub account_revision: i64,
-    pub publishable: bool,
-    /// One signed account target per native contract, independently of how
-    /// many factor strategies contributed to it.
+    /// Complete registered roster; Exec nets, crosses and attributes them.
+    pub strategies: Strategies,
     pub net_targets: Quantities,
-    pub attribution: Strategies,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct FactualFill {
-    pub identity: String,
-    pub market: String,
-    pub lots: i64,
-    pub price: f64,
-    pub commission_cny: Option<f64>,
-    pub evidence_sequence: i64,
-    pub received_us: i64,
-    pub evidence_sha256: String,
-}
-
-impl FactualFill {
-    /// Called only with a record read from this source's cn_trade_facts CF.
-    pub fn from_evidence(record: &serde_json::Value) -> Result<Self> {
-        let fill = &record["fill"];
-        let id = &fill["identity"];
-        let venue = id["venue"].as_str().context("fill venue")?;
-        let symbol = id["symbol"].as_str().context("fill symbol")?;
-        let day = id["trading_day"].as_str().context("fill trading day")?;
-        super::reference::valid_day(day)?;
-        let trade = id["trade_id"].as_str().context("fill trade id")?;
-        ensure!(!trade.is_empty(), "missing native trade id");
-        let side = match id["side"].as_str() {
-            Some("buy") => 1,
-            Some("sell") => -1,
-            _ => anyhow::bail!("invalid factual fill side"),
-        };
-        let qty = fill["lots"].as_i64().context("fill lots")?;
-        ensure!(qty > 0, "invalid factual fill lots");
-        let market = format!("{venue}:{symbol}");
-        super::validate_market(&market)?;
-        let commission_cny = if record["commission_currency"].as_str() == Some("CNY") {
-            record["commission"].as_f64()
-        } else {
-            None
-        };
-        Ok(Self {
-            identity: serde_json::to_string(&(venue, symbol, day, trade, side))?,
-            market,
-            lots: qty.checked_mul(side).context("fill lots overflow")?,
-            price: fill["price"].as_f64().context("fill price")?,
-            commission_cny,
-            evidence_sequence: record["evidence_seq"]
-                .as_i64()
-                .context("fill evidence sequence")?,
-            received_us: record["received_us"]
-                .as_i64()
-                .context("fill observation time")?,
-            evidence_sha256: fingerprint(record)?,
-        })
-    }
-}
+/// Named-strategy lots per contract folded from `cn_uniform_orders` at a cut.
+pub type ExecLedger = BTreeMap<String, Quantities>;
 
 impl Portfolio {
-    pub(super) fn rebase(&self, request: &Rebase, nav: &super::nav::Anchor) -> Result<Self> {
+    pub(super) fn rebase(
+        &self,
+        request: &Rebase,
+        nav: &super::nav::Anchor,
+        anchor: Anchor,
+        exec_ledger: &ExecLedger,
+    ) -> Result<Self> {
         require(
             self.revision == request.expected_revision,
             "portfolio changed before rebase",
         )?;
         require(
-            !self.external_demand_open,
-            "settle external demand before rebasing",
-        )?;
-        require(
-            nav.source_id == self.source_id
-                && nav.store_id == self.anchor.store_id
-                && nav.snapshot_us > self.anchor.snapshot_us.max(self.decision_us)
-                && nav.evidence_sequence > self.anchor.evidence_sequence
-                && self
-                    .ctaker_lease()
-                    .is_none_or(|(_, until)| nav.snapshot_us >= until),
-            "rebase requires a newer complete snapshot of the same account and execution store",
+            anchor.source_id == self.source_id
+                && nav.source_id == self.source_id
+                && anchor.store_id == self.anchor.store_id
+                && nav.store_id == anchor.store_id
+                && nav.snapshot_us == anchor.snapshot_us
+                && anchor.snapshot_us > self.anchor.snapshot_us.max(self.decision_us)
+                && anchor.orders_key >= self.anchor.orders_key,
+            "rebase requires a later cut of the same account and execution store",
         )?;
         require(
             request
@@ -375,9 +343,9 @@ impl Portfolio {
                 .keys()
                 .eq(self.strategy_groups.keys())
                 && request.strategy_groups.iter().all(|(group, members)| {
-                    members.len() == 1 && members.is_subset(&self.strategy_groups[group].members)
+                    !members.is_empty() && members.is_subset(&self.strategy_groups[group].members)
                 }),
-            "rebase requires one existing strategy per registered group",
+            "rebase requires existing strategies for every registered group",
         )?;
         let mut account = Quantities::new();
         let mut marks = BTreeMap::new();
@@ -388,7 +356,7 @@ impl Portfolio {
                     .get(&market)
                     .is_some_and(|c| c.multiplier == position.contract_multiplier)
                     && !account.contains_key(&market),
-                "rebase requires registered contracts and unhedged factual inventory",
+                "rebase requires registered contracts and unhedged opening inventory",
             )?;
             let lots = position
                 .today
@@ -409,11 +377,7 @@ impl Portfolio {
                     .iter()
                     .map(|(market, &lots)| {
                         let price = *marks.get(market).context(
-                            "rebase allocation has no factual position in that contract",
-                        )?;
-                        require(
-                            lots != 0 && account[market].signum() == lots.signum(),
-                            "rebase allocation must follow factual position side",
+                            "rebase allocation has no opening inventory in that contract",
                         )?;
                         Ok((market.clone(), InitialPosition { lots, price }))
                     })
@@ -425,19 +389,15 @@ impl Portfolio {
             strategy_groups: request.strategy_groups.clone(),
             contracts: self.contracts.clone(),
             positions,
-            snapshot_evidence_sequence: request.snapshot_evidence_sequence,
             note: request.note.clone(),
         };
-        let proof = super::evidence::Anchor {
-            source_id: nav.source_id.clone(),
-            snapshot_us: nav.snapshot_us,
-            trading_day: nav.trading_day.clone(),
-            evidence_sequence: nav.evidence_sequence,
-            evidence_sha256: nav.evidence_sha256.clone(),
-            store_id: nav.store_id.clone(),
-            note: nav.note.clone(),
-        };
-        let mut next = Self::initialize(&self.source_id, &init, &account, proof)?;
+        let mut next = Self::initialize(&self.source_id, &init, exec_ledger, anchor)?;
+        for (market, position) in &next.account {
+            ensure!(
+                position.quantity() == *account.get(market).unwrap_or(&0),
+                "rebase allocations do not match the opening inventory for {market}"
+            );
+        }
         next.revision = self.revision.checked_add(1).context("revision overflow")?;
         // Keep the next issued target newer than any target the Exec has seen.
         next.target_revision = self.target_revision;
@@ -445,19 +405,19 @@ impl Portfolio {
         Ok(next)
     }
 
-    /// Explicit operator allocation, checked against a complete factual snapshot.
+    /// Anchors attribution at a cut of the Exec log. Named strategies must hold
+    /// exactly the positions folded from Exec's records through the cut; the
+    /// rest of the account is the operator-stated [`UNALLOCATED`] remainder.
     pub fn initialize(
         source_id: &str,
         request: &Initialize,
-        account_lots: &Quantities,
-        anchor: super::evidence::Anchor,
+        exec_ledger: &ExecLedger,
+        anchor: Anchor,
     ) -> Result<Self> {
         anchor.validate()?;
         ensure!(
-            anchor.source_id == source_id
-                && anchor.evidence_sequence == request.snapshot_evidence_sequence
-                && anchor.note == request.note,
-            "initial attribution evidence does not match source/request"
+            anchor.source_id == source_id && anchor.note == request.note,
+            "attribution anchor does not match source/request"
         );
         let at_us = anchor.snapshot_us;
         ensure!(
@@ -479,7 +439,6 @@ impl Portfolio {
         ensure!(
             (1..=128).contains(&strategies.len())
                 && (1..=64).contains(&request.contracts.len())
-                && request.snapshot_evidence_sequence > 0
                 && at_us > 0
                 && !request.note.trim().is_empty()
                 && request.note.len() <= 4096,
@@ -487,6 +446,7 @@ impl Portfolio {
         );
         for name in &strategies {
             crate::order_config::validate_strategy_name(name).map_err(anyhow::Error::msg)?;
+            ensure!(name != UNALLOCATED, "reserved strategy name");
         }
         for (market, contract) in &request.contracts {
             super::validate_market(market)?;
@@ -499,13 +459,20 @@ impl Portfolio {
             request
                 .positions
                 .keys()
-                .all(|name| strategies.contains(name)),
+                .all(|name| strategies.contains(name) || name == UNALLOCATED),
             "initial position has unknown strategy"
         );
+        for (market, row) in exec_ledger {
+            ensure!(
+                request.contracts.contains_key(market)
+                    && row.keys().all(|name| strategies.contains(name)),
+                "Exec records attribute {market} outside the registered roster"
+            );
+        }
         let mut positions = BTreeMap::new();
         let mut account: BTreeMap<String, Position> = BTreeMap::new();
         let mut targets = BTreeMap::new();
-        for name in &strategies {
+        for name in strategies.iter().map(String::as_str).chain([UNALLOCATED]) {
             let mut rows = BTreeMap::new();
             let mut desired = BTreeMap::new();
             if let Some(initial) = request.positions.get(name) {
@@ -516,6 +483,18 @@ impl Portfolio {
             }
             for (market, contract) in &request.contracts {
                 let initial = request.positions.get(name).and_then(|p| p.get(market));
+                let lots = initial.map_or(0, |p| p.lots);
+                if name != UNALLOCATED {
+                    let exec = exec_ledger
+                        .get(market)
+                        .and_then(|row| row.get(name))
+                        .copied()
+                        .unwrap_or(0);
+                    ensure!(
+                        lots == exec,
+                        "initial {name} {market} lots {lots} differ from Exec's attributed {exec}"
+                    );
+                }
                 let mut position = Position::default();
                 if let Some(p) = initial {
                     validate_lots(p.lots)?;
@@ -533,14 +512,10 @@ impl Portfolio {
                 rows.insert(market.clone(), position);
                 account.entry(market.clone()).or_default();
             }
-            positions.insert(name.clone(), rows);
-            targets.insert(name.clone(), desired);
-        }
-        for market in request.contracts.keys() {
-            ensure!(
-                account[market].quantity() == *account_lots.get(market).unwrap_or(&0),
-                "initial allocations do not match factual account net lots for {market}"
-            );
+            positions.insert(name.to_owned(), rows);
+            if name != UNALLOCATED {
+                targets.insert(name.to_owned(), desired);
+            }
         }
         let portfolio = Self {
             source_id: source_id.into(),
@@ -549,7 +524,6 @@ impl Portfolio {
             decision_us: 0,
             batch_id: None,
             target_trading_day: None,
-            external_demand_open: false,
             target_revision: 0,
             last_strategy_group: None,
             strategy_groups: request
@@ -561,7 +535,6 @@ impl Portfolio {
                         StrategyGroup {
                             members: members.clone(),
                             decision_us: 0,
-                            held: false,
                         },
                     )
                 })
@@ -575,29 +548,34 @@ impl Portfolio {
         portfolio.check()?;
         Ok(portfolio)
     }
+    /// New contracts and members start flat; Exec must not already attribute
+    /// lots to a named strategy there (checked against the fold at `anchor`).
     pub fn extend_scope(
         &self,
         request: &ExtendScope,
-        proof: &super::evidence::Anchor,
+        anchor: &Anchor,
+        exec_ledger: &ExecLedger,
     ) -> Result<Self> {
         require(
             self.revision == request.expected_revision,
             "portfolio revision changed",
         )?;
-        require(
-            !self.external_demand_open,
-            "settle external demand before extending scope",
-        )?;
-        proof.validate()?;
+        anchor.validate()?;
         ensure!(
-            proof.source_id == self.source_id
-                && proof.store_id == self.anchor.store_id
-                && proof.evidence_sequence == request.snapshot_evidence_sequence
-                && proof.evidence_sequence > self.anchor.evidence_sequence
-                && proof.snapshot_us > self.anchor.snapshot_us.max(self.decision_us)
-                && proof.note == request.note,
-            "scope extension requires a later factual snapshot from the same execution store"
+            anchor.source_id == self.source_id
+                && anchor.store_id == self.anchor.store_id
+                && anchor.orders_key >= self.anchor.orders_key
+                && anchor.snapshot_us > self.anchor.snapshot_us.max(self.decision_us)
+                && anchor.note == request.note,
+            "scope extension requires a later cut of the same execution store"
         );
+        for (market, row) in exec_ledger {
+            ensure!(
+                !request.contracts.contains_key(market)
+                    && row.keys().all(|name| !request.members.contains(name)),
+                "Exec already attributes {market} to a strategy being added"
+            );
+        }
         ensure!(
             (!request.members.is_empty() || !request.contracts.is_empty())
                 && self.targets.len() + request.members.len() <= 128
@@ -613,7 +591,7 @@ impl Portfolio {
         for name in &request.members {
             crate::order_config::validate_strategy_name(name).map_err(anyhow::Error::msg)?;
             ensure!(
-                !self.targets.contains_key(name),
+                name != UNALLOCATED && !self.targets.contains_key(name),
                 "strategy {name} already registered"
             );
         }
@@ -635,7 +613,6 @@ impl Portfolio {
             .or_insert_with(|| StrategyGroup {
                 members: BTreeSet::new(),
                 decision_us: 0,
-                held: false,
             })
             .members
             .extend(request.members.iter().cloned());
@@ -667,32 +644,14 @@ impl Portfolio {
         Ok(next)
     }
 
-    pub fn external_demands(&self) -> Strategies {
-        if !self.external_demand_open {
-            return BTreeMap::new();
-        }
-        self.effective_targets()
-            .iter()
-            .filter_map(|(name, rows)| {
-                let remaining: Quantities = rows
-                    .iter()
-                    .filter_map(|(market, target)| {
-                        let delta = target - self.positions[name][market].quantity();
-                        (delta != 0).then_some((market.clone(), delta))
-                    })
-                    .collect();
-                (!remaining.is_empty()).then_some((name.clone(), remaining))
-            })
-            .collect()
-    }
-    pub(crate) fn ctaker_lease(&self) -> Option<(i64, i64)> {
+    pub(crate) fn exec_lease(&self) -> Option<(i64, i64)> {
         self.target_trading_day.as_ref()?;
         let group = self
             .strategy_groups
             .get(self.last_strategy_group.as_ref()?)?;
         Some((
             group.decision_us,
-            group.decision_us.saturating_add(CTAKER_LEASE_US),
+            group.decision_us.saturating_add(EXEC_LEASE_US),
         ))
     }
 
@@ -702,51 +661,26 @@ impl Portfolio {
             batch_id: self.batch_id.clone(),
             target_revision: self.target_revision,
             account_revision: self.revision,
-            publishable: self.external_demand_open,
-            net_targets: self
-                .net_targets()?
-                .into_iter()
-                .map(|(market, row)| (market, row.target_lots))
-                .collect(),
-            attribution: self.external_demands(),
+            strategies: self.targets.clone(),
+            net_targets: self.net_targets()?,
         })
     }
-    fn effective_targets(&self) -> Strategies {
-        let mut targets = self.targets.clone();
-        for group in self.strategy_groups.values().filter(|g| g.held) {
-            for name in &group.members {
-                for (market, position) in &self.positions[name] {
-                    targets
-                        .get_mut(name)
-                        .unwrap()
-                        .insert(market.clone(), position.quantity());
-                }
-            }
-        }
-        targets
-    }
-    pub fn net_targets(&self) -> Result<BTreeMap<String, NetTarget>> {
-        let effective = self.effective_targets();
+
+    /// Signed account target per contract: the sum of all strategy targets.
+    pub fn net_targets(&self) -> Result<Quantities> {
         self.contracts
             .keys()
             .map(|market| {
-                let target = effective.values().try_fold(0i64, |n, rows| {
+                let target = self.targets.values().try_fold(0i64, |n, rows| {
                     n.checked_add(rows[market])
                         .context("aggregate target overflow")
                 })?;
                 validate_lots(target)?;
-                let current = self.account[market].quantity();
-                Ok((
-                    market.clone(),
-                    NetTarget {
-                        target_lots: target,
-                        attributed_lots: current,
-                        residual_lots: target - current,
-                    },
-                ))
+                Ok((market.clone(), target))
             })
             .collect()
     }
+
     pub fn check(&self) -> Result<()> {
         for market in self.contracts.keys() {
             let sum = self.positions.values().try_fold(0i64, |n, p| {
@@ -760,7 +694,9 @@ impl Portfolio {
         }
         Ok(())
     }
+
     /// Pure plan: callers persist the returned state and complete receipt together.
+    /// Like crypto, a new batch replaces targets at any time; Exec owns execution.
     pub fn batch(&self, request: &TargetBatch, now_us: i64) -> Result<(Self, BatchReceipt)> {
         if let Some(day) = &request.trading_day {
             super::reference::valid_day(day)?;
@@ -770,10 +706,6 @@ impl Portfolio {
             .strategy_groups
             .get(&request.strategy_group)
             .context("unknown strategy group")?;
-        require(
-            !self.external_demand_open,
-            "previous external demand is unsettled; import factual fills or release confirmed canceled demand first",
-        )?;
         require(
             request.expected_revision == self.revision,
             "portfolio changed; reload before publishing",
@@ -809,173 +741,28 @@ impl Portfolio {
                 validate_lots(*lots)?;
             }
         }
-        ensure!(
-            request
-                .quotes
-                .keys()
-                .all(|m| self.contracts.contains_key(m)),
-            "quote for unregistered contract"
-        );
         let mut next = self.clone();
         next.targets.extend(request.strategies.clone());
-        let updated = next
-            .strategy_groups
+        next.strategy_groups
             .get_mut(&request.strategy_group)
-            .unwrap();
-        updated.decision_us = request.decision_us;
-        updated.held = false;
+            .unwrap()
+            .decision_us = request.decision_us;
         next.last_strategy_group = Some(request.strategy_group.clone());
         next.revision = next.revision.checked_add(1).context("revision overflow")?;
         next.target_revision = next.revision;
         next.decision_us = self.decision_us.max(request.decision_us);
         next.batch_id = Some(request.batch_id.clone());
         next.target_trading_day = request.trading_day.clone();
-        let mut crosses = vec![];
-        let mut external = Strategies::new();
-        let effective = next.effective_targets();
-        for (market, contract) in &self.contracts {
-            let mut buyers = VecDeque::new();
-            let mut sellers = VecDeque::new();
-            for (name, rows) in &effective {
-                let delta = rows[market] - self.positions[name][market].quantity();
-                if delta > 0 {
-                    buyers.push_back((name.clone(), delta));
-                } else if delta < 0 {
-                    sellers.push_back((name.clone(), -delta));
-                }
-            }
-            while let (Some((buyer, buy)), Some((seller, sell))) =
-                (buyers.front_mut(), sellers.front_mut())
-            {
-                let quote = request
-                    .quotes
-                    .get(market)
-                    .context("missing BBO for internal crossing")?;
-                let price = quote.mid(request.decision_us)?;
-                let qty = (*buy).min(*sell);
-                next.positions
-                    .get_mut(buyer)
-                    .unwrap()
-                    .get_mut(market)
-                    .unwrap()
-                    .apply(qty, price, contract.multiplier, Some(0.0))?;
-                next.positions
-                    .get_mut(seller)
-                    .unwrap()
-                    .get_mut(market)
-                    .unwrap()
-                    .apply(-qty, price, contract.multiplier, Some(0.0))?;
-                crosses.push(InternalCross {
-                    kind: "internal_cross".into(),
-                    market: market.clone(),
-                    buyer: buyer.clone(),
-                    seller: seller.clone(),
-                    lots: qty,
-                    price,
-                    fee_cny: 0.0,
-                    quote: quote.clone(),
-                });
-                *buy -= qty;
-                *sell -= qty;
-                if *buy == 0 {
-                    buyers.pop_front();
-                }
-                if *sell == 0 {
-                    sellers.pop_front();
-                }
-            }
-            for (name, qty) in buyers {
-                external
-                    .entry(name)
-                    .or_default()
-                    .insert(market.clone(), qty);
-            }
-            for (name, qty) in sellers {
-                external
-                    .entry(name)
-                    .or_default()
-                    .insert(market.clone(), -qty);
-            }
-        }
-        next.external_demand_open = !external.is_empty();
-        next.check()?;
         let receipt = BatchReceipt {
             strategy_group: request.strategy_group.clone(),
             source_id: self.source_id.clone(),
             batch_id: request.batch_id.clone(),
             revision: next.revision,
             decision_us: request.decision_us,
-            internal_crosses: crosses,
-            external_demands: external,
             net_targets: next.net_targets()?,
             execution_plan: next.execution_plan()?,
         };
         Ok((next, receipt))
-    }
-    /// Only imported, explicitly attributed factual fills advance the account ledger.
-    pub fn fill(&self, fill: &FactualFill, allocations: &Quantities) -> Result<Self> {
-        let contract = self
-            .contracts
-            .get(&fill.market)
-            .context("unregistered factual fill contract")?;
-        ensure!(
-            fill.evidence_sequence > self.anchor.evidence_sequence
-                && fill.received_us >= self.anchor.snapshot_us,
-            "fill is already included in the initial snapshot or predates the anchor"
-        );
-        validate_lots(fill.lots)?;
-        ensure!(
-            fill.lots != 0
-                && !allocations.is_empty()
-                && allocations.keys().all(|s| self.positions.contains_key(s)),
-            "invalid fill allocation strategies"
-        );
-        let mut sum = 0i64;
-        for qty in allocations.values() {
-            validate_lots(*qty)?;
-            ensure!(
-                *qty != 0 && qty.signum() == fill.lots.signum(),
-                "allocation must have factual fill direction"
-            );
-            sum = sum.checked_add(*qty).context("fill allocation overflow")?;
-        }
-        ensure!(
-            sum == fill.lots,
-            "allocations must sum to the factual fill quantity"
-        );
-        let mut next = self.clone();
-        let mut assigned_fee = 0.0;
-        for (i, (name, qty)) in allocations.iter().enumerate() {
-            let fee = fill.commission_cny.map(|total| {
-                let part = if i + 1 == allocations.len() {
-                    total - assigned_fee
-                } else {
-                    total * (*qty as f64 / fill.lots as f64)
-                };
-                assigned_fee += part;
-                part
-            });
-            next.positions
-                .get_mut(name)
-                .unwrap()
-                .get_mut(&fill.market)
-                .unwrap()
-                .apply(*qty, fill.price, contract.multiplier, fee)?;
-        }
-        next.account.get_mut(&fill.market).unwrap().apply(
-            fill.lots,
-            fill.price,
-            contract.multiplier,
-            fill.commission_cny,
-        )?;
-        next.revision = next.revision.checked_add(1).context("revision overflow")?;
-        next.external_demand_open = self.external_demand_open
-            && next
-                .net_targets()?
-                .values()
-                .any(|row| row.residual_lots != 0);
-        next.check()?;
-        Ok(next)
     }
 }
 

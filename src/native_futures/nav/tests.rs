@@ -7,8 +7,7 @@ fn anchor() -> Anchor {
         source_id: "account-01".into(),
         snapshot_us: at() - 3_600_000_000,
         trading_day: "20261117".into(),
-        evidence_sequence: 1,
-        evidence_sha256: "a".repeat(64),
+        trades_key: 1,
         store_id: "native-source-01".into(),
         positions: vec![],
         note: "explicit fixture anchor".into(),
@@ -27,7 +26,7 @@ fn position(side: Side, today: i64, yesterday: i64, price: f64) -> InitialPositi
 }
 fn fill(seq: i64, side: Side, offset: Offset, lots: i64, price: f64, time: i64) -> Fill {
     Fill {
-        key: seq.to_be_bytes().to_vec(),
+        key_us: seq,
         source_id: "account-01".into(),
         venue: "SHFE".into(),
         symbol: "cu2612".into(),
@@ -38,10 +37,7 @@ fn fill(seq: i64, side: Side, offset: Offset, lots: i64, price: f64, time: i64) 
         lots,
         price,
         received_us: time,
-        evidence_sequence: seq,
         commission_cny: Some(0.0),
-        journal_rate: None,
-        live_origin: true,
     }
 }
 fn prices() -> BTreeMap<(String, String), MarketPrices> {
@@ -252,79 +248,16 @@ fn missing_actual_fees_use_only_causal_contract_offset_rates_and_never_become_ze
 }
 
 #[test]
-fn ctp_journal_rates_cover_fee_after_nav_for_exact_contract_and_offset() {
-    use serde_json::json;
-
-    let mut history = commission::History::default();
-    history.observe(
-        4,
-        2,
-        &json!({"trading_day":"20261117","error_code":0,"present":1}),
-    );
-    let observation = |received| {
-        json!({
-            "symbol":"cu2612","exchange":"","trading_day":"","error_code":0,
-            "last":1,"present":1,"request_id":12,"received_us":received,
-            "metadata":{"commission_rates":[0.001,1.0,0.0,2.0,0.0,3.0]}
-        })
-    };
-    history.observe(17, 3, &observation(at() - 100));
-    let mut open = fill(6, Side::Buy, Offset::Open, 1, 105.0, at());
-    open.commission_cny = None;
-    history.enrich(&mut open);
-    assert!(open.needs_reference_fee()); // No corroborating venue.
-    history.observe(
-        15,
-        4,
-        &json!({"symbol":"cu","exchange":"SHFE","error_code":0,"present":1}),
-    );
-    history.observe(17, 5, &observation(at() - 1));
-    let mut future = observation(at() + 1);
-    future["metadata"]["commission_rates"][1] = json!(99.0);
-    history.observe(17, 7, &future);
-    history.enrich(&mut open);
-    near(open.estimated_fee(10.0, None).unwrap().unwrap(), 2.05);
-    let mut wrong_month = fill(8, Side::Buy, Offset::Open, 1, 105.0, at() + 1);
-    wrong_month.commission_cny = None;
-    wrong_month.symbol = "cu2701".into();
-    history.enrich(&mut wrong_month);
-    assert!(wrong_month.needs_reference_fee());
-    let mut close = fill(
-        9,
-        Side::Sell,
-        Offset::CloseToday,
-        1,
-        108.0,
-        at() + 60_000_000,
-    );
-    close.commission_cny = None;
-    history.enrich(&mut close);
-    let r = report(
-        &anchor(),
-        &[open, close.clone()],
-        &prices(),
-        &BTreeMap::new(),
-    )
-    .unwrap();
-    assert_eq!(r.fees.estimated_count, 2);
-    assert_eq!(r.fees.missing_count, 0);
-    near(r.summary.unwrap().nav_after_fees_cny.unwrap(), 24.95);
-    close.offset = Offset::Close;
-    assert!(close.estimated_fee(10.0, None).unwrap().is_none());
-    close.commission_cny = Some(0.0);
-    assert!(close.estimated_fee(10.0, None).unwrap().is_none());
-}
-#[test]
-fn cross_account_cross_market_overclose_and_recovery_only_evidence_are_rejected() {
+fn cross_account_cross_market_overclose_and_earlier_trading_day_fills_are_rejected() {
     let mut a = anchor();
     a.positions = vec![position(Side::Buy, 0, 1, 100.0)];
     let mut f = fill(2, Side::Sell, Offset::CloseYesterday, 1, 110.0, at());
     f.source_id = "other-account".into();
     assert!(report(&a, &[f.clone()], &prices(), &BTreeMap::new()).is_err());
     f.source_id = a.source_id.clone();
-    f.live_origin = false;
+    f.trading_day = "20261116".into();
     assert!(report(&a, &[f.clone()], &prices(), &BTreeMap::new()).is_err());
-    f.live_origin = true;
+    f.trading_day = a.trading_day.clone();
     f.lots = 2;
     assert!(report(&a, &[f], &prices(), &BTreeMap::new()).is_err());
     let mut f = fill(3, Side::Sell, Offset::CloseYesterday, 1, 110.0, at());
@@ -376,10 +309,9 @@ fn receive_key_is_a_stable_tie_breaker_and_new_trading_day_moves_today_lots_to_y
     let r = report(&a, &[close, open], &prices(), &BTreeMap::new()).unwrap();
     near(r.summary.unwrap().realized_cny, 100.0);
     assert_eq!(r.markets[0].long_lots, 0);
-    let mut open = fill(2, Side::Buy, Offset::Open, 1, 100.0, at());
-    open.key = b"a".to_vec();
-    let mut close = fill(3, Side::Sell, Offset::CloseToday, 1, 110.0, at());
-    close.key = b"b".to_vec();
+    // Same receipt time: the record key orders them.
+    let open = fill(2, Side::Buy, Offset::Open, 1, 100.0, at());
+    let close = fill(3, Side::Sell, Offset::CloseToday, 1, 110.0, at());
     assert!(report(&a, &[close, open], &prices(), &BTreeMap::new()).is_ok());
 }
 
@@ -407,4 +339,211 @@ fn complete_endpoints_do_not_hide_a_missing_active_minute() {
         Some(15 * 60_000_000),
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn inventory_replays_fills_after_the_cut_with_native_close_semantics() {
+    let mut a = anchor();
+    a.positions = vec![position(Side::Buy, 1, 2, 100.0)];
+    let before_cut = fill(1, Side::Buy, Offset::Open, 5, 101.0, at());
+    let close = fill(2, Side::Sell, Offset::CloseYesterday, 2, 102.0, at() + 1);
+    let short = fill(3, Side::Sell, Offset::Open, 1, 102.0, at() + 2);
+    let rows = inventory(&a, &[before_cut, close, short]).unwrap();
+    assert_eq!(
+        rows,
+        BTreeMap::from([(("SHFE".into(), "cu2612".into()), (1, 1))])
+    );
+    let today = fill(4, Side::Sell, Offset::CloseYesterday, 1, 102.0, at() + 3);
+    let close = fill(2, Side::Sell, Offset::CloseYesterday, 2, 102.0, at() + 1);
+    assert!(inventory(&a, &[close, today]).is_err());
+}
+
+fn local(text: &str) -> i64 {
+    reference::timestamp(text).unwrap()
+}
+/// Completed-minute closes ending in `(from, to]` (Shanghai wall-clock times).
+fn closes(prices: &mut MarketPrices, from: &str, to: &str, price: f64) {
+    let mut at = local(from) + MINUTE_US;
+    while at <= local(to) {
+        prices.closes.insert(at, price);
+        at += MINUTE_US;
+    }
+}
+fn sessions() -> MarketPrices {
+    MarketPrices {
+        multiplier: 10.0,
+        sessions: vec![
+            (21 * 3600, 23 * 3600),
+            (9 * 3600, 11 * 3600 + 30 * 60),
+            (13 * 3600 + 30 * 60, 15 * 3600),
+        ],
+        ..Default::default()
+    }
+}
+fn window(a: &Anchor, fills: &[Fill], p: &MarketPrices, start: i64, end: i64) -> Result<Report> {
+    build(Inputs {
+        anchor: a,
+        fills,
+        prices: &BTreeMap::from([(("SHFE".into(), "cu2612".into()), p.clone())]),
+        rates: &BTreeMap::new(),
+        start_us: start,
+        end_us: end,
+        source_through_us: end,
+        max_points: 1000,
+    })
+}
+fn nav_at(a: &Anchor, fills: &[Fill], p: &MarketPrices, end: &str) -> f64 {
+    window(a, fills, p, a.snapshot_us, local(end))
+        .unwrap()
+        .summary
+        .unwrap()
+        .nav_before_fees_cny
+}
+
+#[test]
+fn friday_night_fill_belongs_to_mondays_trading_day_and_the_weekend_keeps_its_value() {
+    use crate::native_futures::records::{self, fixture};
+    let mut a = anchor();
+    a.snapshot_us = local("2026-11-20T21:00:00+08:00");
+    a.trading_day = "20261123".into();
+    // The trading day comes from the record extension, not the receipt time.
+    let night = local("2026-11-20T21:30:00+08:00");
+    let order = fixture::Order::new(
+        "SHFE:cu2612",
+        "20261123",
+        "ctp:1:2",
+        "1",
+        Side::Buy,
+        Offset::Open,
+        1,
+        100.0,
+    );
+    let trade = fixture::Fill {
+        trade_id: "night".into(),
+        lots: 1,
+        price: 100.0,
+        commission: Some(0.0),
+        order_id: 1,
+    };
+    let open = source::fill(
+        &a.source_id,
+        records::decode_trade(
+            records::key(night).as_bytes(),
+            &order.trade(&trade, 1, None, night),
+        )
+        .unwrap(),
+    );
+    assert_eq!(open.trading_day, "20261123");
+    let mut p = sessions();
+    closes(
+        &mut p,
+        "2026-11-20T21:00:00+08:00",
+        "2026-11-20T23:00:00+08:00",
+        105.0,
+    );
+    closes(
+        &mut p,
+        "2026-11-23T09:00:00+08:00",
+        "2026-11-23T09:30:00+08:00",
+        110.0,
+    );
+    let friday = nav_at(
+        &a,
+        std::slice::from_ref(&open),
+        &p,
+        "2026-11-20T23:00:00+08:00",
+    );
+    near(friday, 50.0);
+    for weekend in [
+        "2026-11-21T02:30:00+08:00",
+        "2026-11-21T12:00:00+08:00",
+        "2026-11-22T21:30:00+08:00",
+        "2026-11-23T08:59:00+08:00",
+    ] {
+        near(nav_at(&a, std::slice::from_ref(&open), &p, weekend), friday);
+    }
+    // Monday's day session closes Friday night's lot as today's position.
+    let mut close = fill(
+        9,
+        Side::Sell,
+        Offset::CloseToday,
+        1,
+        110.0,
+        local("2026-11-23T09:30:00+08:00"),
+    );
+    close.trading_day = "20261123".into();
+    let monday = window(
+        &a,
+        &[open.clone(), close.clone()],
+        &p,
+        a.snapshot_us,
+        close.received_us,
+    )
+    .unwrap();
+    near(monday.summary.unwrap().realized_cny, 100.0);
+    close.offset = Offset::CloseYesterday;
+    assert!(
+        window(
+            &a,
+            &[open, close.clone()],
+            &p,
+            a.snapshot_us,
+            close.received_us
+        )
+        .is_err()
+    );
+    // Monday is a trading day: its missing session minutes are not a weekend.
+    p.closes
+        .retain(|at, _| *at < local("2026-11-23T09:00:00+08:00"));
+    assert!(p.mark(local("2026-11-23T09:05:00+08:00")).is_err());
+}
+
+#[test]
+fn a_holiday_after_a_trading_days_close_keeps_its_last_mark() {
+    let mut a = anchor();
+    a.snapshot_us = local("2026-12-31T14:00:00+08:00");
+    a.trading_day = "20261231".into();
+    a.positions = vec![position(Side::Buy, 1, 0, 100.0)];
+    let mut p = sessions();
+    // No night session before the New Year holiday; trading resumes Monday.
+    closes(
+        &mut p,
+        "2026-12-31T13:59:00+08:00",
+        "2026-12-31T14:59:00+08:00",
+        100.0,
+    );
+    closes(
+        &mut p,
+        "2026-12-31T14:59:00+08:00",
+        "2026-12-31T15:00:00+08:00",
+        102.0,
+    );
+    closes(
+        &mut p,
+        "2027-01-04T09:00:00+08:00",
+        "2027-01-04T09:01:00+08:00",
+        120.0,
+    );
+    near(nav_at(&a, &[], &p, "2026-12-31T15:00:00+08:00"), 20.0);
+    for holiday in [
+        "2027-01-01T10:00:00+08:00",
+        "2027-01-01T21:30:00+08:00",
+        "2027-01-03T12:00:00+08:00",
+        "2027-01-04T08:59:00+08:00",
+    ] {
+        near(nav_at(&a, &[], &p, holiday), 20.0);
+    }
+    near(nav_at(&a, &[], &p, "2027-01-04T09:01:00+08:00"), 200.0);
+    // A gap inside the trading day itself is still missing data.
+    p.closes.remove(&local("2026-12-31T14:30:00+08:00"));
+    assert!(
+        window(
+            &a,
+            &[],
+            &p,
+            a.snapshot_us,
+            local("2026-12-31T15:00:00+08:00")
+        )
+        .is_err()
+    );
 }

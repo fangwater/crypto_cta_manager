@@ -8,13 +8,15 @@ use crypto_cta_manager::{
     auth,
     native_futures::{
         config::{Config, Source},
-        evidence, netting, web,
+        nav::{self, Offset, Side},
+        netting,
+        records::{self, fixture},
+        web,
     },
     postgres,
 };
 use prost::Message;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::{
     AssertSqlSafe,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -132,61 +134,42 @@ async fn rates(
         )
     }
 }
-fn event(db: &rocksdb::DB, seq: i64, at: i64, value: Value) {
-    db.put_cf(
-        db.cf_handle("cn_trading_events").unwrap(),
-        seq.to_be_bytes(),
-        serde_json::to_vec(
-            &json!({"sequence":seq,"received_us":at,"projection_error":null,"value":value}),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-}
-fn inventory() -> Value {
-    json!([
-     {"venue":"SHFE","symbol":"cu2612","side":"buy","position":{"today":1,"yesterday":0,"frozen_today":0,"frozen_yesterday":0}},
-     {"venue":"SHFE","symbol":"cu2612","side":"sell","position":{"today":1,"yesterday":0,"frozen_today":0,"frozen_yesterday":0}}
-    ])
-}
-fn state(db: &rocksdb::DB, seq: i64, at: i64) {
-    event(
-        db,
-        seq,
-        at,
-        json!({"type":"state","state":{"ready":true,"trading_day":"20261117","positions":inventory(),"available_local_budget":100000,"reason":""}}),
-    );
-}
+/// One factual fill of its own one-lot order, and Exec's attribution of it to
+/// `strategy` one microsecond later.
 fn trade(
     db: &rocksdb::DB,
     seq: i64,
-    side: &str,
-    offset: &str,
+    side: Side,
+    offset: Offset,
     price: f64,
     at: i64,
-    live: bool,
+    trading_day: &str,
+    strategy: &str,
     commission: Option<f64>,
 ) {
-    let id = json!({"venue":"SHFE","symbol":"cu2612","trading_day":"20261117","trade_id":format!("trade-{seq}"),"side":side});
-    event(
-        db,
-        seq - 1,
-        at,
-        json!({"type":"ctp_event","event":{"received_us":at,"kind":if live {10}else{14},"direction":if side=="buy" {48}else{49},"exchange":"SHFE","symbol":"cu2612","trading_day":"20261117","trade_id":format!("trade-{seq}"),"system_id":format!("sys-{seq}"),"volume":1,"price":price}}),
+    let order = fixture::Order::new(
+        "SHFE:cu2612",
+        trading_day,
+        "ctp:1:2",
+        &seq.to_string(),
+        side,
+        offset,
+        1,
+        price,
     );
-    event(
+    let fill = fixture::Fill {
+        trade_id: format!("trade-{seq}"),
+        lots: 1,
+        price,
+        commission,
+        order_id: seq,
+    };
+    fixture::put_trade(db, at, &order.trade(&fill, 1, Some(fixture::FILLED), at));
+    fixture::put_order(
         db,
-        seq,
-        at,
-        json!({"type":"normalized_trade","identity":id,"origin":if live {"live_report"}else{"recovery_query"}}),
+        at + 1,
+        &order.share(&fill, strategy, 1, commission, fixture::FILLED, at + 1),
     );
-    let fill = json!({"fill":{"identity":id,"system_id":format!("sys-{seq}"),"order_ref":format!("{seq}"),"offset":offset,"lots":1,"price":price},"commission":commission,"commission_currency":commission.map(|_|"CNY"),"native_time":null,"received_us":at,"evidence_seq":seq});
-    db.put_cf(
-        db.cf_handle("cn_trade_facts").unwrap(),
-        format!("trade-{seq}"),
-        serde_json::to_vec(&fill).unwrap(),
-    )
-    .unwrap();
 }
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/cta.nav.rs"));
@@ -270,7 +253,6 @@ async fn persist_attribution(pool: &sqlx::PgPool, db: &rocksdb::DB, source: &Sou
     .bind(user)
     .execute(pool)
     .await?;
-    let raw = evidence::journal_entry(db, 8)?;
     let market = "SHFE:cu2612";
     let request = netting::Initialize {
         strategy_groups: BTreeMap::from([(
@@ -279,30 +261,27 @@ async fn persist_attribution(pool: &sqlx::PgPool, db: &rocksdb::DB, source: &Sou
         )]),
         contracts: BTreeMap::from([(market.into(), netting::Contract { multiplier: 10.0 })]),
         positions: BTreeMap::new(),
-        snapshot_evidence_sequence: 8,
-        note: "synthetic verified gross hedge and flat net strategy anchor".into(),
+        note: "synthetic flat net strategy anchor before Exec attribution".into(),
     };
     let mut portfolio = netting::Portfolio::initialize(
         &source.id,
         &request,
-        &BTreeMap::new(),
-        evidence::Anchor {
+        &records::strategy_positions(db, 0)?,
+        netting::Anchor {
             source_id: source.id.clone(),
             snapshot_us: BASE,
-            trading_day: "20261117".into(),
-            evidence_sequence: 8,
-            evidence_sha256: hex::encode(Sha256::digest(raw)),
-            store_id: evidence::generation(source, db)?,
+            orders_key: 0,
+            store_id: records::generation(source, db)?,
             note: request.note.clone(),
         },
     )?;
     netting::store::initialize(pool, &portfolio, &request, user).await?;
     let mut tx = pool.begin().await?;
-    for (second, alpha_target, seq, qty) in [(30, 2, 12, 1), (90, 1, 14, -1)] {
+    for (second, alpha_target) in [(30, 2), (90, 1)] {
         let decision_us = BASE + second * 1_000_000;
         let target = netting::TargetBatch {
             strategy_group: "fixture".into(),
-            batch_id: format!("synthetic-batch-{seq}"),
+            batch_id: format!("synthetic-batch-{second}"),
             expected_revision: portfolio.revision,
             decision_us,
             trading_day: Some("20261117".into()),
@@ -314,15 +293,6 @@ async fn persist_attribution(pool: &sqlx::PgPool, db: &rocksdb::DB, source: &Sou
                 ),
                 ("beta".into(), BTreeMap::from([(market.into(), -1)])),
             ]),
-            quotes: BTreeMap::from([(
-                market.into(),
-                netting::Quote {
-                    bid: 99.0,
-                    ask: 101.0,
-                    observed_us: decision_us,
-                    source: "synthetic".into(),
-                },
-            )]),
         };
         let (next, receipt) = portfolio.batch(&target, decision_us)?;
         portfolio = next;
@@ -332,21 +302,6 @@ async fn persist_attribution(pool: &sqlx::PgPool, db: &rocksdb::DB, source: &Sou
         ).bind(&source.id).bind(&target.batch_id).bind(portfolio.revision)
             .bind(netting::fingerprint(&target)?).bind(DbJson(&target)).bind(DbJson(&receipt))
             .bind(user).bind(decision_us).execute(&mut *tx).await?;
-        let key = format!("trade-{seq}");
-        let raw = db
-            .get_cf(db.cf_handle("cn_trade_facts").unwrap(), &key)?
-            .unwrap();
-        let fill = netting::FactualFill::from_evidence(&serde_json::from_slice(&raw)?)?;
-        let allocation = BTreeMap::from([("alpha".into(), qty)]);
-        portfolio = portfolio.fill(&fill, &allocation)?;
-        let receipt = json!({"source_id":source.id,"revision":portfolio.revision,
-            "evidence_key":hex::encode(key),"fill":fill,"allocations":allocation});
-        sqlx::query(
-            "INSERT INTO cta_native_netting_events(source_id,event_id,revision,kind,fingerprint,request,receipt,actor_user_id,received_at_us)
-             VALUES($1,$2,$3,'exchange_fill_allocation',$4,$5,$5,$6,$7)",
-        ).bind(&source.id).bind(format!("fixture-fill-{seq}")).bind(portfolio.revision)
-            .bind(netting::fingerprint(&receipt)?).bind(DbJson(&receipt))
-            .bind(user).bind(fill.received_us).execute(&mut *tx).await?;
     }
     sqlx::query("UPDATE cta_native_netting_portfolios SET state=$2 WHERE source_id=$1")
         .bind(&source.id)
@@ -354,12 +309,34 @@ async fn persist_attribution(pool: &sqlx::PgPool, db: &rocksdb::DB, source: &Sou
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // Exec's internal cross at the mid: alpha takes beta's lot. Its two factual
+    // fills were already attributed to alpha in their uniform-order shares.
+    for (leg, (side, name)) in [(Side::Buy, "alpha"), (Side::Sell, "beta")]
+        .into_iter()
+        .enumerate()
+    {
+        fixture::put_order(
+            db,
+            BASE + 30_000_000 + leg as i64,
+            &fixture::cross_leg(
+                market,
+                "20261117",
+                BASE + 30_000_000,
+                0,
+                side,
+                name,
+                1,
+                100.0,
+                BASE + 30_000_000,
+            ),
+        );
+    }
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires an isolated CTA_SCHEMA_TEST_SOCKET PostgreSQL cluster"]
-async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_recovery_cut()
+async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_trading_day_cut()
 -> Result<()> {
     let socket = std::env::var("CTA_SCHEMA_TEST_SOCKET").context("set isolated test socket")?;
     ensure!(
@@ -393,26 +370,7 @@ async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_reco
     postgres::initialize(&pool).await?;
     let tmp = tempfile::tempdir()?;
     let primary = tmp.path().join("exec");
-    let mut o = rocksdb::Options::default();
-    o.create_if_missing(true);
-    o.create_missing_column_families(true);
-    let db = rocksdb::DB::open_cf(
-        &o,
-        &primary,
-        ["cn_trading_events", "cn_uniform_orders", "cn_trade_facts"],
-    )?;
-    event(
-        &db,
-        8,
-        BASE,
-        json!({"type":"reconciled","state":{"ready":false,"trading_day":"20261117","positions":inventory(),"available_local_budget":100000,"reason":"settlement not confirmed; read-only queries remain available"}}),
-    );
-    event(
-        &db,
-        10,
-        BASE + 10,
-        json!({"type":"state","state":{"ready":false,"trading_day":"20261117","positions":inventory(),"available_local_budget":100000,"reason":"settlement not confirmed; read-only queries remain available"}}),
-    );
+    let db = fixture::open(&primary);
     let grpc = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let grpc_url = format!("http://{}", grpc.local_addr()?);
     let grpc_server = tokio::spawn(async move {
@@ -455,7 +413,7 @@ async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_reco
         stale_secs: 30,
         recent_rows: 20,
         source_viewers: BTreeMap::new(),
-        ctaker_plan_readers: BTreeMap::new(),
+        exec_plan_readers: BTreeMap::new(),
         execution_monitor_urls: BTreeMap::new(),
         sources: vec![Source {
             id: "sim".into(),
@@ -536,8 +494,9 @@ async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_reco
             .contains("快照")
     );
     let snapshots = format!("{base}/api/native/sources/sim/nav-snapshots");
+    // The operator states the (flat) inventory now; the trade log is cut at its tip.
     let body =
-        json!({"expected_state_us":BASE,"note":"synthetic complete hedged read-only anchor"});
+        json!({"trading_day":"20261117","positions":[],"note":"synthetic flat current anchor"});
     assert_eq!(
         client
             .post(&snapshots)
@@ -560,27 +519,66 @@ async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_reco
         "{}",
         response.text().await?
     );
+    let captured: nav::Anchor = response.json().await?;
+    assert_eq!(captured.trades_key, 0);
+    assert!(captured.positions.is_empty());
+    let malformed = json!({"trading_day":"20261117","positions":[{"venue":"SHFE","symbol":"cu2612","side":"buy","today":-1,"yesterday":0}],"note":"negative"});
+    assert_eq!(
+        client
+            .post(&snapshots)
+            .header("Cookie", &cookie)
+            .json(&malformed)
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    // A historical gross hedge, priced at that minute, for the replayed window.
+    let gross = |side| nav::InitialPosition {
+        venue: "SHFE".into(),
+        symbol: "cu2612".into(),
+        side,
+        today: 1,
+        yesterday: 0,
+        reference_price: 100.0,
+        contract_multiplier: 10.0,
+    };
+    nav::store::insert(
+        &pool,
+        &nav::Anchor {
+            source_id: "sim".into(),
+            snapshot_us: BASE,
+            trading_day: "20261117".into(),
+            trades_key: 0,
+            store_id: records::generation(&nav_source, &db)?,
+            positions: vec![gross(Side::Buy), gross(Side::Sell)],
+            note: "synthetic complete hedged anchor".into(),
+        },
+        "admin",
+    )
+    .await?;
     trade(
         &db,
         12,
-        "buy",
-        "open",
+        Side::Buy,
+        Offset::Open,
         100.0,
         BASE + 60_000_000,
-        true,
+        "20261117",
+        "alpha",
         Some(1.0),
     );
     trade(
         &db,
         14,
-        "sell",
-        "close_today",
+        Side::Sell,
+        Offset::CloseToday,
         110.0,
         BASE + 120_000_000,
-        true,
+        "20261117",
+        "alpha",
         None,
     );
-    state(&db, 15, BASE + 180_000_000);
     let url = format!(
         "{base}/api/native/sources/sim/nav?start_ms={}&end_ms={}",
         BASE / 1000,
@@ -627,9 +625,13 @@ async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_reco
     else {
         anyhow::bail!("expected report");
     };
+    // A local store covers its records through the read itself, so the
+    // requested end (already in the past) is served unchanged.
     assert_eq!(
         report.fields["end_ts_us"].kind,
-        Some(prost_types::value::Kind::NumberValue(end as f64))
+        Some(prost_types::value::Kind::NumberValue(
+            (end + 20_000_000) as f64
+        ))
     );
     let absent_symbol = browser_timeline(
         &client,
@@ -764,53 +766,38 @@ async fn native_nav_http_preserves_gross_anchor_permissions_fee_history_and_reco
         .await?
         .json::<Vec<Value>>()
         .await?;
-    assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0]["snapshot_us"], BASE);
-    assert_eq!(stored[0]["positions"].as_array().unwrap().len(), 2);
-    let mut conflicting: crypto_cta_manager::native_futures::nav::Anchor =
-        serde_json::from_value(stored[0].clone())?;
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[1]["snapshot_us"], BASE);
+    assert_eq!(stored[1]["positions"].as_array().unwrap().len(), 2);
+    let mut conflicting: nav::Anchor = serde_json::from_value(stored[1].clone())?;
     use crypto_cta_manager::native_futures::nav::source::validate_anchor;
     validate_anchor(&nav_source, &db, &conflicting)?;
-    conflicting.snapshot_us += 1;
+    conflicting.store_id = "native:replacement-store".into();
     assert!(validate_anchor(&nav_source, &db, &conflicting).is_err());
-    conflicting.snapshot_us -= 1;
-    conflicting.trading_day = "20261116".into();
+    conflicting.store_id = records::generation(&nav_source, &db)?;
+    conflicting.trades_key = i64::MAX;
     assert!(validate_anchor(&nav_source, &db, &conflicting).is_err());
-    conflicting.trading_day = "20261117".into();
+    conflicting.trades_key = 0;
     conflicting.note = "different immutable financial anchor".into();
     assert!(
         crypto_cta_manager::native_futures::nav::store::insert(&pool, &conflicting, "admin")
             .await
             .is_err()
     );
-    event(&db, 16, BASE + 190_000_000, json!({"type":"runtime_start"}));
-    let pending: Value = client
-        .get(format!(
-            "{base}/api/native/sources/sim/nav?start_ms={}&end_ms={}",
-            BASE / 1000,
-            (BASE + 190_000_000) / 1000
-        ))
-        .header("Cookie", &cookie)
-        .send()
-        .await?
-        .json()
-        .await?;
-    assert_eq!(
-        pending["ready"], false,
-        "runtime start must not advance financial coverage: {pending}"
-    );
-    assert!(pending["summary"].is_null());
+    // A fill of an earlier trading day recorded after the anchor may already be
+    // in its inventory; NAV stays unavailable rather than double counting it.
+    // Its share names a strategy outside the roster, so strategy NAV stops too.
     trade(
         &db,
         18,
-        "buy",
-        "open",
+        Side::Buy,
+        Offset::Open,
         100.0,
         BASE + 200_000_000,
-        false,
+        "20261116",
+        "gamma",
         None,
     );
-    state(&db, 20, BASE + 240_000_000);
     let nav: Value = client
         .get(format!(
             "{base}/api/native/sources/sim/nav?start_ms={}&end_ms={}",

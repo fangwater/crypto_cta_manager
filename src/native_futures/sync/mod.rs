@@ -23,31 +23,35 @@ const STATE: &[u8] = b"meta/state";
 const STAGING: &str = "cn_sync_staging";
 const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// The two replicated domestic logs. Both are append-only: overwriting or
+/// deleting an existing key is a conflict.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
 pub enum NativeCf {
-    #[serde(rename = "cn_trading_events")]
-    Events,
     #[serde(rename = "cn_uniform_orders")]
     Orders,
-    #[serde(rename = "cn_trade_facts")]
-    Fills,
+    #[serde(rename = "cn_trade_updates")]
+    Trades,
 }
+pub(super) const CF_COUNT: usize = 2;
 impl NativeCf {
-    const ALL: [Self; 3] = [Self::Events, Self::Orders, Self::Fills];
+    const ALL: [Self; CF_COUNT] = [Self::Orders, Self::Trades];
     fn name(self) -> &'static str {
         match self {
-            Self::Events => "cn_trading_events",
-            Self::Orders => "cn_uniform_orders",
-            Self::Fills => "cn_trade_facts",
+            Self::Orders => super::records::ORDERS,
+            Self::Trades => super::records::TRADES,
         }
     }
     fn index(self) -> usize {
         match self {
-            Self::Events => 0,
-            Self::Orders => 1,
-            Self::Fills => 2,
+            Self::Orders => 0,
+            Self::Trades => 1,
         }
     }
+}
+
+/// Manager-owned replica families that are not Exec records.
+pub(super) fn internal(cf: &str) -> bool {
+    cf == STAGING
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

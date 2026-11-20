@@ -33,7 +33,7 @@ pub struct Config {
     pub execution_monitor_urls: BTreeMap<String, String>,
     /// Dedicated per-source read credentials for the Exec-side plan consumer.
     #[serde(default)]
-    pub ctaker_plan_readers: BTreeMap<String, String>,
+    pub exec_plan_readers: BTreeMap<String, String>,
     pub sources: Vec<Source>,
 }
 fn default_database() -> crate::config::DatabaseConfig {
@@ -210,7 +210,7 @@ impl Config {
         }
         let mut plan_envs = BTreeSet::new();
         ensure!(
-            self.ctaker_plan_readers.iter().all(|(id, env)| {
+            self.exec_plan_readers.iter().all(|(id, env)| {
                 !env.is_empty()
                     && env.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
                     && env != &self.database.url_env
@@ -221,7 +221,7 @@ impl Config {
                         .iter()
                         .all(|s| s.sync.as_ref().is_none_or(|s| &s.token_env != env))
             }),
-            "ctaker plan readers require enabled native sources and distinct dedicated token variables"
+            "exec plan readers require enabled native sources and distinct dedicated token variables"
         );
         if let Some(reference) = &self.reference_service {
             reference.validate()?;

@@ -1,4 +1,4 @@
-//! Assemble native NAV from the frozen Exec cut and independent market/rate APIs.
+//! Assemble native NAV from the Exec trade-log cut and independent market/rate APIs.
 use super::*;
 use crate::native_futures::{market_data, reference_data};
 
@@ -11,7 +11,14 @@ pub async fn price_anchor(
         inventory,
     } = candidate;
     let mut prices = BTreeMap::new();
-    for (venue, symbol, side, today, yesterday) in inventory {
+    for Inventory {
+        venue,
+        symbol,
+        side,
+        today,
+        yesterday,
+    } in inventory
+    {
         let key = (venue.clone(), symbol.clone());
         if !prices.contains_key(&key) {
             let feed = market
@@ -82,11 +89,9 @@ pub(crate) async fn timeline(
     if end_us > through_us {
         return unavailable("执行端证据尚未覆盖所选结束时刻；请选择已覆盖时段或等待同步追平");
     }
-    if fills.iter().any(|f| {
-        !f.live_origin || f.received_us < anchor.snapshot_us || f.trading_day < anchor.trading_day
-    }) {
+    if fills.iter().any(|f| f.trading_day < anchor.trading_day) {
         return unavailable(
-            "发现起始快照之后才入库的恢复成交，缺少可验证的原始成交时刻；不能按查询回报时间重排历史，可在完整恢复后另建快照继续跟踪",
+            "起始快照之后入库的成交属于更早的交易日；起始持仓可能已包含该成交，请另建快照",
         );
     }
     let markets = available_markets(anchor, &fills, end_us);

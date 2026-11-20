@@ -1,12 +1,12 @@
 //! Actual-quantity cost comparison against manually maintained market evidence.
 //! No strategy attribution, synthetic fills, account NAV or execution side effects.
 use super::{
+    nav::Side,
     reader::CostFacts,
     reference::{self, MINUTE_US, Model, Pack, Signal},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -89,10 +89,11 @@ pub struct Report {
     pub fills: Vec<FillCost>,
 }
 
-fn text<'a>(v: &'a Value, name: &str) -> Result<&'a str> {
-    v[name]
-        .as_str()
-        .with_context(|| format!("missing native {name}"))
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::Buy => "buy",
+        Side::Sell => "sell",
+    }
 }
 
 struct ReferenceIndex<'a> {
@@ -296,16 +297,16 @@ pub fn build(
         .map(|(i, s)| (s.signal_id.clone(), i))
         .collect();
     let mut orders = BTreeMap::new();
-    for order in &facts.orders {
-        let id = &order["identity"];
+    for observed in &facts.orders {
+        let order = &observed.order;
         ensure!(
-            text(id, "trading_day")? == day,
+            order.trading_day == day,
             "order outside requested trading day"
         );
         let key = (
-            text(id, "venue")?,
-            text(&id["native"], "session")?,
-            text(&id["native"], "order_ref")?,
+            order.venue.as_str(),
+            order.order.session.as_str(),
+            order.order.order_ref.as_str(),
         );
         ensure!(
             orders.insert(key, order).is_none(),
@@ -327,44 +328,27 @@ pub fn build(
         .unwrap_or_default();
     let mut fills = vec![];
     let mut identities = BTreeSet::new();
-    for record in &facts.fills {
-        let f = &record["fill"];
-        let id = &f["identity"];
-        let (venue, symbol, trade_id, side, offset) = (
-            text(id, "venue")?,
-            text(id, "symbol")?,
-            text(id, "trade_id")?,
-            text(id, "side")?,
-            text(f, "offset")?,
+    for trade in &facts.fills {
+        let (venue, symbol, trade_id) = (
+            trade.venue.as_str(),
+            trade.symbol.as_str(),
+            trade.trade_id.as_str(),
         );
+        let side = side_name(trade.side);
+        let offset = trade.offset.key();
         ensure!(
-            text(id, "trading_day")? == day && identities.insert((venue, symbol, trade_id, side)),
+            trade.trading_day == day && identities.insert((venue, symbol, trade_id, side)),
             "duplicate or out-of-day native fill"
         );
-        super::validate_market(&format!("{venue}:{symbol}"))?;
-        ensure!(matches!(side, "buy" | "sell"), "invalid factual fill side");
-        ensure!(
-            matches!(offset, "open" | "close" | "close_yesterday" | "close_today"),
-            "invalid factual fill offset"
-        );
-        let lots = f["lots"]
-            .as_i64()
-            .filter(|n| *n > 0)
-            .context("invalid factual lots")?;
-        let price = f["price"]
-            .as_f64()
-            .filter(|p| p.is_finite() && *p > 0.0)
-            .context("invalid factual fill price")?;
+        let (lots, price) = (trade.lots, trade.price);
         let mut row = FillCost {
             venue: venue.into(),
             symbol: symbol.into(),
             trading_day: day.into(),
             trade_id: trade_id.into(),
-            received_us: record["received_us"]
-                .as_i64()
-                .context("missing factual fill receipt timestamp")?,
-            session: f["order_key"]["session"].as_str().map(str::to_owned),
-            order_ref: f["order_key"]["order_ref"].as_str().map(str::to_owned),
+            received_us: trade.received_us,
+            session: Some(trade.order.session.clone()),
+            order_ref: Some(trade.order.order_ref.clone()),
             side: side.into(),
             offset: offset.into(),
             lots,
@@ -372,58 +356,39 @@ pub fn build(
             contract_multiplier: None,
             signal_id: None,
             theoretical_price: None,
-            actual_commission: record["commission"].as_f64(),
-            commission_currency: record["commission_currency"].as_str().map(str::to_owned),
+            // Exec records commissions in CNY; absent means unknown.
+            actual_commission: trade.commission_cny,
+            commission_currency: trade.commission_cny.map(|_| "CNY".to_owned()),
             theoretical_commission_cny: None,
             price_shortfall_cny: None,
             fee_shortfall_cny: None,
             total_shortfall_cny: None,
             reason: None,
         };
-        let order_key = row
-            .session
-            .as_deref()
-            .zip(row.order_ref.as_deref())
-            .map(|(session, order_ref)| (venue, session, order_ref));
+        let order_key = (
+            venue,
+            trade.order.session.as_str(),
+            trade.order.order_ref.as_str(),
+        );
         let contract = reference
             .as_ref()
             .and_then(|index| index.contracts.get(&(venue, symbol)));
-        let order = order_key.and_then(|key| orders.get(&key));
-        let recorded_multiple = order
-            .filter(|order| {
-                let instrument = &order["instrument"];
-                let request = &order["order"]["request"];
-                instrument["venue"] == venue
-                    && instrument["symbol"] == symbol
-                    && request["venue"] == venue
-                    && request["symbol"] == symbol
-                    && request["side"] == side
-                    && request["offset"] == offset
-            })
-            .and_then(|order| order["instrument"]["contract_multiple"].as_f64())
-            .filter(|multiple| multiple.is_finite() && *multiple > 0.0);
-        row.contract_multiplier =
-            recorded_multiple.or_else(|| contract.map(|c| c.contract_multiplier));
-        row.signal_id = order_key
-            .and_then(|key| links.get(&key))
-            .map(|id| (*id).to_owned());
+        // Records carry no instrument rules; the maintained reference (or the
+        // market-data multiplier filled in later) supplies the multiplier.
+        row.contract_multiplier = contract.map(|c| c.contract_multiplier);
+        row.signal_id = links.get(&order_key).map(|id| (*id).to_owned());
         let compare = || -> std::result::Result<(usize, f64, f64, Option<f64>), String> {
             let pack = pack.ok_or("尚未维护本账户／交易日的参考数据")?;
-            let (Some(session), Some(order_ref)) =
-                (row.session.as_deref(), row.order_ref.as_deref())
-            else {
-                return Err("事实成交缺少完整原生报单身份".into());
-            };
-            let key = (venue, session, order_ref);
-            let signal_id = links.get(&key).ok_or("未提供该报单的显式信号参考关联")?;
+            let signal_id = links
+                .get(&order_key)
+                .ok_or("未提供该报单的显式信号参考关联")?;
             let index = *signal_indices.get(*signal_id).ok_or("信号参考不存在")?;
             let signal = &pack.signals[index];
-            let order = orders.get(&key).ok_or("缺少完整身份对应的委托记录")?;
-            let request = &order["order"]["request"];
-            if request["symbol"] != symbol
-                || request["venue"] != venue
-                || request["side"] != side
-                || request["offset"] != offset
+            let order = orders.get(&order_key).ok_or("缺少完整身份对应的委托记录")?;
+            if order.symbol != symbol
+                || order.venue != venue
+                || order.side != trade.side
+                || order.offset != trade.offset
                 || signal.symbol != symbol
                 || signal.side != side
                 || signal.offset != offset
@@ -431,14 +396,8 @@ pub fn build(
                 return Err("参考信号、完整委托与成交的合约／方向／开平不一致".into());
             }
             let received = reference::timestamp(&signal.received_at).map_err(|e| e.to_string())?;
-            if !order["first_received_us"]
-                .as_i64()
-                .is_some_and(|t| t >= received)
-                || !record["received_us"]
-                    .as_i64()
-                    .is_some_and(|t| t >= received)
-            {
-                return Err("委托或成交的接收时间早于参考信号，或缺少接收时间证据".into());
+            if order.created_us < received || trade.received_us < received {
+                return Err("委托或成交的接收时间早于参考信号".into());
             }
             let theoretical = signals[index].theoretical_price.ok_or_else(|| {
                 signals[index]
@@ -447,17 +406,7 @@ pub fn build(
                     .unwrap_or("理论价格不可用".into())
             })?;
             let contract = contract.ok_or("缺少合约规则")?;
-            for (key, expected) in [
-                ("contract_multiple", contract.contract_multiplier),
-                ("price_tick", contract.price_tick),
-            ] {
-                if let Some(actual) = order["instrument"][key].as_f64() {
-                    if (actual - expected).abs() > expected.abs().max(1.0) * 1e-10 {
-                        return Err("维护的合约规则与委托记录中的合约规则冲突".into());
-                    }
-                }
-            }
-            let shortfall = if side == "buy" { 1.0 } else { -1.0 }
+            let shortfall = if trade.side == Side::Buy { 1.0 } else { -1.0 }
                 * lots as f64
                 * contract.contract_multiplier
                 * (price - theoretical);
@@ -478,22 +427,14 @@ pub fn build(
                     .checked_add(lots)
                     .context("matched lots overflow")?;
                 row.theoretical_price = Some(theoretical);
-                row.contract_multiplier = contract.map(|c| c.contract_multiplier);
                 row.price_shortfall_cny = Some(shortfall);
                 row.theoretical_commission_cny = fee;
-                row.fee_shortfall_cny = fee
-                    .zip(
-                        row.actual_commission
-                            .filter(|_| row.commission_currency.as_deref() == Some("CNY")),
-                    )
-                    .map(|(t, a)| a - t);
+                row.fee_shortfall_cny = fee.zip(row.actual_commission).map(|(t, a)| a - t);
                 row.total_shortfall_cny = row.fee_shortfall_cny.map(|f| shortfall + f);
                 row.reason = if fee.is_none() {
                     Some("缺少对应开平类型的理论手续费规则".into())
                 } else if row.actual_commission.is_none() {
                     Some("事实手续费未报告，保留未知".into())
-                } else if row.commission_currency.as_deref() != Some("CNY") {
-                    Some("事实手续费币种不是已确认的 CNY".into())
                 } else {
                     None
                 };

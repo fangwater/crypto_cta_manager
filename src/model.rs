@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 
+mod extension;
+pub use extension::{EXTENSION_MAGIC, PositionEffect, RecordExtension};
+
 pub const UNIFORM_ORDERS_CF: &str = "uniform_orders";
 pub const TRADE_UPDATES_CF: &str = "trade_updates";
 pub const TRADE_UPDATES_UNMATCHED_CF: &str = "trade_updates_unmatched";
@@ -125,6 +128,29 @@ pub struct OrderUpdateEvent {
 }
 
 pub fn decode_trade_update(key: &[u8], payload: &[u8]) -> Result<TradeUpdateEvent> {
+    let (event, extension) = decode_trade_update_record(key, payload)?;
+    if extension.is_some() {
+        bail!("crypto trade update payload carries a domestic record extension");
+    }
+    Ok(event)
+}
+
+/// Domestic trade update: the crypto layout followed by the record extension.
+pub fn decode_native_trade_update(
+    key: &[u8],
+    payload: &[u8],
+) -> Result<(TradeUpdateEvent, RecordExtension)> {
+    let (event, extension) = decode_trade_update_record(key, payload)?;
+    Ok((
+        event,
+        extension.context("domestic trade update lacks its record extension")?,
+    ))
+}
+
+fn decode_trade_update_record(
+    key: &[u8],
+    payload: &[u8],
+) -> Result<(TradeUpdateEvent, Option<RecordExtension>)> {
     let (record_key, record_ts_us) = decode_timestamp_key(key, "trade update")?;
     let mut decoder = Decoder::new(payload);
     let event = TradeUpdateEvent {
@@ -147,13 +173,16 @@ pub fn decode_trade_update(key: &[u8], payload: &[u8]) -> Result<TradeUpdateEven
             value => bail!("trade update has invalid status-present flag {value}"),
         },
     };
+    let extension = extension::starts(&decoder)
+        .then(|| extension::read(&mut decoder))
+        .transpose()?;
     if decoder.remaining() != 0 {
         bail!(
             "trade update payload has {} trailing bytes",
             decoder.remaining()
         );
     }
-    Ok(event)
+    Ok((event, extension))
 }
 
 pub fn decode_order_update(key: &[u8], payload: &[u8]) -> Result<OrderUpdateEvent> {
@@ -203,6 +232,30 @@ fn decode_timestamp_key(key: &[u8], kind: &str) -> Result<(String, i64)> {
 }
 
 pub fn decode_uniform_order(key: &[u8], payload: &[u8]) -> Result<UniformOrderEvent> {
+    let (event, extension) = decode_uniform_record(key, payload)?;
+    if extension.is_some() {
+        bail!("crypto uniform order payload carries a domestic record extension");
+    }
+    Ok(event)
+}
+
+/// Domestic uniform order: the stored crypto layout (empty BBO spread, absent
+/// signal BBO, fill role) followed by the record extension instead of provenance.
+pub fn decode_native_uniform_order(
+    key: &[u8],
+    payload: &[u8],
+) -> Result<(UniformOrderEvent, RecordExtension)> {
+    let (event, extension) = decode_uniform_record(key, payload)?;
+    Ok((
+        event,
+        extension.context("domestic uniform order lacks its record extension")?,
+    ))
+}
+
+fn decode_uniform_record(
+    key: &[u8],
+    payload: &[u8],
+) -> Result<(UniformOrderEvent, Option<RecordExtension>)> {
     let mut record_key = std::str::from_utf8(key)
         .context("uniform order key is not UTF-8")?
         .to_string();
@@ -261,7 +314,12 @@ pub fn decode_uniform_order(key: &[u8], payload: &[u8]) -> Result<UniformOrderEv
     } else {
         None
     };
-    if decoder.remaining() != 0 {
+    let extension = if fill_liquidity.is_some() && extension::starts(&decoder) {
+        Some(extension::read(&mut decoder)?)
+    } else {
+        None
+    };
+    if extension.is_none() && decoder.remaining() != 0 {
         let size = decoder.u32("uniform provenance size")? as usize;
         anyhow::ensure!(
             (1..=MAX_UNIFORM_PROVENANCE_BYTES).contains(&size),
@@ -290,7 +348,7 @@ pub fn decode_uniform_order(key: &[u8], payload: &[u8]) -> Result<UniformOrderEv
         );
     }
 
-    Ok(UniformOrderEvent {
+    let event = UniformOrderEvent {
         record_key,
         event_ts_us,
         recv_ts_us,
@@ -320,7 +378,8 @@ pub fn decode_uniform_order(key: &[u8], payload: &[u8]) -> Result<UniformOrderEv
         signal_open,
         signal_hedge,
         fill_liquidity,
-    })
+    };
+    Ok((event, extension))
 }
 
 fn decode_signal_bbo(raw: &[u8]) -> Result<(Option<SignalBboLeg>, Option<SignalBboLeg>)> {
@@ -435,6 +494,12 @@ pub fn venue_name(value: u8) -> String {
         13 => "HyperliquidFutures",
         14 => "BinanceCoinFutures",
         15 => "BitgetCoinFutures",
+        64 => "CffexFutures",
+        65 => "ShfeFutures",
+        66 => "IneFutures",
+        67 => "DceFutures",
+        68 => "CzceFutures",
+        69 => "GfexFutures",
         _ => return format!("UNKNOWN({value})"),
     }
     .to_string()
@@ -577,5 +642,70 @@ mod tests {
         let mut truncated = fixture();
         truncated.pop();
         assert!(decode_uniform_order(b"00000000000000001000", &truncated).is_err());
+    }
+
+    fn trade_fixture() -> Vec<u8> {
+        let mut out = Vec::new();
+        for value in [1_000_i64, 1_001, 1_002] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&6_u32.to_le_bytes());
+        out.extend_from_slice(b"rb2701");
+        out.extend_from_slice(&1234_i64.to_le_bytes());
+        out.extend_from_slice(&77_i64.to_le_bytes());
+        out.push(2);
+        out.extend_from_slice(&3100.0_f64.to_le_bytes());
+        out.extend_from_slice(&[0, 65]);
+        out.extend_from_slice(&2.0_f64.to_le_bytes());
+        out.extend_from_slice(&[1, 3]);
+        out
+    }
+
+    fn domestic_extension() -> RecordExtension {
+        RecordExtension {
+            position_effect: Some(PositionEffect::CloseToday),
+            trading_day: Some("20261120".into()),
+            trade_id: Some("  123456".into()),
+            last_filled_quantity: Some(2.0),
+            commission: Some(3.25),
+            client_order_text: Some("ctp:1:2/17".into()),
+        }
+    }
+
+    #[test]
+    fn domestic_extension_follows_both_layouts_and_crypto_decoders_reject_it() {
+        let key = b"00000000000000001000";
+        let mut uniform = fixture();
+        uniform.push(0);
+        domestic_extension().encode(&mut uniform);
+        let (event, extension) = decode_native_uniform_order(key, &uniform).unwrap();
+        assert_eq!(extension, domestic_extension());
+        assert_eq!(event.fill_liquidity, Some(FillLiquidity::Unknown));
+        assert_eq!(event.record_key, "00000000000000001000");
+        assert!(decode_uniform_order(key, &uniform).is_err());
+        let mut crypto = fixture();
+        crypto.push(0);
+        assert!(decode_native_uniform_order(key, &crypto).is_err());
+        assert!(decode_uniform_order(key, &crypto).is_ok());
+
+        let mut trade = trade_fixture();
+        assert_eq!(decode_trade_update(key, &trade).unwrap().venue_code, 65);
+        assert!(decode_native_trade_update(key, &trade).is_err());
+        let partial = RecordExtension {
+            trade_id: Some("9".into()),
+            ..Default::default()
+        };
+        partial.encode(&mut trade);
+        let (event, extension) = decode_native_trade_update(key, &trade).unwrap();
+        assert_eq!(extension, partial);
+        assert_eq!(event.status_code, Some(3));
+        assert!(decode_trade_update(key, &trade).is_err());
+        trade.push(0);
+        assert!(decode_native_trade_update(key, &trade).is_err());
+        let mut unknown = trade_fixture();
+        unknown.extend_from_slice(&EXTENSION_MAGIC.to_le_bytes());
+        unknown.push(1 << 6);
+        assert!(decode_native_trade_update(key, &unknown).is_err());
+        assert_eq!(venue_name(67), "DceFutures");
     }
 }

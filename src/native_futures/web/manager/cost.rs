@@ -189,13 +189,12 @@ fn retain_relevant_signals(
     let order_keys: BTreeSet<_> = facts
         .fills
         .iter()
-        .filter_map(|row| {
-            let fill = &row["fill"];
-            Some((
-                fill["identity"]["venue"].as_str()?,
-                fill["order_key"]["session"].as_str()?,
-                fill["order_key"]["order_ref"].as_str()?,
-            ))
+        .map(|trade| {
+            (
+                trade.venue.as_str(),
+                trade.order.session.as_str(),
+                trade.order.order_ref.as_str(),
+            )
         })
         .collect();
     let linked_signals: BTreeSet<_> = pack

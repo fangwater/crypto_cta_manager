@@ -16,30 +16,32 @@ mod checkpoint;
 mod wal;
 pub use checkpoint::adopt_source_checkpoint;
 
-const HEAD: &[u8] = b"meta/head";
-const PENDING: &[u8] = b"meta/pending";
+// v3: the two append-only domestic logs. Older export state is not reused; the
+// cutover re-captures the source into a fresh replica.
+const HEAD: &[u8] = b"meta/head/v3";
+const PENDING: &[u8] = b"meta/pending/v3";
 #[derive(Clone, Deserialize, Serialize)]
 struct Head {
     store_id: String,
     cursor: u64,
-    counts: [u64; 3],
+    counts: [u64; CF_COUNT],
     captured_at_us: i64,
     #[serde(default)]
     source_sequence: Option<u64>,
     #[serde(default)]
-    source_cf_ids: Option<[u32; 3]>,
+    source_cf_ids: Option<[u32; CF_COUNT]>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 struct Capture {
     after: u64,
     until: u64,
-    counts: [u64; 3],
+    counts: [u64; CF_COUNT],
     captured_at_us: i64,
     ready: bool,
     #[serde(default)]
     source_sequence: Option<u64>,
     #[serde(default)]
-    source_cf_ids: Option<[u32; 3]>,
+    source_cf_ids: Option<[u32; CF_COUNT]>,
 }
 
 #[derive(Debug)]
@@ -159,7 +161,7 @@ fn capture(db: &DB, source: &Source, secondary: &FsPath, journal_path: &FsPath) 
         let head = Head {
             store_id: store_id.clone(),
             cursor: 0,
-            counts: [0; 3],
+            counts: [0; CF_COUNT],
             captured_at_us: 0,
             source_sequence: None,
             source_cf_ids: None,
@@ -189,7 +191,7 @@ fn capture(db: &DB, source: &Source, secondary: &FsPath, journal_path: &FsPath) 
     let mut plan = Capture {
         after: head.cursor,
         until: head.cursor,
-        counts: [0; 3],
+        counts: [0; CF_COUNT],
         captured_at_us: crate::native_futures::now_us(),
         ready: false,
         source_sequence: Some(source_sequence),
@@ -209,7 +211,7 @@ fn capture(db: &DB, source: &Source, secondary: &FsPath, journal_path: &FsPath) 
         // complete fixed source view. Its published hash index is unchanged.
         recover(db)?;
         plan.until = head.cursor;
-        plan.counts = [0; 3];
+        plan.counts = [0; CF_COUNT];
         let mut start = WriteBatch::default();
         start.put(PENDING, serde_json::to_vec(&plan)?);
         write(db, start)?;
@@ -233,7 +235,7 @@ fn capture(db: &DB, source: &Source, secondary: &FsPath, journal_path: &FsPath) 
 fn capture_full(db: &DB, view: &DB, head: &Head, plan: &mut Capture) -> Result<()> {
     let mut batch = WriteBatch::default();
     let mut bytes = 0;
-    let mut new_keys = [0_u64; 3];
+    let mut new_keys = [0_u64; CF_COUNT];
     let mut previous = hash_at(db, head.cursor)?;
     for cf in NativeCf::ALL {
         for item in view.iterator_cf(
@@ -253,8 +255,8 @@ fn capture_full(db: &DB, view: &DB, head: &Head, plan: &mut Capture) -> Result<(
             if old.is_none() {
                 new_keys[cf.index()] += 1;
             }
-            if old.is_some() && cf == NativeCf::Events {
-                return conflict("immutable native evidence was modified");
+            if old.is_some() {
+                return conflict("append-only native record was modified");
             }
             plan.until = plan
                 .until
@@ -326,7 +328,7 @@ fn page_with_db(config: &Config, source_id: &str, request: Request, db: &DB) -> 
         .find(|s| s.id == source_id && s.enabled && s.sync.is_none())
         .context("export source unavailable")?;
     let path = resolved(&settings.journal_root)?.join(source_id);
-    let existing = get::<Head>(&db, HEAD)?;
+    let existing = get::<Head>(db, HEAD)?;
     if request.after > existing.as_ref().map_or(0, |h| h.cursor)
         || request
             .store_id
@@ -335,15 +337,15 @@ fn page_with_db(config: &Config, source_id: &str, request: Request, db: &DB) -> 
     {
         return conflict("replication source or journal was reset or rolled back");
     }
-    if hash_at(&db, request.after)? != request.after_sha256 {
+    if hash_at(db, request.after)? != request.after_sha256 {
         return conflict("replication checkpoint hash mismatch");
     }
     if request.until.is_none() {
-        capture(&db, source, &config.secondary_root.join(source_id), &path)?;
+        capture(db, source, &config.secondary_root.join(source_id), &path)?;
     } else {
-        recover(&db)?;
+        recover(db)?;
     }
-    let head = get::<Head>(&db, HEAD)?.context("no captured export head")?;
+    let head = get::<Head>(db, HEAD)?.context("no captured export head")?;
     if request
         .store_id
         .as_ref()
@@ -355,7 +357,7 @@ fn page_with_db(config: &Config, source_id: &str, request: Request, db: &DB) -> 
     if until > head.cursor || request.after > until {
         return conflict("replication cursor exceeds captured source head");
     }
-    let cut = get::<Capture>(&db, &seq_key(b'B', until))?
+    let cut = get::<Capture>(db, &seq_key(b'B', until))?
         .context("requested replication cut is not available")?;
     let mut changes = vec![];
     let mut next = request.after;
@@ -402,7 +404,7 @@ fn page_with_db(config: &Config, source_id: &str, request: Request, db: &DB) -> 
         next,
         until,
         next_sha256,
-        until_sha256: hash_at(&db, until)?,
+        until_sha256: hash_at(db, until)?,
         captured_at_us: cut.captured_at_us,
         changes,
     })

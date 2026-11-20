@@ -1,17 +1,17 @@
 use super::{
     config::{Config, Source},
+    nav::{Offset, Side},
+    netting::UNALLOCATED,
     reader,
+    records::{self, fixture},
     state::{self, OrderPhase},
 };
-use rocksdb::{ColumnFamilyDescriptor, DB, Options};
-use serde_json::{Value, json};
+use rocksdb::DB;
+use serde_json::json;
 
-fn fixture() -> Value {
-    serde_json::from_str(include_str!(
-        "../../tests/fixtures/yida_native_records.json"
-    ))
-    .unwrap()
-}
+const DAY: &str = "20261112";
+const BASE: i64 = 1_794_877_200_000_000;
+
 fn source(path: &std::path::Path) -> Source {
     Source {
         id: "sim01".into(),
@@ -23,151 +23,166 @@ fn source(path: &std::path::Path) -> Source {
     }
 }
 fn db(path: &std::path::Path) -> DB {
-    let mut o = Options::default();
-    o.create_if_missing(true);
-    o.create_missing_column_families(true);
-    DB::open_cf_descriptors(
-        &o,
-        path,
-        ["cn_trading_events", "cn_uniform_orders", "cn_trade_facts"]
-            .into_iter()
-            .map(|cf| ColumnFamilyDescriptor::new(cf, Options::default())),
-    )
-    .unwrap()
+    fixture::open(path)
 }
-fn put(db: &DB, cf: &str, key: &str, value: &Value) {
-    db.put_cf(
-        db.cf_handle(cf).unwrap(),
-        key,
-        serde_json::to_vec(value).unwrap(),
+fn order(market: &str, session: &str, order_ref: &str) -> fixture::Order {
+    fixture::Order::new(
+        market,
+        DAY,
+        session,
+        order_ref,
+        Side::Sell,
+        Offset::CloseYesterday,
+        2,
+        6000.0,
     )
-    .unwrap();
+}
+fn yida() -> fixture::Order {
+    order("SHFE:cu2612", "yida:20261112:group:1", "10")
+}
+fn fill(trade_id: &str, lots: i64, commission: Option<f64>) -> fixture::Fill {
+    fixture::Fill {
+        trade_id: trade_id.into(),
+        lots,
+        price: 6000.0,
+        commission,
+        order_id: 1234,
+    }
+}
+fn lifecycle(order: &fixture::Order, status: u8, at: i64) -> records::Order {
+    let records::Uniform::Order(order) = records::decode_uniform(
+        records::key(at).as_bytes(),
+        &order.lifecycle(status, "exec", BASE, at),
+    )
+    .unwrap() else {
+        panic!("lifecycle record")
+    };
+    order
 }
 
 #[test]
-fn cost_window_uses_inclusive_receipt_bounds_and_complete_native_order_key() {
+fn cost_window_uses_inclusive_receipt_bounds_and_joins_orders_by_client_order_id() {
     let tmp = tempfile::tempdir().unwrap();
     let primary = tmp.path().join("exec");
     let db = db(&primary);
-    let fixture = fixture();
-    let order = &fixture["order"];
-    let mut fill = fixture["fill"].clone();
-    let day = order["identity"]["trading_day"].as_str().unwrap();
-    fill["fill"]["order_key"] = order["identity"]["native"].clone();
-    fill["received_us"] = json!(101);
-    put(&db, "cn_trade_facts", "in-range", &fill);
-    fill["fill"]["identity"]["trade_id"] = json!("outside");
-    fill["received_us"] = json!(102);
-    put(&db, "cn_trade_facts", "outside", &fill);
-    let order_key = super::evidence::NativeOrderIdentity::for_fill(&fill["fill"])
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        serde_json::to_string(&order_key).unwrap(),
-        r#"{"trading_day":"20261112","venue":"SHFE","native":{"session":"yida:20261112:group:1","order_ref":"10"}}"#
-    );
-    put(
+    let placed = yida();
+    let other = order("SHFE:cu2612", "another-session", "10");
+    fixture::put_order(
         &db,
-        "cn_uniform_orders",
-        &serde_json::to_string(&order_key).unwrap(),
-        order,
+        BASE,
+        &placed.lifecycle(fixture::NEW, "exec", BASE, BASE),
     );
-    let mut wrong_order = order.clone();
-    wrong_order["identity"]["native"]["session"] = json!("another-session");
-    put(&db, "cn_uniform_orders", "wrong-session", &wrong_order);
+    fixture::put_order(
+        &db,
+        BASE + 1,
+        &other.lifecycle(fixture::NEW, "exec", BASE, BASE + 1),
+    );
+    fixture::put_trade(
+        &db,
+        BASE + 101,
+        &placed.trade(&fill("in-range", 1, None), 1, None, BASE + 101),
+    );
+    fixture::put_trade(
+        &db,
+        BASE + 102,
+        &placed.trade(&fill("outside", 1, None), 2, None, BASE + 102),
+    );
+    // The latest lifecycle record is the order's current state.
+    fixture::put_order(
+        &db,
+        BASE + 103,
+        &placed.lifecycle(fixture::FILLED, "exec", BASE, BASE + 103),
+    );
 
-    let window = reader::read_cost_window(&source(&primary), &db, 101, 101).unwrap();
+    let window = reader::read_cost_window(&source(&primary), &db, BASE + 101, BASE + 101).unwrap();
     assert_eq!(window.days.len(), 1);
-    let facts = &window.days[day];
+    let facts = &window.days[DAY];
     assert_eq!(facts.fills.len(), 1);
-    assert_eq!(facts.orders, vec![order.clone()]);
+    assert_eq!(facts.fills[0].trade_id, "in-range");
+    assert_eq!(facts.orders.len(), 1);
+    let joined = &facts.orders[0];
+    assert_eq!(joined.order.order.session, "yida:20261112:group:1");
+    assert_eq!(joined.order.key_us, BASE + 103);
+    // Only the window's own fills join; the order still awaits its other lot.
+    assert_eq!(joined.filled_lots, 1);
+    assert_eq!(joined.phase, OrderPhase::Settling);
+
+    let day = reader::read_cost_facts_from_db(&source(&primary), &db, DAY).unwrap();
+    assert_eq!(day.fills.len(), 2);
+    assert_eq!(day.orders.len(), 2);
+    assert!(
+        day.orders
+            .iter()
+            .any(|o| o.order.order.session == "yida:20261112:group:1"
+                && o.phase == OrderPhase::Filled)
+    );
 }
 
 #[test]
-fn distinguishes_submission_cancellation_and_factual_settlement() {
-    let mut record = fixture()["order"].clone();
-    record["order"]["status"] = json!("working");
-    record["order"]["filled"] = json!(0);
-    record["order"]["reported_filled"] = json!(0);
-    record["order"]["cancelled"] = json!(0);
-    record["send_state"] = json!("submitted_locally");
-    record["order"]["cancel_pending"] = json!(true);
+fn order_phase_joins_factual_fills_and_never_invents_lots() {
+    let placed = yida();
+    let observe =
+        |status, filled| state::observe(lifecycle(&placed, status, BASE), filled).unwrap();
+    assert_eq!(observe(fixture::NEW, 0).phase, OrderPhase::Working);
+    assert_eq!(observe(fixture::NEW, 1).phase, OrderPhase::PartiallyFilled);
     assert_eq!(
-        state::observe(record.clone()).unwrap().phase,
-        OrderPhase::CancelPending
+        observe(fixture::PARTIALLY_FILLED, 1).phase,
+        OrderPhase::PartiallyFilled
     );
-    record["send_state"] = json!("uncertain");
-    assert_eq!(
-        state::observe(record.clone()).unwrap().phase,
-        OrderPhase::Uncertain
-    );
-    record["send_state"] = json!("observed");
-    record["order"]["status"] = json!("filled");
-    record["order"]["reported_filled"] = json!(1);
-    let before = state::observe(record.clone()).unwrap();
-    assert_eq!(before.phase, OrderPhase::Settling);
-    assert!(before.exchange_terminal && !before.facts_complete);
-    record["order"]["filled"] = json!(1);
-    assert_eq!(state::observe(record).unwrap().phase, OrderPhase::Filled);
+    let settling = observe(fixture::FILLED, 1);
+    assert_eq!(settling.phase, OrderPhase::Settling);
+    assert!(settling.exchange_terminal && !settling.facts_complete);
+    assert_eq!(observe(fixture::FILLED, 2).phase, OrderPhase::Filled);
+    assert_eq!(observe(fixture::CANCELED, 1).phase, OrderPhase::Cancelled);
+    assert_eq!(observe(fixture::EXPIRED, 0).phase, OrderPhase::Rejected);
+    assert!(state::observe(lifecycle(&placed, fixture::FILLED, BASE), 3).is_err());
 }
 
 #[test]
-fn partial_cancel_waits_for_actual_fills_and_never_invents_the_remaining_lot() {
-    let mut record = fixture()["order"].clone();
-    record["order"]["request"]["lots"] = json!(2);
-    record["order"]["status"] = json!("cancelled");
-    record["order"]["filled"] = json!(0);
-    record["order"]["reported_filled"] = json!(1);
-    record["order"]["cancelled"] = json!(1);
-    assert_eq!(
-        state::observe(record.clone()).unwrap().phase,
-        OrderPhase::Settling
-    );
-    record["order"]["filled"] = json!(1);
-    assert_eq!(
-        state::observe(record.clone()).unwrap().phase,
-        OrderPhase::Cancelled
-    );
-    record["order"]["filled"] = json!(2);
-    assert!(state::observe(record).is_err());
-}
-
-#[test]
-fn live_primary_remains_writable_and_late_fills_mark_snapshot_lag() {
+fn live_primary_remains_writable_and_recent_rows_do_not_limit_cost_facts() {
     let tmp = tempfile::tempdir().unwrap();
     let primary = tmp.path().join("exec");
     let secondary = tmp.path().join("secondary");
     let db = db(&primary);
-    let f = fixture();
-    put(&db, "cn_uniform_orders", "one", &f["order"]);
-    put(&db, "cn_trade_facts", "one", &f["fill"]);
-    let mut event = f["state"].clone();
-    event["sequence"] = json!(100);
-    event["received_us"] = json!(super::now_us());
-    put(&db, "cn_trading_events", "00000000000000000100", &event);
-    let view = reader::read(&source(&primary), &secondary, 100, 30).unwrap();
-    assert_eq!(view.total_orders, 1);
-    assert_eq!(view.total_fills, 1);
-    assert_eq!(view.status, "observing");
-    assert!(view.reported_can_trade.is_none());
-    assert_eq!(
-        view.positions,
-        f["state"]["value"]["state"]["positions"]
-            .as_array()
-            .unwrap()
-            .clone()
+    let placed = yida();
+    let first = fill("000000008888", 1, Some(1.5));
+    fixture::put_order(
+        &db,
+        BASE,
+        &placed.lifecycle(fixture::NEW, "exec", BASE, BASE),
     );
-    assert!(!view.positions_may_lag);
-    let mut fill = f["fill"].clone();
-    fill["evidence_seq"] = json!(101);
-    fill["fill"]["identity"]["trade_id"] = json!("18446744073709551614");
-    put(&db, "cn_trade_facts", "late", &fill);
+    fixture::put_trade(&db, BASE + 1, &placed.trade(&first, 1, None, BASE + 1));
+    fixture::put_order(
+        &db,
+        BASE + 1,
+        &placed.share(
+            &first,
+            UNALLOCATED,
+            1,
+            Some(1.5),
+            fixture::PARTIALLY_FILLED,
+            BASE + 1,
+        ),
+    );
+    let view = reader::read(&source(&primary), &secondary, 100, 30).unwrap();
+    assert_eq!(view.total_orders, 1, "fill shares are not order events");
+    assert_eq!(view.total_fills, 1);
+    assert_eq!(view.last_record_us, Some(BASE + 1));
+    assert!(
+        view.through_us
+            .is_some_and(|at| at >= view.read_at_us - 1_000_000)
+    );
+    assert_eq!(view.orders[0].phase, OrderPhase::PartiallyFilled);
+    assert_eq!(view.fills[0].commission_cny, Some(1.5));
+
+    let late = fill("18446744073709551614", 1, None);
+    fixture::put_trade(&db, BASE + 2, &placed.trade(&late, 2, None, BASE + 2));
     let after = reader::read(&source(&primary), &secondary, 1, 30).unwrap();
     assert_eq!(after.total_fills, 2);
     assert_eq!(after.fills.len(), 1);
-    assert!(after.positions_may_lag);
-    assert_eq!(after.positions, view.positions);
-    let all_facts = reader::read_cost_facts(&source(&primary), &secondary, "20261112").unwrap();
+    assert_eq!(after.fills[0].trade_id, "18446744073709551614");
+    assert_eq!(after.orders[0].filled_lots, 2);
+    let all_facts = reader::read_cost_facts(&source(&primary), &secondary, DAY).unwrap();
     assert_eq!(
         all_facts.fills.len(),
         2,
@@ -178,74 +193,82 @@ fn live_primary_remains_writable_and_late_fills_mark_snapshot_lag() {
 }
 
 #[test]
-fn new_runtime_and_stopped_process_do_not_claim_current_trading_readiness() {
+fn preserves_market_group_and_native_order_identities() {
     let tmp = tempfile::tempdir().unwrap();
     let primary = tmp.path().join("exec");
     let db = db(&primary);
-    let f = fixture();
-    put(&db, "cn_trading_events", "001", &f["state"]);
-    put(
-        &db,
-        "cn_trading_events",
-        "002",
-        &json!({"sequence":1000,"received_us":super::now_us(),"projection_error":null,"value":{"type":"runtime_start","execute":false}}),
-    );
-    let view = reader::read(&source(&primary), &tmp.path().join("secondary"), 5, 30).unwrap();
-    assert_eq!(view.status, "recovering");
-    put(
-        &db,
-        "cn_trading_events",
-        "003",
-        &json!({"sequence":1001,"received_us":super::now_us(),"projection_error":null,"value":{"type":"runtime_stopped"}}),
-    );
-    assert_eq!(
-        reader::read(&source(&primary), &tmp.path().join("secondary"), 5, 30)
-            .unwrap()
-            .status,
-        "stopped"
-    );
-}
-
-#[test]
-fn preserves_market_group_and_64_bit_order_identities() {
-    let tmp = tempfile::tempdir().unwrap();
-    let primary = tmp.path().join("exec");
-    let db = db(&primary);
-    let f = fixture();
-    for (key, venue, group) in [("one", "SHFE", 1), ("two", "SHFE", 2), ("three", "INE", 1)] {
-        let mut r = f["order"].clone();
-        r["identity"]["venue"] = json!(venue);
-        r["identity"]["native"]["session"] = json!(format!("yida:20261112:group:{group}"));
-        r["order"]["system_id"] = json!("18446744073709551614");
-        put(&db, "cn_uniform_orders", key, &r);
+    for (n, (market, group)) in [("SHFE:cu2612", 1), ("SHFE:cu2612", 2), ("INE:sc2701", 1)]
+        .into_iter()
+        .enumerate()
+    {
+        let placed = order(
+            market,
+            &format!("yida:20261112:group:{group}"),
+            "18446744073709551614",
+        );
+        fixture::put_order(
+            &db,
+            BASE + n as i64,
+            &placed.lifecycle(fixture::NEW, "exec", BASE, BASE + n as i64),
+        );
     }
     let s = reader::read(&source(&primary), &tmp.path().join("secondary"), 5, 30).unwrap();
     assert_eq!(s.orders.len(), 3);
     assert!(
         s.orders
             .iter()
-            .all(|o| o.record["order"]["system_id"] == "18446744073709551614")
+            .all(|o| o.order.order.order_ref == "18446744073709551614")
     );
+    let ids: std::collections::BTreeSet<_> =
+        s.orders.iter().map(|o| o.order.client_order_id).collect();
+    assert_eq!(ids.len(), 3);
 }
 
 #[test]
-fn malformed_evidence_and_projection_faults_are_visible() {
+fn malformed_records_and_other_store_layouts_are_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let primary = tmp.path().join("exec");
     let db = db(&primary);
-    let mut event = fixture()["state"].clone();
-    event["projection_error"] = json!("conflicting trade fact");
-    put(&db, "cn_trading_events", "001", &event);
-    let s = reader::read(&source(&primary), &tmp.path().join("secondary"), 5, 30).unwrap();
-    assert_eq!(s.projection_errors, 1);
-    assert_eq!(s.status, "blocked");
     db.put_cf(
-        db.cf_handle("cn_trading_events").unwrap(),
-        "002",
-        b"bad-json",
+        db.cf_handle(records::TRADES).unwrap(),
+        records::key(BASE),
+        b"{\"json\":true}",
     )
     .unwrap();
     assert!(reader::read(&source(&primary), &tmp.path().join("secondary"), 5, 30).is_err());
+
+    let legacy = tmp.path().join("legacy");
+    let mut options = rocksdb::Options::default();
+    options.create_if_missing(true);
+    options.create_missing_column_families(true);
+    drop(
+        DB::open_cf(
+            &options,
+            &legacy,
+            ["cn_trading_events", records::ORDERS, records::TRADES],
+        )
+        .unwrap(),
+    );
+    assert!(
+        reader::read(
+            &source(&legacy),
+            &tmp.path().join("legacy-secondary"),
+            5,
+            30
+        )
+        .is_err()
+    );
+    let missing = tmp.path().join("missing");
+    drop(DB::open_cf(&options, &missing, [records::ORDERS]).unwrap());
+    assert!(
+        reader::read(
+            &source(&missing),
+            &tmp.path().join("missing-secondary"),
+            5,
+            30
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -272,7 +295,7 @@ fn rejects_overlapping_stores_before_creating_a_secondary() {
         recent_rows: 10,
         source_viewers: Default::default(),
         execution_monitor_urls: Default::default(),
-        ctaker_plan_readers: Default::default(),
+        exec_plan_readers: Default::default(),
         sources: vec![source(&primary)],
     };
     assert!(config.validate().is_ok());
@@ -333,49 +356,6 @@ fn native_strategy_targets_keep_contract_case_and_integer_lots() {
 use super::web;
 
 #[test]
-fn later_block_disconnect_and_transport_events_override_a_ready_snapshot() {
-    let tmp = tempfile::tempdir().unwrap();
-    let primary = tmp.path().join("exec");
-    let db = db(&primary);
-    put(&db, "cn_trading_events", "001", &fixture()["state"]);
-    put(
-        &db,
-        "cn_trading_events",
-        "002",
-        &json!({"sequence":1000,"received_us":super::now_us(),"projection_error":null,"value":{"type":"trading_blocked","error":"cancel response unknown; reservation retained"}}),
-    );
-    let view = reader::read(&source(&primary), &tmp.path().join("secondary"), 5, 30).unwrap();
-    assert!(view.snapshot_ready);
-    assert_eq!(view.status, "blocked");
-    assert!(view.reason.contains("reservation retained"));
-    put(
-        &db,
-        "cn_trading_events",
-        "003",
-        &json!({"sequence":1001,"received_us":super::now_us(),"projection_error":null,"value":{"type":"yida_event","event":{"kind":2,"replay":0}}}),
-    );
-    assert_eq!(
-        reader::read(&source(&primary), &tmp.path().join("secondary"), 5, 30)
-            .unwrap()
-            .status,
-        "disconnected"
-    );
-    let mut state = fixture()["state"].clone();
-    state["sequence"] = json!(1002);
-    state["received_us"] = json!(super::now_us());
-    put(&db, "cn_trading_events", "004", &state);
-    put(
-        &db,
-        "cn_trading_events",
-        "005",
-        &json!({"sequence":1003,"received_us":super::now_us(),"projection_error":null,"value":{"type":"transport_status","ready":false}}),
-    );
-    let view = reader::read(&source(&primary), &tmp.path().join("secondary"), 5, 30).unwrap();
-    assert_eq!(view.status, "transport_unavailable");
-    assert_eq!(view.transport_ready, Some(false));
-}
-
-#[test]
 fn ctp_sources_are_explicit_and_reject_unknown_adapters() {
     let temp = tempfile::tempdir().unwrap();
     let mut config: Config =
@@ -397,508 +377,158 @@ fn ctp_reads_six_venues_without_changing_native_identities_offsets_or_unknown_fe
     let db = db(&primary);
     let mut source = source(&primary);
     source.adapter = "ctp".into();
-    let fixture: Value =
-        serde_json::from_str(include_str!("../../tests/fixtures/ctp_native_records.json")).unwrap();
-    let mut state = fixture["state"].clone();
-    state["received_us"] = json!(super::now_us());
-    let mut positions = vec![];
-    for (venue, symbol) in [
-        ("SHFE", "sn2612"),
-        ("INE", "sc2701"),
-        ("DCE", "m2701"),
-        ("CZCE", "SR701"),
-        ("CFFEX", "IF2612"),
-        ("GFEX", "lc2701"),
-    ] {
-        let mut position = state["value"]["state"]["positions"][0].clone();
-        position["venue"] = json!(venue);
-        position["symbol"] = json!(symbol);
-        positions.push(position);
-        let mut order = fixture["order"].clone();
-        order["identity"]["venue"] = json!(venue);
-        order["order"]["request"]["venue"] = json!(venue);
-        order["order"]["request"]["symbol"] = json!(symbol);
-        put(&db, "cn_uniform_orders", venue, &order);
-        let mut fill = fixture["fill"].clone();
-        fill["fill"]["identity"]["venue"] = json!(venue);
-        fill["fill"]["identity"]["symbol"] = json!(symbol);
-        put(&db, "cn_trade_facts", venue, &fill);
-    }
-    state["value"]["state"]["positions"] = json!(positions);
-    put(&db, "cn_trading_events", "001", &state);
-    let mut other_session = fixture["order"].clone();
-    other_session["identity"]["native"]["session"] = json!("ctp:7:12");
-    other_session["order"]["key"]["session"] = json!("ctp:7:12");
-    put(&db, "cn_uniform_orders", "other-session", &other_session);
-    let view = reader::read(&source, &temp.path().join("secondary"), 20, 30).unwrap();
-    assert_eq!(view.status, "observing");
-    assert_eq!(view.positions, positions);
-    assert_eq!(view.total_orders, 7);
-    assert_eq!(view.total_fills, 6);
-    assert_eq!(view.trading_day.as_deref(), Some("20261117"));
-    for fill in &view.fills {
-        assert!(fill["commission"].is_null());
-        assert!(fill["commission_currency"].is_null());
-        assert!(fill["native_time"].is_null());
-        assert_eq!(
-            fill["fill"]["order_key"],
-            fixture["fill"]["fill"]["order_key"]
+    let markets = [
+        "SHFE:sn2612",
+        "INE:sc2701",
+        "DCE:m2701",
+        "CZCE:SR701",
+        "CFFEX:IF2612",
+        "GFEX:lc2701",
+    ];
+    for (n, market) in markets.into_iter().enumerate() {
+        let at = BASE + 10 * n as i64;
+        let placed = order(market, "ctp:7:11", "000000000042");
+        let fact = fill("000000008888", 2, None);
+        fixture::put_order(&db, at, &placed.lifecycle(fixture::NEW, "observed", at, at));
+        fixture::put_trade(
+            &db,
+            at + 1,
+            &placed.trade(&fact, 2, Some(fixture::FILLED), at + 1),
         );
-        assert_eq!(fill["fill"]["identity"]["trade_id"], "000000008888");
-        assert_eq!(fill["fill"]["system_id"], "000000001234");
-        assert_eq!(fill["fill"]["offset"], "close_yesterday");
-        assert_eq!(fill["fill"]["lots"], 2);
+        fixture::put_order(
+            &db,
+            at + 2,
+            &placed.lifecycle(fixture::FILLED, "observed", at, at + 2),
+        );
     }
-    assert!(
-        view.orders
+    let other = order("SHFE:sn2612", "ctp:7:12", "000000000042");
+    fixture::put_order(
+        &db,
+        BASE + 100,
+        &other.lifecycle(fixture::NEW, "observed", BASE, BASE + 100),
+    );
+    let view = reader::read(&source, &temp.path().join("secondary"), 20, 30).unwrap();
+    assert_eq!(view.total_orders, 13);
+    assert_eq!(view.total_fills, 6);
+    assert_eq!(view.orders.len(), 7);
+    for fill in &view.fills {
+        assert!(fill.commission_cny.is_none());
+        assert_eq!(fill.order.session, "ctp:7:11");
+        assert_eq!(fill.order.order_ref, "000000000042");
+        assert_eq!(fill.trade_id, "000000008888");
+        assert_eq!(fill.order_id, 1234);
+        assert_eq!(fill.offset, Offset::CloseYesterday);
+        assert_eq!(fill.lots, 2);
+    }
+    assert_eq!(
+        view.fills
             .iter()
-            .all(|order| order.phase == OrderPhase::Filled)
+            .map(|fill| fill.market())
+            .collect::<std::collections::BTreeSet<_>>(),
+        markets.iter().map(|m| m.to_string()).collect()
     );
     assert_eq!(
         view.orders
             .iter()
-            .filter(|order| order.record["identity"]["native"]["session"] == "ctp:7:12")
+            .filter(|order| order.phase == OrderPhase::Filled)
+            .count(),
+        6
+    );
+    assert_eq!(
+        view.orders
+            .iter()
+            .filter(|order| order.order.order.session == "ctp:7:12")
             .count(),
         1
     );
-    let facts =
-        reader::read_cost_facts(&source, &temp.path().join("cost-secondary"), "20261117").unwrap();
+    let facts = reader::read_cost_facts(&source, &temp.path().join("cost-secondary"), DAY).unwrap();
     assert_eq!(facts.fills.len(), 6);
     assert_eq!(facts.orders.len(), 7);
 }
 
 #[test]
-fn ctp_connection_recovery_and_query_events_follow_the_ctp_contract() {
-    let temp = tempfile::tempdir().unwrap();
-    let primary = temp.path().join("execution");
-    let db = db(&primary);
-    let mut source = source(&primary);
-    source.adapter = "ctp".into();
-    let fixture: Value =
-        serde_json::from_str(include_str!("../../tests/fixtures/ctp_native_records.json")).unwrap();
-    // 14 is QUERY_TRADE; 16/error=90 is a retriable response, not Yida fatal.
-    for (index, (value, expected)) in [
-        (json!({"type":"runtime_start"}), "recovering"),
-        (fixture["state"]["value"].clone(), "observing"),
-        (json!({"type":"ctp_event","event":{"kind":14}}), "observing"),
-        (
-            json!({"type":"ctp_event","event":{"kind":16,"error_code":90}}),
-            "observing",
-        ),
-        (
-            json!({"type":"ctp_event","event":{"kind":2}}),
-            "disconnected",
-        ),
-        (json!({"type":"ctp_event","event":{"kind":1}}), "recovering"),
-        (
-            json!({"type":"recovery_checkpoint","state":fixture["state"]["value"]["state"]}),
-            "recovering",
-        ),
-        (fixture["state"]["value"].clone(), "observing"),
-        (
-            json!({"type":"restart_required","reason":"transport or control response timeout"}),
-            "blocked",
-        ),
-        (json!({"type":"runtime_stopped"}), "stopped"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        put(
-            &db,
-            "cn_trading_events",
-            &format!("{index:020}"),
-            &json!({"sequence":index + 1,"received_us":super::now_us(),"projection_error":null,"value":value}),
-        );
-        let view = reader::read(&source, &temp.path().join("secondary"), 10, 30).unwrap();
-        assert_eq!(view.status, expected, "event {index}");
-        if index == 6 {
-            assert_eq!(view.state_observed_us, last_reconciled_time(&db));
-        }
-        if index == 8 {
-            assert!(view.reason.contains("timeout"));
-        }
-    }
-}
-
-fn last_reconciled_time(db: &DB) -> Option<i64> {
-    let bytes = db
-        .get_cf(
-            db.cf_handle("cn_trading_events").unwrap(),
-            format!("{:020}", 1),
-        )
-        .unwrap()
-        .unwrap();
-    serde_json::from_slice::<Value>(&bytes).unwrap()["received_us"].as_i64()
-}
-
-#[test]
-fn cached_observation_matches_cold_reads_and_updates_only_changed_evidence_and_rows() {
+fn cached_observation_matches_cold_reads_and_decodes_only_appended_records() {
     let tmp = tempfile::tempdir().unwrap();
     let primary = tmp.path().join("exec");
     let db = db(&primary);
     let source = source(&primary);
-    let f = fixture();
-    let mut state = f["state"].clone();
-    state["received_us"] = json!(super::now_us());
-    put(&db, "cn_trading_events", "001", &state);
-    put(&db, "cn_uniform_orders", "one", &f["order"]);
-    put(&db, "cn_trade_facts", "one", &f["fill"]);
+    let placed = yida();
+    fixture::put_order(
+        &db,
+        BASE,
+        &placed.lifecycle(fixture::NEW, "exec", BASE, BASE),
+    );
+    fixture::put_trade(
+        &db,
+        BASE + 1,
+        &placed.trade(&fill("one", 1, None), 1, None, BASE + 1),
+    );
     let pool =
         crate::rocks_source::ReaderPool::new(&tmp.path().join("pooled"), &[&primary]).unwrap();
     let mut cache = reader::Cache::default();
     let mut read =
         || reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
     let first = read();
-    assert_eq!(first.status, "observing");
+    assert_eq!((first.total_orders, first.total_fills), (1, 1));
     let unchanged = read();
-    assert_eq!(unchanged.total_fills, 1);
-    assert_eq!(unchanged.nav_evidence_revision, first.nav_evidence_revision);
-    put(
+    assert_eq!(unchanged.last_record_us, first.last_record_us);
+    fixture::put_trade(
         &db,
-        "cn_trading_events",
-        "002",
-        &json!({"sequence":101,"received_us":super::now_us(),"value":{"type":"market_tick","error":7,"reason":false,"payload":[1,2,3]}}),
+        BASE + 2,
+        &placed.trade(&fill("two", 1, Some(123.5)), 2, None, BASE + 2),
     );
-    let tick = read();
-    assert_eq!(tick.status, "observing");
-    assert_eq!(tick.total_orders, 1);
-    assert_eq!(tick.nav_evidence_revision, first.nav_evidence_revision);
-    let mut fill = f["fill"].clone();
-    fill["commission"] = json!(123.5);
-    put(&db, "cn_trade_facts", "one", &fill);
-    let corrected = read();
-    assert_eq!(corrected.fills[0]["commission"], 123.5);
-    assert_ne!(corrected.nav_evidence_revision, first.nav_evidence_revision);
-    put(
+    fixture::put_order(
         &db,
-        "cn_trading_events",
-        "003",
-        &json!({"sequence":102,"received_us":super::now_us(),"value":{"type":"yida_event","event":{"kind":2,"replay":0}}}),
+        BASE + 3,
+        &placed.lifecycle(fixture::FILLED, "exec", BASE, BASE + 3),
     );
-    let cached = read();
+    let appended = read();
+    assert_eq!((appended.total_orders, appended.total_fills), (2, 2));
+    assert_eq!(appended.fills[0].commission_cny, Some(123.5));
+    assert_eq!(appended.orders[0].phase, OrderPhase::Filled);
     let cold = reader::read(&source, &tmp.path().join("cold"), 10, 30).unwrap();
-    let mut a = serde_json::to_value(cached).unwrap();
+    let mut a = serde_json::to_value(read()).unwrap();
     let mut b = serde_json::to_value(cold).unwrap();
-    a["read_at_us"] = json!(0);
-    b["read_at_us"] = json!(0);
+    for value in [&mut a, &mut b] {
+        value["read_at_us"] = json!(0);
+        value["through_us"] = json!(0);
+    }
     assert_eq!(a, b);
 }
 
 #[test]
-fn cached_snapshot_lag_includes_fills_outside_recent_rows_and_clears_after_a_new_state() {
+fn cached_observation_rebuilds_after_directory_replacement() {
     let tmp = tempfile::tempdir().unwrap();
     let primary = tmp.path().join("exec");
     let db = db(&primary);
     let source = source(&primary);
-    let f = fixture();
-    let mut state = f["state"].clone();
-    state["received_us"] = json!(super::now_us());
-    put(&db, "cn_trading_events", "001", &state);
-    let mut late = f["fill"].clone();
-    late["evidence_seq"] = json!(1000);
-    late["received_us"] = json!(1);
-    put(&db, "cn_trade_facts", "late", &late);
-    let mut recent = f["fill"].clone();
-    recent["received_us"] = json!(2);
-    recent["fill"]["identity"]["trade_id"] = json!("second");
-    put(&db, "cn_trade_facts", "recent", &recent);
-    let pool =
-        crate::rocks_source::ReaderPool::new(&tmp.path().join("pooled"), &[&primary]).unwrap();
-    let mut cache = reader::Cache::default();
-    let mut read = || reader::with_db(&pool, &source, |db| cache.read(&source, db, 1, 30)).unwrap();
-    let first = read();
-    assert_eq!(first.fills.len(), 1);
-    assert!(first.positions_may_lag);
-    assert!(first.position_observation.unwrap().later_fills);
-    state["sequence"] = json!(500);
-    state["received_us"] = json!(super::now_us());
-    put(&db, "cn_trading_events", "002", &state);
-    assert!(read().positions_may_lag);
-    state["sequence"] = json!(1001);
-    put(&db, "cn_trading_events", "003", &state);
-    let caught_up = read();
-    assert!(!caught_up.positions_may_lag);
-    let proof = caught_up.position_observation.unwrap();
-    assert!(!proof.later_fills);
-    assert!(proof.current_runtime);
-
-    state["sequence"] = json!(1002);
-    state["value"]["type"] = json!("state");
-    state["value"]["state"]["ready"] = json!(false);
-    state["value"]["state"]["positions"] = json!([]);
-    put(&db, "cn_trading_events", "004", &state);
-    let incomplete = read();
-    assert!(incomplete.positions.is_empty());
-    let last = incomplete.position_observation.unwrap();
-    assert_eq!(last.evidence_sequence, proof.evidence_sequence);
-    assert_eq!(last.rows, proof.rows);
-}
-
-#[test]
-fn cached_observation_rebuilds_after_old_evidence_updates_and_directory_replacement() {
-    let tmp = tempfile::tempdir().unwrap();
-    let primary = tmp.path().join("exec");
-    let db = db(&primary);
-    let source = source(&primary);
-    let mut state = fixture()["state"].clone();
-    state["received_us"] = json!(super::now_us());
-    put(&db, "cn_trading_events", "001", &state);
+    let placed = yida();
+    fixture::put_order(
+        &db,
+        BASE,
+        &placed.lifecycle(fixture::NEW, "exec", BASE, BASE),
+    );
+    fixture::put_trade(
+        &db,
+        BASE + 1,
+        &placed.trade(&fill("one", 1, None), 1, None, BASE + 1),
+    );
     let pool =
         crate::rocks_source::ReaderPool::new(&tmp.path().join("pooled"), &[&primary]).unwrap();
     let mut cache = reader::Cache::default();
     let mut read =
         || reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
-    let first = read();
-    assert!(first.snapshot_ready);
-    state["value"]["state"]["ready"] = json!(false);
-    put(&db, "cn_trading_events", "001", &state);
-    put(
-        &db,
-        "cn_trading_events",
-        "002",
-        &json!({"sequence":101,"received_us":super::now_us(),"value":{"type":"market_tick"}}),
-    );
-    let corrected = read();
-    assert!(!corrected.snapshot_ready);
-    assert_ne!(corrected.nav_evidence_revision, first.nav_evidence_revision);
+    assert_eq!(read().total_fills, 1);
     drop(db);
     std::fs::rename(&primary, tmp.path().join("old-exec")).unwrap();
-    let fresh = super::tests::db(&primary);
-    state["value"]["state"]["positions"] = json!([]);
-    state["value"]["state"]["trading_day"] = json!("20261117");
-    put(&fresh, "cn_trading_events", "001", &state);
+    let fresh = self::db(&primary);
+    fixture::put_order(
+        &fresh,
+        BASE + 5,
+        &placed.lifecycle(fixture::CANCELED, "exec", BASE, BASE + 5),
+    );
     let next = read();
-    assert_eq!(next.trading_day.as_deref(), Some("20261117"));
-    assert!(next.positions.is_empty());
-    assert_ne!(next.nav_evidence_revision, corrected.nav_evidence_revision);
-}
-
-#[test]
-fn readonly_reconciled_inventory_remains_a_historical_anchor_after_later_execution_blocks() {
-    let tmp = tempfile::tempdir().unwrap();
-    let primary = tmp.path().join("exec");
-    let db = db(&primary);
-    let source = source(&primary);
-    let mut complete = fixture()["state"].clone();
-    complete["sequence"] = json!(100);
-    complete["value"]["type"] = json!("reconciled");
-    complete["value"]["state"]["ready"] = json!(false);
-    put(&db, "cn_trading_events", "001", &complete);
-    let mut blocked = complete.clone();
-    blocked["sequence"] = json!(101);
-    blocked["received_us"] = json!(complete["received_us"].as_i64().unwrap() + 1);
-    blocked["value"]["type"] = json!("state");
-    put(&db, "cn_trading_events", "002", &blocked);
-    let pool =
-        crate::rocks_source::ReaderPool::new(&tmp.path().join("pooled"), &[&primary]).unwrap();
-    let mut cache = reader::Cache::default();
-    let read = reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
-    assert!(!read.snapshot_ready);
-    assert_eq!(read.state_evidence_sequence, Some(101));
-    assert_eq!(read.nav_anchor_evidence_sequence, Some(100));
-    blocked["sequence"] = json!(102);
-    put(&db, "cn_trading_events", "003", &blocked);
-    let read = reader::with_db(&pool, &source, |db| cache.read(&source, db, 10, 30)).unwrap();
-    assert_eq!(
-        read.nav_anchor_observed_us,
-        complete["received_us"].as_i64()
-    );
-    assert_eq!(read.nav_anchor_evidence_sequence, Some(100));
-}
-
-fn funds_event(db: &DB, seq: i64, recorded_us: i64, value: Value) {
-    db.put_cf(
-        db.cf_handle("cn_trading_events").unwrap(),
-        seq.to_be_bytes(),
-        serde_json::to_vec(&json!({
-            "sequence": seq, "received_us": recorded_us, "projection_error": null, "value": value,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-}
-
-#[test]
-fn broker_funds_ctp_complete_raw_query_without_trading_readiness() {
-    let tmp = tempfile::tempdir().unwrap();
-    let primary = tmp.path().join("exec");
-    let db = db(&primary);
-    let mut source = source(&primary);
-    source.adapter = "ctp".into();
-    let pool =
-        crate::rocks_source::ReaderPool::new(&tmp.path().join("secondary"), &[&primary]).unwrap();
-    let mut cache = reader::Cache::default();
-    let mut read =
-        || reader::with_db(&pool, &source, |view| cache.read(&source, view, 10, 30)).unwrap();
-    let now = super::now_us();
-    funds_event(&db, 1, now, json!({"type":"runtime_start"}));
-    funds_event(
-        &db,
-        2,
-        now,
-        json!({"type":"ctp_event","event":{
-            "kind":4,"error_code":0,"trading_day":"20261117"
-        }}),
-    );
-    funds_event(
-        &db,
-        3,
-        now,
-        json!({"type":"reconciled","state":{
-            "connected":true,"ready":false,"trading_day":"20261117","positions":[],
-            "available_local_budget":9999.0,"reason":"settlement not confirmed"
-        }}),
-    );
-    let mut values = vec![0.0; 44];
-    values[3] = 1000.0;
-    values[7] = 12.0;
-    values[8] = 5.0;
-    values[12] = 100.0;
-    values[16] = -21.0;
-    values[17] = 985.0;
-    values[18] = 900.0;
-    let callback = |history: &[f64]| {
-        json!({"type":"ctp_event","event":{
-            "kind":7,"request_id":21,"error_code":0,"last":0,"present":1,"exchange":"CNY",
-            "trading_day":"20261117","received_us":now-100,"available":900.0,
-            "metadata":{"account_values":history}
-        }})
-    };
-    funds_event(&db, 4, now, callback(&values));
-    let pending = read();
-    assert!(pending.funds.is_none());
-    assert_eq!(pending.available_local_budget, Some(9999.0));
-
-    funds_event(
-        &db,
-        5,
-        now,
-        json!({"type":"ctp_event","event":{
-            "kind":7,"request_id":21,"error_code":0,"last":1,"present":0
-        }}),
-    );
-    let complete = read();
-    assert!(!complete.snapshot_ready);
-    assert!(complete.funds_current_runtime);
-    assert!(!complete.funds_stale);
-    let funds = complete.funds.unwrap();
-    assert_eq!(funds.source, reader::AccountFundsSource::CtpTradingAccount);
-    assert_eq!(funds.observed_us, now - 100);
-    assert_eq!(funds.evidence_sequence, 4);
-    assert_eq!(funds.trading_day.as_deref(), Some("20261117"));
-    assert_eq!(funds.currency.as_deref(), Some("CNY"));
-    assert_eq!(funds.previous_balance, Some(1000.0));
-    assert_eq!(funds.balance, Some(985.0));
-    assert_eq!(funds.available, Some(900.0));
-    assert_eq!(funds.margin, Some(100.0));
-    assert_eq!(funds.deposit, Some(12.0));
-    assert_eq!(funds.withdraw, Some(5.0));
-    assert_eq!(funds.native_fields.len(), 44);
-    assert_eq!(funds.native_fields["position_profit"], -21.0);
-    assert_eq!(funds.native_fields["frozen_cash"], 0.0);
-
-    values[17] = 986.0;
-    funds_event(&db, 4, now, callback(&values));
-    let corrected = read();
-    assert_eq!(corrected.funds.unwrap().balance, Some(986.0));
-    let newest = json!({"type":"ctp_event","event":{
-        "kind":7,"request_id":22,"error_code":0,"last":1,"present":1,"exchange":"USD",
-        "trading_day":"20261117","received_us":now-10,"available":1.0
-    }});
-    funds_event(&db, 6, now, newest);
-    let failed = read();
-    assert!(failed.funds_stale);
-    assert_eq!(failed.funds.unwrap().balance, Some(986.0));
-
-    funds_event(&db, 7, now, json!({"type":"ctp_event","event":{"kind":2}}));
-    let disconnected = read();
-    assert!(!disconnected.funds_current_runtime);
-    assert!(disconnected.funds_stale);
-    assert_eq!(disconnected.funds.unwrap().observed_us, now - 100);
-}
-
-#[test]
-fn broker_funds_yida_need_confirmed_recovery_and_keep_native_marks_distinct() {
-    let tmp = tempfile::tempdir().unwrap();
-    let primary = tmp.path().join("exec");
-    let db = db(&primary);
-    let source = source(&primary);
-    let pool =
-        crate::rocks_source::ReaderPool::new(&tmp.path().join("secondary"), &[&primary]).unwrap();
-    let mut cache = reader::Cache::default();
-    let mut read =
-        || reader::with_db(&pool, &source, |view| cache.read(&source, view, 10, 30)).unwrap();
-    let now = super::now_us();
-    let event = |seq, value| funds_event(&db, seq, now, value);
-    let structural = |kind| json!({"type":"yida_event","received_us":now,"event":{"kind":kind,"day":20261117,"replay":0}});
-    let account = |replay, available, detail: Value| {
-        json!({
-        "type":"yida_event","received_us":now-120_000_000,"event":{
-                "kind":8,"day":20261117,"replay":replay,"error":0,"login_count":1,"right":0,
-                "available":available,"account":detail
-            }
-        })
-    };
-    event(1, json!({"type":"runtime_start"}));
-    event(2, account(0, 500.0, Value::Null));
-    event(3, structural(6));
-    event(4, account(1, 100.0, Value::Null));
-    assert!(read().funds.is_none());
-    event(5, structural(12));
-    assert!(read().funds.is_none());
-    event(
-        6,
-        json!({"type":"reconciled","state":{
-            "connected":true,"ready":true,"trading_day":"20261117","positions":[],
-            "available_local_budget":9999.0
-        }}),
-    );
-    let reconciled = read();
-    assert!(reconciled.funds_current_runtime && !reconciled.funds_stale);
-    let funds = reconciled.funds.unwrap();
-    assert_eq!(funds.usable_cash, Some(100.0));
-    assert!(funds.available.is_none());
-    assert!(funds.balance.is_none());
-    assert!(funds.margin.is_none());
-    assert!(funds.currency.is_none());
-    assert_eq!(funds.observed_us, now - 120_000_000);
-
-    event(7, account(1, 30.0, Value::Null));
-    assert_eq!(read().funds.unwrap().usable_cash, Some(100.0));
-    let detail = json!({
-        "valuation_basis":"sdk_mark_time_unverified","currency":"CNY","balance":400.0,
-        "available":200.0,"sdk_market_value":555.0,"sdk_cash_balance":501.0,
-        "pre_market_value":300.0,"pre_cash_balance":290.0,"margin":33.0,
-        "deposit":12.0,"withdraw":0.0
-    });
-    event(8, account(0, 250.0, detail));
-    let reported = read();
-    let funds = reported.funds.unwrap();
-    assert_eq!(
-        funds.source,
-        reader::AccountFundsSource::YidaExtendedAccount
-    );
-    assert_eq!(funds.currency.as_deref(), Some("CNY"));
-    assert_eq!(
-        funds.valuation_basis.as_deref(),
-        Some("sdk_mark_time_unverified")
-    );
-    assert_eq!(funds.usable_cash, Some(250.0));
-    assert_eq!(funds.available, Some(200.0));
-    assert_eq!(funds.previous_balance, Some(300.0));
-    assert!(funds.balance.is_none());
-    assert!(funds.margin.is_none());
-    assert_eq!(funds.native_fields["sdk_market_value"], 555.0);
-    assert_eq!(funds.native_fields["balance"], 400.0);
-    assert_eq!(funds.native_fields["margin"], 33.0);
-    assert_eq!(funds.withdraw, Some(0.0));
-
-    let mut tail = account(0, 1.0, Value::Null);
-    tail["shutdown_tail"] = true.into();
-    event(9, tail);
-    event(10, json!({"type":"runtime_stopped"}));
-    let stopped = read();
-    assert!(!stopped.funds_current_runtime && stopped.funds_stale);
-    assert_eq!(stopped.funds.unwrap(), funds);
+    assert_eq!((next.total_orders, next.total_fills), (1, 0));
+    assert_eq!(next.orders[0].phase, OrderPhase::Cancelled);
+    assert_eq!(next.orders[0].filled_lots, 0);
 }

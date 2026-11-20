@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(crate) mod attribution;
-pub(super) mod commission;
 pub(crate) mod comparison;
 pub mod service;
 pub mod source;
@@ -93,6 +92,17 @@ impl Offset {
     }
 }
 
+/// Operator-stated opening gross inventory of one contract side.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Inventory {
+    pub venue: String,
+    pub symbol: String,
+    pub side: Side,
+    pub today: i64,
+    pub yesterday: i64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialPosition {
@@ -110,8 +120,8 @@ pub struct Anchor {
     pub source_id: String,
     pub snapshot_us: i64,
     pub trading_day: String,
-    pub evidence_sequence: i64,
-    pub evidence_sha256: String,
+    /// Last `cn_trade_updates` key at the cut; later fills follow the anchor.
+    pub trades_key: i64,
     pub store_id: String,
     pub positions: Vec<InitialPosition>,
     pub note: String,
@@ -122,10 +132,8 @@ impl Anchor {
         ensure!(
             !self.source_id.is_empty()
                 && self.snapshot_us > 0
-                && self.evidence_sequence > 0
+                && self.trades_key >= 0
                 && !self.store_id.is_empty()
-                && self.evidence_sha256.len() == 64
-                && self.evidence_sha256.bytes().all(|b| b.is_ascii_hexdigit())
                 && !self.note.trim().is_empty()
                 && self.note.len() <= 4096
                 && self.positions.len() <= 512,
@@ -149,9 +157,12 @@ impl Anchor {
         Ok(())
     }
 }
+/// One factual exchange fill from `cn_trade_updates` (or, for strategy NAV,
+/// one strategy's share of it from `cn_uniform_orders`).
 #[derive(Debug, Clone)]
 pub struct Fill {
-    pub key: Vec<u8>,
+    /// Record key time; orders fills with the same receipt time.
+    pub key_us: i64,
     pub source_id: String,
     pub venue: String,
     pub symbol: String,
@@ -162,17 +173,13 @@ pub struct Fill {
     pub lots: i64,
     pub price: f64,
     pub received_us: i64,
-    pub evidence_sequence: i64,
+    /// Exec's CNY commission for this record; unknown when absent.
     pub commission_cny: Option<f64>,
-    journal_rate: Option<commission::Rate>,
-    /// Verified live report or an explicitly unambiguous projection. Recovery
-    /// queries without an original UTC trade time cannot be placed after an anchor.
-    pub live_origin: bool,
 }
 
 impl Fill {
     fn needs_reference_fee(&self) -> bool {
-        self.commission_cny.is_none() && self.journal_rate.is_none()
+        self.commission_cny.is_none()
     }
 
     fn estimated_fee(
@@ -182,9 +189,6 @@ impl Fill {
     ) -> Result<Option<f64>> {
         if self.commission_cny.is_some() {
             return Ok(None);
-        }
-        if let Some(rate) = self.journal_rate {
-            return Ok(rate.estimate(self, multiplier));
         }
         let rate = rates
             .into_iter()
@@ -308,6 +312,63 @@ impl MarketLedger {
             self.short.iter().map(|p| p.lots).sum(),
         )
     }
+    /// Opening lots: yesterday's have no day, today's carry the anchor's day.
+    fn seed(&mut self, position: &InitialPosition, trading_day: &str) {
+        if position.yesterday > 0 {
+            self.position_mut(position.side).push_back(Lot {
+                day: None,
+                lots: position.yesterday,
+                price: position.reference_price,
+            });
+        }
+        if position.today > 0 {
+            self.position_mut(position.side).push_back(Lot {
+                day: Some(trading_day.to_owned()),
+                lots: position.today,
+                price: position.reference_price,
+            });
+        }
+    }
+}
+
+/// Fills after the anchor cut in replay order.
+fn after_anchor<'a>(anchor: &Anchor, fills: &'a [Fill], end_us: i64) -> Vec<&'a Fill> {
+    let mut ordered: Vec<_> = fills
+        .iter()
+        .filter(|f| f.key_us > anchor.trades_key && f.received_us <= end_us)
+        .collect();
+    ordered.sort_by_key(|f| (f.received_us, f.key_us));
+    ordered
+}
+
+/// Long/short lots per contract after replaying the factual fills on the
+/// anchor's opening inventory with native open/close semantics.
+pub(crate) fn inventory(anchor: &Anchor, fills: &[Fill]) -> Result<BTreeMap<Market, (i64, i64)>> {
+    anchor.validate()?;
+    let mut ledgers: BTreeMap<Market, MarketLedger> = BTreeMap::new();
+    for p in &anchor.positions {
+        ledgers
+            .entry((p.venue.clone(), p.symbol.clone()))
+            .or_default()
+            .seed(p, &anchor.trading_day);
+    }
+    for fill in after_anchor(anchor, fills, i64::MAX) {
+        ensure!(
+            fill.source_id == anchor.source_id && fill.trading_day >= anchor.trading_day,
+            "成交属于其他账户或早于起始快照的交易日"
+        );
+        let ledger = ledgers
+            .entry((fill.venue.clone(), fill.symbol.clone()))
+            .or_default();
+        // Lots only; realized amounts are not used here.
+        ledger.multiplier = 1.0;
+        ledger.apply(fill)?;
+    }
+    Ok(ledgers
+        .into_iter()
+        .map(|(key, ledger)| (key, ledger.quantities()))
+        .filter(|(_, (long, short))| *long != 0 || *short != 0)
+        .collect())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -330,42 +391,29 @@ pub(crate) struct ReferenceMinute {
     pub(crate) turnover_cny: f64,
 }
 impl MarketPrices {
+    /// The close of the minute containing `at_us`, or the last earlier close
+    /// across a gap without trading time. Sessions opening on Saturday or
+    /// Sunday never trade (Friday's night session does, as part of Monday's
+    /// trading day). After a trading day's final close the position keeps that
+    /// day's last mark until the next trading day's first bar, so weekends and
+    /// exchange holidays neither move a mark nor need one. The Manager has no
+    /// holiday calendar: a holiday is only the absence of provider bars after
+    /// a trading day's close, and a weekday gap inside a trading day fails.
     pub fn mark(&self, at_us: i64) -> Result<f64> {
-        let minute = at_us.div_euclid(60_000_000) * 60_000_000;
-        let requested = minute;
+        let requested = at_us.div_euclid(MINUTE_US) * MINUTE_US;
         let (time, price) = self
             .closes
             .range(..=requested)
             .next_back()
             .context("缺少持仓计价所需的已完成分钟")?;
-        ensure!(*time % 60_000_000 == 0, "unaligned native close mark");
+        ensure!(*time % MINUTE_US == 0, "unaligned native close mark");
         if *time != requested {
             ensure!(
                 !self.sessions.is_empty(),
                 "缺少交易时段，不能判断行情缺口是否为休市"
             );
-            let span = (requested - *time) / 1_000_000;
-            let begin = (*time / 1_000_000 + 8 * 3600).rem_euclid(86400);
-            let finish = begin + span;
-            let mut skipped_active = false;
-            for (start, end) in &self.sessions {
-                let segments = if start < end {
-                    vec![(*start as i64, *end as i64)]
-                } else {
-                    vec![(*start as i64, 86400), (0, *end as i64)]
-                };
-                for (start, end) in segments {
-                    if span >= 86400 {
-                        skipped_active = true;
-                        break;
-                    }
-                    for shift in [0, 86400] {
-                        skipped_active |= begin.max(start + shift) < finish.min(end + shift);
-                    }
-                }
-            }
             ensure!(
-                !skipped_active,
+                self.closes_trading_day(*time) || !self.trading_minutes_between(*time, requested),
                 "缺少应有交易分钟或停市日历依据，不能跨越缺口沿用旧价"
             );
         }
@@ -375,7 +423,46 @@ impl MarketPrices {
         );
         Ok(*price)
     }
+
+    /// The minute ending at `minute_end` is the last minute of a trading day
+    /// (the end of its latest day session).
+    fn closes_trading_day(&self, minute_end: i64) -> bool {
+        let close = self
+            .sessions
+            .iter()
+            .filter(|(start, end)| start < end && *start < 18 * 3600)
+            .map(|(_, end)| *end)
+            .max();
+        close.is_some_and(|close| shanghai_second(minute_end) == i64::from(close))
+    }
+
+    /// Whether a weekday session overlaps the open interval `(from, to)`.
+    fn trading_minutes_between(&self, from: i64, to: i64) -> bool {
+        const DAY_US: i64 = 86_400 * 1_000_000;
+        let local = |at: i64| (at + 8 * 3600 * 1_000_000).div_euclid(DAY_US);
+        // Night windows wrap into the next date; start a day early.
+        (local(from) - 1..=local(to)).any(|date| {
+            // 1970-01-01 was a Thursday: Monday..Friday are 0..5.
+            let weekday = (date + 3).rem_euclid(7) < 5;
+            let midnight = date * DAY_US - 8 * 3600 * 1_000_000;
+            weekday
+                && self.sessions.iter().any(|&(start, end)| {
+                    let start = midnight + i64::from(start) * 1_000_000;
+                    let mut end = midnight + i64::from(end) * 1_000_000;
+                    if end <= start {
+                        end += DAY_US;
+                    }
+                    from.max(start) < to.min(end)
+                })
+        })
+    }
 }
+
+/// Shanghai seconds since midnight.
+fn shanghai_second(at_us: i64) -> i64 {
+    (at_us / 1_000_000 + 8 * 3600).rem_euclid(86_400)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Point {
     pub timestamp_us: i64,
@@ -662,9 +749,7 @@ fn available_markets(anchor: &Anchor, fills: &[Fill], end_us: i64) -> BTreeSet<M
         .chain(
             fills
                 .iter()
-                .filter(|f| {
-                    f.evidence_sequence > anchor.evidence_sequence && f.received_us <= end_us
-                })
+                .filter(|f| f.key_us > anchor.trades_key && f.received_us <= end_us)
                 .map(|f| (f.venue.clone(), f.symbol.clone())),
         )
         .collect()
@@ -714,38 +799,14 @@ fn build_selected(
             "conflicting initial contract multiplier"
         );
         ledger.multiplier = p.contract_multiplier;
-        if p.yesterday > 0 {
-            ledger.position_mut(p.side).push_back(Lot {
-                day: None,
-                lots: p.yesterday,
-                price: p.reference_price,
-            });
-        }
-        if p.today > 0 {
-            ledger.position_mut(p.side).push_back(Lot {
-                day: Some(anchor.trading_day.clone()),
-                lots: p.today,
-                price: p.reference_price,
-            });
-        }
+        ledger.seed(p, &anchor.trading_day);
     }
-    let mut ordered: Vec<_> = fills
-        .iter()
-        .filter(|f| f.evidence_sequence > anchor.evidence_sequence && f.received_us <= end_us)
-        .collect();
-    ordered.sort_by(|a, b| {
-        a.received_us
-            .cmp(&b.received_us)
-            .then_with(|| a.key.cmp(&b.key))
-    });
+    let mut ordered = after_anchor(anchor, fills, end_us);
     let mut identities = BTreeSet::new();
     for fill in &ordered {
         ensure!(
-            fill.source_id == anchor.source_id
-                && fill.live_origin
-                && fill.received_us >= anchor.snapshot_us
-                && fill.trading_day >= anchor.trading_day,
-            "成交来源、历史补报或时间边界不明确，不能将恢复查询当作起始快照之后的新成交"
+            fill.source_id == anchor.source_id && fill.trading_day >= anchor.trading_day,
+            "成交属于其他账户或早于起始快照的交易日"
         );
         super::validate_market(&format!("{}:{}", fill.venue, fill.symbol))?;
         reference::valid_day(&fill.trading_day)?;

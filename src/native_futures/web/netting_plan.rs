@@ -1,10 +1,8 @@
-//! Dedicated source-scoped readers see only the calculated account target.
-//! The Exec process owns target admission and order submission.
-use super::{netting::account_lots, netting::observed, *};
-use crate::native_futures::{
-    netting::{Quantities, store},
-    reader::Snapshot,
-};
+//! Dedicated source-scoped readers see the complete strategy targets. Like
+//! crypto, the Exec process owns netting, attribution, admission and orders;
+//! delivery never waits on the Exec replica or Manager-side attribution.
+use super::*;
+use crate::native_futures::netting::{Strategies, store};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::{collections::BTreeSet, pin::Pin, time::Duration};
@@ -15,7 +13,7 @@ mod wire {
     tonic::include_proto!("cn_futures_target");
 }
 use wire::{
-    ContractTarget, PlanStatus, PlanSubscription, PlanUpdate, PositionTarget,
+    ContractTarget, PlanStatus, PlanSubscription, PlanUpdate, PositionTarget, StrategyTarget,
     manager_plans_server::{ManagerPlans, ManagerPlansServer},
 };
 
@@ -40,13 +38,13 @@ pub(super) fn credentials(config: &Config) -> Result<BTreeMap<String, [u8; 32]>>
         }
     }
     config
-        .ctaker_plan_readers
+        .exec_plan_readers
         .iter()
         .map(|(source, env)| {
-            let value = std::env::var(env).context("missing ctaker plan reader credential")?;
-            ensure!(valid_token(&value), "invalid ctaker plan reader credential");
+            let value = std::env::var(env).context("missing exec plan reader credential")?;
+            ensure!(valid_token(&value), "invalid exec plan reader credential");
             let hash = hash(&value);
-            ensure!(hashes.insert(hash), "ctaker plan reader credentials must be distinct from all source sync and plan readers");
+            ensure!(hashes.insert(hash), "exec plan reader credentials must be distinct from all source sync and plan readers");
             Ok((source.clone(), hash))
         })
         .collect()
@@ -63,7 +61,7 @@ fn hash(value: &str) -> [u8; 32] {
 fn token_mac(value: &str) -> Hmac<Sha256> {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(value.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(b"cn-futures/ctaker-plan-reader");
+    mac.update(b"cn-futures/exec-plan-reader");
     mac
 }
 
@@ -72,7 +70,7 @@ pub(super) fn routes(service: Service) -> Router {
         .max_decoding_message_size(MAX_MESSAGE)
         .max_encoding_message_size(MAX_MESSAGE);
     Router::new()
-        .route("/api/native/sources/{id}/netting/ctaker-plan", get(read))
+        .route("/api/native/sources/{id}/netting/exec-plan", get(read))
         .with_state(service)
         .route_service("/cn_futures_target.ManagerPlans/Watch", stream)
 }
@@ -85,7 +83,7 @@ struct Plan {
     trading_day: String,
     decision_us: i64,
     expires_at_us: i64,
-    net_targets: Quantities,
+    strategies: Strategies,
 }
 
 struct PlanCheck {
@@ -116,11 +114,10 @@ impl PlanCheck {
         })
     }
 
-    fn http_response(self, error: Option<ApiError>) -> Result<Response, ApiError> {
-        let mut response = match (error, self.target) {
-            (Some(error), _) => error.into_response(),
-            (None, Some(plan)) => Json(plan).into_response(),
-            (None, None) => StatusCode::NO_CONTENT.into_response(),
+    fn http_response(self) -> Result<Response, ApiError> {
+        let mut response = match self.target {
+            Some(plan) => Json(plan).into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
         };
         let headers = response.headers_mut();
         headers.insert(
@@ -156,7 +153,7 @@ fn authorize_reader(service: &Service, id: &str, token: Option<&str>) -> Result<
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "invalid plan credential".into()))?;
     if !service
         .config
-        .ctaker_plan_readers
+        .exec_plan_readers
         .get(id)
         .is_some_and(|stored| token_mac(value).verify_slice(stored).is_ok())
     {
@@ -175,21 +172,10 @@ async fn read(
         &id,
         headers.get(PLAN_TOKEN).and_then(|v| v.to_str().ok()),
     )?;
-    match plan(&service, &id, false, false).await {
-        Ok(result) => result.http_response(None),
-        Err(error) if error.0 == StatusCode::SERVICE_UNAVAILABLE => {
-            PlanCheck::without_batch(PlanStatus::ReplicaNotReady).http_response(Some(error))
-        }
-        Err(error) => Err(error),
-    }
+    plan(&service, &id, false).await?.http_response()
 }
 
-async fn plan(
-    service: &Service,
-    id: &str,
-    wait_for_replica: bool,
-    observe_only: bool,
-) -> Result<PlanCheck, ApiError> {
+async fn plan(service: &Service, id: &str, observe_only: bool) -> Result<PlanCheck, ApiError> {
     let Some(state) = store::load(&service.pool, id).await? else {
         return Ok(PlanCheck::without_batch(PlanStatus::NoBatch));
     };
@@ -203,41 +189,30 @@ async fn plan(
         target,
         recheck_us,
     };
-    let payload = |trading_day, decision_us, expires_at_us| -> Result<Plan> {
-        Ok(Plan {
-            source_id: id.to_owned(),
-            batch_id: batch.clone(),
-            target_revision: state.target_revision,
-            trading_day,
-            decision_us,
-            expires_at_us,
-            net_targets: state.execution_plan()?.net_targets,
-        })
+    let payload = |trading_day, decision_us, expires_at_us| Plan {
+        source_id: id.to_owned(),
+        batch_id: batch.clone(),
+        target_revision: state.target_revision,
+        trading_day,
+        decision_us,
+        expires_at_us,
+        strategies: state.targets.clone(),
     };
     if observe_only {
-        let status = if state.external_demand_open {
-            PlanStatus::ObserveOnly
-        } else {
-            PlanStatus::NoExternalDemand
-        };
         return Ok(check(
-            status,
+            PlanStatus::ObserveOnly,
             Some(payload(
                 state.target_trading_day.clone().unwrap_or_default(),
                 state.decision_us,
                 0,
-            )?),
+            )),
             None,
         ));
     }
-    if !state.external_demand_open {
-        return Ok(check(PlanStatus::NoExternalDemand, None, None));
-    }
-    let Some(day) = state.target_trading_day.as_ref() else {
+    let (Some(day), Some((decision_us, expires_at_us))) =
+        (state.target_trading_day.as_ref(), state.exec_lease())
+    else {
         return Ok(check(PlanStatus::MissingTradingDay, None, None));
-    };
-    let Some((decision_us, expires_at_us)) = state.ctaker_lease() else {
-        return Ok(check(PlanStatus::EvidenceError, None, None));
     };
     let now = crate::native_futures::now_us();
     if decision_us > now {
@@ -246,74 +221,11 @@ async fn plan(
     if expires_at_us <= now {
         return Ok(check(PlanStatus::LeaseExpired, None, None));
     }
-    let pending = |status| check(status, None, Some(expires_at_us));
-    let snapshot = match observed(service, id).await {
-        Err(error) if wait_for_replica && error.0 == StatusCode::SERVICE_UNAVAILABLE => {
-            return Ok(pending(PlanStatus::ReplicaNotReady));
-        }
-        outcome => outcome?,
-    };
-    if let Some(status) = snapshot_blocker(
-        &snapshot,
-        day,
-        service.config.stale_secs,
-        crate::native_futures::now_us(),
-    ) {
-        return Ok(pending(status));
-    }
-    let actual = account_lots(&snapshot, &state.contracts)?;
-    if !state.account.iter().all(|(market, position)| {
-        actual.get(market).copied().unwrap_or_default() == position.quantity()
-    }) {
-        return Ok(pending(PlanStatus::AccountPositionsUnconfirmed));
-    }
-    let current_revision = store::load(&service.pool, id).await?.map(|s| s.revision);
-    if current_revision != Some(state.revision) {
-        return Ok(pending(PlanStatus::Refreshing));
-    }
-    if crate::native_futures::now_us() >= expires_at_us {
-        return Ok(check(PlanStatus::LeaseExpired, None, None));
-    }
-    let freshness_deadline = snapshot.state_observed_us.map(|observed| {
-        observed
-            .saturating_add(service.config.stale_secs as i64 * 1_000_000)
-            .saturating_add(1)
-    });
     Ok(check(
         PlanStatus::Ready,
-        Some(payload(day.clone(), decision_us, expires_at_us)?),
-        Some(
-            freshness_deadline
-                .unwrap_or(expires_at_us)
-                .min(expires_at_us),
-        ),
+        Some(payload(day.clone(), decision_us, expires_at_us)),
+        Some(expires_at_us),
     ))
-}
-
-fn snapshot_blocker(
-    snapshot: &Snapshot,
-    day: &str,
-    stale_secs: u64,
-    now: i64,
-) -> Option<PlanStatus> {
-    if snapshot.replication_stale {
-        Some(PlanStatus::ReplicaNotReady)
-    } else if snapshot.projection_errors != 0 {
-        Some(PlanStatus::EvidenceError)
-    } else if !snapshot.snapshot_ready || !snapshot.snapshot_current_runtime {
-        Some(PlanStatus::AccountNotReady)
-    } else if snapshot.trading_day.as_deref() != Some(day) {
-        Some(PlanStatus::TradingDayMismatch)
-    } else if snapshot.positions_may_lag {
-        Some(PlanStatus::AccountPositionsUnconfirmed)
-    } else if !snapshot
-        .state_observed_us
-        .is_some_and(|at| at <= now && now.saturating_sub(at) <= stale_secs as i64 * 1_000_000)
-    {
-        Some(PlanStatus::AccountSnapshotStale)
-    } else {
-        None
-    }
 }
 
 impl TryFrom<Plan> for PositionTarget {
@@ -327,13 +239,21 @@ impl TryFrom<Plan> for PositionTarget {
             trading_day: plan.trading_day,
             decision_us: plan.decision_us.try_into()?,
             expires_at_us: plan.expires_at_us.try_into()?,
-            net_targets: plan
-                .net_targets
+            strategy_targets: plan
+                .strategies
                 .into_iter()
-                .map(|(market, lots)| {
-                    Ok(ContractTarget {
-                        market,
-                        lots: lots.try_into()?,
+                .map(|(strategy, rows)| {
+                    Ok(StrategyTarget {
+                        strategy,
+                        targets: rows
+                            .into_iter()
+                            .map(|(market, lots)| {
+                                Ok(ContractTarget {
+                                    market,
+                                    lots: lots.try_into()?,
+                                })
+                            })
+                            .collect::<Result<_>>()?,
                     })
                 })
                 .collect::<Result<_>>()?,
@@ -377,7 +297,7 @@ impl ManagerPlans for PlanStream {
             let mut delay = Duration::from_millis(25);
             while !*shutdown.borrow() {
                 changes.borrow_and_update();
-                let check = plan(&service, &id, true, observe_only).await
+                let check = plan(&service, &id, observe_only).await
                     .map_err(|_| Status::unavailable("read Manager plan"))?;
                 let recheck_us = check.recheck_us;
                 let wait_for_deadline = matches!(check.status, PlanStatus::Ready | PlanStatus::DecisionInFuture);
@@ -423,8 +343,8 @@ mod tests {
     #[test]
     fn empty_http_plans_expose_distinct_statuses_without_a_target() {
         for (status, name) in [
-            (PlanStatus::NoExternalDemand, "no_external_demand"),
-            (PlanStatus::AccountNotReady, "account_not_ready"),
+            (PlanStatus::MissingTradingDay, "missing_trading_day"),
+            (PlanStatus::DecisionInFuture, "decision_in_future"),
             (PlanStatus::LeaseExpired, "lease_expired"),
         ] {
             let check = PlanCheck {
@@ -434,7 +354,7 @@ mod tests {
                 target: None,
                 recheck_us: None,
             };
-            let response = check.http_response(None).unwrap();
+            let response = check.http_response().unwrap();
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert_eq!(response.headers()["x-cta-plan-status"], name);
             assert_eq!(response.headers()["x-cta-plan-batch-id"], "batch-7");

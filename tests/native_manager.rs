@@ -4,6 +4,8 @@ use crypto_cta_manager::{
     auth,
     native_futures::{
         config::{Config, Source},
+        nav::Offset,
+        records::{self, fixture},
         web,
     },
     postgres,
@@ -51,28 +53,33 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     postgres::initialize(&pool).await?;
     let tmp = tempfile::tempdir()?;
     let primary = tmp.path().join("exec");
-    let mut opts = rocksdb::Options::default();
-    opts.create_if_missing(true);
-    opts.create_missing_column_families(true);
-    let db = rocksdb::DB::open_cf_descriptors(
-        &opts,
-        &primary,
-        ["cn_trading_events", "cn_uniform_orders", "cn_trade_facts"]
-            .into_iter()
-            .map(|cf| rocksdb::ColumnFamilyDescriptor::new(cf, rocksdb::Options::default())),
-    )?;
-    let fixture: Value = serde_json::from_str(include_str!("fixtures/yida_native_records.json"))?;
-    for (cf, key) in [
-        ("cn_trading_events", "state"),
-        ("cn_uniform_orders", "order"),
-        ("cn_trade_facts", "fill"),
-    ] {
-        db.put_cf(
-            db.cf_handle(cf).unwrap(),
-            "001",
-            serde_json::to_vec(&fixture[key])?,
-        )?;
-    }
+    let db = fixture::open(&primary);
+    // Synthetic Yida-shaped records in the Exec binary layouts.
+    let at = crypto_cta_manager::native_futures::now_us();
+    let placed = fixture::Order::new(
+        "SHFE:cu2612",
+        "20261112",
+        "yida:20261112:group:1",
+        "10",
+        crypto_cta_manager::native_futures::nav::Side::Buy,
+        Offset::Open,
+        1,
+        105_000.0,
+    );
+    let fill = fixture::Fill {
+        trade_id: "18446744073709551614".into(),
+        lots: 1,
+        price: 105_000.0,
+        commission: None,
+        order_id: 0,
+    };
+    let lifecycle = placed.lifecycle(fixture::FILLED, "exec", at, at + 2);
+    fixture::put_trade(
+        &db,
+        at + 1,
+        &placed.trade(&fill, 1, Some(fixture::FILLED), at + 1),
+    );
+    fixture::put_order(&db, at + 2, &lifecycle);
     let config = Config {
         mode: crypto_cta_manager::runtime_mode::RuntimeMode::CnFutures,
         database: crypto_cta_manager::config::DatabaseConfig {
@@ -91,7 +98,7 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
             "hidden".into(),
             vec!["operator".into()],
         )]),
-        ctaker_plan_readers: Default::default(),
+        exec_plan_readers: Default::default(),
         execution_monitor_urls: [(
             "sim".into(),
             "https://viz.example.test/?source=paper".into(),
@@ -269,8 +276,14 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     assert_eq!(overview["accounts"][0]["source_id"], "sim");
     assert_eq!(overview["accounts"][0]["quote_currency"], "CNY");
     assert_eq!(overview["accounts"][0]["collection_status"], "loading");
-    for field in ["collection_status_reason", "execution_status"] {
-        assert!(overview["accounts"][0].get(field).is_some(), "{field}");
+    assert!(
+        overview["accounts"][0]
+            .get("collection_status_reason")
+            .is_some()
+    );
+    // Manager reads only Exec records: no runtime status or broker funds.
+    for field in ["execution_status", "funds_status", "sdk_market_value"] {
+        assert!(overview["accounts"][0].get(field).is_none(), "{field}");
     }
     assert!(overview["accounts"][0]["equity"].is_null());
     assert!(overview["accounts"][0]["margin"].is_null());
@@ -295,6 +308,8 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     assert_eq!(account["can_edit_alias"], true);
     assert_eq!(account["configurable"], false);
     assert!(account["open_position_symbol_count"].is_null());
+    assert!(account.get("account_funds").is_none());
+    assert_eq!(account["live_equity_status"], "unavailable");
     assert!(dashboard["report"]["sources"][0]["nav_change_after_fee_quote"].is_null());
     use crypto_cta_manager::native_futures::nav::{self, Anchor, InitialPosition, Side};
     nav::store::insert(
@@ -303,8 +318,7 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
             source_id: "sim".into(),
             snapshot_us: 1_794_895_200_000_000,
             trading_day: "20261117".into(),
-            evidence_sequence: 100,
-            evidence_sha256: "a".repeat(64),
+            trades_key: 0,
             store_id: "native:isolated-fixture".into(),
             positions: vec![
                 InitialPosition {
@@ -344,7 +358,6 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     assert_eq!(historical["dates"], json!(["2026-11-17"]));
     let row = &historical["accounts"][0];
     assert_eq!(row["collection_status"], "historical");
-    assert!(row["execution_status"].is_null());
     assert_eq!(row["long_position"], 1_575_000.0);
     assert_eq!(row["short_position"], 525_000.0);
     assert_eq!(row["net_position"], 1_050_000.0);
@@ -603,6 +616,10 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     let observed: Value = observed.json().await?;
     assert_eq!(observed["total_orders"], 1);
     assert_eq!(observed["total_fills"], 1);
+    assert_eq!(observed["orders"][0]["phase"], "filled");
+    assert_eq!(observed["orders"][0]["order"]["order"]["order_ref"], "10");
+    assert_eq!(observed["fills"][0]["trade_id"], "18446744073709551614");
+    assert!(observed["fills"][0]["commission_cny"].is_null());
     let target =
         json!({"strategy_name":"native_alpha","targets":{"SHFE:cu2612":{"qty":1,"signal":0}}});
     assert_eq!(
@@ -789,17 +806,15 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     );
     // The live primary remains open and writable, with its factual rows unchanged.
     assert_eq!(
-        serde_json::from_slice::<Value>(
-            &db.get_cf(db.cf_handle("cn_uniform_orders").unwrap(), "001")?
-                .unwrap()
-        )?,
-        fixture["order"]
+        db.get_cf(db.cf_handle(records::ORDERS).unwrap(), records::key(at + 2))?
+            .as_deref(),
+        Some(lifecycle.as_slice())
     );
-    db.put_cf(
-        db.cf_handle("cn_trading_events").unwrap(),
-        "002",
-        b"test-primary-still-writable",
-    )?;
+    fixture::put_order(
+        &db,
+        at + 3,
+        &placed.lifecycle(fixture::FILLED, "exec", at, at + 3),
+    );
     server.abort();
     let _ = server.await;
     pool.close().await;

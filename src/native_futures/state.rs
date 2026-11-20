@@ -1,21 +1,18 @@
-use anyhow::{Context, Result, ensure};
+use super::records::{Order, OrderStatus};
+use anyhow::{Result, ensure};
 use serde::Serialize;
-use serde_json::Value;
 
 /// Observation only. It never advances execution state or releases a reservation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderPhase {
-    Prepared,
-    Pending,
     Working,
     PartiallyFilled,
-    CancelPending,
+    /// Terminal at the exchange while its factual fills are still arriving.
     Settling,
     Filled,
     Cancelled,
     Rejected,
-    Uncertain,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -23,86 +20,41 @@ pub struct ObservedOrder {
     pub phase: OrderPhase,
     pub exchange_terminal: bool,
     pub facts_complete: bool,
-    pub record: Value,
+    /// Lots joined from the order's factual trade updates.
+    pub filled_lots: i64,
+    pub order: Order,
 }
 
-pub fn observe(record: Value) -> Result<ObservedOrder> {
-    let order = &record["order"];
-    let number = |key: &str| {
-        order[key]
-            .as_i64()
-            .with_context(|| format!("missing order {key}"))
+/// Current order state: its latest lifecycle record joined with the factual
+/// fills of the same `client_order_id`.
+pub fn observe(order: Order, filled_lots: i64) -> Result<ObservedOrder> {
+    ensure!(
+        (0..=order.lots).contains(&filled_lots),
+        "factual fills exceed native order lots"
+    );
+    let exchange_terminal = order.status.terminal();
+    let facts_complete = match order.status {
+        OrderStatus::Filled => filled_lots == order.lots,
+        // Cancellation and rejection carry no fill count; later fills of a
+        // terminal order cannot exist once it is terminal at the exchange.
+        OrderStatus::Canceled | OrderStatus::Expired => true,
+        OrderStatus::PartiallyFilled => filled_lots > 0,
+        OrderStatus::New => true,
     };
-    let lots = order["request"]["lots"]
-        .as_i64()
-        .context("missing order lots")?;
-    let filled = number("filled")?;
-    let reported = number("reported_filled")?;
-    let cancelled = number("cancelled")?;
-    ensure!(
-        lots > 0
-            && filled >= 0
-            && reported >= 0
-            && cancelled >= 0
-            && reported <= lots
-            && filled + cancelled <= lots,
-        "inconsistent native order quantities"
-    );
-    let status = order["status"]
-        .as_str()
-        .context("missing native order status")?;
-    ensure!(
-        matches!(
-            status,
-            "pending" | "working" | "filled" | "cancelled" | "rejected"
-        ),
-        "unknown native order status"
-    );
-    let send = record["send_state"]
-        .as_str()
-        .context("missing native send state")?;
-    ensure!(
-        matches!(
-            send,
-            "prepared" | "submitted_locally" | "rejected_locally" | "uncertain" | "observed"
-        ),
-        "unknown native send state"
-    );
-    let exchange_terminal =
-        matches!(status, "filled" | "cancelled" | "rejected") && send == "observed";
-    let facts_complete = filled == reported;
-    let phase = if send == "uncertain" {
-        OrderPhase::Uncertain
-    } else if matches!(status, "filled" | "cancelled" | "rejected") && !facts_complete {
-        OrderPhase::Settling
-    } else if status == "filled" {
-        ensure!(
-            filled == lots,
-            "filled terminal without complete factual fills"
-        );
-        OrderPhase::Filled
-    } else if status == "cancelled" {
-        OrderPhase::Cancelled
-    } else if status == "rejected" || send == "rejected_locally" {
-        OrderPhase::Rejected
-    } else if order["cancel_pending"]
-        .as_bool()
-        .context("missing cancel_pending")?
-    {
-        OrderPhase::CancelPending
-    } else if filled > 0 {
-        OrderPhase::PartiallyFilled
-    } else if send == "prepared" {
-        OrderPhase::Prepared
-    } else if status == "working" {
-        OrderPhase::Working
-    } else {
-        OrderPhase::Pending
+    let phase = match order.status {
+        _ if exchange_terminal && !facts_complete => OrderPhase::Settling,
+        OrderStatus::Filled => OrderPhase::Filled,
+        OrderStatus::Canceled => OrderPhase::Cancelled,
+        OrderStatus::Expired => OrderPhase::Rejected,
+        OrderStatus::PartiallyFilled => OrderPhase::PartiallyFilled,
+        OrderStatus::New if filled_lots > 0 => OrderPhase::PartiallyFilled,
+        OrderStatus::New => OrderPhase::Working,
     };
     Ok(ObservedOrder {
         phase,
         exchange_terminal,
         facts_complete,
-        record,
+        filled_lots,
+        order,
     })
 }

@@ -42,13 +42,13 @@ pub(super) async fn nav_monitor(
     let end = sample
         .snapshot
         .as_ref()
-        .and_then(|snapshot| snapshot.nav_anchor_observed_us)
+        .and_then(|snapshot| snapshot.through_us)
         .map(|time| time.div_euclid(MONITOR_STEP_US) * (MONITOR_STEP_US / 1000));
     let (report, reason, loading) = match (start, end) {
         (None, _) => (None, Some("该账户尚无原生净值起始快照"), false),
         (Some(_), None) => (
             None,
-            Some("尚无完整账户回报"),
+            Some("执行记录尚未同步"),
             sample.collection() == "loading",
         ),
         (Some(start), Some(end)) if start > end => {
@@ -144,18 +144,11 @@ pub(super) async fn strategy(
         unavailable("策略归因历史记录不完整，无法计算所选区间的净值")
     })?;
     let frozen_symbols = symbols.clone();
-    let cut = with_nav_source(&s, id, move |source, db, through, commissions| {
+    let cut = with_nav_source(&s, id, move |source, db, through| {
         let mut replay = replay;
         let effective_end = end.min(through);
-        ensure!(effective_end >= start, "策略归因的执行证据尚未覆盖所选区间");
-        replay.validate_fills(
-            source,
-            db,
-            commissions,
-            start,
-            effective_end,
-            &frozen_symbols,
-        )?;
+        ensure!(effective_end >= start, "策略归因的执行记录尚未覆盖所选区间");
+        replay.read_records(source, db, start, effective_end, &frozen_symbols)?;
         Ok((replay, effective_end, through))
     })
     .await?;

@@ -1,26 +1,22 @@
+//! Incremental observation: both logs are append-only, so each refresh decodes
+//! only keys after the last one it has seen. A replaced store resets the cache.
 use super::*;
-use std::{
-    os::unix::fs::MetadataExt,
-    sync::atomic::{AtomicU64, Ordering},
-};
-
-static NEXT_NAV_EVIDENCE_REVISION: AtomicU64 = AtomicU64::new(1);
+use std::{collections::HashMap, os::unix::fs::MetadataExt};
 
 #[derive(PartialEq, Eq)]
 struct Epoch {
     source: String,
-    adapter: String,
     device: u64,
     inode: u64,
     identity: Vec<u8>,
-    families: [u32; 3],
+    families: [u32; 2],
 }
 impl Epoch {
     fn read(source: &Source, db: &DB) -> Result<Self> {
         use rocksdb::AsColumnFamilyRef;
         let metadata = std::fs::metadata(db.path())?;
-        let mut families = [0; 3];
-        for (i, name) in [EVENTS, ORDERS, FILLS].into_iter().enumerate() {
+        let mut families = [0; 2];
+        for (i, name) in records::COLUMN_FAMILIES.into_iter().enumerate() {
             let cf = db
                 .cf_handle(name)
                 .context("native observation column family")?;
@@ -30,7 +26,6 @@ impl Epoch {
         }
         Ok(Self {
             source: source.id.clone(),
-            adapter: source.adapter.clone(),
             device: metadata.dev(),
             inode: metadata.ino(),
             identity: std::fs::read(db.path().join("IDENTITY"))?,
@@ -42,20 +37,14 @@ impl Epoch {
 #[derive(Default)]
 pub struct Cache {
     epoch: Option<Epoch>,
-    database_sequence: Option<u64>,
-    version: Option<(u64, Option<String>, usize)>,
-    projection: Option<projection::Projection>,
-    snapshot: Option<Snapshot>,
+    last_order_key: i64,
+    last_trade_key: i64,
+    lifecycle_records: usize,
+    trades: usize,
+    /// Factual lots per `client_order_id` across the whole trade log.
+    filled: HashMap<i64, i64>,
 }
 impl Cache {
-    pub(in crate::native_futures) fn commissions(
-        &self,
-    ) -> Option<&super::super::nav::commission::History> {
-        self.projection
-            .as_ref()
-            .map(|projection| &projection.commissions)
-    }
-
     pub fn read(
         &mut self,
         source: &Source,
@@ -70,6 +59,7 @@ impl Cache {
         }
         result
     }
+
     fn refresh(
         &mut self,
         source: &Source,
@@ -79,90 +69,66 @@ impl Cache {
     ) -> Result<Snapshot> {
         let epoch = Epoch::read(source, db)?;
         if self.epoch.as_ref() != Some(&epoch) {
-            *self = Self::default();
-            self.epoch = Some(epoch);
+            *self = Self {
+                epoch: Some(epoch),
+                ..Self::default()
+            };
         }
-        let replication = if source.sync.is_some() {
-            Some(super::super::sync::replica_status(db, &source.id)?)
-        } else {
-            None
-        };
+        let replication = replication(source, db)?;
         if replication
             .as_ref()
             .is_some_and(|s| !s.initialized || s.applying)
         {
             return Err(super::super::sync::ReplicaBusy.into());
         }
-        let sequence = db.latest_sequence_number();
-        ensure!(
-            self.database_sequence.is_none_or(|old| old <= sequence),
-            "native reader sequence moved backwards"
-        );
-        let version = (
-            replication
-                .as_ref()
-                .map_or(sequence, |s| s.committed_cursor),
-            replication.as_ref().and_then(|s| s.store_id.clone()),
-            limit,
-        );
-        let changed = self.database_sequence.map(|old| {
-            changes::since(
-                db,
-                old,
-                self.projection.as_ref().and_then(|p| p.last_key.as_deref()),
-            )
-        });
-        if self.version.as_ref() == Some(&version)
-            && changed.is_some_and(|c| !c.events && !c.orders && !c.fills)
-        {
-            if let (Some(cached), Some(projection)) = (&self.snapshot, &self.projection) {
-                let mut result = cached.clone();
-                result.read_at_us = super::super::now_us();
-                result.account = source.account.clone();
-                result.replication = replication;
-                result.replication_stale =
-                    replication_stale(result.replication.as_ref(), result.read_at_us, stale_secs);
-                projection.apply(&mut result, stale_secs);
-                self.database_sequence = Some(sequence);
-                return Ok(result);
+        records::scan(db, ORDERS, self.last_order_key, |key, value| {
+            if let Uniform::Order(_) = records::decode_uniform(key, value)? {
+                self.lifecycle_records += 1;
             }
-        }
-        let previous = if changed.is_some_and(|c| !c.reset_events) {
-            self.projection.as_ref()
-        } else {
-            None
+            self.last_order_key = records::key_us(key)?;
+            Ok(true)
+        })?;
+        records::scan(db, TRADES, self.last_trade_key, |key, value| {
+            let trade = records::decode_trade(key, value)?;
+            let lots = self.filled.entry(trade.client_order_id).or_default();
+            *lots = lots
+                .checked_add(trade.lots)
+                .context("filled lots overflow")?;
+            self.trades += 1;
+            self.last_trade_key = trade.key_us;
+            Ok(true)
+        })?;
+        let orders = recent_orders(db, limit)?
+            .into_iter()
+            .map(|order| {
+                let lots = self
+                    .filled
+                    .get(&order.client_order_id)
+                    .copied()
+                    .unwrap_or(0);
+                super::super::state::observe(order, lots)
+            })
+            .collect::<Result<_>>()?;
+        let read_at_us = super::super::now_us();
+        let through_us = match &replication {
+            Some(replica) => replica.source_captured_at_us,
+            None => Some(read_at_us),
         };
-        let projection = projection::read(db, &source.adapter, previous)?;
-        let old_rows = self
-            .snapshot
-            .as_ref()
-            .filter(|_| self.version.as_ref().is_some_and(|v| v.2 == limit));
-        let reuse_orders = changed.is_some_and(|c| !c.orders);
-        let reuse_fills = changed.is_some_and(|c| !c.fills);
-        let mut result = read_snapshot_with_projection(
-            source,
-            db,
-            limit,
-            stale_secs,
-            &projection,
-            old_rows,
-            reuse_orders,
-            reuse_fills,
-        )?;
-        // Fill rewrites and corrections to existing journal evidence can change
-        // NAV even when the observed account sequence and row count are unchanged.
-        result.nav_evidence_revision = self
-            .snapshot
-            .as_ref()
-            .filter(|_| changed.is_some_and(|c| !c.fills && !c.reset_events))
-            .map_or_else(
-                || NEXT_NAV_EVIDENCE_REVISION.fetch_add(1, Ordering::Relaxed),
-                |previous| previous.nav_evidence_revision,
-            );
-        self.database_sequence = Some(sequence);
-        self.version = Some(version);
-        self.projection = Some(projection);
-        self.snapshot = Some(result.clone());
-        Ok(result)
+        Ok(Snapshot {
+            source_id: source.id.clone(),
+            account: source.account.clone(),
+            read_at_us,
+            last_record_us: [self.last_order_key, self.last_trade_key]
+                .into_iter()
+                .filter(|key| *key > 0)
+                .max(),
+            through_us,
+            orders,
+            fills: recent_trades(db, limit)?,
+            total_orders: self.lifecycle_records,
+            total_fills: self.trades,
+            replication_stale: replication_stale(replication.as_ref(), read_at_us, stale_secs),
+            replication,
+        })
     }
 }

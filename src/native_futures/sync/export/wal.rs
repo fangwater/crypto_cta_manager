@@ -6,8 +6,8 @@ const MAX_KEYS: usize = 100_000;
 const MAX_KEY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OPERATIONS: usize = 1_000_000;
 
-pub(super) fn column_family_ids(view: &DB) -> Result<[u32; 3]> {
-    let mut ids = [0; 3];
+pub(super) fn column_family_ids(view: &DB) -> Result<[u32; CF_COUNT]> {
+    let mut ids = [0; CF_COUNT];
     for cf in NativeCf::ALL {
         let handle = view
             .cf_handle(cf.name())
@@ -20,7 +20,7 @@ pub(super) fn column_family_ids(view: &DB) -> Result<[u32; 3]> {
 }
 
 struct Changes {
-    ids: [u32; 3],
+    ids: [u32; CF_COUNT],
     puts: Vec<(NativeCf, Vec<u8>, Vec<u8>)>,
     operations: usize,
     bytes: usize,
@@ -129,8 +129,8 @@ pub(super) fn capture(db: &DB, view: &DB, head: &Head, plan: &mut Capture) -> Re
             } else {
                 db.get(&index)?
             };
-            if old.as_deref().is_some_and(|old| old != hash) && cf == NativeCf::Events {
-                return conflict("immutable native evidence was modified");
+            if old.as_deref().is_some_and(|old| old != hash) {
+                return conflict("append-only native record was modified");
             }
             if !seen.contains_key(&index) {
                 key_bytes += index.len();

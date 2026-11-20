@@ -18,9 +18,9 @@ max_connections = 8
 # [source_viewers]
 # yida_sim01 = ["operator"]
 
-# Optional read-only ctaker gRPC subscription for a configured CTP source.
+# Optional read-only exec gRPC subscription for a configured CTP source.
 # Exec connects to the Manager loopback origin and uses this environment token.
-# [ctaker_plan_readers]
+# [exec_plan_readers]
 # ctp_live01 = "CN_CTA_CTP_LIVE01_PLAN_TOKEN"
 
 # Native market-replay gRPC. Lots are single-sided, turnover includes multiplier.

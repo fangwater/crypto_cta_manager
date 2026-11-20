@@ -104,7 +104,7 @@ pub struct Service {
 
 struct RuntimeConfig {
     settings: Config,
-    ctaker_plan_readers: BTreeMap<String, [u8; 32]>,
+    exec_plan_readers: BTreeMap<String, [u8; 32]>,
 }
 
 impl std::ops::Deref for RuntimeConfig {
@@ -118,8 +118,8 @@ impl std::ops::Deref for RuntimeConfig {
 impl Service {
     pub fn new(config: Config, pool: PgPool) -> Result<Self> {
         config.validate()?;
-        let ctaker_plan_readers = netting_plan::credentials(&config)?;
-        let plan_changes = ctaker_plan_readers
+        let exec_plan_readers = netting_plan::credentials(&config)?;
+        let plan_changes = exec_plan_readers
             .keys()
             .map(|source| (source.clone(), watch::channel(()).0))
             .collect();
@@ -154,7 +154,7 @@ impl Service {
             overview: Arc::new(manager::Observations::new(&config)),
             config: Arc::new(RuntimeConfig {
                 settings: config,
-                ctaker_plan_readers,
+                exec_plan_readers,
             }),
             pool,
             rocks,
@@ -634,9 +634,13 @@ async fn nav_snapshots(
     }
     body(nav::store::list(&s.pool, &id).await?)
 }
+/// The operator states the opening gross inventory; the trade log is cut at
+/// its current tip and the inventory priced at the completed-minute close.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CaptureNav {
-    expected_state_us: i64,
+    trading_day: String,
+    positions: Vec<nav::Inventory>,
     note: String,
 }
 async fn capture_nav_snapshot(
@@ -660,18 +664,15 @@ async fn capture_nav_snapshot(
         .cloned()
         .ok_or_else(forbidden)?;
     let rocks = s.rocks.clone();
-    let lock = s.readers[&id].clone();
-    let mut cache = lock.lock_owned().await;
-    let limit = s.config.recent_rows;
-    let stale = s.config.stale_secs;
+    let guard = s.readers[&id].clone().lock_owned().await;
     let candidate = tokio::task::spawn_blocking(move || {
+        let _guard = guard;
         reader::with_db(&rocks, &source, |db| {
-            let snapshot = cache.read(&source, db, limit, stale)?;
             nav::source::candidate(
                 &source,
                 db,
-                &snapshot,
-                request.expected_state_us,
+                request.trading_day,
+                request.positions,
                 request.note,
             )
         })
@@ -745,14 +746,7 @@ impl NavQuery {
 async fn with_nav_source<T: Send + 'static>(
     s: &Service,
     id: &str,
-    read: impl FnOnce(
-        &super::config::Source,
-        &rocksdb::DB,
-        i64,
-        &nav::commission::History,
-    ) -> anyhow::Result<T>
-    + Send
-    + 'static,
+    read: impl FnOnce(&super::config::Source, &rocksdb::DB, i64) -> anyhow::Result<T> + Send + 'static,
 ) -> Result<anyhow::Result<T>, ApiError> {
     let source = s
         .config
@@ -768,21 +762,10 @@ async fn with_nav_source<T: Send + 'static>(
     let result = tokio::task::spawn_blocking(move || {
         reader::with_db(&rocks, &source, |db| {
             let snapshot = cache.read(&source, db, limit, stale)?;
-            ensure!(
-                snapshot.projection_errors == 0,
-                "原生投影存在错误，暂停净值回放"
-            );
             let through = snapshot
-                .nav_anchor_observed_us
-                .context("missing complete account observation time")?;
-            read(
-                &source,
-                db,
-                through,
-                cache
-                    .commissions()
-                    .context("missing native commission projection")?,
-            )
+                .through_us
+                .context("execution records have no committed coverage yet")?;
+            read(&source, db, through)
         })
     })
     .await
@@ -823,15 +806,10 @@ async fn account_nav_report(
         ));
     };
     let read_anchor = anchor.clone();
-    let cut = with_nav_source(s, id, move |source, db, through, commissions| {
-        let mut fills = nav::source::fills(source, db, &read_anchor, end)?;
-        for fill in fills.iter_mut().filter(|fill| fill.received_us >= start) {
-            commissions.enrich(fill);
-        }
-        // Lifecycle and heartbeat events do not extend financial coverage.
+    let cut = with_nav_source(s, id, move |source, db, through| {
+        let fills = nav::source::fills(source, db, &read_anchor, end)?;
         let through = fills
             .iter()
-            .filter(|fill| fill.live_origin)
             .map(|fill| fill.received_us)
             .fold(through, i64::max);
         Ok((fills, through))
@@ -862,7 +840,7 @@ async fn account_nav_report(
                 start,
                 end,
                 through,
-                "所选区间晚于最近一次完整账户回报；请选择已有执行证据的时间".into(),
+                "所选区间晚于执行记录已覆盖的时间；请选择已同步的时间".into(),
             ));
         }
         fills.retain(|fill| fill.received_us <= effective_end);

@@ -508,14 +508,6 @@ CREATE TABLE cta_native_netting_events (
     UNIQUE(source_id,revision)
 );
 CREATE UNIQUE INDEX cta_native_netting_factual_fill ON cta_native_netting_events(source_id,factual_identity) WHERE factual_identity IS NOT NULL;
-CREATE TABLE cta_native_netting_demands (
-    source_id text NOT NULL REFERENCES cta_native_netting_portfolios(source_id),
-    batch_id text NOT NULL,
-    strategy_name text NOT NULL REFERENCES cta_native_netting_members(strategy_name),
-    market text NOT NULL,
-    remaining_lots bigint NOT NULL,
-    PRIMARY KEY(source_id,batch_id,strategy_name,market)
-);
 
 CREATE TABLE cta_native_netting_publishers (
     source_id text NOT NULL REFERENCES cta_native_netting_portfolios(source_id),
