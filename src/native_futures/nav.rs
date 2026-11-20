@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(crate) mod attribution;
+pub(super) mod commission;
 pub(crate) mod comparison;
 pub mod service;
 pub mod source;
@@ -163,9 +164,45 @@ pub struct Fill {
     pub received_us: i64,
     pub evidence_sequence: i64,
     pub commission_cny: Option<f64>,
+    journal_rate: Option<commission::Rate>,
     /// Verified live report or an explicitly unambiguous projection. Recovery
     /// queries without an original UTC trade time cannot be placed after an anchor.
     pub live_origin: bool,
+}
+
+impl Fill {
+    fn needs_reference_fee(&self) -> bool {
+        self.commission_cny.is_none() && self.journal_rate.is_none()
+    }
+
+    fn estimated_fee(
+        &self,
+        multiplier: f64,
+        rates: Option<&[AccountRates]>,
+    ) -> Result<Option<f64>> {
+        if self.commission_cny.is_some() {
+            return Ok(None);
+        }
+        if let Some(rate) = self.journal_rate {
+            return Ok(rate.estimate(self, multiplier));
+        }
+        let rate = rates
+            .into_iter()
+            .flatten()
+            .filter(|r| r.observed_at_us <= self.received_us)
+            .max_by_key(|r| r.observed_at_us);
+        if let Some(rate) = rate {
+            ensure!(
+                rate.venue == self.venue
+                    && rate.symbol == self.symbol
+                    && rate.contract_multiplier == multiplier,
+                "fee observation belongs to another market or multiplier"
+            );
+        }
+        Ok(rate.and_then(|r| {
+            r.estimated_fee(self.offset.key(), self.lots, self.price, self.received_us)
+        }))
+    }
 }
 #[derive(Debug, Clone)]
 struct Lot {
@@ -805,22 +842,8 @@ fn build_selected(
                 .get_mut(&key)
                 .context("missing native market ledger")?;
             ledger.apply(fill)?;
-            let observed = rates.get(&key).and_then(|v| {
-                v.iter()
-                    .filter(|r| r.observed_at_us <= fill.received_us)
-                    .max_by_key(|r| r.observed_at_us)
-            });
-            if let Some(r) = observed {
-                ensure!(
-                    r.venue == fill.venue
-                        && r.symbol == fill.symbol
-                        && r.contract_multiplier == ledger.multiplier,
-                    "fee observation belongs to another market or multiplier"
-                );
-            }
-            let estimated = observed.and_then(|r| {
-                r.estimated_fee(fill.offset.key(), fill.lots, fill.price, fill.received_us)
-            });
+            let estimated =
+                fill.estimated_fee(ledger.multiplier, rates.get(&key).map(Vec::as_slice))?;
             let volume = fill.price * fill.lots as f64 * ledger.multiplier;
             fees.add(volume, fill.commission_cny, estimated)?;
             by_market

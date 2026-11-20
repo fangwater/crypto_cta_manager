@@ -141,11 +141,18 @@ pub(super) async fn strategy(
         unavailable("策略归因历史记录不完整，无法计算所选区间的净值")
     })?;
     let frozen_symbols = symbols.clone();
-    let cut = with_nav_source(&s, id, move |source, db, through| {
+    let cut = with_nav_source(&s, id, move |source, db, through, commissions| {
         let mut replay = replay;
         let effective_end = end.min(through);
         ensure!(effective_end >= start, "策略归因的执行证据尚未覆盖所选区间");
-        replay.validate_fills(source, db, start, effective_end, &frozen_symbols)?;
+        replay.validate_fills(
+            source,
+            db,
+            commissions,
+            start,
+            effective_end,
+            &frozen_symbols,
+        )?;
         Ok((replay, effective_end, through))
     })
     .await?;
@@ -327,13 +334,18 @@ fn unavailable(message: impl ToString) -> ApiError {
 }
 
 fn metadata(report: &nav::Report, references: &[comparison::Reference]) -> Value {
+    let fee_basis = if report.fees.estimated_count > 0 {
+        "reported_and_estimated_total_cny"
+    } else {
+        "actual_total_cny"
+    };
     json!({
         "generated_at_us": crate::native_futures::now_us(), "generation_duration_ms": 0,
         "theoretical": references.iter().map(|row| json!({
             "valuation": "native_target_baseline_minute_reference", "execution_model": row.model.key(),
             "loading": false, "available_from_us": report.snapshot_us,
             "execution_window_secs": row.model.window_secs(),
-            "price_basis": "baseline_data_1min", "fee_basis": "actual_total_cny",
+            "price_basis": "baseline_data_1min", "fee_basis": fee_basis,
             "latest_point_ts_us": row.points.last().map(|point| point.ts_us),
             "unavailable_reason": row.unavailable, "sampled": report.sampled,
             "points": [],

@@ -228,10 +228,11 @@ impl Replay {
         Ok(())
     }
 
-    pub(crate) fn validate_fills(
+    pub(in crate::native_futures) fn validate_fills(
         &mut self,
         source: &Source,
         db: &DB,
+        commissions: &commission::History,
         start: i64,
         end: i64,
         symbols: &[String],
@@ -289,7 +290,8 @@ impl Replay {
                     .allocations
                     .remove(key)
                     .context("合约存在未归因的真实成交；请先完成明确的成交归因")?;
-                let fill = source::parse_fill(source, db, key, value, seq, received)?;
+                let mut fill = source::parse_fill(source, db, key, value, seq, received)?;
+                commissions.enrich(&mut fill);
                 let verified = netting::FactualFill::from_evidence(value)?;
                 ensure!(
                     fill.live_origin
@@ -373,10 +375,7 @@ impl Replay {
                     mv.market.0 == venue
                         && mv.market.1 == symbol
                         && mv.at >= query.start_us
-                        && mv
-                            .fill
-                            .as_ref()
-                            .is_some_and(|fill| fill.commission_cny.is_none())
+                        && mv.fill.as_ref().is_some_and(Fill::needs_reference_fee)
                 }) {
                     match feed
                         .history(
@@ -500,25 +499,7 @@ fn apply(
         }
         return Ok(());
     };
-    let rate = if fill.commission_cny.is_none() {
-        rates
-            .into_iter()
-            .flatten()
-            .filter(|r| r.observed_at_us <= fill.received_us)
-            .max_by_key(|r| r.observed_at_us)
-    } else {
-        None
-    };
-    if let Some(rate) = rate {
-        ensure!(
-            rate.venue == fill.venue
-                && rate.symbol == fill.symbol
-                && rate.contract_multiplier == multiplier,
-            "strategy fee observation belongs to another contract or multiplier"
-        );
-    }
-    let estimated = rate
-        .and_then(|r| r.estimated_fee(fill.offset.key(), fill.lots, fill.price, fill.received_us));
+    let estimated = fill.estimated_fee(multiplier, rates.map(Vec::as_slice))?;
     let volume = fill.price * multiplier * fill.lots as f64;
     window
         .portfolio

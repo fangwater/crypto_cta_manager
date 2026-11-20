@@ -40,6 +40,7 @@ fn fill(seq: i64, side: Side, offset: Offset, lots: i64, price: f64, time: i64) 
         received_us: time,
         evidence_sequence: seq,
         commission_cny: Some(0.0),
+        journal_rate: None,
         live_origin: true,
     }
 }
@@ -248,6 +249,70 @@ fn missing_actual_fees_use_only_causal_contract_offset_rates_and_never_become_ze
     let s = r.summary.unwrap();
     assert!(s.nav_after_fees_cny.is_none());
     near(s.nav_before_fees_cny, 50.0);
+}
+
+#[test]
+fn ctp_journal_rates_cover_fee_after_nav_for_exact_contract_and_offset() {
+    use serde_json::json;
+
+    let mut history = commission::History::default();
+    history.observe(
+        4,
+        2,
+        &json!({"trading_day":"20261117","error_code":0,"present":1}),
+    );
+    let observation = |received| {
+        json!({
+            "symbol":"cu2612","exchange":"","trading_day":"","error_code":0,
+            "last":1,"present":1,"request_id":12,"received_us":received,
+            "metadata":{"commission_rates":[0.001,1.0,0.0,2.0,0.0,3.0]}
+        })
+    };
+    history.observe(17, 3, &observation(at() - 100));
+    let mut open = fill(6, Side::Buy, Offset::Open, 1, 105.0, at());
+    open.commission_cny = None;
+    history.enrich(&mut open);
+    assert!(open.needs_reference_fee()); // No corroborating venue.
+    history.observe(
+        15,
+        4,
+        &json!({"symbol":"cu","exchange":"SHFE","error_code":0,"present":1}),
+    );
+    history.observe(17, 5, &observation(at() - 1));
+    let mut future = observation(at() + 1);
+    future["metadata"]["commission_rates"][1] = json!(99.0);
+    history.observe(17, 7, &future);
+    history.enrich(&mut open);
+    near(open.estimated_fee(10.0, None).unwrap().unwrap(), 2.05);
+    let mut wrong_month = fill(8, Side::Buy, Offset::Open, 1, 105.0, at() + 1);
+    wrong_month.commission_cny = None;
+    wrong_month.symbol = "cu2701".into();
+    history.enrich(&mut wrong_month);
+    assert!(wrong_month.needs_reference_fee());
+    let mut close = fill(
+        9,
+        Side::Sell,
+        Offset::CloseToday,
+        1,
+        108.0,
+        at() + 60_000_000,
+    );
+    close.commission_cny = None;
+    history.enrich(&mut close);
+    let r = report(
+        &anchor(),
+        &[open, close.clone()],
+        &prices(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(r.fees.estimated_count, 2);
+    assert_eq!(r.fees.missing_count, 0);
+    near(r.summary.unwrap().nav_after_fees_cny.unwrap(), 24.95);
+    close.offset = Offset::Close;
+    assert!(close.estimated_fee(10.0, None).unwrap().is_none());
+    close.commission_cny = Some(0.0);
+    assert!(close.estimated_fee(10.0, None).unwrap().is_none());
 }
 #[test]
 fn cross_account_cross_market_overclose_and_recovery_only_evidence_are_rejected() {

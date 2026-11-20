@@ -17,6 +17,7 @@ pub(super) struct Projection {
     position_boundary: Option<i64>,
     reconciled: Option<(i64, i64)>,
     funds: super::funds::FundsProjection,
+    pub(super) commissions: super::super::nav::commission::History,
 }
 #[derive(Clone)]
 struct State {
@@ -217,6 +218,17 @@ pub(super) fn read(db: &DB, adapter: &str, previous: Option<&Projection>) -> Res
         }
         if matches!(kind, "runtime_start" | "runtime_stopped") {
             next.runtime = Some((kind == "runtime_stopped", event.sequence));
+            next.commissions.reset_login();
+        }
+        if adapter == "ctp"
+            && event.projection_error.is_none()
+            && boolean(value.shutdown_tail) != Some(true)
+            && let Some(raw_kind @ (1 | 2 | 4 | 15 | 17)) = native.as_ref().and_then(|raw| raw.kind)
+            && let Some(row) = value
+                .event
+                .and_then(|raw| serde_json::from_str(raw.get()).ok())
+        {
+            next.commissions.observe(raw_kind, event.sequence, &row);
         }
         if matches!(
             kind,

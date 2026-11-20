@@ -100,7 +100,7 @@ pub(crate) async fn timeline(
         for (venue, symbol) in selected {
             if fills.iter().any(|f| {
                 f.venue == venue && f.symbol == symbol && f.received_us >= start_us
-                    && f.received_us <= end_us && f.commission_cny.is_none()
+                    && f.received_us <= end_us && f.needs_reference_fee()
             }) && let Some(feed) = reference {
                 match feed.history(&anchor.source_id, &venue, &symbol, start_us, end_us).await {
                     Ok(observations) => { rates.insert((venue, symbol), observations); }

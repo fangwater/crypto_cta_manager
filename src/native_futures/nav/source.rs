@@ -228,6 +228,7 @@ pub(super) fn parse_fill(
         received_us: received,
         evidence_sequence: seq,
         commission_cny,
+        journal_rate: None,
         live_origin: live_origin(source, db, value, seq)?,
     })
 }

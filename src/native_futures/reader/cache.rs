@@ -48,6 +48,14 @@ pub struct Cache {
     snapshot: Option<Snapshot>,
 }
 impl Cache {
+    pub(in crate::native_futures) fn commissions(
+        &self,
+    ) -> Option<&super::super::nav::commission::History> {
+        self.projection
+            .as_ref()
+            .map(|projection| &projection.commissions)
+    }
+
     pub fn read(
         &mut self,
         source: &Source,

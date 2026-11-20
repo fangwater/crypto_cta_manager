@@ -745,7 +745,14 @@ impl NavQuery {
 async fn with_nav_source<T: Send + 'static>(
     s: &Service,
     id: &str,
-    read: impl FnOnce(&super::config::Source, &rocksdb::DB, i64) -> anyhow::Result<T> + Send + 'static,
+    read: impl FnOnce(
+        &super::config::Source,
+        &rocksdb::DB,
+        i64,
+        &nav::commission::History,
+    ) -> anyhow::Result<T>
+    + Send
+    + 'static,
 ) -> Result<anyhow::Result<T>, ApiError> {
     let source = s
         .config
@@ -768,7 +775,14 @@ async fn with_nav_source<T: Send + 'static>(
             let through = snapshot
                 .nav_anchor_observed_us
                 .context("missing complete account observation time")?;
-            read(&source, db, through)
+            read(
+                &source,
+                db,
+                through,
+                cache
+                    .commissions()
+                    .context("missing native commission projection")?,
+            )
         })
     })
     .await
@@ -809,8 +823,11 @@ async fn account_nav_report(
         ));
     };
     let read_anchor = anchor.clone();
-    let cut = with_nav_source(s, id, move |source, db, through| {
-        let fills = nav::source::fills(source, db, &read_anchor, end)?;
+    let cut = with_nav_source(s, id, move |source, db, through, commissions| {
+        let mut fills = nav::source::fills(source, db, &read_anchor, end)?;
+        for fill in fills.iter_mut().filter(|fill| fill.received_us >= start) {
+            commissions.enrich(fill);
+        }
         // Lifecycle and heartbeat events do not extend financial coverage.
         let through = fills
             .iter()
