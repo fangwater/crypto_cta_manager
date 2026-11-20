@@ -113,7 +113,7 @@ pub(super) async fn strategy(
     State(s): State<Service>,
     Extension(user): Extension<AuthUser>,
     Extension(access): Extension<Arc<SourceAccess>>,
-    Query(query): Query<TimelineQuery>,
+    Query(mut query): Query<TimelineQuery>,
 ) -> Result<Response, ApiError> {
     let sources = selected(&s, &access, query.source_ids.as_deref())?;
     let id = only_source(&sources)?;
@@ -125,6 +125,9 @@ pub(super) async fn strategy(
         return Err(forbidden());
     }
     let revision = ledger.revision;
+    if ledger.baseline_revision > 0 {
+        query.restrict_to_baseline(ledger.anchor.snapshot_us)?;
+    }
     let symbols = query.symbols();
     let window = query.nav_window(Some(ledger.anchor.snapshot_us))?;
     let (start, end, max_points) = window.window()?;
@@ -238,9 +241,12 @@ async fn account_view(
     s: &Service,
     user: &AuthUser,
     id: &str,
-    query: TimelineQuery,
+    mut query: TimelineQuery,
     view: View,
 ) -> Result<Response, ApiError> {
+    if let Some(start) = nav::store::fresh_start(&s.pool, id).await? {
+        query.restrict_to_baseline(start)?;
+    }
     let end = query
         .end_ms
         .unwrap_or_else(|| crate::native_futures::now_us() / 1000);
@@ -296,6 +302,17 @@ fn only_source(sources: &[String]) -> Result<&str, ApiError> {
 }
 
 impl TimelineQuery {
+    fn restrict_to_baseline(&mut self, snapshot_us: i64) -> Result<(), ApiError> {
+        let baseline_ms = snapshot_us / 1000 + i64::from(snapshot_us % 1000 != 0);
+        if self.end_ms.is_some_and(|end| end < baseline_ms) {
+            return Err(unavailable("所选时段早于新净值起点"));
+        }
+        if let Some(start) = &mut self.start_ms {
+            *start = (*start).max(baseline_ms);
+        }
+        Ok(())
+    }
+
     fn wants_comparison(&self, view: View) -> bool {
         view == View::Theoretical || (view == View::Portfolio && self.include_theoretical)
     }

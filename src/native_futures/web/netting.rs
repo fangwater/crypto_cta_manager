@@ -16,6 +16,7 @@ pub(super) fn routes() -> Router<Service> {
             "/api/native/sources/{id}/netting/extend-scope",
             post(extend_scope),
         )
+        .route("/api/native/sources/{id}/netting/rebase", post(rebase))
         .route(
             "/api/native/sources/{id}/netting/execution-plan",
             get(execution_plan),
@@ -261,6 +262,100 @@ async fn read(
         json!({"portfolio":state,"net_targets":state.net_targets()?,"external_demands":state.external_demands(),"execution_enabled":false,
         "account_basis":"explicit_snapshot_allocation_plus_imported_fills"}),
     )
+}
+
+async fn rebase(
+    State(s): State<Service>,
+    Extension(user): Extension<AuthUser>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    Json(request): Json<model::Rebase>,
+) -> ApiResult {
+    if !user.is_admin() {
+        return Err(forbidden());
+    }
+    model::valid_id(&request.event_id).map_err(bad)?;
+    let state = authorized(&s, &user, &access, &id, true).await?;
+    if let Some(receipt) = store::replay(
+        &s.pool,
+        &id,
+        &format!("rebase:{}", request.event_id),
+        &request,
+    )
+    .await
+    .map_err(failure)?
+    {
+        return body(receipt);
+    }
+    model::require(
+        state.revision == request.expected_revision && !state.external_demand_open,
+        "portfolio has changed or still has unsettled execution",
+    )
+    .map_err(failure)?;
+
+    let snapshot = observed(&s, &id).await?;
+    let expected = request.snapshot_evidence_sequence;
+    check_rebase_snapshot(&snapshot, expected, s.config.stale_secs)?;
+    let at = snapshot
+        .state_observed_us
+        .context("missing current observation time")?;
+    let note = request.note.clone();
+    let candidate = with_source(&s, &id, move |source, db| {
+        use crate::native_futures::evidence;
+        let proof = evidence::capture_current(source, db, &snapshot, expected, note.clone())?;
+        let row: Value = serde_json::from_slice(&evidence::journal_entry(db, expected)?)?;
+        model::require(
+            evidence::no_unsettled_orders(&row["value"]["state"]),
+            "rebase requires an order-free broker snapshot",
+        )?;
+        nav::source::candidate(source, db, &snapshot, proof.snapshot_us, note)
+    })
+    .await?;
+    let nav = nav::service::price_anchor(candidate, s.market_data.as_deref())
+        .await
+        .map_err(bad)?;
+    let _guard = s.catalog_lock.lock().await;
+    let latest_access = auth::allowed_source_access(
+        &s.pool,
+        &user,
+        &s.config.source_ids(),
+        &s.config.source_viewers,
+    )
+    .await?;
+    authorized(&s, &user, &latest_access, &id, true).await?;
+    let latest = observed(&s, &id).await?;
+    check_rebase_snapshot(&latest, expected, s.config.stale_secs)?;
+    if latest.state_observed_us != Some(at) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "柜台事实快照已变化，请重新读取".into(),
+        ));
+    }
+    let receipt = store::rebase(&s.pool, &id, &request, &nav, user.user_id, &user.username)
+        .await
+        .map_err(failure)?;
+    s.plan_changed(&id);
+    body(receipt)
+}
+
+fn check_rebase_snapshot(
+    snapshot: &reader::Snapshot,
+    expected: i64,
+    stale_secs: u64,
+) -> Result<(), ApiError> {
+    let now = crate::native_futures::now_us();
+    model::require(
+        snapshot.state_evidence_sequence == Some(expected)
+            && snapshot.nav_anchor_evidence_sequence == Some(expected)
+            && snapshot.snapshot_current_runtime
+            && !snapshot.positions_may_lag
+            && !snapshot.replication_stale
+            && snapshot
+                .state_observed_us
+                .is_some_and(|at| at <= now && now - at <= stale_secs as i64 * 1_000_000),
+        "rebase requires the current, complete, synchronized account snapshot",
+    )
+    .map_err(failure)
 }
 
 async fn extend_scope(

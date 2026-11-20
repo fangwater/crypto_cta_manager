@@ -53,6 +53,17 @@ pub struct Initialize {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct Rebase {
+    pub event_id: String,
+    pub expected_revision: i64,
+    pub snapshot_evidence_sequence: i64,
+    pub strategy_groups: BTreeMap<String, BTreeSet<String>>,
+    pub positions: BTreeMap<String, Quantities>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExtendScope {
     pub event_id: String,
     pub expected_revision: i64,
@@ -217,6 +228,8 @@ pub struct StrategyGroup {
 pub struct Portfolio {
     pub source_id: String,
     pub revision: i64,
+    #[serde(default, skip_serializing_if = "is_zero_revision")]
+    pub baseline_revision: i64,
     pub decision_us: i64,
     pub batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,6 +244,10 @@ pub struct Portfolio {
     /// Account attribution anchor + imported factual fills; never target quantity.
     pub account: BTreeMap<String, Position>,
     pub anchor: super::evidence::Anchor,
+}
+
+fn is_zero_revision(revision: &i64) -> bool {
+    *revision == 0
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -333,6 +350,101 @@ impl FactualFill {
 }
 
 impl Portfolio {
+    pub(super) fn rebase(&self, request: &Rebase, nav: &super::nav::Anchor) -> Result<Self> {
+        require(
+            self.revision == request.expected_revision,
+            "portfolio changed before rebase",
+        )?;
+        require(
+            !self.external_demand_open,
+            "settle external demand before rebasing",
+        )?;
+        require(
+            nav.source_id == self.source_id
+                && nav.store_id == self.anchor.store_id
+                && nav.snapshot_us > self.anchor.snapshot_us.max(self.decision_us)
+                && nav.evidence_sequence > self.anchor.evidence_sequence
+                && self
+                    .ctaker_lease()
+                    .is_none_or(|(_, until)| nav.snapshot_us >= until),
+            "rebase requires a newer complete snapshot of the same account and execution store",
+        )?;
+        require(
+            request
+                .strategy_groups
+                .keys()
+                .eq(self.strategy_groups.keys())
+                && request.strategy_groups.iter().all(|(group, members)| {
+                    members.len() == 1 && members.is_subset(&self.strategy_groups[group].members)
+                }),
+            "rebase requires one existing strategy per registered group",
+        )?;
+        let mut account = Quantities::new();
+        let mut marks = BTreeMap::new();
+        for position in &nav.positions {
+            let market = format!("{}:{}", position.venue, position.symbol);
+            require(
+                self.contracts
+                    .get(&market)
+                    .is_some_and(|c| c.multiplier == position.contract_multiplier)
+                    && !account.contains_key(&market),
+                "rebase requires registered contracts and unhedged factual inventory",
+            )?;
+            let lots = position
+                .today
+                .checked_add(position.yesterday)
+                .context("gross position overflow")?;
+            let sign = match position.side {
+                super::nav::Side::Buy => 1,
+                super::nav::Side::Sell => -1,
+            };
+            account.insert(market.clone(), lots * sign);
+            marks.insert(market, position.reference_price);
+        }
+        let positions = request
+            .positions
+            .iter()
+            .map(|(name, rows)| {
+                let rows = rows
+                    .iter()
+                    .map(|(market, &lots)| {
+                        let price = *marks.get(market).context(
+                            "rebase allocation has no factual position in that contract",
+                        )?;
+                        require(
+                            lots != 0 && account[market].signum() == lots.signum(),
+                            "rebase allocation must follow factual position side",
+                        )?;
+                        Ok((market.clone(), InitialPosition { lots, price }))
+                    })
+                    .collect::<Result<_>>()?;
+                Ok((name.clone(), rows))
+            })
+            .collect::<Result<_>>()?;
+        let init = Initialize {
+            strategy_groups: request.strategy_groups.clone(),
+            contracts: self.contracts.clone(),
+            positions,
+            snapshot_evidence_sequence: request.snapshot_evidence_sequence,
+            note: request.note.clone(),
+        };
+        let proof = super::evidence::Anchor {
+            source_id: nav.source_id.clone(),
+            snapshot_us: nav.snapshot_us,
+            trading_day: nav.trading_day.clone(),
+            evidence_sequence: nav.evidence_sequence,
+            evidence_sha256: nav.evidence_sha256.clone(),
+            store_id: nav.store_id.clone(),
+            note: nav.note.clone(),
+        };
+        let mut next = Self::initialize(&self.source_id, &init, &account, proof)?;
+        next.revision = self.revision.checked_add(1).context("revision overflow")?;
+        // Keep the next issued target newer than any target the Exec has seen.
+        next.target_revision = self.target_revision;
+        next.baseline_revision = next.revision;
+        Ok(next)
+    }
+
     /// Explicit operator allocation, checked against a complete factual snapshot.
     pub fn initialize(
         source_id: &str,
@@ -433,6 +545,7 @@ impl Portfolio {
         let portfolio = Self {
             source_id: source_id.into(),
             revision: 0,
+            baseline_revision: 0,
             decision_us: 0,
             batch_id: None,
             target_trading_day: None,

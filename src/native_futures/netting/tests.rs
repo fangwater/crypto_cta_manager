@@ -3,6 +3,61 @@ use super::*;
 const MARKET: &str = "SHFE:sn2612";
 const AT: i64 = 1_000_000_000;
 
+#[test]
+fn rebase_uses_factual_lots_one_strategy_and_a_monotonic_target_revision() {
+    let mut old = portfolio(1, -2);
+    old.revision = 12;
+    old.target_revision = 11;
+    let request = Rebase {
+        event_id: "fresh-start".into(),
+        expected_revision: 12,
+        snapshot_evidence_sequence: 20,
+        strategy_groups: BTreeMap::from([("test".into(), BTreeSet::from(["a-1h".into()]))]),
+        positions: BTreeMap::from([("a-1h".into(), BTreeMap::from([(MARKET.into(), -2)]))]),
+        note: "new factual baseline".into(),
+    };
+    let nav = super::super::nav::Anchor {
+        source_id: old.source_id.clone(),
+        snapshot_us: AT + 10,
+        trading_day: old.anchor.trading_day.clone(),
+        evidence_sequence: 20,
+        evidence_sha256: "b".repeat(64),
+        store_id: old.anchor.store_id.clone(),
+        positions: vec![super::super::nav::InitialPosition {
+            venue: "SHFE".into(),
+            symbol: "sn2612".into(),
+            side: super::super::nav::Side::Sell,
+            today: 0,
+            yesterday: 2,
+            reference_price: 150.0,
+            contract_multiplier: 5.0,
+        }],
+        note: request.note.clone(),
+    };
+    let next = old.rebase(&request, &nav).unwrap();
+    assert_eq!(
+        (next.revision, next.baseline_revision, next.target_revision),
+        (13, 13, 11)
+    );
+    assert_eq!(
+        next.strategy_groups["test"].members,
+        BTreeSet::from(["a-1h".into()])
+    );
+    assert_eq!(next.positions["a-1h"][MARKET].fifo[0].price, 150.0);
+    assert_eq!(next.net_targets().unwrap()[MARKET].attributed_lots, -2);
+    assert_eq!(next.net_targets().unwrap()[MARKET].residual_lots, 0);
+    assert!(!next.execution_plan().unwrap().publishable);
+    let mut mismatch = request.clone();
+    mismatch
+        .positions
+        .get_mut("a-1h")
+        .unwrap()
+        .insert(MARKET.into(), -1);
+    assert!(old.rebase(&mismatch, &nav).is_err());
+    old.external_demand_open = true;
+    assert!(old.rebase(&request, &nav).is_err());
+}
+
 fn portfolio(a: i64, b: i64) -> Portfolio {
     let request = Initialize {
         strategy_groups: BTreeMap::from([(

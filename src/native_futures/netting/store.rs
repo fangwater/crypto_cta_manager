@@ -48,7 +48,10 @@ pub async fn replay(
     request: &impl Serialize,
 ) -> Result<Option<serde_json::Value>> {
     let row = sqlx::query(
-        "SELECT request,receipt FROM cta_native_netting_events WHERE source_id=$1 AND event_id=$2",
+        "SELECT e.request,e.receipt FROM cta_native_netting_events e
+         JOIN cta_native_netting_portfolios p USING(source_id)
+         WHERE source_id=$1 AND event_id=$2
+           AND e.revision >= COALESCE((p.state->>'baseline_revision')::bigint, 0)",
     )
     .bind(source)
     .bind(id)
@@ -81,12 +84,20 @@ async fn existing(
     id: &str,
     hash: &str,
 ) -> Result<Option<serde_json::Value>> {
-    let row=sqlx::query("SELECT fingerprint,receipt FROM cta_native_netting_events WHERE source_id=$1 AND event_id=$2")
-        .bind(source).bind(id).fetch_optional(&mut **tx).await?;
+    let row = sqlx::query(
+        "SELECT e.fingerprint,e.receipt,
+         e.revision >= COALESCE((p.state->>'baseline_revision')::bigint, 0) AS current
+         FROM cta_native_netting_events e JOIN cta_native_netting_portfolios p USING(source_id)
+         WHERE source_id=$1 AND event_id=$2",
+    )
+    .bind(source)
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
     row.map(|r| {
         require(
-            r.try_get::<String, _>("fingerprint")? == hash,
-            "event id already exists with different content",
+            r.try_get::<bool, _>("current")? && r.try_get::<String, _>("fingerprint")? == hash,
+            "event id belongs to a prior baseline or has different content",
         )?;
         Ok(r.try_get("receipt")?)
     })
@@ -240,6 +251,58 @@ pub async fn extend_scope(
         EventMeta {
             id: &id,
             kind: "scope_extension",
+            hash: &hash,
+            batch: None,
+            factual_identity: None,
+            user_id,
+        },
+        request,
+        &receipt,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(receipt)
+}
+
+pub(in crate::native_futures) async fn rebase(
+    pool: &PgPool,
+    source: &str,
+    request: &Rebase,
+    nav: &super::super::nav::Anchor,
+    user_id: i64,
+    username: &str,
+) -> Result<serde_json::Value> {
+    valid_id(&request.event_id)?;
+    let id = format!("rebase:{}", request.event_id);
+    let hash = fingerprint(request)?;
+    let mut tx = pool.begin().await?;
+    let state = locked(&mut tx, source).await?;
+    if let Some(previous) = existing(&mut tx, source, &id, &hash).await? {
+        return Ok(previous);
+    }
+    let next = state.rebase(request, nav)?;
+    let retired: Vec<_> = state
+        .targets
+        .keys()
+        .filter(|name| !next.targets.contains_key(*name))
+        .collect();
+    if !retired.is_empty() {
+        // Reserve the historical strategies' ownership and keep their original
+        // allocation receipts. Only the current target catalog is cleared.
+        sqlx::query("UPDATE cta_position_strategies SET targets='{}'::jsonb,updated_at_us=$2 WHERE strategy_name = ANY($1)")
+            .bind(&retired)
+            .bind(super::super::now_us())
+            .execute(&mut *tx).await?;
+    }
+    catalog(&mut tx, &next).await?;
+    super::super::nav::store::insert_in_transaction(&mut tx, nav, username).await?;
+    let receipt = serde_json::to_value(&next)?;
+    save(
+        &mut tx,
+        &next,
+        EventMeta {
+            id: &id,
+            kind: "initialize",
             hash: &hash,
             batch: None,
             factual_identity: None,
@@ -474,7 +537,10 @@ pub async fn history(
         after >= -1 && (1..=100).contains(&limit),
         "invalid attribution history range"
     );
-    let rows=sqlx::query("SELECT event_id,revision,kind,receipt,actor_user_id,received_at_us FROM cta_native_netting_events WHERE source_id=$1 AND revision>$2 ORDER BY revision LIMIT $3")
+    let rows=sqlx::query("SELECT event_id,revision,kind,receipt,actor_user_id,received_at_us FROM cta_native_netting_events
+        JOIN cta_native_netting_portfolios USING(source_id)
+        WHERE source_id=$1 AND revision>$2 AND revision >= COALESCE((state->>'baseline_revision')::bigint, 0)
+        ORDER BY revision LIMIT $3")
         .bind(source).bind(after).bind(limit).fetch_all(pool).await?;
     rows.into_iter().map(|r|Ok(serde_json::json!({"event_id":r.try_get::<String,_>("event_id")?,"revision":r.try_get::<i64,_>("revision")?,
         "kind":r.try_get::<String,_>("kind")?,"receipt":r.try_get::<serde_json::Value,_>("receipt")?,

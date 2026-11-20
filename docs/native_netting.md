@@ -29,6 +29,7 @@
 |---|---|
 | POST `/api/native/sources/{id}/netting` | 显式初始化一次，核对事实快照；禁止隐式覆盖旧账本 |
 | POST `/api/native/sources/{id}/netting/extend-scope` | 用新鲜的对账快照注册新组，或向现有组添加策略和零仓合约 |
+| POST `/api/native/sources/{id}/netting/rebase` | 管理员以无未结委托的柜台快照开启新的账户和策略净值，并为每个原有组保留一个策略 |
 | GET `/api/native/sources/{id}/netting` | 当前策略 FIFO、完整净目标、revision 和已归属手数 |
 | POST `/api/native/sources/{id}/target-batches` | 原子更新指定组全部策略的完整目标 |
 | GET `/api/native/sources/{id}/netting/events?after=-1&limit=50` | 按 revision 分页读取不可变审计，最多 100 条 |
@@ -82,6 +83,12 @@
 `scripts/apply_native_netting_scope_schema.sql`。
 
 `batch_id` 在账户内幂等：完全相同的请求重试返回原收据，即使后续批次已经提交。相同编号内容不同、revision 不一致或决策时间回退返回 409。新批次决策不得早于锚点，必须在接收时最近 120 秒内；幂等重试先查已提交事件，不受后续时间推移影响。任何校验或存储失败都回滚整批。
+
+重设净值起点显式提供 `event_id`、`expected_revision`、`snapshot_evidence_sequence`、各组单成员
+`strategy_groups`、按策略和合约分配的有符号期初手数 `positions` 以及 `note`。按快照时点的
+已完成合约分钟收盘价给现有柜台仓位计价，原子保存账户快照和新的归因起点。新净目标从
+事实期初仓位起步。原始执行事实和旧审计记录保留，正常查询从新起点开始，发布令牌和执行
+revision 连续。旧目标租约结束且没有未结执行需求后才接受重设。
 
 真实成交导入示例：
 

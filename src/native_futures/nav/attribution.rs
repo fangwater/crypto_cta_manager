@@ -64,14 +64,16 @@ fn market_key(name: &str) -> Result<Market> {
 impl Replay {
     pub(crate) async fn load(pool: &PgPool, portfolio: netting::Portfolio) -> Result<Self> {
         ensure!(
-            (0..20_000).contains(&portfolio.revision),
+            portfolio.baseline_revision >= 0
+                && (0..20_000).contains(&(portfolio.revision - portfolio.baseline_revision)),
             "native attribution revision budget exceeded"
         );
         let rows: Vec<(i64, String, Value)> = sqlx::query_as(
             "SELECT revision,kind,receipt FROM cta_native_netting_events
-             WHERE source_id=$1 AND revision <= $2 ORDER BY revision LIMIT 20001",
+             WHERE source_id=$1 AND revision BETWEEN $2 AND $3 ORDER BY revision LIMIT 20001",
         )
         .bind(&portfolio.source_id)
+        .bind(portfolio.baseline_revision)
         .bind(portfolio.revision)
         .fetch_all(pool)
         .await?;
@@ -83,7 +85,7 @@ impl Replay {
         rows: Vec<(i64, String, Value)>,
     ) -> Result<Self> {
         ensure!(
-            rows.len() == portfolio.revision as usize + 1,
+            rows.len() as i64 == portfolio.revision - portfolio.baseline_revision + 1,
             "native attribution history is missing revisions"
         );
         let mut rows = rows.into_iter();
@@ -91,9 +93,10 @@ impl Replay {
             rows.next().context("missing attribution anchor receipt")?;
         let initial: netting::Portfolio = serde_json::from_value(value)?;
         ensure!(
-            initial_revision == 0
+            initial_revision == portfolio.baseline_revision
                 && kind == "initialize"
-                && initial.revision == 0
+                && initial.revision == initial_revision
+                && initial.baseline_revision == initial_revision
                 && initial.source_id == portfolio.source_id
                 && serde_json::to_value(&initial.anchor)?
                     == serde_json::to_value(&portfolio.anchor)?,
@@ -126,7 +129,7 @@ impl Replay {
         }
         for (offset, (revision, kind, value)) in rows.enumerate() {
             ensure!(
-                revision == offset as i64 + 1
+                revision == initial_revision + offset as i64 + 1
                     && value["revision"].as_i64() == Some(revision)
                     && value["source_id"].as_str() == Some(&replay.anchor.source_id),
                 "native attribution revision/source mismatch"
