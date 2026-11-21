@@ -63,7 +63,12 @@ After a recoverable PostgreSQL backup, explicitly apply
 matching Manager binary/frontend. The additive maintenance creates only the
 history table and indexes; it preserves all existing allocations, snapshots and
 targets. New databases use `cta_web --init-db`; normal startup never runs DDL.
-No live host has been changed by this implementation.
+On 2026-11-18, jp-meta already ran the matching Manager binary, and the
+missing table blocked binding changes. A PostgreSQL backup passed a full
+`pg_restore` read before the maintenance ran. The first 16 entries record the
+Spread01 and Spread02 bindings changing from 0 to 1 on OKX and Binance.
+The backup and activation receipts are in the Manager host's
+`maintenance-backups/cta_cross_resume_20261118/` directory.
 
 The current allocation is immediately readable from existing materialized
 bindings. History starts with the new code's first actual allocation change;
