@@ -20,6 +20,8 @@ import './nav-dashboard.css'
 import type { TimelineQuery } from './api'
 import { ApiError, getAccountTimeline, getDashboard, getHealth, getTimeline, getTimelineOverlay } from './api'
 import { AppShell } from './components/AppShell'
+import { AnalysisMetric } from './components/AnalysisMetric'
+import { isNativeFuturesVenue } from './components/ContractLeveragePanel'
 import { NavMonitorPage } from './pages/NavMonitorPage'
 import { WorkspacePage } from './pages/WorkspacePage'
 import { AccountsPage } from './pages/AccountsPage'
@@ -41,6 +43,7 @@ import {
   NavTimelineChart,
   navSeriesMeta,
   navSeriesLabel,
+  referenceForSeries,
 } from './components/NavTimelineChart'
 import { PositionLeverageChart } from './components/PositionLeverageChart'
 import { ExecutionSlippagePanel } from './components/ExecutionSlippagePanel'
@@ -60,11 +63,13 @@ import {
 } from './format'
 import type {
   AggregateSymbolNavReport,
+  DashboardAccount,
   DashboardSnapshot,
   FeeMode,
   HealthResponse,
   NavSeriesKey,
   NavTotals,
+  NativeNavFeeEvidence,
   SourceNavReport,
   TimelineChartMode,
   TimelineSnapshot,
@@ -103,6 +108,14 @@ const seriesOptions: NavSeriesKey[] = [
   'funding_income_quote',
   'total_nav_before_fee_quote',
   'total_nav_after_fee_quote',
+]
+
+const domesticSeriesOptions: NavSeriesKey[] = [
+  'nav_change_after_fee_quote',
+  'theoretical_nav_after_fee_quote',
+  'theoretical_native_vwap_after_fee_quote',
+  'theoretical_native_twap5m_after_fee_quote',
+  'theoretical_native_vwap5m_after_fee_quote',
 ]
 
 const ZERO_TOTALS: NavTotals = {
@@ -184,8 +197,8 @@ function initialScope() {
 }
 
 function defaultPnlMode(dashboard: DashboardSnapshot, sourceId: string): PnlMode {
-  const funding = dashboard.accounts?.find((account) => account.source_id === sourceId)?.funding
-  return usesActualFunding(funding)
+  const account = dashboard.accounts?.find((item) => item.source_id === sourceId)
+  return account?.account_pnl_only || usesActualFunding(account?.funding)
     ? 'account'
     : 'strategy'
 }
@@ -227,14 +240,13 @@ function NavPage() {
   const [timeline, setTimeline] = useState<TimelineSnapshot | null>(null)
   const [scope, setScope] = useState(initialScope)
   const [pnlMode, setPnlMode] = useState<PnlMode>('strategy')
-  const [feeMode, setFeeMode] = useState<FeeMode>('after')
+  const [feePreference, setFeeMode] = useState<FeeMode>('after')
   const [chartMode, setChartMode] =
     useState<TimelineChartMode>('portfolio')
   const [visibleSeries, setVisibleSeries] = useState<NavSeriesKey[]>([
+    ...domesticSeriesOptions,
     'nav_change_before_fee_quote',
-    'nav_change_after_fee_quote',
     'theoretical_nav_before_fee_quote',
-    'theoretical_nav_after_fee_quote',
     'theoretical_twap3m_before_fee_quote',
     'theoretical_twap3m_after_fee_quote',
     'theoretical_instant_taker_before_fee_quote',
@@ -263,6 +275,12 @@ function NavPage() {
   const timelineView = chartMode === 'symbols' ? 'symbols' : chartMode === 'strategies' || chartMode === 'strategyFunding' ? 'strategies' : 'portfolio'
   const initialized = useRef(false)
   const scopeReady = Boolean(dashboard?.report.sources.some((source) => source.source_id === scope))
+  const selectedSource = useMemo(
+    () => dashboard?.report.sources.find((source) => source.source_id === scope),
+    [dashboard, scope],
+  )
+  const native = dashboard?.report.valuation.startsWith('native_') === true || isNativeFuturesVenue(selectedSource?.configured_venue)
+  const feeMode = native ? 'after' : feePreference
 
   const refreshDashboard = useCallback(
     async (signal?: AbortSignal, manual = false) => {
@@ -379,7 +397,7 @@ function NavPage() {
     let factual: TimelineSnapshot | null = null
     let overlay: TimelineOverlay | null = null
     let overlayStarted = false
-    const pairedWindow = selectedSymbols === null && endMs - startMs <= 30 * DAY_MS
+    const pairedWindow = (selectedSymbols === null || native) && endMs - startMs <= (native ? 31 : 30) * DAY_MS
     let fundingRetry: number | undefined
     const publish = () => {
       if (!factual || controller.signal.aborted) return
@@ -476,12 +494,7 @@ function NavPage() {
       window.clearTimeout(retryTimer)
       window.clearTimeout(fundingRetry)
     }
-  }, [activeRange, endMs, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision, timelineView])
-
-  const selectedSource = useMemo(
-    () => dashboard?.report.sources.find((source) => source.source_id === scope),
-    [dashboard, scope],
-  )
+  }, [activeRange, endMs, native, pnlMode, scope, scopeReady, selectedSymbols, startMs, timelineRevision, timelineView])
   const availableSymbols = timeline?.report.available_symbols ?? []
   const availableStrategies = useMemo(() => activeNavStrategies(timeline), [timeline])
   const selectedSet = useMemo(
@@ -498,7 +511,7 @@ function NavPage() {
     const normalizedQuery = query.trim().toUpperCase()
     const rows = normalizedQuery
       ? (timeline?.report.symbols ?? []).filter((row) =>
-          row.symbol.includes(normalizedQuery),
+          row.symbol.toUpperCase().includes(normalizedQuery),
         )
       : [...(timeline?.report.symbols ?? [])]
     return rows.sort(
@@ -539,22 +552,29 @@ function NavPage() {
   const fundingIncome = displayed.income
   const hasFunding = displayed.kind !== 'unavailable'
   const strategyChart = chartMode === 'strategies' || chartMode === 'strategyFunding'
-  const fundingLabel = (key: NavSeriesKey) => usesEstimatedFunding ? navSeriesLabel(key, timeline?.theoretical[0]?.execution_model).replace('Funding', '估算 Funding').replace('funding', '估算 funding') : navSeriesLabel(key, timeline?.theoretical[0]?.execution_model)
-  const fundingSeriesVisible = (key: NavSeriesKey) => (!key.startsWith('theoretical_twap3m_') || timeline?.theoretical.some((r) => r.execution_model === 'twap3m')) && (!key.startsWith('theoretical_instant_taker_') || timeline?.theoretical.some((r) => r.execution_model === 'instant_taker')) && (hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_')))
-  const portfolioSeriesOptions = (
-    selectedSymbols === null
+  const fundingLabel = (key: NavSeriesKey) => {
+    const label = navSeriesLabel(key, referenceForSeries(key, timeline?.theoretical)?.execution_model, native)
+    return usesEstimatedFunding ? label.replace('Funding', '估算 Funding').replace('funding', '估算 funding') : label
+  }
+  const availableSeries = (key: NavSeriesKey) => {
+    if (key.startsWith('theoretical_')) {
+      const reference = referenceForSeries(key, timeline?.theoretical)
+      if (native) return Boolean(reference?.points.length)
+      if (!key.startsWith('theoretical_nav_')) return Boolean(reference)
+    }
+    return hasFunding || (key !== 'funding_income_quote' && !key.startsWith('total_nav_'))
+  }
+  const portfolioSeriesOptions = (native
+    ? domesticSeriesOptions
+    : selectedSymbols === null
       ? seriesOptions
       : seriesOptions.filter((key) => !key.startsWith('theoretical_'))
-  ).filter(fundingSeriesVisible)
-  const portfolioVisibleSeries = (
-    selectedSymbols === null
-      ? visibleSeries
-      : visibleSeries.filter((key) => !key.startsWith('theoretical_'))
-  ).filter(fundingSeriesVisible)
+  ).filter(availableSeries)
+  const portfolioVisibleSeries = visibleSeries.filter((key) => portfolioSeriesOptions.includes(key))
   const totals = noSymbolsSelected
     ? ZERO_TOTALS
     : (timeline?.report.summary ?? null)
-  const leverageEquityUsdt = useMemo(() => {
+  const leverageEquityQuote = useMemo(() => {
     const accounts = (dashboard?.accounts ?? []).filter(
       (account) =>
         account.enabled &&
@@ -566,14 +586,14 @@ function NavPage() {
       accounts.some(
         (account) =>
           account.live_equity_status !== 'ok' ||
-          !Number.isFinite(account.live_equity_usdt) ||
-          (account.live_equity_usdt ?? 0) <= 0,
+          !Number.isFinite(account.live_equity_quote) ||
+          (account.live_equity_quote ?? 0) <= 0,
       )
     ) {
       return null
     }
     return accounts.reduce(
-      (total, account) => total + (account.live_equity_usdt ?? 0),
+      (total, account) => total + (account.live_equity_quote ?? 0),
       0,
     )
   }, [dashboard, scope, timeline])
@@ -831,7 +851,7 @@ function NavPage() {
                 {selectedSource?.account ?? '暂无可查看账户'}
               </h2>
             </div>
-            <div className="control-row">
+            {!native && <div className="control-row">
               <div className="segmented segmented--compact" aria-label="费率口径">
                 <button
                   type="button"
@@ -848,7 +868,7 @@ function NavPage() {
                   费前
                 </button>
               </div>
-            </div>
+            </div>}
           </div>
 
           <div className="segmented segmented--accounts" role="group" aria-label="账户范围">
@@ -888,7 +908,7 @@ function NavPage() {
             />
             <SummaryItem
               icon={<Coins size={18} />}
-              label="区间估算手续费"
+              label={native ? '区间手续费' : '区间估算手续费'}
               value={totals?.estimated_trading_fee_quote ?? null}
             />
             <SummaryItem
@@ -907,10 +927,13 @@ function NavPage() {
           </div>
         </section>
 
-        <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />
+        {native ? <NativeCommissionAnalysis
+          evidence={noSymbolsSelected ? undefined : timeline?.report.fee_evidence}
+          funds={dashboard?.accounts?.find(account => account.source_id === scope)?.account_funds}
+        /> : dashboard && <LiquidityExecutionAnalysis totals={totals ?? ZERO_TOTALS} />}
         {!noSymbolsSelected && timeline?.execution_slippage.map((value, index) => <ExecutionSlippagePanel key={index} value={value} model={timeline.theoretical[index]?.execution_model} />)}
-        {!noSymbolsSelected && <FundingPanel value={timeline?.funding} accountTotals={pnlMode === 'account'} selectedForNav={displayed.kind === 'actual'} />}
-        {!noSymbolsSelected && <FundingEstimatePanel value={estimate} />}
+        {!native && !noSymbolsSelected && <FundingPanel value={timeline?.funding} accountTotals={pnlMode === 'account'} selectedForNav={displayed.kind === 'actual'} />}
+        {!native && !noSymbolsSelected && <FundingEstimatePanel value={estimate} />}
 
         <section className="chart-section" aria-labelledby="chart-title">
           <div className="panel-heading pnl-chart-header">
@@ -932,7 +955,7 @@ function NavPage() {
                   className={chartMode === 'symbols' ? 'is-active' : ''}
                   onClick={() => setChartMode('symbols')}
                 >
-                  分币
+                  分合约
                 </button>
                 <button
                   type="button"
@@ -948,7 +971,7 @@ function NavPage() {
                 >
                   分策略 PnL
                 </button>
-                <button
+                {!native && <button
                   type="button"
                   className={pnlMode === 'strategy' && chartMode === 'strategyFunding' ? 'is-active' : ''}
                   onClick={() => {
@@ -957,11 +980,11 @@ function NavPage() {
                   }}
                 >
                   策略 Funding
-                </button>
+                </button>}
               </div>
               {chartMode === 'symbols' && (
                 <span className="symbol-series-count">
-                  {selectedSet.size} 条币种曲线
+                  {selectedSet.size} 条合约曲线
                 </span>
               )}
               {pnlMode === 'strategy' && strategyChart && (
@@ -977,7 +1000,7 @@ function NavPage() {
             <p className="chart-notice">实际持仓按已完成的 1 分钟收盘价估值；成交价格、数量和交易费按真实成交计算。</p>
           )}
           {timeline?.report.valuation === 'quantity_fifo_window_delta' && (
-            <p className="chart-notice">当前区间使用本地成交历史重建：已实现盈亏、数量和手续费按真实成交计算；浮盈及总净值按各币种最近成交价估值，不代表分钟市价。超出 K 线保留范围时，理论净值与滑点不可用。</p>
+            <p className="chart-notice">当前区间使用本地成交历史重建：已实现盈亏、数量和手续费按真实成交计算；浮盈及总净值按各合约最近成交价估值，不代表分钟市价。超出 K 线保留范围时，理论净值与滑点不可用。</p>
           )}
           {timeline?.theoretical.map((reference, index) => reference.unavailable_reason && <div key={index} className="chart-notice" role="status">{theoreticalExecutionLabel(reference.execution_model)}：{reference.unavailable_reason}</div>)}
           {timeline?.theoretical[0]?.latest_point_ts_us != null && timeline.theoretical[0].latest_point_ts_us < timeline.report.end_ts_us && (
@@ -1003,10 +1026,11 @@ function NavPage() {
                   visibleSeries={portfolioVisibleSeries}
                   mode={chartMode}
                   feeMode={feeMode}
+                  native={native}
                 />
               )}
               {noSymbolsSelected && (
-                <div className="chart-empty">当前未选择币种</div>
+                <div className="chart-empty">当前未选择合约</div>
               )}
               {!noSymbolsSelected &&
                 strategyChart &&
@@ -1046,9 +1070,9 @@ function NavPage() {
                 </div>
               </aside>
             ) : chartMode === 'symbols' ? (
-              <aside className="symbol-curve-picker" aria-label="分币曲线选择">
+              <aside className="symbol-curve-picker" aria-label="分合约曲线选择">
                 <div className="symbol-curve-picker__header">
-                  <strong>币种</strong>
+                  <strong>合约</strong>
                   <div className="symbol-curve-picker__actions">
                     <button
                       type="button"
@@ -1157,8 +1181,8 @@ function NavPage() {
               <h2 id="position-chart-title">仓位与杠杆率</h2>
             </div>
             <span className="symbol-series-count">
-              {chartMode === 'symbols' ? '分币净仓位' : '组合仓位'}
-              {leverageEquityUsdt === null ? '，权益不可用' : ''}
+              {chartMode === 'symbols' ? '分合约净仓位' : '组合仓位'}
+              {leverageEquityQuote === null ? '，权益不可用' : ''}
             </span>
           </div>
           <div className="chart-body">
@@ -1168,10 +1192,10 @@ function NavPage() {
                   points={timeline.report.points}
                   symbolPoints={timeline.report.symbol_points}
                   mode={chartMode === 'symbols' ? 'symbols' : 'portfolio'}
-                  equityUsdt={leverageEquityUsdt}
+                  equityQuote={leverageEquityQuote}
                 />
               )}
-              {noSymbolsSelected && <div className="chart-empty">当前未选择币种</div>}
+              {noSymbolsSelected && <div className="chart-empty">当前未选择合约</div>}
               {!timeline && !timelineLoading && <div className="chart-empty">暂无仓位时间线</div>}
               {timelineLoading && (
                 <div className="chart-loading">
@@ -1200,13 +1224,17 @@ function NavPage() {
               <thead>
                 <tr>
                   <th>策略</th>
-                  <th className="numeric">估算 Funding</th>
-                  <th className="numeric">净值变化（含估算 Funding）</th>
+                  {!native && <>
+                    <th className="numeric">估算 Funding</th>
+                    <th className="numeric">净值变化（含估算 Funding）</th>
+                  </>}
                   <th className="numeric">成交</th>
-                  <th className="numeric">Maker 笔 / 额</th>
-                  <th className="numeric">Taker 笔 / 额</th>
-                  <th className="numeric">未判定 笔 / 额</th>
-                  <th className="numeric">持仓币种</th>
+                  {!native && <>
+                    <th className="numeric">Maker 笔 / 额</th>
+                    <th className="numeric">Taker 笔 / 额</th>
+                    <th className="numeric">未判定 笔 / 额</th>
+                  </>}
+                  <th className="numeric">持仓合约</th>
                   <th className="numeric">期末总敞口</th>
                   <th className="numeric">区间已实现</th>
                   <th className="numeric">区间浮动盈亏</th>
@@ -1226,27 +1254,31 @@ function NavPage() {
                         <code>{strategy.strategy}</code>
                       )}
                     </td>
-                    <td className={`numeric mono ${signedClass(funding?.income_quote ?? 0)}`} title={funding && Object.entries(funding.income_by_asset).map(([asset, value]) => `${asset} ${fundingMoney(value)}`).join(' / ')}>
-                      {funding ? fundingMoney(funding.income_quote) : '—'}
-                    </td>
-                    <td className={`numeric mono nav-cell ${signedClass(totalNav ?? 0)}`}>
-                      {totalNav == null ? '—' : money(totalNav)}
-                    </td>
+                    {!native && <>
+                      <td className={`numeric mono ${signedClass(funding?.income_quote ?? 0)}`} title={funding && Object.entries(funding.income_by_asset).map(([asset, value]) => `${asset} ${fundingMoney(value)}`).join(' / ')}>
+                        {funding ? fundingMoney(funding.income_quote) : '—'}
+                      </td>
+                      <td className={`numeric mono nav-cell ${signedClass(totalNav ?? 0)}`}>
+                        {totalNav == null ? '—' : money(totalNav)}
+                      </td>
+                    </>}
                     <td className="numeric mono">
                       {integer(strategy.summary.fill_count)}
                     </td>
-                    <LiquidityTableCell
-                      count={strategy.summary.maker_fill_count}
-                      volume={strategy.summary.maker_volume_quote}
-                    />
-                    <LiquidityTableCell
-                      count={strategy.summary.taker_fill_count}
-                      volume={strategy.summary.taker_volume_quote}
-                    />
-                    <LiquidityTableCell
-                      count={strategy.summary.unknown_liquidity_fill_count}
-                      volume={strategy.summary.unknown_liquidity_volume_quote}
-                    />
+                    {!native && <>
+                      <LiquidityTableCell
+                        count={strategy.summary.maker_fill_count}
+                        volume={strategy.summary.maker_volume_quote}
+                      />
+                      <LiquidityTableCell
+                        count={strategy.summary.taker_fill_count}
+                        volume={strategy.summary.taker_volume_quote}
+                      />
+                      <LiquidityTableCell
+                        count={strategy.summary.unknown_liquidity_fill_count}
+                        volume={strategy.summary.unknown_liquidity_volume_quote}
+                      />
+                    </>}
                     <td className="numeric mono">{integer(strategy.symbol_count)}</td>
                     <td className="numeric mono">
                       {money(strategy.gross_position_value_quote)}
@@ -1298,8 +1330,8 @@ function NavPage() {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索币种"
-                aria-label="搜索币种"
+                placeholder="搜索合约"
+                aria-label="搜索合约"
               />
             </label>
           </div>
@@ -1307,8 +1339,8 @@ function NavPage() {
             <table>
               <thead>
                 <tr>
-                  <th>币种</th>
-                  <th className="numeric">期末净数量</th>
+                  <th>合约</th>
+                  <th className="numeric">期末净手数</th>
                   <th className="numeric">期末净敞口</th>
                   <th className="numeric">区间已实现</th>
                   <th className="numeric">区间浮动盈亏</th>
@@ -1329,7 +1361,7 @@ function NavPage() {
               </tbody>
             </table>
             {visibleRows.length === 0 && (
-              <div className="empty-state">没有匹配的币种</div>
+              <div className="empty-state">没有匹配的合约</div>
             )}
           </div>
         </section>
@@ -1354,7 +1386,7 @@ function NavPage() {
               return (
               <div className="source-row" key={source.source_id}>
                 <div className="source-identity">
-                  <span className="venue-mark">{okx ? 'O' : 'B'}</span>
+                  <span className="venue-mark">{source.configured_venue === 'ctp' ? 'CTP' : source.configured_venue === 'yida' ? 'YD' : okx ? 'O' : 'B'}</span>
                   <div>
                     <strong>
                       {source.account}
@@ -1369,13 +1401,12 @@ function NavPage() {
                   value={timestampUs(source.initial_position_snapshot_ts_us)}
                 />
                 <SourceDatum label="累计成交" value={integer(source.fill_count)} />
-                <SourceDatum
-                  label="Maker / Taker 费率"
-                  value={accountFeeSummary(source)}
-                />
+                {isNativeFuturesVenue(source.configured_venue)
+                  ? <SourceDatum label="手续费口径" value="按合约及开平" />
+                  : <SourceDatum label="Maker / Taker 费率" value={accountFeeSummary(source)} />}
                 <SourceDatum
                   label="累计费后净值"
-                  value={`${money(source.nav_change_after_fee_quote)} 报价币`}
+                  value={`${money(source.nav_change_after_fee_quote)} CNY`}
                   tone={signedClass(source.nav_change_after_fee_quote)}
                 />
                 {unified && (
@@ -1397,6 +1428,26 @@ function NavPage() {
           </div>
         </section>
     </AppShell>
+  )
+}
+
+function NativeCommissionAnalysis({ evidence, funds }: { evidence?: NativeNavFeeEvidence; funds?: DashboardAccount['account_funds'] }) {
+  const amount = (count: number, total: number) => count > 0 ? `${money(total)} CNY` : '—'
+  const commission = funds?.trading_day ? funds.trading_day_commission_cny : null
+  if (!evidence && commission == null) return null
+  return (
+    <section className="execution-section" aria-labelledby="execution-title">
+      <div className="panel-heading">
+        <h2 id="execution-title">手续费</h2>
+        {evidence && <span className="generation-time">区间 {integer(evidence.fill_count)} 笔 · {money(evidence.volume_cny)} CNY</span>}
+      </div>
+      <div className="summary-strip nav-analysis-stats">
+        {commission != null && funds?.trading_day && <AnalysisMetric label="柜台交易日手续费" value={`${money(commission)} CNY`} detail={`交易日 ${funds.trading_day} · ${timestampUs(funds.observed_us)}`} />}
+        {evidence && evidence.actual_count > 0 && <AnalysisMetric label="区间逐笔实收" value={amount(evidence.actual_count, evidence.actual_known_cny)} detail={`${integer(evidence.actual_count)} 笔有柜台费用回报`} />}
+        {evidence && <AnalysisMetric label="区间费率估算" value={amount(evidence.estimated_count, evidence.estimated_known_cny)} detail={`${integer(evidence.estimated_count)} 笔按合约和开平估算`} />}
+        {evidence && evidence.missing_count > 0 && <AnalysisMetric label="缺少费用依据" value={`${integer(evidence.missing_count)} 笔`} />}
+      </div>
+    </section>
   )
 }
 
@@ -1430,7 +1481,7 @@ function LiquidityExecutionAnalysis({ totals }: { totals: NavTotals }) {
           <h2 id="execution-title">区间成交执行分析</h2>
         </div>
         <span className="generation-time">
-          {integer(totals.fill_count)} 笔 · {money(totals.volume_quote)} 报价币
+          {integer(totals.fill_count)} 笔 · {money(totals.volume_quote)} CNY
         </span>
       </div>
       <div className="liquidity-analysis">
@@ -1465,7 +1516,7 @@ function LiquidityTableCell({ count, volume }: { count: number; volume: number }
   return (
     <td className="numeric mono liquidity-cell">
       <strong>{integer(count)} 笔</strong>
-      <small>{money(volume)} 报价币</small>
+      <small>{money(volume)} CNY</small>
     </td>
   )
 }
@@ -1488,7 +1539,7 @@ function SummaryItem({
         <span>{label}</span>
         <strong className={signed && value !== null ? signedClass(value) : ''}>
           {value === null ? '--' : money(value)}{' '}
-          {value !== null && <small>报价币</small>}
+          {value !== null && <small>CNY</small>}
         </strong>
       </div>
     </div>
@@ -1518,8 +1569,8 @@ function SymbolTableRow({
         >
           {selected && <Check size={13} />}
         </button>
-        <strong className="symbol-name">{row.symbol.replace(/(?:USDT|USDC|USD)$/, '')}</strong>
-        <span className="symbol-quote">/{row.symbol.match(/(?:USDT|USDC|USD)$/)?.[0] ?? ''}</span>
+        <strong className="symbol-name">{row.symbol}</strong>
+        <span className="symbol-quote">/CNY</span>
       </td>
       <td className={`numeric mono ${signedClass(row.net_quantity)}`}>
         {quantity(row.net_quantity)}

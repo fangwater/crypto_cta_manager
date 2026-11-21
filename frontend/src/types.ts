@@ -71,6 +71,8 @@ export interface SourceNavReport extends NavTotals {
   maker_fee_rate: number | null
   taker_fee_rate: number | null
   quote_fee_rates: Record<string, QuoteFeeRates>
+  nav_as_of_ts_us?: number | null
+  nav_is_historical?: boolean
   initial_position_snapshot_ts_us: number | null
   initial_position_count: number
   order_event_count: number
@@ -89,7 +91,13 @@ export interface NavReport {
   sources: SourceNavReport[]
 }
 
-export interface DashboardAccount {
+export interface SourceSyncState {
+  collection_status?: 'live' | 'historical' | 'stale' | 'loading' | 'unavailable' | null
+  collection_status_reason?: string | null
+  execution_status?: string | null
+}
+
+export interface DashboardAccount extends SourceSyncState {
   execution_sources?: DashboardAccount[]
   source_id: string
   /** Manager display name. Uses alias when configured. */
@@ -97,18 +105,40 @@ export interface DashboardAccount {
   venue: string
   enabled: boolean
   gateway_prefix: string | null
+  execution_monitor_url?: string | null
   configurable: boolean
   target_proxy_enabled: boolean
   /** Count supplied by the compact dashboard projection, without symbol detail rows. */
   open_position_symbol_count?: number | null
+  execution_observed_ts_us?: number | null
+  recent_position_symbol_count?: number | null
+  position_status?: 'live' | 'historical' | null
+  position_observed_ts_us?: number | null
+  position_historical_reason?: string | null
   /** Current session's grant on this account. Undefined only in stale payloads. */
   access_level?: 'view' | 'configure' | null
   can_edit_alias?: boolean
   display_alias?: string | null
+  account_pnl_only?: boolean
   account_pnl_start_ts_us?: number | null
   strategy_pnl_start_ts_us?: number | null
-  live_equity_usdt?: number | null
+  live_equity_quote?: number | null
   live_equity_status?: 'ok' | 'stale' | string | null
+  account_funds?: {
+    source: 'ctp_trading_account' | 'yida_extended_account'
+    status: 'live' | 'historical'
+    historical_reason?: string | null
+    observed_us: number
+    trading_day?: string | null
+    currency?: string | null
+    valuation_basis?: 'sdk_mark_time_unverified' | null
+    available?: number | null
+    usable_cash?: number | null
+    previous_balance?: number | null
+    sdk_cash_balance?: number | null
+    sdk_market_value?: number | null
+    trading_day_commission_cny?: number | null
+  } | null
   /** Account monitor has published an OKX unified AccountRisk sample. */
   unified_account?: boolean
   /** OKX maintenance margin ratio. Higher is safer. */
@@ -351,6 +381,16 @@ export interface StrategyNavTimeline {
   points: NavTimelinePoint[]
 }
 
+export interface NativeNavFeeEvidence {
+  fill_count: number
+  actual_count: number
+  estimated_count: number
+  missing_count: number
+  actual_known_cny: number
+  estimated_known_cny: number
+  volume_cny: number
+}
+
 export interface NavTimelineReport {
   valuation: string
   earliest_start_ts_us: number
@@ -360,6 +400,7 @@ export interface NavTimelineReport {
   available_symbols: string[]
   selected_symbols: string[]
   available_strategies: string[]
+  fee_evidence?: NativeNavFeeEvidence
   summary: NavTotals
   symbols: AggregateSymbolNavReport[]
   points: NavTimelinePoint[]
@@ -441,7 +482,7 @@ export interface TheoreticalNavPoint {
   estimated_trading_fee_quote: number
 }
 
-export type TheoreticalExecutionModel = 'twap5m' | 'vwap3m' | 'twap3m' | 'instant_taker'
+export type TheoreticalExecutionModel = 'native_reference' | 'native_twap' | 'native_vwap' | 'native_twap5m' | 'native_vwap5m' | 'twap5m' | 'vwap3m' | 'twap3m' | 'instant_taker'
 
 export interface TheoreticalNavTimeline {
   execution_model: TheoreticalExecutionModel | null
@@ -471,55 +512,55 @@ export interface AcquisitionCostTotals {
   zero_volume_fallback_sample_count: number
   zero_volume_skipped_sample_count: number
   comparable_delta_count: number
-  virtual_turnover_usdt: number
-  virtual_fee_usdt: number
+  virtual_turnover_quote: number
+  virtual_fee_quote: number
   actual_fill_count: number
-  actual_turnover_usdt: number
-  actual_fee_usdt: number
-  matched_virtual_turnover_usdt: number
-  actual_matched_turnover_usdt: number
-  actual_matched_fee_usdt: number
+  actual_turnover_quote: number
+  actual_fee_quote: number
+  matched_virtual_turnover_quote: number
+  actual_matched_turnover_quote: number
+  actual_matched_fee_quote: number
   matched_fill_count: number
   unmatched_fill_count: number
-  unmatched_fill_notional_usdt: number
+  unmatched_fill_notional_quote: number
   opposite_fill_count: number
-  opposite_fill_notional_usdt: number
+  opposite_fill_notional_quote: number
   stale_reference_fill_count: number
-  stale_reference_fill_notional_usdt: number
-  price_shortfall_usdt: number
-  first_minute_shortfall_usdt: number
-  five_sample_drift_usdt: number
-  fee_shortfall_usdt: number
-  after_fee_shortfall_usdt: number
+  stale_reference_fill_notional_quote: number
+  price_shortfall_quote: number
+  first_minute_shortfall_quote: number
+  five_sample_drift_quote: number
+  fee_shortfall_quote: number
+  after_fee_shortfall_quote: number
   price_shortfall_bps: number
   after_fee_shortfall_bps: number
   first_minute_shortfall_bps: number
   matched_turnover_coverage: number
-  actual_fill_reference_coverage: number
+  actual_fill_reference_coverage: number | null
 }
 
 export interface AcquisitionCostPoint {
   ts_us: number
-  virtual_turnover_usdt: number
-  actual_matched_turnover_usdt: number
-  price_shortfall_usdt: number
-  after_fee_shortfall_usdt: number
+  virtual_turnover_quote: number
+  actual_matched_turnover_quote: number
+  price_shortfall_quote: number
+  after_fee_shortfall_quote: number
 }
 
 export interface AcquisitionCostBreakdown {
   bucket: string
   fill_count: number
-  reference_turnover_usdt: number
-  actual_turnover_usdt: number
-  actual_fee_usdt: number
-  virtual_fee_usdt: number
-  price_shortfall_usdt: number
-  first_minute_shortfall_usdt: number
-  five_sample_drift_usdt: number
+  reference_turnover_quote: number
+  actual_turnover_quote: number
+  actual_fee_quote: number | null
+  virtual_fee_quote: number | null
+  price_shortfall_quote: number
+  first_minute_shortfall_quote: number
+  five_sample_drift_quote: number
   price_shortfall_bps: number
-  after_fee_shortfall_bps: number
+  after_fee_shortfall_bps: number | null
   first_minute_shortfall_bps: number
-  after_fee_shortfall_usdt: number
+  after_fee_shortfall_quote: number | null
 }
 
 export interface AcquisitionFillDiagnostic {
@@ -539,10 +580,10 @@ export interface AcquisitionFillDiagnostic {
   virtual_price: number
   target_delay_us: number
   order_delay_us: number
-  reference_turnover_usdt: number
-  price_shortfall_usdt: number
-  first_minute_shortfall_usdt: number
-  five_sample_drift_usdt: number
+  reference_turnover_quote: number
+  price_shortfall_quote: number
+  first_minute_shortfall_quote: number
+  five_sample_drift_quote: number
   price_shortfall_bps: number
 }
 
@@ -551,6 +592,7 @@ export interface AcquisitionExecutionFill {
   actual_price: number
   actual_qty: number
   liquidity: string
+  offset?: string
   target_delay_us: number
   order_delay_us: number
 }
@@ -574,6 +616,8 @@ export interface AcquisitionCostRow {
   strategy_name: string
   symbol: string
   venue: string
+  offset?: string
+  native_trading_minutes?: number
   received_at_us: number
   virtual_execution_ts_us: number
   delta_qty: number
@@ -582,17 +626,17 @@ export interface AcquisitionCostRow {
   zero_volume_fallback_sample_count: number
   zero_volume_skipped_sample_count: number
   virtual_vwap: number
-  virtual_turnover_usdt: number
-  virtual_fee_usdt: number
+  virtual_turnover_quote: number
+  virtual_fee_quote: number
   actual_matched_qty: number
   actual_vwap: number | null
-  actual_matched_turnover_usdt: number
-  actual_matched_fee_usdt: number
+  actual_matched_turnover_quote: number
+  actual_matched_fee_quote: number
   matched_fill_count: number
   fill_ratio: number
-  price_shortfall_usdt: number | null
-  fee_shortfall_usdt: number | null
-  after_fee_shortfall_usdt: number | null
+  price_shortfall_quote: number | null
+  fee_shortfall_quote: number | null
+  after_fee_shortfall_quote: number | null
   price_shortfall_bps: number | null
   after_fee_shortfall_bps: number | null
   execution: AcquisitionExecution
@@ -622,6 +666,7 @@ export interface AcquisitionCostReport {
   by_strategy: AcquisitionCostBreakdown[]
   by_symbol: AcquisitionCostBreakdown[]
   by_side: AcquisitionCostBreakdown[]
+  by_offset?: AcquisitionCostBreakdown[]
   by_liquidity: AcquisitionCostBreakdown[]
   by_target_delay: AcquisitionCostBreakdown[]
   by_order_delay: AcquisitionCostBreakdown[]
@@ -660,6 +705,9 @@ export type ActualNavSeriesKey =
 export type TheoreticalNavSeriesKey =
   | 'theoretical_nav_before_fee_quote'
   | 'theoretical_nav_after_fee_quote'
+  | 'theoretical_native_vwap_after_fee_quote'
+  | 'theoretical_native_twap5m_after_fee_quote'
+  | 'theoretical_native_vwap5m_after_fee_quote'
   | 'theoretical_twap3m_before_fee_quote'
   | 'theoretical_twap3m_after_fee_quote'
   | 'theoretical_instant_taker_before_fee_quote'

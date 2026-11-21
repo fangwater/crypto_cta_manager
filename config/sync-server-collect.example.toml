@@ -1,0 +1,42 @@
+# Local collector and Manager may share this file. Only sync-server writes replicas.
+mode = "cn_futures"
+secondary_root = "/home/operator/cn_futures_cta_manager/data/secondaries"
+stale_secs = 60
+recent_rows = 200
+
+[database]
+url_env = "CN_FUTURES_CTA_DATABASE_URL"
+max_connections = 8
+
+[sync]
+enabled = true
+replica_root = "/home/operator/cn_futures_cta_manager/data/replicas"
+poll_secs = 10
+timeout_secs = 30
+concurrent_sources = 4
+
+# Optional links to the execution dashboard. The URL source selects the Viz counter.
+# [execution_monitor_urls]
+# cn_live01 = "https://viz.example.com/?source=yida-sim"
+# cn_live02 = "https://viz.example.com/?source=ctp-sim"
+
+# Example loopback endpoints may be SSH tunnels to independent cloud exporters.
+[[sources]]
+id = "cn_live01"
+account = "国内实盘一"
+adapter = "yida"
+rocksdb_path = "/home/operator/cn_futures_cta_manager/data/replicas/cn_live01"
+enabled = true
+[sources.sync]
+url = "http://127.0.0.1:18212"
+token_env = "CN_FUTURES_SYNC_HOST_A_TOKEN"
+
+[[sources]]
+id = "cn_live02"
+account = "国内实盘二"
+adapter = "ctp"
+rocksdb_path = "/home/operator/cn_futures_cta_manager/data/replicas/cn_live02"
+enabled = true
+[sources.sync]
+url = "http://127.0.0.1:18213"
+token_env = "CN_FUTURES_SYNC_HOST_B_TOKEN"

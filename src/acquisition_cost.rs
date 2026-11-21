@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::{cmp::Ordering, collections::BTreeSet};
 
 use crate::config::{AppConfig, TheoreticalFeeRates};
 use crate::nav;
@@ -135,7 +136,6 @@ fn execution_summary(
     fills: &[&AcquisitionFillDiagnostic],
     window_end_us: i64,
 ) -> AcquisitionExecution {
-    const MAX_PLOT_FILLS: usize = 200;
     if fills.is_empty() {
         return AcquisitionExecution::default();
     }
@@ -158,28 +158,9 @@ fn execution_summary(
                 / qty
         })
     };
-    let mut indices = std::collections::BTreeSet::new();
-    if ordered.len() <= MAX_PLOT_FILLS {
-        indices.extend(0..ordered.len());
-    } else {
-        for i in 0..MAX_PLOT_FILLS - 2 {
-            indices.insert(i * (ordered.len() - 1) / (MAX_PLOT_FILLS - 3));
-        }
-        if let Some((index, _)) = ordered
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.actual_price.total_cmp(&b.1.actual_price))
-        {
-            indices.insert(index);
-        }
-        if let Some((index, _)) = ordered
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.actual_price.total_cmp(&b.1.actual_price))
-        {
-            indices.insert(index);
-        }
-    }
+    let indices = execution_sample_indices(ordered.len(), |a, b| {
+        ordered[a].actual_price.total_cmp(&ordered[b].actual_price)
+    });
     AcquisitionExecution {
         first_fill_ts_us: ordered.first().map(|fill| fill.fill_ts_us),
         last_fill_ts_us: ordered.last().map(|fill| fill.fill_ts_us),
@@ -209,6 +190,22 @@ fn execution_summary(
             })
             .collect(),
     }
+}
+
+pub(crate) fn execution_sample_indices(
+    len: usize,
+    compare_price: impl Fn(usize, usize) -> Ordering,
+) -> BTreeSet<usize> {
+    const MAX_PLOT_FILLS: usize = 200;
+    if len <= MAX_PLOT_FILLS {
+        return (0..len).collect();
+    }
+    let mut indices: BTreeSet<_> = (0..MAX_PLOT_FILLS - 2)
+        .map(|i| i * (len - 1) / (MAX_PLOT_FILLS - 3))
+        .collect();
+    indices.extend((0..len).min_by(|&a, &b| compare_price(a, b)));
+    indices.extend((0..len).max_by(|&a, &b| compare_price(a, b)));
+    indices
 }
 
 #[derive(Clone, Debug, Default)]
@@ -452,7 +449,7 @@ fn detail_page(
     (rows, filtered_row_count)
 }
 
-fn delay_bucket(delay_us: i64) -> &'static str {
+pub(crate) fn delay_bucket(delay_us: i64) -> &'static str {
     match delay_us.max(0) {
         0..5_000_000 => "00_00-05s",
         5_000_000..10_000_000 => "01_05-10s",

@@ -7,6 +7,7 @@ use rocksdb::{DB, Direction, IteratorMode, Options, ReadOptions};
 use crate::model::UNIFORM_ORDERS_CF;
 
 mod secondary;
+pub(crate) use secondary::ReaderPool;
 pub use secondary::{ReaderSession, configure as configure_source_readers};
 
 #[derive(Debug)]

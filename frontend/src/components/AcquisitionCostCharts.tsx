@@ -1,4 +1,4 @@
-import { theoreticalExecutionLabel } from '../lib/theoreticalExecution'
+import { isNativeExecutionModel, nativeOffsetLabel, theoreticalExecutionLabel } from '../lib/theoreticalExecution'
 import { BarChart, LineChart, ScatterChart } from 'echarts/charts'
 import { DataZoomComponent, GridComponent, LegendComponent, MarkAreaComponent, MarkLineComponent, TooltipComponent } from 'echarts/components'
 import * as echarts from 'echarts/core'
@@ -51,27 +51,28 @@ function CostChart({ option, label, height = 300, onDataClick }: { option: echar
 export function AcquisitionOverview({ report, onSelectSymbol }: { report: AcquisitionCostReport; onSelectSymbol: (symbol: string) => void }) {
   const [symbolMetric, setSymbolMetric] = useState('bps')
   const [delayMode, setDelayMode] = useState('target')
-  const symbols = [...report.by_symbol].sort((a, b) => Math.abs(b.price_shortfall_usdt) - Math.abs(a.price_shortfall_usdt)).slice(0, 12).reverse()
-  const delays = delayMode === 'target' ? report.by_target_delay : report.by_order_delay
-  const turnover = delays.reduce((sum, row) => sum + row.reference_turnover_usdt, 0)
+  const native = isNativeExecutionModel(report.execution_model)
+  const symbols = [...report.by_symbol].sort((a, b) => Math.abs(b.price_shortfall_quote) - Math.abs(a.price_shortfall_quote)).slice(0, 12).reverse()
+  const delays = native || delayMode === 'target' ? report.by_target_delay : report.by_order_delay
+  const turnover = delays.reduce((sum, row) => sum + row.reference_turnover_quote, 0)
   const delayLabels: Record<string, string> = { '00_00-05s': '<5s', '01_05-10s': '5–10s', '02_10-30s': '10–30s', '03_30-60s': '30–60s', '04_60-300s': '60–300s', '05_after-300s': '≥300s' }
   return <div className="mb-6 grid min-w-0 gap-4 xl:grid-cols-2">
     <Card className="min-w-0">
       <CardHeader>
-        <CardTitle>哪些币的滑点更明显</CardTitle>
-        <CardDescription>全查询区间，按价格差金额绝对值选前 12 个币。bps 可跨币比较，正值更差、负值更好。点击柱形可筛选该币的 delta，优先查看价格差金额最大的目标。</CardDescription>
-        <Label>显示指标<Select value={symbolMetric} onChange={(e) => setSymbolMetric(e.target.value)}><option value="bps">方向调整价格差 · bps</option><option value="amount">价格差金额 · U</option></Select></Label>
+        <CardTitle>哪些合约的滑点更明显</CardTitle>
+        <CardDescription>全查询区间，按价格差金额绝对值选前 12 个合约。bps 可跨合约比较，正值更差、负值更好。点击柱形可筛选该合约的 delta，优先查看价格差金额最大的目标。</CardDescription>
+        <Label>显示指标<Select value={symbolMetric} onChange={(e) => setSymbolMetric(e.target.value)}><option value="bps">方向调整价格差 · bps</option><option value="amount">价格差金额 · CNY</option></Select></Label>
       </CardHeader>
       <CardContent>
-        {symbols.length ? <CostChart label="各币种价格滑点对比，点击柱形筛选目标" onDataClick={(index) => { if (symbols[index]) onSelectSymbol(symbols[index].bucket) }} height={Math.max(280, symbols.length * 26 + 70)} option={{
+        {symbols.length ? <CostChart label="各合约价格滑点对比，点击柱形筛选目标" onDataClick={(index) => { if (symbols[index]) onSelectSymbol(symbols[index].bucket) }} height={Math.max(280, symbols.length * 26 + 70)} option={{
           grid, tooltip: { ...tooltip, trigger: 'item', formatter: (p: { dataIndex: number }) => {
             const row = symbols[p.dataIndex]
-            return `${row.bucket}\n价格差 ${bps(row.price_shortfall_bps)}\n价格差金额 ${money(row.price_shortfall_usdt)} U\n可比成交额 ${money(row.reference_turnover_usdt)} U\n${row.fill_count} 笔可比成交`
+            return `${row.bucket}\n价格差 ${bps(row.price_shortfall_bps)}\n价格差金额 ${money(row.price_shortfall_quote)} CNY\n可比成交额 ${money(row.reference_turnover_quote)} CNY\n${row.fill_count} 笔可比成交`
           } },
-          xAxis: { ...valueAxis, name: symbolMetric === 'bps' ? 'bps' : 'U', nameLocation: 'middle', nameGap: 25 },
+          xAxis: { ...valueAxis, name: symbolMetric === 'bps' ? 'bps' : 'CNY', nameLocation: 'middle', nameGap: 25 },
           yAxis: { type: 'category', data: symbols.map((row) => row.bucket), axisTick: { show: false }, axisLine: { show: false } },
           series: [{ type: 'bar', barMaxWidth: 18, data: symbols.map((row) => {
-            const value = symbolMetric === 'bps' ? row.price_shortfall_bps : row.price_shortfall_usdt
+            const value = symbolMetric === 'bps' ? row.price_shortfall_bps : row.price_shortfall_quote
             return { value, itemStyle: { color: value > 0 ? worse : better } }
           }) }],
         }} /> : <p className="py-12 text-center text-sm text-muted">没有可比成交。</p>}
@@ -81,23 +82,23 @@ export function AcquisitionOverview({ report, onSelectSymbol }: { report: Acquis
       <CardHeader>
         <CardTitle>成交延迟与滑点</CardTitle>
         <CardDescription>全区间可比成交。柱形为同量虚拟成交额占比，折线为该组价格差；相关性不代表延迟造成了全部滑点。</CardDescription>
-        <Label>计时起点<Select value={delayMode} onChange={(e) => setDelayMode(e.target.value)}><option value="target">目标发布 → 成交</option><option value="order">订单信号 → 成交</option></Select></Label>
+        {!native && <Label>计时起点<Select value={delayMode} onChange={(e) => setDelayMode(e.target.value)}><option value="target">目标发布 → 成交</option><option value="order">订单信号 → 成交</option></Select></Label>}
       </CardHeader>
       <CardContent>
         {delays.length ? <CostChart label="成交延迟分组占比及滑点" option={{
           grid: { ...grid, right: 36 }, legend: { top: 0, data: ['成交额占比', '价格差'] },
           tooltip: { ...tooltip, trigger: 'axis', formatter: (items: { dataIndex: number }[]) => {
             const row = delays[items[0].dataIndex]
-            return `${delayLabels[row.bucket] ?? row.bucket}\n${row.fill_count} 笔 · ${money(row.reference_turnover_usdt)} U\n占比 ${(turnover ? row.reference_turnover_usdt / turnover * 100 : 0).toFixed(2)}%\n价格差 ${bps(row.price_shortfall_bps)} · ${money(row.price_shortfall_usdt)} U`
+            return `${delayLabels[row.bucket] ?? row.bucket}\n${row.fill_count} 笔 · ${money(row.reference_turnover_quote)} CNY\n占比 ${(turnover ? row.reference_turnover_quote / turnover * 100 : 0).toFixed(2)}%\n价格差 ${bps(row.price_shortfall_bps)} · ${money(row.price_shortfall_quote)} CNY`
           } },
           xAxis: { type: 'category', data: delays.map((row) => delayLabels[row.bucket] ?? row.bucket), axisLabel: { interval: 0, fontSize: 10 } },
           yAxis: [{ ...valueAxis, name: '%' }, { ...valueAxis, name: 'bps', splitLine: { show: false } }],
           series: [
-            { type: 'bar', name: '成交额占比', barMaxWidth: 28, itemStyle: { color: blue }, data: delays.map((row) => turnover ? row.reference_turnover_usdt / turnover * 100 : 0) },
+            { type: 'bar', name: '成交额占比', barMaxWidth: 28, itemStyle: { color: blue }, data: delays.map((row) => turnover ? row.reference_turnover_quote / turnover * 100 : 0) },
             { type: 'line', name: '价格差', yAxisIndex: 1, itemStyle: { color: worse }, data: delays.map((row) => row.price_shortfall_bps) },
           ],
         }} /> : <p className="py-12 text-center text-sm text-muted">没有可比成交。</p>}
-        <p className="mt-3 text-xs leading-6 text-muted">延迟按成交回报时间计算，不是网络耗时。订单计时使用稳定的订单信号时间；历史记录缺少该时间时会使用成交时间，订单延迟可能低估。</p>
+        <p className="mt-3 text-xs leading-6 text-muted">{native ? '延迟为参考信号收到至关联成交回报收到的时间。' : '延迟按成交回报时间计算，不是网络耗时。订单计时使用稳定的订单信号时间；历史记录缺少该时间时会使用成交时间，订单延迟可能低估。'}</p>
       </CardContent>
     </Card>
   </div>
@@ -119,11 +120,12 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
   const formatPrice = rowPriceFormatter(row)
   const path = analyzePricePath(row)
   const execution = row.execution
+  const native = isNativeExecutionModel(row.execution_model)
   const sign = Math.sign(row.delta_qty)
   const offset = (ts: number) => (ts - row.received_at_us) / 1e6
   const plotPrice = (price: number) => priceMode === 'price' ? price : sign * (price / row.virtual_vwap - 1) * 10_000
   const instant = row.execution_model === 'instant_taker'
-  const windowMinutes = row.execution_window_secs / 60
+  const windowMinutes = row.native_trading_minutes ?? row.execution_window_secs / 60
   const startUs = instant ? Math.floor(row.received_at_us / 60e6) * 60e6 : row.virtual_execution_ts_us - row.execution_window_secs * 1e6
   const xStart = Math.min(0, offset(startUs))
   const xEnd = Math.max(1, offset(row.virtual_execution_ts_us), offset(execution.last_fill_ts_us ?? row.received_at_us))
@@ -135,6 +137,15 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
   const maxQty = Math.max(...execution.fills.map((fill) => Math.abs(fill.actual_qty)), 1e-30)
   const priceDifference = row.actual_vwap == null ? null : row.actual_vwap - row.virtual_vwap
   const differenceFormat = priceFormatter([priceDifference])
+  const offsetName = nativeOffsetLabel(row.offset)
+  const fillGroups = native
+    ? [{ name: offsetName ? `${offsetName}成交` : '实际成交', color: '#7357a3', fills: execution.fills }]
+    : [
+      { role: 'maker', name: 'Maker 成交', color: better },
+      { role: 'taker', name: 'Taker 成交', color: worse },
+      { role: 'unclassified', name: '未分类成交', color: '#7357a3' },
+      { role: 'internal_cross', name: '内部对敲', color: '#64748b' },
+    ].map(({ role, name, color }) => ({ name, color, fills: execution.fills.filter((fill) => fill.liquidity === role) }))
   const series: echarts.EChartsCoreOption['series'] = [
     {
       type: 'line', name: instant ? '整分钟 open' : '分钟均价', connectNulls: false, symbolSize: 8, itemStyle: { color: blue },
@@ -149,12 +160,12 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
     },
     ...row.reference_prices.filter((reference) => reference.price != null).map((reference) => ({ type: 'line' as const, name: theoreticalExecutionLabel(reference.execution_model), symbol: 'none', lineStyle: { color: reference.execution_model === 'instant_taker' ? '#e11d48' : reference.execution_model === 'twap3m' ? '#d97706' : better, type: 'dashed' as const }, data: [[xStart, plotPrice(reference.price!)], [xEnd, plotPrice(reference.price!)]] })),
     ...(row.actual_vwap == null ? [] : [{ type: 'line', name: '实际 VWAP', symbol: 'none', lineStyle: { color: '#b7791f', type: 'dashed' }, data: [[0, plotPrice(row.actual_vwap)], [xEnd, plotPrice(row.actual_vwap)]] }]),
-    ...(['maker', 'taker', 'unclassified', 'internal_cross'] as const).map((role, index) => ({
-      type: 'scatter', name: ['Maker 成交', 'Taker 成交', '未分类成交', '内部对敲'][index], itemStyle: { color: [better, worse, '#7357a3', '#64748b'][index], opacity: 0.85 },
-      data: execution.fills.filter((fill) => fill.liquidity === role).map((fill) => ({
+    ...fillGroups.map(({ name, color, fills }) => ({
+      type: 'scatter' as const, name, itemStyle: { color, opacity: 0.85 },
+      data: fills.map((fill) => ({
         value: [offset(fill.fill_ts_us), plotPrice(fill.actual_price)],
         symbolSize: 7 + Math.sqrt(Math.abs(fill.actual_qty) / maxQty) * 13,
-        detail: `发布后 ${seconds(fill.target_delay_us)}\n订单后 ${seconds(fill.order_delay_us)}\n成交价 ${formatPrice(fill.actual_price)}\n数量 ${quantity(Math.abs(fill.actual_qty))}\n方向调整价差 ${bps(sign * (fill.actual_price / row.virtual_vwap - 1) * 10_000)}`,
+        detail: `发布后 ${seconds(fill.target_delay_us)}${native ? `\n开平 ${nativeOffsetLabel(fill.offset) ?? '—'}` : `\n订单后 ${seconds(fill.order_delay_us)}`}\n成交价 ${formatPrice(fill.actual_price)}\n数量 ${quantity(Math.abs(fill.actual_qty))} 手\n方向调整价差 ${bps(sign * (fill.actual_price / row.virtual_vwap - 1) * 10_000)}`,
       })),
       tooltip: { formatter: (p: { data: { detail: string } }) => p.data.detail },
     })),
@@ -162,14 +173,14 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
   return <Card className="mb-6 min-w-0 scroll-mt-4" id="delta-analysis">
     <CardHeader>
       <CardTitle>单个目标复盘</CardTitle>
-      <CardDescription>同一个币、同一个目标下对齐分钟价格与实际成交。下面的线索可以同时成立；只描述观测到的形态，不做确定的因果归因。</CardDescription>
+      <CardDescription>同一个合约、同一个目标下对齐分钟价格与实际成交。下面的线索可以同时成立；只描述观测到的形态，不做确定的因果归因。</CardDescription>
     </CardHeader>
     <CardContent className="min-w-0 space-y-4">
       <div className="grid min-w-0 gap-3 sm:grid-cols-2">
         <Label className="min-w-0">当前页目标<Select value={deltaKey(row)} onChange={(e) => onSelect(e.target.value)} className="w-full min-w-0">
-          {[...report.rows].reverse().map((item) => <option key={deltaKey(item)} value={deltaKey(item)}>{item.symbol} · {item.delta_qty > 0 ? '买' : '卖'} · {item.strategy_name} · {timestampUs(item.received_at_us)} · 价差 {item.price_shortfall_usdt == null ? '--' : `${money(item.price_shortfall_usdt)} U`}</option>)}
+          {[...report.rows].reverse().map((item) => <option key={deltaKey(item)} value={deltaKey(item)}>{item.symbol} · {item.delta_qty > 0 ? '买' : '卖'} · {native ? nativeOffsetLabel(item.offset) ?? '开平未知' : item.strategy_name} · {timestampUs(item.received_at_us)} · 价差 {item.price_shortfall_quote == null ? '--' : `${money(item.price_shortfall_quote)} CNY`}</option>)}
         </Select></Label>
-        <Label>价格坐标<Select value={priceMode} onChange={(e) => setPriceMode(e.target.value)}><option value="bps">相对理论价 · 方向调整 bps</option><option value="price">币种原始价格</option></Select></Label>
+        <Label>价格坐标<Select value={priceMode} onChange={(e) => setPriceMode(e.target.value)}><option value="bps">相对理论价 · 方向调整 bps</option><option value="price">合约原始价格</option></Select></Label>
       </div>
       <div className="grid gap-3 text-sm sm:grid-cols-3">
         <div>{row.reference_prices.map((reference) => <div key={reference.execution_model}><div className="text-xs text-muted">{theoreticalExecutionLabel(reference.execution_model)}</div><div className="mt-1 break-all font-medium tabular-nums">{formatPrice(reference.price)}</div></div>)}<div className="text-xs text-muted">实际 VWAP</div><div className="mt-1 tabular-nums">{formatPrice(row.actual_vwap)}</div></div>
@@ -183,10 +194,10 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
         yAxis: { ...valueAxis, scale: true, name: priceMode === 'price' ? '价格' : '方向调整 bps', axisLabel: { formatter: (value: number) => priceMode === 'price' ? formatPrice(value) : value.toFixed(1), fontSize: 10 } },
         dataZoom: [{ type: 'inside', filterMode: 'none' }, { type: 'slider', bottom: 0, height: 20, filterMode: 'none' }], series,
       }} />
-      <p className="text-xs leading-6 text-muted">{instant ? '参考点为信号接收时间所在整分钟的 K 线 open，负秒数表示取价早于接收；理论数量在接收时一次计入，费用按 taker 计算，未计入价差和冲击。' : `阴影为目标后的 ${windowMinutes} 个完整分钟，右边界为窗口结束。均价画在分钟中点，连线只帮助观察走势，不代表逐笔路径；空白分钟不连线。`}成交点大小表示数量。{execution.fills_sampled ? `图中抽样 ${execution.fills.length} / ${row.matched_fill_count} 笔，保留首尾及价格极值；下方统计使用全部配对成交。` : `共 ${row.matched_fill_count} 笔配对成交。`}成交统计仅覆盖本次查询范围，不代表目标的全部生命周期。价格仅调整显示精度，不代表交易所 tick 精度。</p>
+      <p className="text-xs leading-6 text-muted">{native ? `参考窗口覆盖 ${windowMinutes} 个完整交易分钟，休市空档保留在时间轴上。均价画在分钟中点。` : instant ? '参考点为信号接收时间所在整分钟的 K 线 open，负秒数表示取价早于接收；理论数量在接收时一次计入，费用按 taker 计算，未计入价差和冲击。' : `阴影为目标后的 ${windowMinutes} 个完整分钟，右边界为窗口结束。均价画在分钟中点，连线只帮助观察走势，不代表逐笔路径；空白分钟不连线。`}成交点大小表示数量。{execution.fills_sampled ? `图中抽样 ${execution.fills.length} / ${row.matched_fill_count} 笔，保留首尾及价格极值；下方统计使用全部配对成交。` : `共 ${row.matched_fill_count} 笔配对成交。`}成交统计仅覆盖本次查询范围，不代表目标的全部生命周期。价格仅调整显示精度，不代表交易所 tick 精度。</p>
       <div className="grid gap-3 text-sm sm:grid-cols-3">
         <div><div className="text-xs text-muted">目标 → 成交 · 数量加权平均</div><div className="mt-1 tabular-nums">{seconds(execution.qty_weighted_target_delay_us)}</div></div>
-        <div><div className="text-xs text-muted">订单 → 成交 · 数量加权平均</div><div className="mt-1 tabular-nums">{seconds(execution.qty_weighted_order_delay_us)}</div></div>
+        {!native && <div><div className="text-xs text-muted">订单 → 成交 · 数量加权平均</div><div className="mt-1 tabular-nums">{seconds(execution.qty_weighted_order_delay_us)}</div></div>}
         <div><div className="text-xs text-muted">窗口结束后成交量占比</div><div className="mt-1 tabular-nums">{execution.after_window_qty_ratio == null ? '--' : `${(execution.after_window_qty_ratio * 100).toFixed(1)}%`} · 完成率 {(row.fill_ratio * 100).toFixed(1)}%</div></div>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">

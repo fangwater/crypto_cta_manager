@@ -1,3 +1,5 @@
+mode = "crypto"
+
 [database]
 # The URL itself remains in the host credential file and is never stored here.
 url_env = "CRYPTO_CTA_LOCAL_DATABASE_URL"

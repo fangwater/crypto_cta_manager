@@ -25,7 +25,8 @@ const links: Array<{
 ]
 
 export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: boolean }) {
-  const { logout } = useAuth()
+  const { autoEarnAvailable, logout } = useAuth()
+  const visibleLinks = autoEarnAvailable ? links : links.filter((link) => link.id !== 'auto-earn')
   const navRef = useRef<HTMLElement>(null)
   const sourceId = readSourceId()
 
@@ -45,7 +46,7 @@ export function AppNav({ active, mobile = false }: { active: AppNavId; mobile?: 
         'items-center gap-1',
         mobile ? 'flex w-full overflow-x-auto' : 'hidden rounded-xl border border-border bg-canvas/80 p-1 lg:flex',
       )} aria-label="主导航" ref={navRef}>
-        {links.map((link) => {
+        {visibleLinks.map((link) => {
         const Icon = link.icon
         const isActive = active === link.id
         return (

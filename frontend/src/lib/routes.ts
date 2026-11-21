@@ -11,8 +11,8 @@ export const routes = {
   navMonitor: '/manager/net-value/',
   accounts: '/manager/accounts/',
   execViz: (groupId: string) => `/manager/exec/?group=${encodeURIComponent(groupId)}`,
-  account: (sourceId: string) =>
-    `/manager/account/?source=${encodeURIComponent(sourceId)}`,
+  account: (sourceId: string, section?: 'contract-fees') =>
+    `/manager/account/?source=${encodeURIComponent(sourceId)}${section ? `#${section}` : ''}`,
   nav: (sourceId?: string) =>
     sourceId ? `/manager/?source=${encodeURIComponent(sourceId)}` : '/manager/',
   executionCost: (sourceId?: string) =>

@@ -2,7 +2,18 @@
 
 ## Project Scope
 
-`crypto_cta_manager` is an independent Rust project for Exec/CTA management and
+`cn_futures_cta_manager` is a Git-history-preserving fork of `crypto_cta_manager`.
+The native backend entry point is `cn_futures_web`, with code under
+`src/native_futures/`. Keep the common library/package names and upstream
+modules stable so changes can be merged. Use the shared auth and strategy tables
+in a SEPARATE Manager database, with `CN_FUTURES_CTA_DATABASE_URL`.
+Native reads use separate RocksDB secondaries; never write execution stores,
+load trading SDKs, publish execution targets, submit orders or infer fill/strategy
+identity. Preserve native trading days, groups, lots and open/close semantics.
+CTP execution is forbidden on this development machine and all intranet hosts,
+including SDK initialization, probes, tests and offline SDK runs. Compilation is allowed.
+
+The upstream `crypto_cta_manager` is an independent Rust project for Exec/CTA management and
 read-only order-history analysis. It is intentionally separate from
 `/home/fanghaizhou/crypto_nav_manager`, whose current responsibility is
 NAV-oriented order/history collection. Large Exec-specific changes belong here;
@@ -31,9 +42,11 @@ amounts, lot quantities and open/close flags. Preserve account-scoped permission
 and report missing financial data as unavailable.
 
 For CN parity work, fetch the current upstream source and identify the frontend
-release served by Crypto. Verify the CN bundle against that release using the
-SHA-256 hashes of the HTML, JavaScript and CSS. Also open the same pages with
-CN accounts to verify the API data, units and account selection.
+release served by Crypto. The operator permits CN-only changes to asset labels,
+units and the fields that supply them. Compare the source diff to the Crypto
+release, check the shared layout and navigation on desktop and mobile, and
+verify the SHA-256 of each published file against the local CN build. Exercise
+the same pages with CN accounts to verify data, units and account selection.
 
 Commit and publish CN product changes on `cn-futures` and deploy them to CN
 Manager only. A change to Crypto `main` or a Crypto production release requires
@@ -41,7 +54,7 @@ an explicit request covering that target.
 
 ## Working Directory
 
-Work directly in `/home/fanghaizhou/crypto_cta_manager`. Make edits, run checks,
+Work directly in `/home/fanghaizhou/cn_futures_cta_manager`. Make edits, run checks,
 and prepare deployments in this existing checkout. Do not create additional Git
 worktrees or alternate project checkouts unless the operator explicitly requests
 one. Preserve existing and concurrent edits; merge overlapping changes instead

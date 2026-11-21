@@ -14,17 +14,6 @@ import { Badge } from './ui/Badge'
 import { Button } from './ui/Button'
 import { Input } from './ui/Field'
 
-function normalizeSymbol(raw: string) {
-  if (raw.includes(':')) {
-    const [venue, asset] = raw.trim().split(':')
-    return `${venue.toLowerCase()}:${asset.toUpperCase()}`
-  }
-  const symbol = raw.trim().toUpperCase()
-  return /^[A-Z0-9]+USD_?PERP$/.test(symbol)
-    ? symbol.replace(/_?PERP$/, '')
-    : symbol
-}
-
 function directionMeta(value: number) {
   if (value > 0) {
     return {
@@ -91,7 +80,7 @@ export function TargetPositionsEditor({
   function commitSymbolRename(oldSymbol: string) {
     const draft = draftSymbols[oldSymbol]
     if (draft === undefined) return
-    const nextSymbol = normalizeSymbol(draft)
+    const nextSymbol = draft.trim()
     setDraftSymbols((current) => {
       const next = { ...current }
       delete next[oldSymbol]
@@ -116,7 +105,7 @@ export function TargetPositionsEditor({
       return
     }
     const value = Number(raw)
-    if (!Number.isFinite(value)) return
+    if (!Number.isSafeInteger(value)) return
     updateTarget(symbol, { qty: value })
   }
 
@@ -133,10 +122,10 @@ export function TargetPositionsEditor({
   }
 
   function addSymbol() {
-    const symbol = normalizeSymbol(newSymbol)
+    const symbol = newSymbol.trim()
     const value = Number(newQty)
     if (!symbol) return
-    if (!Number.isFinite(value)) return
+    if (!Number.isSafeInteger(value)) return
     if (symbol in targets) return
     onChange({ ...targets, [symbol]: { qty: value, signal: newSignal } })
     setNewSymbol('')
@@ -149,7 +138,7 @@ export function TargetPositionsEditor({
       <div className="flex flex-col gap-3 border-b border-border-soft bg-surface/80 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-sm font-medium text-ink">目标仓位</p>
-          <p className="text-xs text-subtle">永续合约：USD 币本位，USDC / USDT 对应本位；数量使用币数量，例如 0.01 BTC。</p>
+          <p className="text-xs text-subtle">合约使用交易所和原生代码，例如 SHFE:rb2701、CZCE:SA701。目标以整数手计。</p>
           <Badge tone="neutral">{stats.total} 品种</Badge>
           <Badge tone="brand">{stats.active} 非零</Badge>
           {stats.long > 0 && <Badge tone="success">{stats.long} 多</Badge>}
@@ -185,7 +174,7 @@ export function TargetPositionsEditor({
           </p>
           <p className="mt-1 text-xs text-muted">
             {stats.total === 0
-              ? '在下方添加品种与目标数量。'
+              ? '在下方添加品种与目标手数。'
               : '调整筛选条件，或关闭「隐藏零仓位」。'}
           </p>
         </div>
@@ -196,7 +185,7 @@ export function TargetPositionsEditor({
               <tr className="border-b border-border-soft text-left text-[11px] uppercase tracking-[0.12em] text-subtle">
                 <th className="px-4 py-2.5 font-medium">品种</th>
                 <th className="px-3 py-2.5 font-medium">方向</th>
-                <th className="px-3 py-2.5 font-medium">目标数量</th>
+                <th className="px-3 py-2.5 font-medium">目标手数</th>
                 <th className="px-3 py-2.5 font-medium">Signal</th>
                 <th className="px-4 py-2.5 text-right font-medium">操作</th>
               </tr>
@@ -216,7 +205,7 @@ export function TargetPositionsEditor({
                         onChange={(event) =>
                           setDraftSymbols((current) => ({
                             ...current,
-                            [symbol]: event.target.value.toUpperCase(),
+                            [symbol]: event.target.value,
                           }))
                         }
                         onBlur={() => commitSymbolRename(symbol)}
@@ -239,7 +228,7 @@ export function TargetPositionsEditor({
                     <td className="px-3 py-2.5">
                       <Input
                         type="number"
-                        step="any"
+                        step="1"
                         value={targetQty(value)}
                         disabled={value.qty === 'clear'}
                         onChange={(event) => updateQuantity(symbol, event.target.value)}
@@ -292,16 +281,16 @@ export function TargetPositionsEditor({
             新增品种
             <Input
               value={newSymbol}
-              onChange={(event) => setNewSymbol(event.target.value.toUpperCase())}
-              placeholder="BTCUSDT / okex-futures:BTCUSDT"
+              onChange={(event) => setNewSymbol(event.target.value)}
+              placeholder="SHFE:rb2701 / CZCE:SA701"
               className="font-mono"
             />
           </label>
           <label className="grid gap-1.5 text-xs font-medium text-muted">
-            目标数量
+            目标手数
             <Input
               type="number"
-              step="any"
+              step="1"
               value={newQty}
               onChange={(event) => setNewQty(event.target.value)}
               placeholder="正为多，负为空"
@@ -326,7 +315,7 @@ export function TargetPositionsEditor({
             type="button"
             variant="secondary"
             className="sm:mb-0"
-            disabled={!normalizeSymbol(newSymbol) || !Number.isFinite(Number(newQty))}
+            disabled={!newSymbol.trim() || !Number.isFinite(Number(newQty))}
             onClick={addSymbol}
           >
             <Plus size={15} />

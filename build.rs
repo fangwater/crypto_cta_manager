@@ -8,4 +8,11 @@ fn main() {
         &["src/position_archive"],
     )
     .expect("compile the Manager position archive storage contract (requires protoc)");
+    println!("cargo:rerun-if-changed=src/native_futures/position_target.proto");
+    tonic_prost_build::configure()
+        .compile_protos(
+            &["src/native_futures/position_target.proto"],
+            &["src/native_futures"],
+        )
+        .expect("compile the native Exec target contract (requires protoc)");
 }

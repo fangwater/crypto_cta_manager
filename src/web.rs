@@ -55,7 +55,7 @@ mod publication;
 #[cfg(test)]
 mod publication_tests;
 mod target_state;
-mod timeline_proto;
+pub(crate) mod timeline_proto;
 
 const NO_STORE: [(header::HeaderName, &str); 1] = [(header::CACHE_CONTROL, "no-store")];
 const MANAGER_PUBLISH_CLIENT: &[u8] = include_bytes!("../scripts/manager_publish_client.py");
@@ -7044,6 +7044,7 @@ mod tests {
     #[test]
     fn resolve_publish_source_requires_enabled_exec_config() {
         let mut config = crate::config::AppConfig {
+            mode: Default::default(),
             accounts: Default::default(),
             database: crate::config::DatabaseConfig {
                 url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),
@@ -7136,6 +7137,7 @@ mod tests {
             target_proxy: None,
         };
         let config = crate::config::AppConfig {
+            mode: Default::default(),
             accounts: Default::default(),
             database: crate::config::DatabaseConfig {
                 url_env: "CRYPTO_CTA_LOCAL_DATABASE_URL".into(),

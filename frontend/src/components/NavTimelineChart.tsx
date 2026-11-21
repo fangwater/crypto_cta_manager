@@ -45,6 +45,7 @@ interface Props {
   visibleSeries: NavSeriesKey[]
   mode: TimelineChartMode
   feeMode: FeeMode
+  native?: boolean
 }
 
 const symbolPalette = [
@@ -81,6 +82,9 @@ export const navSeriesMeta: Record<
     color: '#a33f55',
     lineType: 'dashed',
   },
+  theoretical_native_vwap_after_fee_quote: { label: '1min_vwap', color: '#d97706', lineType: 'dashed' },
+  theoretical_native_twap5m_after_fee_quote: { label: '5min_twap', color: '#2563a7', lineType: 'dashed' },
+  theoretical_native_vwap5m_after_fee_quote: { label: '5min_vwap', color: '#9c4f87', lineType: 'dotted' },
   theoretical_twap3m_before_fee_quote: { label: '理论3min_twap（费前）', color: '#0891b2', lineType: 'dotted' },
   theoretical_twap3m_after_fee_quote: { label: '理论3min_twap（费后）', color: '#d97706', lineType: 'dashed' },
   theoretical_instant_taker_before_fee_quote: { label: '理论瞬时taker（费前）', color: '#65a30d', lineType: 'dotted' },
@@ -98,9 +102,12 @@ export const navSeriesMeta: Record<
   },
 }
 
-export function navSeriesLabel(key: NavSeriesKey, model?: TheoreticalExecutionModel | null) {
+export function navSeriesLabel(key: NavSeriesKey, model?: TheoreticalExecutionModel | null, native = false) {
+  if (native && key === 'nav_change_after_fee_quote') return '实际净值'
   if (key.startsWith('theoretical_')) {
     const fee = key.endsWith('before_fee_quote') ? '费前' : '费后'
+    if (key.startsWith('theoretical_native_')) return navSeriesMeta[key].label
+    if (model === 'native_twap') return '1min_twap'
     if (key.startsWith('theoretical_instant_taker_')) return `理论瞬时taker（${fee}）`
     if (key.startsWith('theoretical_twap3m_')) return `理论3min_twap（${fee}）`
     if (model === 'vwap3m') return `理论3min_vwap（${fee}）`
@@ -108,6 +115,15 @@ export function navSeriesLabel(key: NavSeriesKey, model?: TheoreticalExecutionMo
     return `理论${fee}`
   }
   return navSeriesMeta[key].label
+}
+
+export function referenceForSeries(key: NavSeriesKey, references: TheoreticalNavTimeline[] = []) {
+  if (key.startsWith('theoretical_native_twap5m_')) return references.find(row => row.execution_model === 'native_twap5m')
+  if (key.startsWith('theoretical_native_vwap5m_')) return references.find(row => row.execution_model === 'native_vwap5m')
+  if (key.startsWith('theoretical_native_vwap_')) return references.find(row => row.execution_model === 'native_vwap')
+  if (key.startsWith('theoretical_twap3m_')) return references.find(row => row.execution_model === 'twap3m')
+  if (key.startsWith('theoretical_instant_taker_')) return references.find(row => row.execution_model === 'instant_taker')
+  return references[0]
 }
 
 function isTheoreticalSeries(key: NavSeriesKey) {
@@ -141,6 +157,7 @@ export function NavTimelineChart({
   visibleSeries,
   mode,
   feeMode,
+  native = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -151,12 +168,13 @@ export function NavTimelineChart({
       renderer: 'canvas',
     })
     const fundingOnly = mode === 'strategyFunding'
+    const plottedStrategyPaths = new Set<string>()
     const series =
       mode === 'portfolio'
         ? visibleSeries.map((key) => {
-            const meta = { ...navSeriesMeta[key], label: navSeriesLabel(key, theoretical[0]?.execution_model) }
+            const reference = referenceForSeries(key, theoretical)
+            const meta = { ...navSeriesMeta[key], label: navSeriesLabel(key, reference?.execution_model, native) }
             const isTheoretical = isTheoreticalSeries(key)
-            const reference = key.startsWith('theoretical_instant_taker_') ? theoretical.find((r) => r.execution_model === 'instant_taker') : key.startsWith('theoretical_twap3m_') ? theoretical.find((r) => r.execution_model === 'twap3m') : theoretical[0]
             const data = isTheoretical
               ? (reference?.points ?? []).map((point) => [
                   point.ts_us / 1_000,
@@ -200,16 +218,20 @@ export function NavTimelineChart({
                 ? 'nav_change_after_fee_quote'
                 : 'nav_change_before_fee_quote'
             const funding = mode !== 'symbols' ? strategyFunding?.find((row) => row.strategy === (item as StrategyNavTimeline).strategy) : undefined
+            const data = mode !== 'symbols' ? strategyFundingPoints(item as StrategyNavTimeline, funding, feeMode, fundingOnly)
+              : item.points.map((point) => [point.ts_us / 1_000, point[key]])
+            const distinguishOverlap = native && mode === 'strategies'
+            const path = distinguishOverlap ? JSON.stringify(data) : ''
+            const overlaps = distinguishOverlap && plottedStrategyPaths.has(path)
+            if (distinguishOverlap) plottedStrategyPaths.add(path)
             return {
               name:
                 mode === 'symbols'
                   ? (item as SymbolNavTimeline).symbol
                   : strategyLabel((item as StrategyNavTimeline).strategy),
               type: 'line' as const,
-              data: mode !== 'symbols' ? strategyFundingPoints(item as StrategyNavTimeline, funding, feeMode, fundingOnly) : item.points.map((point) => [
-                point.ts_us / 1_000,
-                point[key],
-              ]),
+              z: overlaps ? 4 : undefined,
+              data,
               showSymbol: false,
               sampling: 'lttb' as const,
               connectNulls: true,
@@ -221,7 +243,7 @@ export function NavTimelineChart({
                 lineStyle: { color: '#8993a4', type: 'dashed' as const },
                 data: [{ yAxis: 0 }],
               } : undefined,
-              lineStyle: { width: 1.7, color },
+              lineStyle: { width: overlaps ? 1.4 : distinguishOverlap ? 2.4 : 1.7, color, type: overlaps ? 'dashed' as const : undefined },
               itemStyle: { color },
               emphasis: { focus: 'series' as const },
             }
@@ -307,6 +329,7 @@ export function NavTimelineChart({
     }
   }, [
     feeMode,
+    native,
     mode,
     points,
     strategyPoints,

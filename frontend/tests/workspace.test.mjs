@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { overviewTotal, overviewAlertCount, isExternalOverview } from '../src/lib/accountOverview.ts'
+import { overviewTotal, overviewAlertCount, isExternalOverview, nativeSourceStatus } from '../src/lib/accountOverview.ts'
+
+test('native sync and execution statuses remain distinct', () => {
+  assert.equal(nativeSourceStatus({ collection_status: 'live', execution_status: 'quiet' }).label, '已同步')
+  assert.deepEqual(nativeSourceStatus({ collection_status: 'live', execution_status: 'stopped' }), {
+    label: '已停止', tone: 'neutral', title: '已同步',
+  })
+  assert.equal(nativeSourceStatus({ collection_status: 'live', execution_status: 'recovering' }).label, '对账中')
+  assert.equal(nativeSourceStatus({ collection_status: 'loading' }).label, '同步中')
+  assert.equal(nativeSourceStatus({ collection_status: 'stale' }).label, '同步延迟')
+})
 
 test('MM and remote CTA use external status while local CTA keeps its local rules', () => {
   const mm = { source_id: 'external:nav:bybit_mm_alpha', account_kind: 'mm', equity: 100, collection_status: 'live' }
@@ -20,6 +30,17 @@ test('filtered totals preserve losses and distinguish missing data from zero', (
   assert.equal(overviewTotal([{ equity: 0 }], 'equity'), 0)
   assert.equal(overviewTotal([{ equity: 100 }, { equity: null }], 'equity'), null)
   assert.equal(overviewTotal([{ equity: NaN }], 'equity'), null)
+})
+
+test('previous native fund observations remain visible but cannot enter a current total', () => {
+  const live = { source_id: 'ctp', quote_currency: 'CNY', funds_status: 'live', equity: 100 }
+  const zero = { source_id: 'ctp-zero', quote_currency: 'CNY', funds_status: 'live', equity: 0 }
+  const old = { ...live, funds_status: 'historical', equity: 200 }
+  const usableOnly = { source_id: 'yida', funds_status: 'live', equity: null, usable_cash: 400, sdk_market_value: 700 }
+  assert.equal(overviewTotal([live, zero], 'equity'), 100)
+  assert.equal(overviewTotal([old], 'equity'), null)
+  assert.equal(overviewTotal([live, old], 'equity'), null)
+  assert.equal(overviewTotal([live, usableOnly], 'equity'), null)
 })
 
 test('unknown alert configuration or input does not mean zero alerts', () => {

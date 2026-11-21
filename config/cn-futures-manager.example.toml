@@ -1,0 +1,51 @@
+# Independent Manager storage. This process never loads a trading SDK.
+mode = "cn_futures"
+secondary_root = "/home/operator/cn_futures_cta_manager/data/secondaries"
+# Optional offline minute bars, sessions, fees and explicit signal/order references.
+# Maintain with cn_futures_reference; no market-data API or trading SDK is used.
+# reference_root = "/home/operator/cn_futures_cta_manager/data/references"
+stale_secs = 30
+recent_rows = 200
+
+# For central local replicas, use sync-server-collect.example.toml instead.
+# sync-server is a separate process; Manager never starts it automatically.
+
+[database]
+url_env = "CN_FUTURES_CTA_DATABASE_URL"
+max_connections = 8
+
+# Optional host-enforced account visibility boundary, including administrators:
+# [source_viewers]
+# yida_sim01 = ["operator"]
+
+# Optional read-only exec gRPC subscription for a configured CTP source.
+# Exec connects to the Manager loopback origin and uses this environment token.
+# [exec_plan_readers]
+# ctp_live01 = "CN_CTA_CTP_LIVE01_PLAN_TOKEN"
+
+# Native market-replay gRPC. Lots are single-sided, turnover includes multiplier.
+# [market_data]
+# grpc_url = "http://127.0.0.1:18312"
+# cache_root = "/home/operator/cn_futures_cta_manager/data/market-cache"
+
+# Investor-specific CTP observations; historical requests never use future rates.
+# [reference_service]
+# api_url = "http://127.0.0.1:8765"
+# [reference_service.accounts]
+# ctp_live01 = "chuangyuan01"
+
+[[sources]]
+id = "yida_sim01"
+account = "易达仿真"
+# Choose the actual adapter explicitly: "yida" or "ctp".
+adapter = "yida"
+rocksdb_path = "/home/operator/yida_sim01/flow/persist_manager"
+enabled = true
+
+# A CTP source uses the same native column families, without a Manager SDK.
+# [[sources]]
+# id = "ctp_live01"
+# account = "CTP 实盘"
+# adapter = "ctp"
+# rocksdb_path = "/home/operator/ctp_live01/flow/persist_manager"
+# enabled = true

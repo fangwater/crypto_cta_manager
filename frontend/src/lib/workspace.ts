@@ -1,4 +1,6 @@
 export function accountVenueLabel(venue: string) {
+  if (venue === 'ctp') return 'CTP · 国内期货'
+  if (venue === 'yida') return '易达 · 国内期货'
   if (venue === 'spread') return '多市场账户'
   const exchange = venue.includes('binance') ? '币安' : venue.includes('okex') || venue.includes('okx') ? '欧易' : venue.includes('bybit') ? 'Bybit' : venue.includes('bitget') ? 'Bitget' : venue.includes('gate') ? 'Gate' : venue
   return `${exchange} · ${['binance', 'bybit', 'gate', 'bitget'].includes(venue) ? '现货 / 合约' : venue === 'binance-coin-futures' ? '币本位' : 'U 本位'}`

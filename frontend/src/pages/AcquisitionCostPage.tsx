@@ -1,4 +1,4 @@
-import { theoreticalExecutionDescription, theoreticalExecutionLabel } from '../lib/theoreticalExecution'
+import { isNativeExecutionModel, nativeOffsetLabel, theoreticalExecutionDescription, theoreticalExecutionLabel } from '../lib/theoreticalExecution'
 import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, Scale } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getAcquisitionCost, getDashboard, getKlineCacheStatus } from '../api'
@@ -28,8 +28,8 @@ function fromDatetimeLocal(value: string) {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-function moneyU(value: number | null | undefined) {
-  return value == null ? '--' : `${money(value)} U`
+function moneyCny(value: number | null | undefined) {
+  return value == null ? '--' : `${money(value)} CNY`
 }
 
 function bps(value: number | null | undefined) {
@@ -177,11 +177,14 @@ export function AcquisitionCostPage() {
 
   const report = snapshot?.reports[referenceIndex] ?? snapshot?.reports[0]
   const totals = report?.totals
+  const model = report?.execution_model ?? (dashboard?.report.valuation.startsWith('native_') ? 'native_reference' : null)
+  const native = isNativeExecutionModel(model)
+  const comparisons = native ? report?.by_offset ?? [] : report?.by_strategy ?? []
   return (
     <AppShell
       active="acquisition-cost"
       title="持仓成本"
-      subtitle={`实际成交与${theoreticalExecutionLabel(report?.execution_model)}`}
+      subtitle={`实际成交与${theoreticalExecutionLabel(model)}`}
       icon={Scale}
       actions={
         <Button type="button" size="sm" variant="primary" disabled={loading || !scopeReady} onClick={() => void query(1)}>
@@ -193,12 +196,12 @@ export function AcquisitionCostPage() {
       <PageIntro
         eyebrow="Delta cost"
         title="实际成本 vs 虚拟成本"
-        description={theoreticalExecutionDescription(report?.execution_model)}
+        description={theoreticalExecutionDescription(model)}
       />
 
       {error && <Alert className="mb-4">{error}</Alert>}
       {cacheStatus?.enabled && <div className="mb-4 text-sm text-muted" role="status">
-        行情缓存：已补拉 {cacheStatus.fetched_candles.toLocaleString()} 根分钟 K 线 · {cacheStatus.active_backfills ? `${cacheStatus.active_backfills} 个币对正在补齐，可稍后重新查询` : '当前没有补拉任务'}
+        行情缓存：已补拉 {cacheStatus.fetched_candles.toLocaleString()} 根分钟 K 线 · {cacheStatus.active_backfills ? `${cacheStatus.active_backfills} 个合约正在补齐，可稍后重新查询` : '当前没有补拉任务'}
       </div>}
       {report?.warnings.map((warning) => <Alert key={warning} className="mb-4">{warning}</Alert>)}
       {Boolean(totals?.pending_virtual_delta_count) && <Alert className="mb-4">{totals?.pending_virtual_delta_count} 个 delta 的理论执行窗口尚未结束。</Alert>}
@@ -212,7 +215,7 @@ export function AcquisitionCostPage() {
       {totals && totals.stale_reference_fill_count > 0 && (
         <Alert className="mb-4">
           {totals.stale_reference_fill_count} 笔事实 fill 的最近虚拟参考超过 300 秒，成交额{' '}
-          {moneyU(totals.stale_reference_fill_notional_usdt)}，未进入价格差。
+          {moneyCny(totals.stale_reference_fill_notional_quote)}，未进入价格差。
         </Alert>
       )}
 
@@ -255,12 +258,12 @@ export function AcquisitionCostPage() {
         </div>)}</CardContent>
       </Card>}
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-        <StatTile label="目标虚拟成交额" value={totals ? moneyU(totals.virtual_turnover_usdt) : '--'} hint={totals ? `${totals.virtual_delta_count} 个 delta · 费 ${moneyU(totals.virtual_fee_usdt)}` : undefined} />
-        <StatTile label="事实成交额" value={totals ? moneyU(totals.actual_turnover_usdt) : '--'} hint={totals ? `${totals.actual_fill_count} 笔 · 费 ${moneyU(totals.actual_fee_usdt)}` : undefined} />
-        <StatTile label="同量虚拟成交额" value={totals ? moneyU(totals.matched_virtual_turnover_usdt) : '--'} hint="完全使用事实 fill 数量" />
-        <StatTile label="事实成交覆盖" value={totals ? `${(totals.actual_fill_reference_coverage * 100).toFixed(1)}%` : '--'} />
-        <StatTile label="费前执行滑点" value={totals?.matched_fill_count ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? `价格差 ${moneyU(totals.price_shortfall_usdt)} · 按可比理论成交额归一化` : undefined} />
-        <StatTile label="费后执行滑点" value={totals?.matched_fill_count ? bps(totals.after_fee_shortfall_bps) : '--'} hint={totals ? `费后差 ${moneyU(totals.after_fee_shortfall_usdt)} · 手续费差 ${moneyU(totals.fee_shortfall_usdt)}` : undefined} />
+        <StatTile label="目标虚拟成交额" value={totals ? moneyCny(totals.virtual_turnover_quote) : '--'} hint={totals ? `${totals.virtual_delta_count} 个 delta · 费 ${moneyCny(totals.virtual_fee_quote)}` : undefined} />
+        <StatTile label="事实成交额" value={totals ? moneyCny(totals.actual_turnover_quote) : '--'} hint={totals ? `${totals.actual_fill_count} 笔 · 费 ${moneyCny(totals.actual_fee_quote)}` : undefined} />
+        <StatTile label="同量虚拟成交额" value={totals ? moneyCny(totals.matched_virtual_turnover_quote) : '--'} hint="完全使用事实 fill 数量" />
+        <StatTile label="事实成交覆盖" value={totals?.actual_fill_reference_coverage != null ? `${(totals.actual_fill_reference_coverage * 100).toFixed(1)}%` : '--'} />
+        <StatTile label="费前执行滑点" value={totals?.matched_fill_count ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? `价格差 ${moneyCny(totals.price_shortfall_quote)} · 按可比理论成交额归一化` : undefined} />
+        <StatTile label="费后执行滑点" value={totals?.matched_fill_count ? bps(totals.after_fee_shortfall_bps) : '--'} hint={totals ? `费后差 ${moneyCny(totals.after_fee_shortfall_quote)} · 手续费差 ${moneyCny(totals.fee_shortfall_quote)}` : undefined} />
       </div>
 
       {!snapshot && !loading && <Card><CardContent className="py-16 text-center text-sm text-muted">选择范围后查询。</CardContent></Card>}
@@ -271,11 +274,11 @@ export function AcquisitionCostPage() {
         <Card className="mb-4 scroll-mt-4" id="delta-details">
           <CardHeader>
             <CardTitle>定位 delta</CardTitle>
-            <CardDescription>按币种和策略在整个查询区间内先筛选、排序，再分页；上方汇总保持全区间口径。单个目标复盘仅列出当前页目标。</CardDescription>
+            <CardDescription>按合约和策略在整个查询区间内先筛选、排序，再分页；上方汇总保持全区间口径。单个目标复盘仅列出当前页目标。</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <Label>复盘币种<Select value={rowSymbol} disabled={loading} onChange={(event) => selectDetails(event.target.value, rowSort)}>
-              <option value="">全部币种</option>
+            <Label>复盘合约<Select value={rowSymbol} disabled={loading} onChange={(event) => selectDetails(event.target.value, rowSort)}>
+              <option value="">全部合约</option>
               {rowSymbol && !report.by_symbol.some((row) => row.bucket === rowSymbol) && <option value={rowSymbol}>{rowSymbol}</option>}
               {[...report.by_symbol].sort((a, b) => a.bucket.localeCompare(b.bucket)).map((row) => <option key={row.bucket} value={row.bucket}>{row.bucket}</option>)}
             </Select></Label>
@@ -289,7 +292,7 @@ export function AcquisitionCostPage() {
               <option value="price_shortfall">价格差金额最大优先（正值更差）</option>
             </Select></Label>
             <div className="flex flex-wrap items-center justify-between gap-3 sm:col-span-2 lg:col-span-3">
-              <span className="text-sm text-muted" role="status">{loading ? '正在载入目标明细…' : `${report.row_symbol ?? '全部币种'} · ${report.row_strategy ?? '全部策略'} · ${report.filtered_row_count} 个 delta · 当前页 ${report.returned_row_count} 个`}</span>
+              <span className="text-sm text-muted" role="status">{loading ? '正在载入目标明细…' : `${report.row_symbol ?? '全部合约'} · ${report.row_strategy ?? '全部策略'} · ${report.filtered_row_count} 个 delta · 当前页 ${report.returned_row_count} 个`}</span>
               <div className="flex items-center gap-2">
                 <Button type="button" size="sm" variant="secondary" disabled={loading || page <= 1} onClick={() => void query(page - 1)}>上一页</Button>
                 <Badge tone="brand">{report.page_count ? `${page} / ${report.page_count}` : '0 / 0'}</Badge>
@@ -300,22 +303,31 @@ export function AcquisitionCostPage() {
         </Card>
         {!loading && (report.rows.length
           ? <AcquisitionDeltaAnalysis report={report} selectedKey={selectedKey} onSelect={setSelectedKey} />
-          : <Alert className="mb-6">当前币种、策略和范围没有可展示的 delta，可切换复盘条件或扩大上方查询范围。</Alert>)}
+          : <Alert className="mb-6">当前合约、策略和范围没有可展示的 delta，可切换复盘条件或扩大上方查询范围。</Alert>)}
       </>}
 
       {report && (
         <Card className="mb-6">
-          <CardHeader><CardTitle>策略对比</CardTitle><CardDescription>正值表示实际成交更贵；先看覆盖率，再比较价格差和费用差。</CardDescription></CardHeader>
+          <CardHeader>
+            <CardTitle>{native ? '开平费用对比' : '策略对比'}</CardTitle>
+            <CardDescription>{native ? '比较同量成交的实际手续费与对应开平的参考手续费。缺少费用依据时显示为空。' : '正值表示实际成交更贵；先看覆盖率，再比较价格差和费用差。'}</CardDescription>
+          </CardHeader>
           <CardContent className="overflow-x-auto">
             <table className="min-w-full text-left text-[13px]">
-              <thead><tr><th>策略</th><th className="text-right">可比成交数</th><th className="text-right">可比成交额 U</th><th className="text-right">价格差 bps</th><th className="text-right">费后差 U</th></tr></thead>
-              <tbody>{report.by_strategy.map((row) => <tr key={row.bucket} className="border-b border-border-soft">
-                <td className="py-2">{row.bucket}</td><td className="text-right tabular-nums">{row.fill_count}</td>
-                <td className="text-right tabular-nums">{money(row.reference_turnover_usdt)}</td>
+              <thead><tr>
+                <th>{native ? '开平' : '策略'}</th><th className="text-right">可比成交数</th><th className="text-right">可比成交额 CNY</th>
+                {native && <><th className="text-right">实际手续费 CNY</th><th className="text-right">参考手续费 CNY</th></>}
+                <th className="text-right">价格差 bps</th><th className="text-right">费后差 CNY</th>
+              </tr></thead>
+              <tbody>{comparisons.map((row) => <tr key={row.bucket} className="border-b border-border-soft">
+                <td className="py-2">{native ? nativeOffsetLabel(row.bucket) ?? '—' : row.bucket}</td><td className="text-right tabular-nums">{row.fill_count}</td>
+                <td className="text-right tabular-nums">{money(row.reference_turnover_quote)}</td>
+                {native && <><td className="text-right tabular-nums">{moneyCny(row.actual_fee_quote)}</td><td className="text-right tabular-nums">{moneyCny(row.virtual_fee_quote)}</td></>}
                 <td className={cn('text-right tabular-nums', costClass(row.price_shortfall_bps))}>{bps(row.price_shortfall_bps)}</td>
-                <td className={cn('text-right tabular-nums', costClass(row.after_fee_shortfall_usdt))}>{moneyU(row.after_fee_shortfall_usdt)}</td>
+                <td className={cn('text-right tabular-nums', costClass(row.after_fee_shortfall_quote))}>{moneyCny(row.after_fee_shortfall_quote)}</td>
               </tr>)}</tbody>
             </table>
+            {native && comparisons.length === 0 && <p className="py-4 text-sm text-muted">没有可比开平成交。</p>}
           </CardContent>
         </Card>
       )}
@@ -336,17 +348,18 @@ export function AcquisitionCostPage() {
             <table className="min-w-full text-left text-[13px]">
               <thead className="border-b border-border-soft bg-canvas/80 text-[11px] uppercase tracking-wide text-muted">
                 <tr>
-                  <th className="px-4 py-2 font-medium">信号 / 策略</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta</th><th className="px-4 py-2 text-right font-medium">分钟价格</th><th className="px-4 py-2 text-right font-medium">计价分钟</th><th className="px-4 py-2 text-right font-medium">{(snapshot?.reports.length ?? 0) > 1 ? "三分钟参考价" : theoreticalExecutionLabel(report?.execution_model)}</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">实际 − 理论</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 U</th>
+                  <th className="px-4 py-2 font-medium">信号 / 策略</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta（手）</th><th className="px-4 py-2 text-right font-medium">分钟价格</th><th className="px-4 py-2 text-right font-medium">计价分钟</th><th className="px-4 py-2 text-right font-medium">{(snapshot?.reports.length ?? 0) > 1 ? "三分钟参考价" : theoreticalExecutionLabel(report?.execution_model)}</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">实际 − 理论</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 CNY</th>
                 </tr>
               </thead>
               <tbody>
               {[...report.rows].reverse().map((row) => {
                   const formatPrice = rowPriceFormatter(row)
                   const difference = row.actual_vwap == null ? null : row.actual_vwap - row.virtual_vwap
+                  const offset = native ? nativeOffsetLabel(row.offset) : null
                   return <tr key={deltaKey(row)} className={cn('border-b border-border-soft last:border-0', selectedKey === deltaKey(row) && 'bg-canvas')}>
                     <td className="whitespace-nowrap px-4 py-2 tabular-nums text-muted">{timestampUs(row.received_at_us)}<div className="text-xs">{row.strategy_name} <button type="button" className="ml-2 text-brand underline" onClick={() => { setSelectedKey(deltaKey(row)); document.getElementById('delta-analysis')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }}>复盘</button></div></td>
                     <td className="px-4 py-2 font-medium">{row.symbol}</td>
-                    <td className="px-4 py-2">{side(row.delta_qty)}</td>
+                    <td className="px-4 py-2">{offset ? `${side(row.delta_qty)} · ${offset}` : side(row.delta_qty)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{quantity(Math.abs(row.delta_qty))}</td>
                     <td className="whitespace-nowrap px-4 py-2 text-right text-[11px] tabular-nums text-muted">{sampleText(row)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{row.execution_model === "twap5m" && row.zero_volume_fallback_sample_count ? "收盘价" : (row.sample_prices.length - row.zero_volume_skipped_sample_count) + " / " + row.sample_prices.length}</td>
@@ -355,7 +368,7 @@ export function AcquisitionCostPage() {
                     <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{difference != null && difference > 0 ? '+' : ''}{priceFormatter([difference])(difference)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{(row.fill_ratio * 100).toFixed(1)}%</td>
                     <td className={cn('px-4 py-2 text-right tabular-nums', costClass(row.price_shortfall_bps))}>{bps(row.price_shortfall_bps)}</td>
-                    <td className={cn('px-4 py-2 text-right tabular-nums', costClass(row.after_fee_shortfall_usdt))}>{moneyU(row.after_fee_shortfall_usdt)}</td>
+                    <td className={cn('px-4 py-2 text-right tabular-nums', costClass(row.after_fee_shortfall_quote))}>{moneyCny(row.after_fee_shortfall_quote)}</td>
                   </tr>
                 })}
               </tbody>

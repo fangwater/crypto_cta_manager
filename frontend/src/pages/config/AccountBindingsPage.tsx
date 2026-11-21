@@ -18,6 +18,8 @@ import {
 import {
   ContractLeveragePanel,
   ContractLeverageToolbar,
+  isNativeFuturesVenue,
+  NativeContractRatesPanel,
 } from '../../components/ContractLeveragePanel'
 import { FundingSettingsPanel } from '../../components/FundingSettingsPanel'
 import { AccountFollowPanel } from '../../components/AccountFollowPanel'
@@ -66,7 +68,9 @@ export function AccountBindingsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const publicAccounts = useMemo(() => (dashboard?.accounts ?? []).filter(a => a.enabled && a.configurable && a.access_level === 'configure'), [dashboard])
+  const publicAccounts = useMemo(() => (dashboard?.accounts ?? []).filter(a =>
+    a.enabled && a.access_level === 'configure' && (a.configurable || isNativeFuturesVenue(a.venue))
+  ), [dashboard])
   const accounts = useMemo(() => publicAccounts.flatMap(a => a.execution_sources?.length ? a.execution_sources : [a]), [publicAccounts])
   const selectedPublicAccount = publicAccounts.find(a => a.source_id === sourceId || a.execution_sources?.some(leg => leg.source_id === sourceId))
 
@@ -76,8 +80,9 @@ export function AccountBindingsPage() {
     [studio],
   )
   const following = studio?.configuration.mode === 'follow'
-  const bindingEditsDisabled = !studio || studio.source_id !== sourceId || following || (studio?.pending_publishes.length ?? 0) > 0
   const selectedAccount = accounts.find((account) => account.source_id === sourceId)
+  const native = isNativeFuturesVenue(selectedAccount?.venue)
+  const bindingEditsDisabled = native || !studio || studio.source_id !== sourceId || following || (studio?.pending_publishes.length ?? 0) > 0
 
   // New bindings require strategy configure permission; the access list is
   // already filtered to configurable strategies for non-admin sessions.
@@ -172,13 +177,17 @@ export function AccountBindingsPage() {
     setStudio(null)
     setExecOrderRateLimits(null)
     setQueriedContractLeverage(null)
+    if (native) {
+      setExecOrderRateLimitPerMin('')
+      setExecOrderRateLimit10s('')
+    }
     const controller = new AbortController()
     Promise.all([
       loadStudio(sourceId, controller.signal),
-      getAccountExecOrderRateLimits(sourceId, controller.signal),
+      native ? Promise.resolve(null) : getAccountExecOrderRateLimits(sourceId, controller.signal),
     ])
       .then(([, limits]) => {
-        applyExecOrderRateLimits(limits)
+        if (limits) applyExecOrderRateLimits(limits)
         setError(null)
       })
       .catch((reason: unknown) => {
@@ -186,7 +195,7 @@ export function AccountBindingsPage() {
         setError(reason instanceof Error ? reason.message : String(reason))
       })
     return () => controller.abort()
-  }, [accounts, applyExecOrderRateLimits, loadStudio, sourceId])
+  }, [accounts, applyExecOrderRateLimits, loadStudio, native, sourceId])
 
   async function bindExecution(
     positionStrategyName: string,
@@ -259,14 +268,20 @@ export function AccountBindingsPage() {
                   type="password"
                   autoComplete="off"
                   value={experimentalToken}
+                  disabled={native}
                   onChange={(event) => setExperimentalToken(event.target.value)}
                 />
                 <FieldHint>首次启用、切换或重新启用 POV/Chase 时使用。</FieldHint>
               </Label>}
             </CardContent>
           </Card>
-          {!selectedPublicAccount?.execution_sources?.length && !estimatedFundingOnly(sourceId) && <FundingSettingsPanel key={sourceId} sourceId={sourceId} />}
-          <AccountFollowPanel sourceId={sourceId} studio={studio} onChange={applyStudio} />
+          {!native && !selectedPublicAccount?.execution_sources?.length && !estimatedFundingOnly(sourceId) && <FundingSettingsPanel key={sourceId} sourceId={sourceId} />}
+          <fieldset className="contents" disabled={native} onSubmitCapture={native ? event => {
+            event.preventDefault()
+            event.stopPropagation()
+          } : undefined}>
+            <AccountFollowPanel sourceId={sourceId} studio={studio} onChange={applyStudio} />
+          </fieldset>
           <AccountStrategySharesHistory key={sourceId} sourceId={sourceId} revision={studio} />
           <Card>
             <CardHeader>
@@ -282,7 +297,7 @@ export function AccountBindingsPage() {
                 className="grid max-w-2xl items-end gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
                 onSubmit={(event) => {
                   event.preventDefault()
-                  if (!validExecOrderRateLimits) return
+                  if (native || !validExecOrderRateLimits) return
                   void withWrite(async () => {
                     const next = await saveAccountExecOrderRateLimits(
                       sourceId,
@@ -303,6 +318,7 @@ export function AccountBindingsPage() {
                     max={MAX_EXEC_ORDER_RATE_LIMIT}
                     step="1"
                     value={execOrderRateLimitPerMin}
+                    disabled={native}
                     onChange={(event) => setExecOrderRateLimitPerMin(event.target.value)}
                   />
                 </Label>
@@ -315,23 +331,24 @@ export function AccountBindingsPage() {
                     max={MAX_EXEC_ORDER_RATE_LIMIT}
                     step="1"
                     value={execOrderRateLimit10s}
+                    disabled={native}
                     onChange={(event) => setExecOrderRateLimit10s(event.target.value)}
                   />
                 </Label>
                 <Button
                   type="submit"
                   variant="primary"
-                  disabled={saving || !execOrderRateLimitsChanged}
+                  disabled={native || saving || !execOrderRateLimitsChanged}
                 >
                   <Save size={15} /> 保存
                 </Button>
                 <FieldHint className="sm:col-span-3">
-                  0 表示关闭对应窗口；保存后由 Exec 风控参数热加载，最长约 60 秒生效。
+                  {native ? '此账户暂无可查询的报单限频数据。' : '0 表示关闭对应窗口；保存后由 Exec 风控参数热加载，最长约 60 秒生效。'}
                 </FieldHint>
               </form>
             </CardContent>
           </Card>
-          <ContractLeveragePanel
+          {native ? <NativeContractRatesPanel key={sourceId} sourceId={sourceId} disabled={saving} /> : <ContractLeveragePanel
             toolbar={
               <ContractLeverageToolbar
                 symbolPlaceholder={executionSymbolPlaceholder(selectedAccount?.venue ?? '')}
@@ -372,7 +389,7 @@ export function AccountBindingsPage() {
                 }
               />
             }
-          />
+          />}
 
           {!bindingEditsDisabled && <Card>
             <CardHeader>
@@ -483,7 +500,7 @@ export function AccountBindingsPage() {
                             : 'rounded-full bg-brand-soft px-3 py-1 text-sm font-semibold text-brand'
                         }
                       >
-                        {binding.shares === 0 ? '已停止' : `${binding.shares} 份`}
+                        {native ? '手数归因' : binding.shares === 0 ? '已停止' : `${binding.shares} 份`}
                       </span>
                     </div>
                     <div className="flex flex-wrap items-end gap-3">
@@ -559,7 +576,7 @@ export function AccountBindingsPage() {
                         <Button
                           type="button"
                           variant="primary"
-                          disabled={saving || (studio?.pending_publishes.length ?? 0) > 0}
+                          disabled={native || saving || (studio?.pending_publishes.length ?? 0) > 0}
                           onClick={() =>
                             void withWrite(async () => {
                               await publishAccountBinding(sourceId, binding.binding_name)

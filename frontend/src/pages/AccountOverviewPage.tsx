@@ -1,8 +1,8 @@
-import { accountExecutionGroup, estimatedFundingOnly } from '../lib/executionGroups'
+import { accountExecutionUrl, estimatedFundingOnly } from '../lib/executionGroups'
 import { accountBindings } from '../lib/accountBindings'
 import { accountScope } from '../lib/accountScope'
 import { accountVenueLabel } from '../lib/workspace'
-import { AccountFeeEditor } from '../components/AccountFeeEditor'
+import { AccountFeeEditor, NativeAccountFeeReadout } from '../components/AccountFeeEditor'
 import { FundingSettingsPanel } from '../components/FundingSettingsPanel'
 import { AccountStrategySharesHistory } from '../components/AccountStrategySharesHistory'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
@@ -25,11 +25,14 @@ import {
   getDashboard,
   saveAccountContractLeverage,
   saveAccountFeeRates,
+  type NativeContractRateLookup,
 } from '../api'
 import { AppShell, PageIntro } from '../components/AppShell'
 import {
   ContractLeveragePanel,
   ContractLeverageToolbar,
+  isNativeFuturesVenue,
+  NativeContractRatesPanel,
 } from '../components/ContractLeveragePanel'
 import { OrderParametersView } from '../components/OrderParametersView'
 import { TargetPositionsView } from '../components/TargetPositionsView'
@@ -76,6 +79,7 @@ export function AccountOverviewPage() {
   const [contractSymbol, setContractSymbol] = useState('')
   const [contractLeverage, setContractLeverage] = useState('5')
   const [queriedContractLeverage, setQueriedContractLeverage] = useState<string | null>(null)
+  const [nativeRates, setNativeRates] = useState<NativeContractRateLookup | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -95,7 +99,8 @@ export function AccountOverviewPage() {
     setDashboard(snapshot)
     setAccountStudios(studios)
     setStudio(studios.find(s => s.source_id === nativeId) ?? null)
-    window.history.replaceState({}, '', routes.account(scope.account.source_id))
+    const section = window.location.hash === '#contract-fees' ? 'contract-fees' : undefined
+    window.history.replaceState({}, '', routes.account(scope.account.source_id, section))
   }, [accountId])
 
   useEffect(() => {
@@ -116,10 +121,10 @@ export function AccountOverviewPage() {
 
   const account = useMemo(() => (dashboard?.accounts ?? []).find(a => a.source_id === accountId || a.execution_sources?.some(s => s.source_id === sourceId)), [dashboard, accountId, sourceId])
   const publicId = account?.source_id ?? accountId
-  const executionGroup = account ? accountExecutionGroup(account) : null
-  const executionUrl = executionGroup ? routes.execViz(executionGroup.id) : account?.gateway_prefix ? `${account.gateway_prefix}/` : null
+  const executionUrl = account ? accountExecutionUrl(account) : null
   const markets = account?.execution_sources ?? []
   const marketAccount = markets.find(a => a.source_id === sourceId) ?? account
+  const native = isNativeFuturesVenue(marketAccount?.venue)
   const report = dashboard?.report.sources.find(s => s.source_id === publicId)
   const bindings = useMemo(() => accountBindings(accountStudios), [accountStudios])
   const liquidityReport = report?.execution_sources?.find(s => s.source_id === sourceId) ?? report
@@ -131,6 +136,12 @@ export function AccountOverviewPage() {
     ? (liquidityReport?.maker_volume_quote ?? 0) / knownLiquidityVolume
     : 0
   const takerRatio = knownLiquidityVolume > 0 ? 1 - makerRatio : 0
+
+  useEffect(() => {
+    if (!loading && !catalogLoading && native && window.location.hash === '#contract-fees') {
+      document.getElementById('contract-fees')?.scrollIntoView()
+    }
+  }, [loading, catalogLoading, native])
 
   const positionByName = useMemo(
     () => new Map(positions.map((item) => [item.strategy_name, item])),
@@ -223,27 +234,29 @@ export function AccountOverviewPage() {
                 setStudio(accountStudios.find(s => s.source_id === next) ?? null)
                 setContractSymbol('')
                 setQueriedContractLeverage(null)
+                setNativeRates(null)
               }}>{markets.map(m => <option key={m.source_id} value={m.source_id}>{accountVenueLabel(m.venue)}</option>)}</Select>
             </CardContent></Card>}
             {markets.length === 0 && !estimatedFundingOnly(sourceId) && marketAccount?.venue === 'binance-futures' && <FundingSettingsPanel key={sourceId} sourceId={sourceId} canConfigure={canConfigure} />}
-            <Card>
+            <Card id={native ? 'contract-fees' : undefined}>
               <CardHeader className="border-b border-border-soft/80">
                 <div>
-                  <CardTitle className="text-base">估算费率</CardTitle>
+                  <CardTitle className="text-base">{native ? '合约手续费' : '估算费率'}</CardTitle>
                   <CardDescription className="mt-1">
-                    按账户和合约报价币设置成交及理论成交 费率。未单独设置的报价币使用默认费率。保存后自动更新。
+                    {native ? '查看合约开仓、平仓与平今的柜台手续费。' : '按账户和合约报价币设置成交及理论成交 费率。未单独设置的报价币使用默认费率。保存后自动更新。'}
                   </CardDescription>
                 </div>
               </CardHeader>
               <CardContent className="space-y-3 pt-5">
-                {studio && <AccountFeeEditor studio={studio} disabled={saving || !canConfigure}
+                {native ? <NativeAccountFeeReadout observation={nativeRates?.source_id === sourceId ? nativeRates : null} />
+                  : studio && <AccountFeeEditor studio={studio} disabled={saving || !canConfigure}
                   onSave={(maker, taker, theory, quotes) => void withWrite(async () => {
                     const next = await saveAccountFeeRates(sourceId, maker, taker, theory, quotes)
                     setStudio(next)
                     await refresh()
                     return '已保存报价币费率；成交手续费重新估算，理论费率对后续目标生效'
                   })} />}
-                <div className="space-y-2 border-t border-border-soft pt-3">
+                {!native && <div className="space-y-2 border-t border-border-soft pt-3">
                   <div className="flex items-center justify-between text-sm">
                     <span className="font-medium text-ink">成交名义比例</span>
                     <span className="mono text-muted">
@@ -261,11 +274,11 @@ export function AccountOverviewPage() {
                       <span>Unknown {money(liquidityReport?.unknown_liquidity_volume_quote ?? 0)} 报价币 / {liquidityReport?.unknown_liquidity_fill_count ?? 0} 笔</span>
                     )}
                   </div>
-                </div>
+                </div>}
               </CardContent>
             </Card>
 
-            <ContractLeveragePanel
+            {native ? <NativeContractRatesPanel key={sourceId} sourceId={sourceId} disabled={saving} onRates={setNativeRates} /> : <ContractLeveragePanel
               toolbar={
                 <ContractLeverageToolbar
                   symbolPlaceholder={executionSymbolPlaceholder(marketAccount?.venue ?? '')}
@@ -307,7 +320,7 @@ export function AccountOverviewPage() {
                   }
                 />
               }
-            />
+            />}
           </div>
 
           <section className="mb-8">
@@ -528,6 +541,13 @@ function AccountMeta({
   report: SourceNavReport
   sourceId: string
 }) {
+  const funds = account.account_funds
+  const sdkValues = funds?.valuation_basis === 'sdk_mark_time_unverified' ? [
+    ['SDK 资金权益', funds.sdk_cash_balance],
+    ['SDK 市值权益', funds.sdk_market_value],
+    ['昨市值权益', funds.previous_balance],
+    ['可用资金', funds.usable_cash],
+  ].flatMap(([label, value]) => typeof value === 'number' ? [[label, money(value), funds.currency].filter(Boolean).join(' ')] : []) : []
   return (
     <Card className="mt-8 border-border-soft bg-canvas/30">
       <CardContent className="flex flex-wrap items-center gap-4 py-4 text-sm text-muted">
@@ -551,12 +571,16 @@ function AccountMeta({
           </span>
         )}
         <span>最近成交 {timestampUs(report.last_fill_ts_us)}</span>
+        {!!sdkValues.length && funds && <span title={[
+          funds.historical_reason, '易达资金回报', timestampUs(funds.observed_us),
+          funds.trading_day ? `交易日 ${funds.trading_day}` : undefined, '行情估值时间未核验',
+        ].filter(Boolean).join(' · ')}>{sdkValues.join(' · ')}</span>}
         <span className={signedClass(report.nav_change_after_fee_quote)}>
-          累计费后 {money(report.nav_change_after_fee_quote)} 报价币
+          累计费后 {money(report.nav_change_after_fee_quote)} CNY
         </span>
         {account.funding && usesActualFunding(account.funding) && <>
-          <span className={signedClass(account.funding.income_quote)}>累计实际 Funding {money(account.funding.income_quote)} 报价币</span>
-          <span className={signedClass(account.total_nav_after_fee_quote ?? 0)}>总体费后 {money(account.total_nav_after_fee_quote ?? 0)} 报价币</span>
+          <span className={signedClass(account.funding.income_quote)}>累计实际 Funding {money(account.funding.income_quote)} CNY</span>
+          <span className={signedClass(account.total_nav_after_fee_quote ?? 0)}>总体费后 {money(account.total_nav_after_fee_quote ?? 0)} CNY</span>
         </>}
       </CardContent>
     </Card>

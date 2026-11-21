@@ -1828,6 +1828,7 @@ mod tests {
 
     fn market_test_config(symbols: &[&str]) -> AppConfig {
         AppConfig {
+            mode: Default::default(),
             accounts: Default::default(),
             database: crate::config::DatabaseConfig {
                 url_env: "TEST_DATABASE_URL".to_string(),

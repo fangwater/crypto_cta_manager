@@ -5,6 +5,10 @@ const PREP_GROUP_BY_SOURCE: Readonly<Record<string, string>> = {
 }
 
 export function accountSignalConfigPath(sourceId: string, strategyName?: string) {
+  if (sourceId === 'sh_dev_chuangyuan01_ctp' && strategyName === undefined) {
+    return '/cta-cn-futures/'
+  }
+
   if (sourceId === 'cta_cross_spread_rx01') {
     let interval = '1min'
     if (strategyName !== undefined) {

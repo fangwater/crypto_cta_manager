@@ -469,6 +469,55 @@ CREATE TABLE cta_strategy_allocation_snapshots (
     PRIMARY KEY (source_id, snapshot_ts_us)
 );
 
+-- Native CN gross-position anchors, independent from Crypto signed snapshots.
+CREATE TABLE cn_futures_nav_snapshots (
+    source_id text NOT NULL REFERENCES cta_order_sources(source_id),
+    snapshot_us bigint NOT NULL CHECK (snapshot_us > 0),
+    anchor jsonb NOT NULL CHECK (jsonb_typeof(anchor) = 'object'),
+    created_by text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (source_id, snapshot_us),
+    CHECK (anchor->>'source_id' = source_id),
+    CHECK ((anchor->>'snapshot_us')::bigint = snapshot_us)
+);
+
+-- Manager-owned attribution only. No foreign key or write into execution stores.
+CREATE TABLE cta_native_netting_portfolios (
+    source_id text PRIMARY KEY REFERENCES cta_order_sources(source_id),
+    state jsonb NOT NULL CHECK (jsonb_typeof(state) = 'object'),
+    updated_at_us bigint NOT NULL CHECK (updated_at_us > 0)
+);
+CREATE TABLE cta_native_netting_members (
+    source_id text NOT NULL REFERENCES cta_native_netting_portfolios(source_id),
+    strategy_group text NOT NULL,
+    strategy_name text PRIMARY KEY REFERENCES cta_position_strategies(strategy_name)
+);
+CREATE TABLE cta_native_netting_events (
+    source_id text NOT NULL REFERENCES cta_native_netting_portfolios(source_id),
+    event_id text NOT NULL,
+    revision bigint NOT NULL CHECK (revision >= 0),
+    kind text NOT NULL CHECK (kind IN ('initialize','target_batch','exchange_fill_allocation','external_demand_release','scope_extension')),
+    fingerprint text NOT NULL,
+    batch_id text,
+    factual_identity text,
+    request jsonb NOT NULL,
+    receipt jsonb NOT NULL,
+    actor_user_id bigint NOT NULL REFERENCES cta_users(user_id),
+    received_at_us bigint NOT NULL CHECK (received_at_us > 0),
+    PRIMARY KEY(source_id,event_id),
+    UNIQUE(source_id,revision)
+);
+CREATE UNIQUE INDEX cta_native_netting_factual_fill ON cta_native_netting_events(source_id,factual_identity) WHERE factual_identity IS NOT NULL;
+
+CREATE TABLE cta_native_netting_publishers (
+    source_id text NOT NULL REFERENCES cta_native_netting_portfolios(source_id),
+    strategy_group text NOT NULL,
+    actor_user_id bigint NOT NULL REFERENCES cta_users(user_id),
+    token_hash text UNIQUE NOT NULL,
+    created_at_us bigint NOT NULL CHECK (created_at_us > 0),
+    PRIMARY KEY(source_id,strategy_group)
+);
+
 -- Actual account allocations are grouped by leaf strategy after Virtual expansion.
 CREATE TABLE cta_account_strategy_shares_history (
     change_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

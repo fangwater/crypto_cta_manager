@@ -99,7 +99,7 @@ struct Registry {
 }
 
 #[derive(Default)]
-struct ReaderPool {
+pub(crate) struct ReaderPool {
     registry: Mutex<Registry>,
     #[cfg(test)]
     opens: std::sync::atomic::AtomicUsize,
@@ -127,14 +127,7 @@ impl Drop for ReaderSession {
 
 /// Configure scratch before starting analysis; no source DB is opened here.
 pub fn configure(root: &Path, protected: &[&Path]) -> Result<ReaderSession> {
-    let root = crate::config::resolve_storage_path(root)?;
-    for path in protected {
-        let path = crate::config::resolve_storage_path(path)?;
-        ensure!(
-            !root.starts_with(&path) && !path.starts_with(&root),
-            "source reader scratch overlaps a live database"
-        );
-    }
+    let root = configured_root(root, protected)?;
     let mut registry = readers().registry.lock().unwrap_or_else(|e| e.into_inner());
     ensure!(
         registry.entries.is_empty(),
@@ -145,7 +138,25 @@ pub fn configure(root: &Path, protected: &[&Path]) -> Result<ReaderSession> {
     Ok(ReaderSession)
 }
 
+fn configured_root(root: &Path, protected: &[&Path]) -> Result<PathBuf> {
+    let root = crate::config::resolve_storage_path(root)?;
+    for path in protected {
+        let path = crate::config::resolve_storage_path(path)?;
+        ensure!(
+            !root.starts_with(&path) && !path.starts_with(&root),
+            "source reader scratch overlaps a live database"
+        );
+    }
+    Ok(root)
+}
+
 impl ReaderPool {
+    pub(crate) fn new(root: &Path, protected: &[&Path]) -> Result<Self> {
+        let root = configured_root(root, protected)?;
+        let pool = Self::default();
+        pool.registry.lock().unwrap_or_else(|e| e.into_inner()).root = Some(root);
+        Ok(pool)
+    }
     fn acquire(&self, primary: &Path) -> Result<(ReaderSlot, PathBuf)> {
         let now = Instant::now();
         let mut retired = Vec::new();
@@ -260,7 +271,7 @@ impl ReaderPool {
         })
     }
 
-    fn read<T>(
+    pub(crate) fn read<T>(
         &self,
         path: &Path,
         requested: &[String],

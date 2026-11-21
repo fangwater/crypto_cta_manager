@@ -120,7 +120,7 @@ export function PositionStrategyPage() {
                 </Label>
                 <FieldHint>
                   账户发布数量 = 原始 qty × 该账户份数；signal 原样发布。
-                  OKX/Binance Spread 使用 okex-futures:BTCUSDT 和 binance-futures:BTCUSDT 成对目标；绑定账户只执行自身交易所的一腿。
+                  交易所与合约代码共同确定持仓，例如 SHFE:rb2701 和 CZCE:SA701。
                 </FieldHint>
                 <TargetPositionsEditor
                   targets={selectedPosition.targets}

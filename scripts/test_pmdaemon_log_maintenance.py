@@ -72,7 +72,7 @@ class PmdaemonLogMaintenanceTests(unittest.TestCase):
             valuable = root / "records"
             data = b"immutable history\n" * 200_000
             valuable.write_bytes(data)
-            link = root / "linked.log"
+            link = root / "linked-error.log"
             link.symlink_to(valuable)
             with self.assertRaises(OSError):
                 reclaim_log(root, link.name, 2 * MIB, MIB, True)
@@ -81,7 +81,7 @@ class PmdaemonLogMaintenanceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 reclaim_log(root, link.name, 2 * MIB, MIB, True)
             with self.assertRaises(ValueError):
-                reclaim_log(root, "../linked.log", 2 * MIB, MIB, True)
+                reclaim_log(root, "../linked-error.log", 2 * MIB, MIB, True)
             self.assertEqual(valuable.read_bytes(), data)
 
 
