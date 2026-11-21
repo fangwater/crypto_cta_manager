@@ -183,7 +183,8 @@ impl NavTimelineCache {
             symbol_points: Vec::new(),
             strategy_points: Vec::new(),
             sampled: false,
-            aligned_summaries: BTreeMap::new(),
+            cta_summary: Default::default(),
+            aligned_cta_summaries: BTreeMap::new(),
         })
     }
 

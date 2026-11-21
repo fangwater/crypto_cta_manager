@@ -11,9 +11,9 @@ export function ExecutionSlippagePanel({ value, model }: { value?: ExecutionSlip
     <div className="summary-strip nav-analysis-stats">
       <AnalysisMetric label="费前滑点" value={bps(value.before_fee_bps)} detail={`净值差 ${value.before_fee_gap_quote == null ? '--' : money(value.before_fee_gap_quote)} 报价币`} />
       <AnalysisMetric label="费后滑点" value={bps(value.after_fee_bps)} detail={`净值差 ${value.after_fee_gap_quote == null ? '--' : money(value.after_fee_gap_quote)} 报价币`} />
-      <AnalysisMetric label="比较区间实际成交额" value={money(value.volume_quote)} detail="报价币" />
+      <AnalysisMetric label="比较区间 CTA 实际成交额" value={money(value.volume_quote)} detail="报价币" />
     </div>
-    <p className="chart-notice">（理论净值 − 实际净值）÷ 同期实际成交额 × 10,000；正值表示实际表现更差，funding 不计入滑点。{value.end_ts_us != null && `比较截至 ${timestampUs(value.end_ts_us)}。`}</p>
+    <p className="chart-notice">（理论净值 − CTA 实际净值）÷ 同期 CTA 实际成交额 × 10,000；正值表示实际表现更差。BNB 储备对冲、系统平仓、未归属成交和 funding 不计入滑点。{value.end_ts_us != null && `比较截至 ${timestampUs(value.end_ts_us)}。`}</p>
     <p className="chart-notice">净值差包含仓位与估值差异；同成交量的价格与费用滑点见“成本分析”。</p>
     {value.unavailable_reason && <p className="chart-notice" role="status">{value.unavailable_reason}</p>}
   </section>

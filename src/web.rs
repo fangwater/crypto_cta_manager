@@ -2344,6 +2344,15 @@ async fn rebuild_timeline_snapshot_projected(
 
     let mut execution_slippage = Vec::new();
     let mut aligned_totals = BTreeMap::new();
+    // Theoretical NAV models only archived CTA targets, so only CTA strategy
+    // ledgers are comparable. Unallocated opening inventory cannot be split.
+    let cta_totals = |report: &nav::NavTimelineReport, totals: nav::NavTotals| {
+        if report.has_unallocated_opening_inventory() {
+            Err("区间内有未分配到策略的期初持仓，无法单独比较 CTA 实际净值".to_string())
+        } else {
+            Ok(totals)
+        }
+    };
     for reference in &theoretical {
         let Some(point) = reference.points.last().copied() else {
             execution_slippage.push(crate::execution_slippage::ExecutionSlippage::unavailable(
@@ -2358,7 +2367,7 @@ async fn rebuild_timeline_snapshot_projected(
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
                 let shared = report
-                    .aligned_summaries
+                    .aligned_cta_summaries
                     .get(&point.ts_us)
                     .copied()
                     .or_else(|| {
@@ -2366,10 +2375,10 @@ async fn rebuild_timeline_snapshot_projected(
                             && report.end_ts_us == point.ts_us
                             && (report.valuation == nav::minute_marks::VALUATION
                                 || !nav_timelines.uses_minute_marks(&report.selected_source_ids)))
-                        .then_some(report.summary)
+                        .then_some(report.cta_summary)
                     });
                 let totals = match shared {
-                    Some(totals) => Ok(totals),
+                    Some(totals) => cta_totals(&report, totals),
                     None => nav_timelines
                         .rebuild_priced(
                             nav::NavTimelineRequest {
@@ -2381,8 +2390,8 @@ async fn rebuild_timeline_snapshot_projected(
                             state.klines.clone(),
                         )
                         .await
-                        .map(|aligned| aligned.summary)
-                        .map_err(|error| format!("滑点所需的分钟估值暂不可用：{error}")),
+                        .map_err(|error| format!("滑点所需的分钟估值暂不可用：{error}"))
+                        .and_then(|aligned| cta_totals(&aligned, aligned.cta_summary)),
                 };
                 entry.insert(totals)
             }
@@ -6707,8 +6716,8 @@ mod tests {
         assert!(cutoff < end);
         assert_eq!(snapshot.report.end_ts_us, end);
         assert_eq!(snapshot.execution_slippage[0].end_ts_us, Some(cutoff));
-        let aligned = snapshot.report.aligned_summaries[&cutoff];
-        assert_ne!(aligned, snapshot.report.summary);
+        let aligned = snapshot.report.aligned_cta_summaries[&cutoff];
+        assert_ne!(aligned, snapshot.report.cta_summary);
         assert_eq!(
             snapshot.execution_slippage[0].before_fee_gap_quote,
             Some(-aligned.nav_change_before_fee_quote)
@@ -6821,7 +6830,8 @@ mod tests {
                     points,
                 }],
                 sampled: false,
-                aligned_summaries: BTreeMap::new(),
+                cta_summary: Default::default(),
+                aligned_cta_summaries: BTreeMap::new(),
             },
             theoretical: Vec::new(),
             execution_slippage: Default::default(),

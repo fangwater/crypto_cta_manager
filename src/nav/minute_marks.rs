@@ -723,7 +723,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!paired.aligned_summaries.contains_key(&missing_cut));
+        assert!(!paired.aligned_cta_summaries.contains_key(&missing_cut));
         for cut in cuts {
             let standalone = recent
                 .rebuild_priced(
@@ -736,9 +736,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(paired.aligned_summaries[&cut], standalone.summary);
+            assert_eq!(paired.aligned_cta_summaries[&cut], standalone.cta_summary);
         }
-        Arc::make_mut(&mut paired).aligned_summaries.clear();
+        Arc::make_mut(&mut paired).aligned_cta_summaries.clear();
         assert_eq!(paired, expected);
         assert_eq!(store.status().requests, 0);
     }

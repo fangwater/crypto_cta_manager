@@ -43,7 +43,7 @@ impl ExecutionSlippage {
             after_fee_bps: valid
                 .then(|| after / actual.volume_quote * 10_000.0)
                 .filter(|v| v.is_finite()),
-            unavailable_reason: (!valid).then(|| "比较区间没有实际成交额".into()),
+            unavailable_reason: (!valid).then(|| "比较区间没有 CTA 实际成交额".into()),
         }
     }
 }

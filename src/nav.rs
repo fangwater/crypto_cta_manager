@@ -451,8 +451,22 @@ pub struct NavTimelineReport {
     pub symbol_points: Vec<SymbolNavTimeline>,
     pub strategy_points: Vec<StrategyNavTimeline>,
     pub sampled: bool,
+    /// Window totals of CTA strategy buckets only; see [`is_cta_strategy`].
     #[serde(skip)]
-    pub aligned_summaries: BTreeMap<i64, NavTotals>,
+    pub cta_summary: NavTotals,
+    /// CTA-only totals at theoretical comparison endpoints.
+    #[serde(skip)]
+    pub aligned_cta_summaries: BTreeMap<i64, NavTotals>,
+}
+
+impl NavTimelineReport {
+    /// Opening inventory not allocated to any strategy is active in the window,
+    /// so its CTA share cannot be separated from system or reserve holdings.
+    pub fn has_unallocated_opening_inventory(&self) -> bool {
+        self.strategy_points
+            .iter()
+            .any(|timeline| timeline.strategy == INITIAL_POSITION_STRATEGY)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1383,7 +1397,7 @@ impl NavTimelineCache {
         } else {
             let alignment_count = key.alignment_ends.len();
             self.results.get_or_compute_if(key, compute, |report| {
-                recent && report.aligned_summaries.len() == alignment_count
+                recent && report.aligned_cta_summaries.len() == alignment_count
             })
         }
     }
@@ -3173,7 +3187,7 @@ fn rebuild_nav_timeline_with_cache(
             timeline_totals_by_strategy_symbol(&runtimes),
         )
     };
-    let mut aligned_summaries = BTreeMap::new();
+    let mut aligned_cta_summaries = BTreeMap::new();
     let mut aligned_ticks = alignment
         .into_iter()
         .flat_map(|a| a.ends.iter().copied())
@@ -3202,15 +3216,14 @@ fn rebuild_nav_timeline_with_cache(
                 continue;
             }
             if !collecting_marks {
-                let mut totals = NavTotals::default();
-                for (symbol, current) in timeline_totals_by_symbol(&endpoint) {
-                    if selected_symbol_set.contains(&symbol) {
-                        totals.add(
-                            current.difference(baselines.get(&symbol).copied().unwrap_or_default()),
-                        );
-                    }
-                }
-                aligned_summaries.insert(ts, totals.cleaned());
+                aligned_cta_summaries.insert(
+                    ts,
+                    cta_window_totals(
+                        &timeline_totals_by_strategy_symbol(&endpoint),
+                        &strategy_baselines,
+                        &selected_symbol_set,
+                    ),
+                );
             }
         }
     };
@@ -3377,6 +3390,11 @@ fn rebuild_nav_timeline_with_cache(
     }
 
     let current_totals = timeline_totals_by_symbol(&runtimes);
+    let cta_summary = cta_window_totals(
+        &timeline_totals_by_strategy_symbol(&runtimes),
+        &strategy_baselines,
+        &selected_symbol_set,
+    );
     let mut symbols = timeline_symbol_reports(&runtimes);
     if prices.is_some() {
         symbols.retain(|symbol| selected_symbol_set.contains(&symbol.symbol));
@@ -3472,7 +3490,8 @@ fn rebuild_nav_timeline_with_cache(
         symbol_points,
         strategy_points,
         sampled,
-        aligned_summaries,
+        cta_summary,
+        aligned_cta_summaries,
     })
 }
 
@@ -4205,6 +4224,39 @@ pub fn strategy_from_from_key(from_key: &str) -> String {
 
 fn is_system_position_close(strategy: &str) -> bool {
     strategy.eq_ignore_ascii_case("system_position_close")
+}
+
+/// Strategies executing Manager-archived CTA targets, the only fills with a
+/// theoretical counterpart. System closes, the BNB reserve hedge and derived
+/// opening/residual/unattributed buckets are excluded.
+pub fn is_cta_strategy(strategy: &str) -> bool {
+    !matches!(
+        strategy,
+        INITIAL_POSITION_STRATEGY
+            | UNALLOCATED_STRATEGY
+            | UNATTRIBUTED_STRATEGY
+            | crate::bnb_auto::HEDGE_STRATEGY
+    ) && !is_system_position_close(strategy)
+}
+
+/// Window change of the selected symbols' CTA strategy ledgers.
+fn cta_window_totals(
+    current: &BTreeMap<(String, String), NavTotals>,
+    baselines: &BTreeMap<(String, String), NavTotals>,
+    selected_symbols: &BTreeSet<String>,
+) -> NavTotals {
+    let mut totals = NavTotals::default();
+    for key in current
+        .keys()
+        .chain(baselines.keys())
+        .collect::<BTreeSet<_>>()
+    {
+        if is_cta_strategy(&key.0) && selected_symbols.contains(&key.1) {
+            let current = current.get(key).copied().unwrap_or_default();
+            totals.add(current.difference(baselines.get(key).copied().unwrap_or_default()));
+        }
+    }
+    totals.cleaned()
 }
 
 #[cfg(test)]
@@ -6574,6 +6626,49 @@ mod tests {
             strategy_a_nav + strategy_b_nav,
             report.summary.nav_change_before_fee_quote,
         );
+    }
+
+    #[test]
+    fn cta_summary_excludes_reserve_hedge_and_system_close_fills() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("trade01");
+        write_events(
+            &path,
+            &[
+                strategy_event_at(1, 1, "BTCUSDT", 1, 1, 100.0, 1.0, "cta_a"),
+                strategy_event_at(2, 1, "BNBUSDC", 1, 2, 600.0, 1.0, "SYSTEM_BNB_RESERVE"),
+                strategy_event_at(3, 1, "ETHUSDT", 1, 1, 10.0, 1.0, "SYSTEM_POSITION_CLOSE"),
+                strategy_event_at(4, 3, "BTCUSDT", 1, 2, 120.0, 1.0, "cta_a"),
+                strategy_event_at(5, 3, "BNBUSDC", 1, 1, 650.0, 1.0, "SYSTEM_BNB_RESERVE"),
+                strategy_event_at(6, 3, "ETHUSDT", 1, 2, 12.0, 1.0, "SYSTEM_POSITION_CLOSE"),
+            ],
+        );
+
+        let report = rebuild_nav_timeline_from_rocksdb_with_snapshots(
+            &app_config(vec![source_at("trade01", &path, 0.0)]),
+            timeline_request(1, 3, Vec::new(), Vec::new()),
+            &SourcePositionSnapshots::new(),
+        )
+        .unwrap();
+
+        assert!(!report.has_unallocated_opening_inventory());
+        assert_close(
+            report.summary.nav_change_before_fee_quote,
+            20.0 - 50.0 + 2.0,
+        );
+        assert_close(report.cta_summary.nav_change_before_fee_quote, 20.0);
+        assert_close(report.cta_summary.volume_quote, 220.0);
+        assert!(is_cta_strategy("cta_a"));
+        for reserved in [
+            "SYSTEM_BNB_RESERVE",
+            "SYSTEM_POSITION_CLOSE",
+            "system_position_close",
+            INITIAL_POSITION_STRATEGY,
+            UNALLOCATED_STRATEGY,
+            UNATTRIBUTED_STRATEGY,
+        ] {
+            assert!(!is_cta_strategy(reserved), "{reserved}");
+        }
     }
 
     #[test]

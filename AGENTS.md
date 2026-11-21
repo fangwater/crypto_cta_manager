@@ -778,6 +778,13 @@ is factual Maker/Taker fee minus the same-quantity virtual blended fee. Symbol,
 side, liquidity, target-delay, and order-delay breakdowns must add to the total.
 This endpoint and its `/manager/acquisition-cost/` browser do not use mark prices.
 
+By operator instruction on 2026-11-21, the NAV page's `execution_slippage`
+(净值差滑点) compares theoretical NAV only with the factual CTA strategy
+ledgers and their turnover. Exclude `SYSTEM_BNB_RESERVE`, system position
+closes, `__unallocated__`, `__unattributed__` and `__initial_position__`; they
+remain in account NAV and the strategy table. Active unallocated opening
+inventory makes slippage explicitly unavailable rather than guessing its owner.
+
 The main NAV display is a time series, not a per-symbol contribution bar chart.
 `GET /api/timeline` rebuilds it on demand and accepts camel-case `startMs`,
 `endMs`, comma-separated `sourceIds`, comma-separated `symbols`, and
