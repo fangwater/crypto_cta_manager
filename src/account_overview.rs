@@ -24,7 +24,7 @@ pub mod nav;
 const CF: &str = "account_observations";
 const DAY_MS: i64 = 86_400_000;
 const SHANGHAI_OFFSET_MS: i64 = 8 * 3_600_000;
-const SAMPLE_FRESH_MS: i64 = 45_000;
+pub(crate) const SAMPLE_FRESH_MS: i64 = 45_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AccountObservation {

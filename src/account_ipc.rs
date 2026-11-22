@@ -9,6 +9,7 @@ use iceoryx2::service::ipc;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::account_overview::SAMPLE_FRESH_MS;
 use crate::config::{AppConfig, SourceConfig};
 
 pub const ACCOUNT_IPC_PAYLOAD: usize = 16_384;
@@ -105,7 +106,30 @@ pub struct RapidXFinancial {
     pub published_ms: i64,
     pub recovery_ready: bool,
     pub accounts_observed_ms: Option<i64>,
+    pub equity_usdt: Option<String>,
     pub frozen_margin: Option<String>,
+}
+
+impl RapidXFinancial {
+    fn account_equity(&self, now_ms: i64) -> Option<LiveEquitySnapshot> {
+        let ts_ms = self.accounts_observed_ms?;
+        if ts_ms <= 0
+            || ts_ms > self.published_ms
+            || self.published_ms > now_ms
+            || now_ms.saturating_sub(ts_ms) > SAMPLE_FRESH_MS
+        {
+            return None;
+        }
+        let equity_usdt: f64 = self.equity_usdt.as_deref()?.parse().ok()?;
+        equity_usdt.is_finite().then(|| LiveEquitySnapshot {
+            source: "rapidx_accounts".into(),
+            equity_usdt,
+            wallet_balance_usdt: None,
+            unrealized_pnl_usdt: None,
+            available_balance_usdt: None,
+            ts_ms,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -325,11 +349,16 @@ fn apply_account_message(
             return;
         }
         if let Some(financial) = parse_rapidx_financial(payload, service, scope) {
-            if state
-                .rapidx_financial
-                .as_ref()
-                .is_none_or(|old| financial.published_ms >= old.published_ms)
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            if financial.published_ms <= now_ms
+                && state
+                    .rapidx_financial
+                    .as_ref()
+                    .is_none_or(|old| financial.published_ms >= old.published_ms)
             {
+                if let Some(equity) = financial.account_equity(now_ms) {
+                    state.apply_account_equity(equity);
+                }
                 state.rapidx_financial = Some(financial);
             }
         }
@@ -885,6 +914,58 @@ mod tests {
         for len in 0..payload.len() {
             assert!(parse_account_equity(&payload[..len], scope, "rapidx_account_risk").is_none());
         }
+    }
+
+    #[test]
+    fn rapidx_financial_equity_updates_while_trading_recovery_is_closed() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let observed = now - 1_000;
+        let service = "rx/account_pubs/rapidx_binance_123_pm";
+        let mut state = SourceLiveState::default();
+        let mut wallets = WalletAssetAccumulator::default();
+        let mut financial = serde_json::json!({
+            "portfolio":"999", "exchange":"BINANCE", "published_ms":now-500,
+            "recovery_ready":false, "accounts_observed_ms":observed, "equity_usdt":"101301.39"
+        });
+        let mut apply = |state: &mut SourceLiveState, value: &serde_json::Value| {
+            let body = serde_json::to_vec(value).unwrap();
+            let mut event = Vec::new();
+            event.extend_from_slice(&4020_u32.to_le_bytes());
+            event.extend_from_slice(&BINANCE_UNIFIED_SCOPE.to_le_bytes());
+            event.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            event.extend_from_slice(&body);
+            apply_account_message(state, &mut wallets, "binance-futures", service, &event);
+        };
+        apply(&mut state, &financial);
+        assert!(state.reading().is_none());
+
+        financial["portfolio"] = serde_json::json!("123");
+        apply(&mut state, &financial);
+        let reading = state.reading().unwrap();
+        let equity = reading.equity.unwrap();
+        assert_eq!(equity.equity_usdt, 101301.39);
+        assert_eq!(equity.ts_ms, observed);
+        assert!(!reading.rapidx_financial.unwrap().recovery_ready);
+        assert_eq!(reading.uni_mmr, None);
+
+        financial["published_ms"] = serde_json::json!(now);
+        apply(&mut state, &financial);
+        assert_eq!(state.equity, Some(equity.clone()));
+
+        financial["accounts_observed_ms"] = serde_json::json!(now - SAMPLE_FRESH_MS - 1);
+        financial["equity_usdt"] = serde_json::json!("100");
+        let stale: RapidXFinancial = serde_json::from_value(financial.clone()).unwrap();
+        assert!(stale.account_equity(now).is_none());
+        apply(&mut state, &financial);
+        assert_eq!(state.equity, Some(equity));
+
+        financial["accounts_observed_ms"] = serde_json::json!(now + 1);
+        let future: RapidXFinancial = serde_json::from_value(financial.clone()).unwrap();
+        assert!(future.account_equity(now).is_none());
+
+        financial["published_ms"] = serde_json::json!(now + SAMPLE_FRESH_MS);
+        apply(&mut state, &financial);
+        assert_eq!(state.rapidx_financial.as_ref().unwrap().published_ms, now);
     }
 
     #[test]
