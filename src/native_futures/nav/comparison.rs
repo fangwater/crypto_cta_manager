@@ -50,15 +50,11 @@ pub(crate) fn unavailable(reason: &str) -> Vec<Reference> {
         .collect()
 }
 
+/// A target-batch receipt: the account net target per contract.
 #[derive(Deserialize)]
 struct Batch {
     source_id: String,
-    net_targets: BTreeMap<String, Target>,
-}
-
-#[derive(Deserialize)]
-struct Target {
-    target_lots: i64,
+    net_targets: BTreeMap<String, i64>,
 }
 
 struct Intent {
@@ -122,8 +118,8 @@ pub(crate) async fn timeline(
             let (venue, symbol) = name.split_once(':').context("缺少目标合约交易所")?;
             let market = (venue.to_owned(), symbol.to_owned());
             let previous = targets.entry(market.clone()).or_default();
-            if *previous != target.target_lots {
-                *previous = target.target_lots;
+            if *previous != target {
+                *previous = target;
                 intents.push(Intent {
                     market,
                     accepted_us,
@@ -290,6 +286,21 @@ fn execution_price(model: Model, execution: &Execution<'_>, prices: &MarketPrice
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_batch_receipts_carry_plain_net_lots() {
+        let batch: Batch = serde_json::from_value(serde_json::json!({
+            "source_id": "source", "batch_id": "b", "net_targets": {"SHFE:rb2701": -1}
+        }))
+        .unwrap();
+        assert_eq!(batch.net_targets["SHFE:rb2701"], -1);
+        assert!(
+            serde_json::from_value::<Batch>(serde_json::json!({
+                "source_id": "source", "net_targets": {"SHFE:rb2701": {"target_lots": -1}}
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn comparison_uses_native_references_and_the_same_total_fee() -> Result<()> {

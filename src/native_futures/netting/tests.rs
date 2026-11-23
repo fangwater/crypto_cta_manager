@@ -229,6 +229,9 @@ fn batches_replace_targets_without_waiting_for_fills() {
     // The next decision publishes immediately; nothing is held for settlement.
     let (after, receipt) = next.batch(&batch(&next, 3, -1), AT + 10).unwrap();
     assert_eq!(receipt.net_targets[MARKET], 2);
+    // Reference NAV reads stored receipts: net targets are plain lots.
+    let stored = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(stored["net_targets"][MARKET], serde_json::json!(2));
     assert_eq!(after.target_revision, after.revision);
     let restored: Portfolio = serde_json::from_slice(&serde_json::to_vec(&after).unwrap()).unwrap();
     assert_eq!(
