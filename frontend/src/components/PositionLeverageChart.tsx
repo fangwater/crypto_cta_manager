@@ -5,6 +5,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { useEffect, useRef } from 'react'
 import type { NavTimelinePoint, SymbolNavTimeline } from '../types'
 import { UI_FONT_SANS } from '../format'
+import { marketLabel } from '../lib/nativeContract'
 
 echarts.use([LineChart, DataZoomComponent, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -50,7 +51,7 @@ export function PositionLeverageChart({ points, symbolPoints, mode, equityQuote 
         : symbolPoints.map((series, index) => {
             const color = palette[index % palette.length]
             return {
-              name: series.symbol,
+              name: marketLabel(series.symbol),
               type: 'line' as const,
               data: series.points.map((point) => [point.ts_us / 1_000, point.net_position_value_quote]),
               lineStyle: { width: 1.6, color },

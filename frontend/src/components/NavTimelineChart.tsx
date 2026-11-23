@@ -24,6 +24,7 @@ import type {
 } from '../types'
 import { fundingMoney, strategyLabel, UI_FONT_SANS } from '../format'
 import { strategyFundingPoints } from '../lib/fundingPresentation'
+import { marketLabel } from '../lib/nativeContract'
 
 echarts.use([
   LineChart,
@@ -227,7 +228,7 @@ export function NavTimelineChart({
             return {
               name:
                 mode === 'symbols'
-                  ? (item as SymbolNavTimeline).symbol
+                  ? marketLabel((item as SymbolNavTimeline).symbol)
                   : strategyLabel((item as StrategyNavTimeline).strategy),
               type: 'line' as const,
               z: overlaps ? 4 : undefined,

@@ -48,6 +48,7 @@ import {
 import { PositionLeverageChart } from './components/PositionLeverageChart'
 import { ExecutionSlippagePanel } from './components/ExecutionSlippagePanel'
 import { FundingPanel } from './components/FundingPanel'
+import { marketLabel, nativeContract } from './lib/nativeContract'
 import { FundingEstimatePanel } from './components/FundingEstimatePanel'
 import {
   fundingMoney,
@@ -1098,7 +1099,7 @@ function NavPage() {
                         checked={selectedSet.has(symbol)}
                         onChange={() => toggleSymbol(symbol)}
                       />
-                      <span>{symbol}</span>
+                      <ContractName market={symbol} />
                     </label>
                   ))}
                 </div>
@@ -1546,6 +1547,19 @@ function SummaryItem({
   )
 }
 
+/** Domestic contracts show the Viz Chinese name and code, without the venue. */
+function ContractName({ market }: { market: string }) {
+  const contract = nativeContract(market)
+  if (!contract) return <span>{market}</span>
+  return <span title={market}>{contract.name} <span className="symbol-quote">{contract.code}</span></span>
+}
+
+function SymbolName({ market }: { market: string }) {
+  const contract = nativeContract(market)
+  if (!contract) return <><strong className="symbol-name">{market}</strong><span className="symbol-quote">/CNY</span></>
+  return <><strong className="symbol-name" title={market}>{contract.name}</strong> <span className="symbol-quote">{contract.code}</span></>
+}
+
 function SymbolTableRow({
   row,
   feeMode,
@@ -1565,12 +1579,11 @@ function SymbolTableRow({
           type="button"
           onClick={onToggle}
           title={selected ? '移出组合' : '加入组合'}
-          aria-label={`${selected ? '移出' : '加入'} ${row.symbol}`}
+          aria-label={`${selected ? '移出' : '加入'} ${marketLabel(row.symbol)}`}
         >
           {selected && <Check size={13} />}
         </button>
-        <strong className="symbol-name">{row.symbol}</strong>
-        <span className="symbol-quote">/CNY</span>
+        <SymbolName market={row.symbol} />
       </td>
       <td className={`numeric mono ${signedClass(row.net_quantity)}`}>
         {quantity(row.net_quantity)}
