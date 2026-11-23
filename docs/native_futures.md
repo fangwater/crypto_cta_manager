@@ -73,7 +73,7 @@ HTTP API 只监听 loopback，前端保留 `/manager/` 和同源 `/manager/api/`
    Manager 身份返回实时帧资金，不返回冷启动检查点。
 3. 云端导出器配置 `[sync_export].account_funds_url`（仅回环 HTTP 基址）后提供
    `GET /api/native/sync/{source_id}/account-funds`，与增量同步共用 Bearer 令牌和
-   导出名单，校验来源与柜台类型后转发；未配置时返回 404。
+   导出名单，校验来源与柜台类型后转发；未配置或 Viz 未绑定该来源（如易达）时返回 404，视为没有资金而非故障。
 4. Manager 观察循环每 15 秒经同一隧道读取，校验身份与数值后保存每个交易日最后一次
    观察到 `cn_futures_account_equity_daily`（显式执行
    `scripts/apply_native_equity_schema.sql`，启动不运行 DDL；表缺失时仅记日志，

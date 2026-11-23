@@ -1372,6 +1372,20 @@ async fn exporter_relays_viz_funds_only_with_the_token_and_matching_identity() {
     server.abort();
     viz_task.abort();
 
+    // A Viz counter without this Manager binding means no funds, not a fault.
+    let (viz, viz_task) = fake_viz(viz_funds("another_source", &adapter)).await;
+    cloud.sync_export.as_mut().unwrap().account_funds_url = Some(viz);
+    let (url, server) = serve(cloud.clone()).await;
+    local.sources[0].sync.as_mut().unwrap().url = url;
+    assert!(
+        funds_with_token(&c, &local.sources[0], TEST_TOKEN)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.abort();
+    viz_task.abort();
+
     // A relay for another adapter is refused rather than shown.
     let (viz, viz_task) = fake_viz(viz_funds(&id, "other")).await;
     cloud.sync_export.as_mut().unwrap().account_funds_url = Some(viz);

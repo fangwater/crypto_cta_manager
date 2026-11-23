@@ -588,19 +588,20 @@ async fn export_funds(
     };
     let result = async {
         let url = base.join(&format!("account-funds/{id}"))?;
-        let observation: crate::native_futures::funds::Observation = client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let response = client.get(url).send().await?;
+        // A counter without an explicit Manager binding has no funds.
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return anyhow::Ok(None);
+        }
+        let observation: crate::native_futures::funds::Observation =
+            response.error_for_status()?.json().await?;
         observation.validate(&source.id, &source.adapter)?;
-        anyhow::Ok(observation)
+        anyhow::Ok(Some(observation))
     }
     .await;
     match result {
-        Ok(observation) => Json(observation).into_response(),
+        Ok(Some(observation)) => Json(observation).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => {
             tracing::warn!(source_id=%id,error=?error,"native broker funds relay failed");
             (
