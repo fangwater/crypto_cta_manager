@@ -324,6 +324,7 @@ mod tests {
                         turnover_cny: 1040.0,
                     },
                 )]),
+                covered_through_us: None,
             },
         )]);
         let intents = [1, 2]
@@ -452,6 +453,7 @@ mod tests {
                     (10 * 3600 + 30 * 60, 11 * 3600 + 30 * 60),
                 ],
                 references,
+                covered_through_us: None,
             },
         )]);
         let end = minute_ends[4];

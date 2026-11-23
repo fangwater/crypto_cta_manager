@@ -101,6 +101,9 @@ pub(crate) async fn timeline(
     };
     let assemble = async {
         let prices = prices(market, &selected, start_us, end_us).await?;
+        let end_us = covered_end(&prices, end_us);
+        ensure!(end_us >= start_us, "分钟行情尚未覆盖所选起点；请稍后重试");
+        let fills: Vec<_> = fills.into_iter().filter(|f| f.received_us <= end_us).collect();
         let mut rates = BTreeMap::new();
         for (venue, symbol) in selected {
             if fills.iter().any(|f| {
@@ -135,6 +138,15 @@ pub(crate) async fn timeline(
             )
         }
     }
+}
+
+/// Value only through the minutes the provider has published: a later minute
+/// of an in-progress day is pending, not missing. The effective end is reported.
+pub(super) fn covered_end(prices: &BTreeMap<Market, MarketPrices>, end_us: i64) -> i64 {
+    prices
+        .values()
+        .filter_map(|p| p.covered_through_us)
+        .fold(end_us, i64::min)
 }
 
 pub(super) async fn prices(

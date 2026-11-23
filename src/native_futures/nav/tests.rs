@@ -547,3 +547,18 @@ fn a_holiday_after_a_trading_days_close_keeps_its_last_mark() {
         .is_err()
     );
 }
+
+#[test]
+fn valuation_stops_at_the_published_minute_of_an_in_progress_day() {
+    let mut p = prices();
+    let end = at() + 180_000_000;
+    // A completed day (or none in progress) does not limit the end.
+    assert_eq!(service::covered_end(&p, end), end);
+    // Minutes after the provider watermark are pending, not missing.
+    for row in p.values_mut() {
+        row.covered_through_us = Some(at() + 120_000_000);
+    }
+    let covered = service::covered_end(&p, end);
+    assert_eq!(covered, at() + 120_000_000);
+    assert_eq!(p.values().next().unwrap().mark(covered).unwrap(), 109.0);
+}

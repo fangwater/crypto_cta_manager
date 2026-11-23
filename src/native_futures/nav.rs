@@ -380,6 +380,10 @@ pub struct MarketPrices {
     pub sessions: Vec<(u32, u32)>,
     /// Execution references by verified minute end, populated only for comparisons.
     pub(crate) references: BTreeMap<i64, ReferenceMinute>,
+    /// While a trading day is in progress, the provider's final-minute
+    /// watermark: later minutes are not yet published, not missing. `None`
+    /// when no day is in progress, so every minute gap is real.
+    pub covered_through_us: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]

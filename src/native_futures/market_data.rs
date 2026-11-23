@@ -209,6 +209,10 @@ impl Feed {
                 );
             }
             snapshot = Some(state.session_snapshot_as_of.clone());
+            // Minutes ending at or before live_through_ms are final.
+            result.covered_through_us = (state.live_trading_day != 0
+                && state.live_trading_day > state.latest_trading_day)
+                .then(|| state.live_through_ms.saturating_mul(1000));
             let mut days: BTreeMap<String, Vec<_>> = BTreeMap::new();
             for bar in response.bars {
                 ensure!(
