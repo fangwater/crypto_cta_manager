@@ -56,6 +56,10 @@ pub struct ExportSettings {
     pub batch_records: usize,
     #[serde(default = "bytes")]
     pub batch_bytes: usize,
+    /// Same-host native Viz base URL; its read-only `/account-funds/<source>`
+    /// relay supplies broker funds. Omit to serve no funds.
+    #[serde(default)]
+    pub account_funds_url: Option<String>,
 }
 
 fn env_name(value: &str) -> bool {
@@ -139,6 +143,27 @@ pub fn validate_config(config: &Config) -> Result<()> {
                     .all(|s| resolved(&s.rocksdb_path).is_ok_and(|p| disjoint(&p, &root))),
             "export journal overlaps an execution or Manager store"
         );
+        if let Some(url) = &export.account_funds_url {
+            let url = reqwest::Url::parse(url).context("invalid account_funds_url")?;
+            let loopback = url.host_str().is_some_and(|host| {
+                host == "localhost"
+                    || host
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+            ensure!(
+                url.scheme() == "http"
+                    && loopback
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == "/"
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "account_funds_url must be a loopback HTTP base URL without a path"
+            );
+        }
         let mut ids = BTreeSet::new();
         for id in &export.source_ids {
             ensure!(

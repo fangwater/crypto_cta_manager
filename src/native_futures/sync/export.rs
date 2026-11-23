@@ -414,6 +414,7 @@ struct ExportState {
     config: Config,
     token_hash: [u8; 32],
     journals: BTreeMap<String, Arc<tokio::sync::Mutex<Option<Journal>>>>,
+    viz: Option<(reqwest::Url, reqwest::Client)>,
 }
 #[derive(Clone)]
 pub struct ExportService(Arc<ExportState>);
@@ -435,15 +436,47 @@ impl ExportService {
             .iter()
             .map(|id| (id.clone(), Arc::default()))
             .collect();
+        let viz = settings
+            .account_funds_url
+            .as_deref()
+            .map(|url| -> Result<_> {
+                Ok((
+                    reqwest::Url::parse(url)?,
+                    reqwest::Client::builder()
+                        .no_proxy()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .timeout(std::time::Duration::from_secs(5))
+                        .build()?,
+                ))
+            })
+            .transpose()?;
         Ok(Self(Arc::new(ExportState {
             config,
             token_hash: Sha256::digest(secret.as_bytes()).into(),
             journals,
+            viz,
         })))
+    }
+    fn authorized(&self, headers: &HeaderMap) -> bool {
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|v| {
+                let hash = Sha256::digest(v.as_bytes());
+                hash.iter()
+                    .zip(&self.0.token_hash)
+                    .fold(0_u8, |sum, (a, b)| sum | (a ^ b))
+                    == 0
+            })
     }
     pub fn router(self) -> Router {
         Router::new()
             .route("/api/native/sync/{id}", post(export_page))
+            .route(
+                "/api/native/sync/{id}/account-funds",
+                axum::routing::get(export_funds),
+            )
             .with_state(self)
             .layer(
                 tower_http::compression::CompressionLayer::new()
@@ -459,25 +492,8 @@ async fn export_page(
     headers: HeaderMap,
     Json(request): Json<Request>,
 ) -> Response {
-    let provided = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    let valid = provided
-        .map(|v| {
-            let hash = Sha256::digest(v.as_bytes());
-            hash.iter()
-                .zip(&service.0.token_hash)
-                .fold(0_u8, |sum, (a, b)| sum | (a ^ b))
-                == 0
-        })
-        .unwrap_or(false);
-    if !valid {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error":"unauthorized"})),
-        )
-            .into_response();
+    if !service.authorized(&headers) {
+        return unauthorized();
     }
     let Some(lock) = service.0.journals.get(&id).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -538,6 +554,60 @@ async fn export_page(
         Err(error) => {
             tracing::error!(error=?error,"native sync export worker failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({"error":"unauthorized"})),
+    )
+        .into_response()
+}
+
+/// Read-only relay of the same-host Viz broker funds for an exported source.
+async fn export_funds(
+    State(service): State<ExportService>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !service.authorized(&headers) {
+        return unauthorized();
+    }
+    let state = &service.0;
+    let (Some((base, client)), Some(source)) = (
+        state.viz.as_ref(),
+        state
+            .journals
+            .contains_key(&id)
+            .then(|| state.config.sources.iter().find(|s| s.id == id))
+            .flatten(),
+    ) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let result = async {
+        let url = base.join(&format!("account-funds/{id}"))?;
+        let observation: crate::native_futures::funds::Observation = client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        observation.validate(&source.id, &source.adapter)?;
+        anyhow::Ok(observation)
+    }
+    .await;
+    match result {
+        Ok(observation) => Json(observation).into_response(),
+        Err(error) => {
+            tracing::warn!(source_id=%id,error=?error,"native broker funds relay failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"broker funds unavailable"})),
+            )
+                .into_response()
         }
     }
 }

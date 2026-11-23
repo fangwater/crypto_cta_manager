@@ -78,6 +78,9 @@ sync-server --config /absolute/export.toml serve
 ```
 
 接口为 `POST /api/native/sync/{source_id}`，仅返回授权名单中的原生记录。
+配置 `account_funds_url`（同主机原生 Viz 的回环 HTTP 基址）后，另有只读
+`GET /api/native/sync/{source_id}/account-funds` 转发该来源的柜台资金，鉴权与导出
+名单相同；它不进入增量记录链，也不写副本。口径见 `native_futures.md`「柜台资金与每日权益」。
 无效令牌返回 401，未导出 source 返回 404，身份／断点冲突返回 409，读取失败返回
 503。错误响应不携带执行路径、凭据或原始载荷。导出器没有修改执行库的接口。
 

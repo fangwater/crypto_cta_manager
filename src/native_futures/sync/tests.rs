@@ -402,6 +402,7 @@ fn configs(root: &Path) -> (Config, Config) {
         source_ids: vec![cloud.sources[0].id.clone()],
         batch_records: 1,
         batch_bytes: 4096,
+        account_funds_url: None,
     });
     let mut local = cloud.clone();
     local.sync_export = None;
@@ -1283,4 +1284,123 @@ fn cached_replica_queries_release_apply_barriers_and_read_later_committed_fills(
     assert_eq!(after.fills[0].commission_cny, Some(42.0));
     assert_eq!(after.total_fills, 2);
     assert_eq!(after.orders[0].filled_lots, 2);
+}
+
+/// A same-host Viz stand-in serving one Manager source's funds relay.
+async fn fake_viz(body: Value) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::response::IntoResponse;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let router = axum::Router::new().route(
+        "/account-funds/{id}",
+        axum::routing::get(
+            move |axum::extract::Path(id): axum::extract::Path<String>| {
+                let body = body.clone();
+                async move {
+                    if body["manager_source_id"] == id.as_str() {
+                        axum::Json(body).into_response()
+                    } else {
+                        axum::http::StatusCode::NOT_FOUND.into_response()
+                    }
+                }
+            },
+        ),
+    );
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (url, task)
+}
+fn viz_funds(source_id: &str, adapter: &str) -> Value {
+    serde_json::json!({
+        "manager_source_id": source_id, "counter_id": "counter-1", "adapter": adapter,
+        "error": null, "observed_us": 1_795_415_513_000_100_i64, "runtime_status": "running",
+        "connected": true, "transport_ready": true, "trading_day": "20261123",
+        "account": {
+            "observed_us": 1_795_415_513_000_000_i64, "trading_day": "20261123", "currency": "CNY",
+            "pre_balance": 500000.0, "deposit": 0.0, "withdraw": 0.0, "balance": 501234.5,
+            "available": 400000.0, "withdraw_quota": 399000.0, "curr_margin": 90000.0,
+            "frozen_margin": 0.0, "frozen_cash": 0.0, "frozen_commission": 0.0,
+            "position_profit": 1000.0, "close_profit": 250.0, "commission": 15.5
+        }
+    })
+}
+
+#[tokio::test]
+async fn exporter_relays_viz_funds_only_with_the_token_and_matching_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut cloud, mut local) = configs(temp.path());
+    let id = cloud.sources[0].id.clone();
+    let adapter = cloud.sources[0].adapter.clone();
+    // Without a configured Viz the exporter serves no funds.
+    let (url, server) = serve(cloud.clone()).await;
+    local.sources[0].sync.as_mut().unwrap().url = url;
+    let c = client();
+    assert!(
+        funds_with_token(&c, &local.sources[0], TEST_TOKEN)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.abort();
+
+    let (viz, viz_task) = fake_viz(viz_funds(&id, &adapter)).await;
+    cloud.sync_export.as_mut().unwrap().account_funds_url = Some(viz);
+    cloud.validate().unwrap();
+    let (url, server) = serve(cloud.clone()).await;
+    local.sources[0].sync.as_mut().unwrap().url = url.clone();
+    let response = c
+        .get(format!("{url}/api/native/sync/{id}/account-funds"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let observation = funds_with_token(&c, &local.sources[0], TEST_TOKEN)
+        .await
+        .unwrap()
+        .unwrap();
+    let account = observation.account.unwrap();
+    assert_eq!(account.pre_balance, 500000.0);
+    assert_eq!(account.trading_day, "20261123");
+    let response = c
+        .get(format!("{url}/api/native/sync/unknown/account-funds"))
+        .bearer_auth(TEST_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    server.abort();
+    viz_task.abort();
+
+    // A relay for another adapter is refused rather than shown.
+    let (viz, viz_task) = fake_viz(viz_funds(&id, "other")).await;
+    cloud.sync_export.as_mut().unwrap().account_funds_url = Some(viz);
+    let (url, server) = serve(cloud.clone()).await;
+    local.sources[0].sync.as_mut().unwrap().url = url;
+    assert!(
+        funds_with_token(&c, &local.sources[0], TEST_TOKEN)
+            .await
+            .is_err()
+    );
+    server.abort();
+    viz_task.abort();
+}
+
+#[test]
+fn account_funds_url_must_be_a_loopback_http_base() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut cloud, _) = configs(temp.path());
+    for (url, ok) in [
+        ("http://127.0.0.1:8811", true),
+        ("http://localhost:8811/", true),
+        ("http://[::1]:8811", true),
+        ("https://127.0.0.1:8811", false),
+        ("http://124.223.189.200:8811", false),
+        ("http://127.0.0.1:8811/viz", false),
+        ("http://u:p@127.0.0.1:8811", false),
+        ("http://127.0.0.1:8811/?x=1", false),
+    ] {
+        cloud.sync_export.as_mut().unwrap().account_funds_url = Some(url.into());
+        assert_eq!(cloud.validate().is_ok(), ok, "{url}");
+    }
 }

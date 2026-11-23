@@ -481,6 +481,21 @@ CREATE TABLE cn_futures_nav_snapshots (
     CHECK ((anchor->>'snapshot_us')::bigint = snapshot_us)
 );
 
+-- Native CN broker funds, latest observation per source and native trading day.
+CREATE TABLE cn_futures_account_equity_daily (
+    source_id text NOT NULL REFERENCES cta_order_sources(source_id),
+    trading_day text NOT NULL CHECK (trading_day ~ '^[0-9]{8}$'),
+    observed_us bigint NOT NULL CHECK (observed_us > 0),
+    funds jsonb NOT NULL CHECK (jsonb_typeof(funds) = 'object'),
+    long_notional double precision,
+    short_notional double precision,
+    positions_at_us bigint CHECK (positions_at_us > 0),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (source_id, trading_day),
+    CHECK (funds->>'trading_day' = trading_day),
+    CHECK ((funds->>'observed_us')::bigint = observed_us)
+);
+
 -- Manager-owned attribution only. No foreign key or write into execution stores.
 CREATE TABLE cta_native_netting_portfolios (
     source_id text PRIMARY KEY REFERENCES cta_order_sources(source_id),

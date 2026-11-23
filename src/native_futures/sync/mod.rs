@@ -147,6 +147,41 @@ pub struct Page {
     pub changes: Vec<Change>,
 }
 
+/// Manager's read-only query of a replica source's broker funds through the
+/// same authenticated exporter. `None` when the exporter serves no funds.
+pub async fn account_funds(
+    client: &reqwest::Client,
+    source: &crate::native_futures::config::Source,
+) -> Result<Option<crate::native_futures::funds::Observation>> {
+    let remote = source.sync.as_ref().context("native remote source")?;
+    funds_with_token(client, source, &settings::token(&remote.token_env)?).await
+}
+async fn funds_with_token(
+    client: &reqwest::Client,
+    source: &crate::native_futures::config::Source,
+    token: &str,
+) -> Result<Option<crate::native_futures::funds::Observation>> {
+    let remote = source.sync.as_ref().context("native remote source")?;
+    let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))?;
+    authorization.set_sensitive(true);
+    let response = client
+        .get(format!(
+            "{}/api/native/sync/{}/account-funds",
+            remote.url.trim_end_matches('/'),
+            source.id
+        ))
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let observation: crate::native_futures::funds::Observation =
+        response.error_for_status()?.json().await?;
+    observation.validate(&source.id, &source.adapter)?;
+    Ok(Some(observation))
+}
+
 pub async fn shutdown_signal() {
     #[cfg(unix)]
     {

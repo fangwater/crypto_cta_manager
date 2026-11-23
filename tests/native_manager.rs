@@ -281,12 +281,21 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
             .get("collection_status_reason")
             .is_some()
     );
-    // Manager reads only Exec records: no runtime status or broker funds.
-    for field in ["execution_status", "funds_status", "sdk_market_value"] {
+    // No runtime status or SDK valuation; a local source without a funds
+    // relay reports every broker funds field as unavailable.
+    for field in ["execution_status", "sdk_market_value"] {
         assert!(overview["accounts"][0].get(field).is_none(), "{field}");
     }
-    assert!(overview["accounts"][0]["equity"].is_null());
-    assert!(overview["accounts"][0]["margin"].is_null());
+    for field in [
+        "funds_status",
+        "equity",
+        "yesterday_equity",
+        "today_profit",
+        "margin",
+        "max_drawdown_15d_percent",
+    ] {
+        assert!(overview["accounts"][0][field].is_null(), "{field}");
+    }
     let dashboard: Value = client
         .get(format!(
             "{address}/manager/api/dashboard?includeSymbols=false"
@@ -308,7 +317,7 @@ async fn native_observation_preserves_permission_boundaries_and_never_submits_or
     assert_eq!(account["can_edit_alias"], true);
     assert_eq!(account["configurable"], false);
     assert!(account["open_position_symbol_count"].is_null());
-    assert!(account.get("account_funds").is_none());
+    assert!(account["account_funds"].is_null());
     assert_eq!(account["live_equity_status"], "unavailable");
     assert!(dashboard["report"]["sources"][0]["nav_change_after_fee_quote"].is_null());
     use crypto_cta_manager::native_futures::nav::{self, Anchor, InitialPosition, Side};

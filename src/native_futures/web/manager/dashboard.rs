@@ -1,10 +1,11 @@
 use super::*;
 use crate::{
     account_overview::{OverviewAlertSettings, OverviewRow},
+    native_futures::funds::{self, BrokerFunds, DailyEquity},
     postgres,
 };
 use axum::extract::Query;
-use chrono::{DateTime, FixedOffset, NaiveDate};
+use chrono::NaiveDate;
 use serde::Deserialize;
 use std::{collections::BTreeSet, time::Duration};
 
@@ -84,6 +85,10 @@ pub(super) struct Sample {
     holdings: Option<Holdings>,
     nav_cut: Option<NavCut>,
     nav: Option<CachedNav>,
+    /// Latest validated broker funds relay; kept when a later query fails.
+    funds: Option<funds::Observation>,
+    /// Trading day and query time of the last persisted daily observation.
+    funds_saved: Option<(String, i64)>,
 }
 impl Sample {
     pub(super) fn collection(&self) -> &'static str {
@@ -152,10 +157,17 @@ impl Observations {
 }
 
 pub(in super::super) fn start_observing(service: &Service) {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("native funds HTTP client");
     for (id, updates) in &service.overview.0 {
         let service = service.clone();
         let id = id.clone();
         let updates = updates.clone();
+        let client = client.clone();
         let mut shutdown = service.plan_shutdown.subscribe();
         tokio::spawn(async move {
             loop {
@@ -164,14 +176,19 @@ pub(in super::super) fn start_observing(service: &Service) {
                 let mut sample = observation(updates.borrow().clone(), result, attempted_at_us);
                 updates.send_replace(sample.clone());
                 let budget = Duration::from_secs(REFRESH_SECS);
-                let (holdings, nav) = tokio::join!(
+                let (holdings, nav, broker) = tokio::join!(
                     tokio::time::timeout(budget, holdings(&service, &id, &sample)),
-                    refresh_cumulative_nav(&service, &id, &sample, budget)
+                    refresh_cumulative_nav(&service, &id, &sample, budget),
+                    broker_funds(&service, &client, &id)
                 );
                 if let Ok(Some(holdings)) = holdings {
                     sample.holdings = Some(holdings);
                 }
                 sample.nav = nav;
+                if let Some(broker) = broker {
+                    sample.funds = Some(broker);
+                }
+                save_funds(&service, &id, &mut sample).await;
                 updates.send_replace(sample);
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(REFRESH_SECS)) => {},
@@ -179,6 +196,68 @@ pub(in super::super) fn start_observing(service: &Service) {
                 }
             }
         });
+    }
+}
+
+/// Broker funds exist only for replica sources whose exporter relays them.
+async fn broker_funds(
+    s: &Service,
+    client: &reqwest::Client,
+    id: &str,
+) -> Option<funds::Observation> {
+    let source = s
+        .config
+        .sources
+        .iter()
+        .find(|source| source.id == id && source.sync.is_some())?;
+    match crate::native_futures::sync::account_funds(client, source).await {
+        Ok(observation) => observation,
+        Err(error) => {
+            tracing::warn!(source_id=%id,error=?error,"native broker funds unavailable");
+            None
+        }
+    }
+}
+
+const SAVE_EVERY_US: i64 = 60_000_000;
+
+/// Persists the latest observation of each trading day: at most once a minute
+/// while live, and immediately once the counter stops answering so the final
+/// observation of the day is kept.
+async fn save_funds(s: &Service, id: &str, sample: &mut Sample) {
+    let now = crate::native_futures::now_us();
+    let Some(observation) = sample.funds.as_ref() else {
+        return;
+    };
+    let Some(account) = observation.account.as_ref() else {
+        return;
+    };
+    let due = match &sample.funds_saved {
+        None => true,
+        Some((day, at)) => {
+            account.observed_us > *at
+                && (*day != account.trading_day
+                    || account.observed_us - at >= SAVE_EVERY_US
+                    || observation.historical_reason(now).is_some())
+        }
+    };
+    if !due {
+        return;
+    }
+    let notionals = sample
+        .holdings
+        .as_ref()
+        .and_then(|h| h.notionals.map(|n| (n, h.cut.at_us)));
+    let row = DailyEquity {
+        source_id: id.into(),
+        funds: account.clone(),
+        long_notional: notionals.map(|((long, _), _)| long),
+        short_notional: notionals.map(|((_, short), _)| short),
+        positions_at_us: notionals.map(|(_, at)| at),
+    };
+    match funds::store::upsert(&s.pool, &row).await {
+        Ok(()) => sample.funds_saved = Some((account.trading_day.clone(), account.observed_us)),
+        Err(error) => tracing::warn!(source_id=%id,error=?error,"native daily equity not saved"),
     }
 }
 
@@ -391,15 +470,6 @@ pub(super) struct OverviewQuery {
     date: Option<String>,
 }
 
-fn shanghai_date(at_us: i64) -> Option<NaiveDate> {
-    let local = FixedOffset::east_opt(8 * 3600).unwrap();
-    Some(
-        DateTime::from_timestamp_micros(at_us)?
-            .with_timezone(&local)
-            .date_naive(),
-    )
-}
-
 fn anchor_notionals(anchor: &nav::Anchor) -> Option<(f64, f64)> {
     let (mut long, mut short) = (0.0, 0.0);
     for position in &anchor.positions {
@@ -414,6 +484,85 @@ fn anchor_notionals(anchor: &nav::Anchor) -> Option<(f64, f64)> {
     finite_notionals(long, short)
 }
 
+/// The funds shown for "now": the live relay, else the latest saved day.
+#[derive(Clone)]
+struct CurrentFunds {
+    funds: BrokerFunds,
+    reason: Option<&'static str>,
+}
+impl CurrentFunds {
+    fn status(&self) -> &'static str {
+        if self.reason.is_some() {
+            "historical"
+        } else {
+            "live"
+        }
+    }
+}
+
+fn current_funds(sample: &Sample, saved: &[DailyEquity], now_us: i64) -> Option<CurrentFunds> {
+    if let Some(observation) = &sample.funds
+        && let Some(account) = &observation.account
+        && saved
+            .last()
+            .is_none_or(|row| account.observed_us >= row.funds.observed_us)
+    {
+        return Some(CurrentFunds {
+            funds: account.clone(),
+            reason: observation.historical_reason(now_us),
+        });
+    }
+    saved.last().map(|row| CurrentFunds {
+        funds: row.funds.clone(),
+        reason: Some("未取得柜台实时资金，显示最近一次保存的观察"),
+    })
+}
+
+/// Saved trading days with the current observation replacing its own day.
+fn with_current(mut rows: Vec<DailyEquity>, current: Option<DailyEquity>) -> Vec<DailyEquity> {
+    let Some(current) = current else {
+        return rows;
+    };
+    match rows.last_mut() {
+        Some(last) if last.funds.trading_day == current.funds.trading_day => {
+            if current.funds.observed_us >= last.funds.observed_us {
+                *last = current;
+            }
+        }
+        Some(last) if last.funds.trading_day > current.funds.trading_day => {}
+        _ => rows.push(current),
+    }
+    rows
+}
+
+fn apply_funds(row: &mut OverviewRow, funds: &BrokerFunds, drawdown: Option<f64>) {
+    row.date_ms = Some(funds.observed_us / 1000);
+    row.yesterday_equity = Some(funds.pre_balance);
+    row.equity = Some(funds.balance);
+    row.today_profit = Some(funds.profit());
+    row.profit_percent = funds.profit_percent();
+    row.margin = Some(funds.curr_margin);
+    row.margin_kind = Some("initial".into());
+    row.margin_percent = funds.margin_percent();
+    row.long_leverage = funds.leverage(row.long_position);
+    row.short_leverage = funds.leverage(row.short_position);
+    row.max_drawdown_15d_percent = drawdown;
+}
+
+fn dashed(trading_day: &str) -> Option<String> {
+    funds::day(trading_day).map(|day| day.to_string())
+}
+
+/// Saved daily equity, or none until the explicit schema maintenance ran.
+async fn saved_equity(s: &Service, id: &str) -> Vec<DailyEquity> {
+    funds::store::list(&s.pool, id)
+        .await
+        .inspect_err(
+            |error| tracing::warn!(source_id=%id,error=?error,"native daily equity unavailable"),
+        )
+        .unwrap_or_default()
+}
+
 #[derive(Serialize)]
 struct NativeOverviewRow {
     #[serde(flatten)]
@@ -423,8 +572,14 @@ struct NativeOverviewRow {
     position_status: Option<&'static str>,
     position_as_of_ms: Option<i64>,
     position_historical_reason: Option<&'static str>,
+    funds_status: Option<&'static str>,
+    funds_as_of_ms: Option<i64>,
+    funds_historical_reason: Option<&'static str>,
+    funds_trading_day: Option<String>,
 }
 
+/// Dates are native trading days: a night session belongs to the next day,
+/// and yesterday's equity is the broker's settled previous-day equity.
 pub(super) async fn overview(
     State(s): State<Service>,
     Extension(access): Extension<Arc<SourceAccess>>,
@@ -436,7 +591,8 @@ pub(super) async fn overview(
         .filter(|date| !date.is_empty())
         .map(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d"))
         .transpose()
-        .map_err(|_| bad("日期须为 YYYY-MM-DD"))?;
+        .map_err(|_| bad("日期须为 YYYY-MM-DD"))?
+        .map(|day| day.format("%Y%m%d").to_string());
     let aliases = postgres::load_source_aliases(&s.pool).await?;
     let now_us = crate::native_futures::now_us();
     let now_ms = now_us / 1000;
@@ -446,8 +602,21 @@ pub(super) async fn overview(
         let sample = s.overview.sample(&source.id);
         let position = sample.position();
         let anchors = nav::store::list(&s.pool, &source.id).await?;
-        dates.extend(anchors.iter().filter_map(|a| shanghai_date(a.snapshot_us)));
-        dates.extend(position.and_then(|obs| shanghai_date(obs.holdings.cut.at_us)));
+        let saved = saved_equity(&s, &source.id).await;
+        let current = current_funds(&sample, &saved, now_us);
+        let live_notionals = position.and_then(|obs| obs.holdings.notionals);
+        let days = with_current(
+            saved,
+            current.as_ref().map(|current| DailyEquity {
+                source_id: source.id.clone(),
+                funds: current.funds.clone(),
+                long_notional: live_notionals.map(|(long, _)| long),
+                short_notional: live_notionals.map(|(_, short)| short),
+                positions_at_us: position.map(|obs| obs.holdings.cut.at_us),
+            }),
+        );
+        dates.extend(anchors.iter().filter_map(|a| dashed(&a.trading_day)));
+        dates.extend(days.iter().filter_map(|d| dashed(&d.funds.trading_day)));
         let mut row = OverviewRow {
             source_id: source.id.clone(),
             account: aliases.get(&source.id).unwrap_or(&source.account).clone(),
@@ -457,65 +626,76 @@ pub(super) async fn overview(
             history_start_ms: anchors.last().map(|anchor| anchor.snapshot_us / 1000),
             ..Default::default()
         };
-        let (status, notionals, position_status, position_at, position_reason) =
-            if let Some(day) = selected_day {
-                let anchor = anchors
-                    .iter()
-                    .find(|a| shanghai_date(a.snapshot_us) == Some(day));
-                let observed =
-                    position.filter(|obs| shanghai_date(obs.holdings.cut.at_us) == Some(day));
-                let at = anchor
-                    .map(|a| a.snapshot_us)
-                    .or_else(|| observed.map(|obs| obs.holdings.cut.at_us));
-                row.date_ms = at.map(|at| at / 1000);
-                row.queried_at_ms = now_ms;
-                (
-                    if at.is_some() {
-                        "historical"
-                    } else {
-                        "unavailable"
-                    },
-                    match anchor {
-                        Some(anchor) => anchor_notionals(anchor),
-                        None => observed.and_then(|obs| obs.holdings.notionals),
-                    },
-                    at.map(|_| "historical"),
-                    at,
-                    Some(if at.is_some() {
-                        "所选日期的持仓观测"
-                    } else {
-                        "所选日期没有可验证的持仓"
-                    }),
-                )
-            } else {
-                let at = position.map(|obs| obs.holdings.cut.at_us);
-                row.date_ms = at.map(|at| at / 1000);
-                (
-                    sample.collection(),
-                    position.and_then(|obs| obs.holdings.notionals),
-                    position.map(PositionDisplay::status),
-                    at,
-                    sample.position_reason(position),
-                )
-            };
-        row.collection_status = Some(status.into());
-        if let Some((long, short)) = notionals {
-            row.long_position = Some(long);
-            row.short_position = Some(short);
-            row.net_position = Some(long - short);
-        }
-        accounts.push(NativeOverviewRow {
-            row,
+        let mut native = NativeOverviewRow {
+            row: OverviewRow::default(),
             quote_currency: "CNY",
-            collection_status_reason: if selected_day.is_none() {
-                sample.collection_reason
+            collection_status_reason: None,
+            position_status: None,
+            position_as_of_ms: None,
+            position_historical_reason: None,
+            funds_status: None,
+            funds_as_of_ms: None,
+            funds_historical_reason: None,
+            funds_trading_day: None,
+        };
+        if let Some(day) = &selected_day {
+            row.queried_at_ms = now_ms;
+            let through = days.partition_point(|d| d.funds.trading_day <= *day);
+            let daily = days[..through]
+                .last()
+                .filter(|d| d.funds.trading_day == *day);
+            let anchor = anchors.iter().find(|a| a.trading_day == *day);
+            let (notionals, at) = match (daily, anchor) {
+                (Some(d), _) if d.positions_at_us.is_some() => {
+                    (d.long_notional.zip(d.short_notional), d.positions_at_us)
+                }
+                (_, Some(anchor)) => (anchor_notionals(anchor), Some(anchor.snapshot_us)),
+                _ => (None, None),
+            };
+            if let Some((long, short)) = notionals {
+                row.long_position = Some(long);
+                row.short_position = Some(short);
+                row.net_position = Some(long - short);
+            }
+            row.date_ms = at.map(|at| at / 1000);
+            if let Some(d) = daily {
+                apply_funds(&mut row, &d.funds, funds::drawdown(&days[..through]));
+                native.funds_status = Some("historical");
+                native.funds_as_of_ms = Some(d.funds.observed_us / 1000);
+                native.funds_historical_reason = Some("所选交易日最后一次柜台资金观察");
+                native.funds_trading_day = Some(d.funds.trading_day.clone());
+            }
+            let found = daily.is_some() || at.is_some();
+            row.collection_status = Some(if found { "historical" } else { "unavailable" }.into());
+            native.position_status = at.map(|_| "historical");
+            native.position_as_of_ms = at.map(|at| at / 1000);
+            native.position_historical_reason = Some(if at.is_some() {
+                "所选交易日的持仓观测"
             } else {
-                None
-            },
-            position_status,
-            position_as_of_ms: position_at.map(|at| at / 1000),
-            position_historical_reason: position_reason,
-        });
+                "所选交易日没有可验证的持仓"
+            });
+        } else {
+            if let Some((long, short)) = live_notionals {
+                row.long_position = Some(long);
+                row.short_position = Some(short);
+                row.net_position = Some(long - short);
+            }
+            row.date_ms = position.map(|obs| obs.holdings.cut.at_us / 1000);
+            if let Some(current) = &current {
+                apply_funds(&mut row, &current.funds, funds::drawdown(&days));
+                native.funds_status = Some(current.status());
+                native.funds_as_of_ms = Some(current.funds.observed_us / 1000);
+                native.funds_historical_reason = current.reason;
+                native.funds_trading_day = Some(current.funds.trading_day.clone());
+            }
+            row.collection_status = Some(sample.collection().into());
+            native.collection_status_reason = sample.collection_reason;
+            native.position_status = position.map(PositionDisplay::status);
+            native.position_as_of_ms = position.map(|obs| obs.holdings.cut.at_us / 1000);
+            native.position_historical_reason = sample.position_reason(position);
+        }
+        native.row = row;
+        accounts.push(native);
     }
     let loading = !accounts.is_empty()
         && accounts
@@ -524,7 +704,7 @@ pub(super) async fn overview(
     body(json!({
         "loading": loading,
         "accounts": accounts,
-        "dates": dates.into_iter().rev().map(|day| day.to_string()).collect::<Vec<_>>(),
+        "dates": dates.into_iter().rev().collect::<Vec<_>>(),
         "generated_at_ms": now_ms,
         "alerts": OverviewAlertSettings::default(),
         "external_status": [],
@@ -557,6 +737,8 @@ pub(super) async fn dashboard(
             .filter(|obs| obs.reason.is_some())
             .map(PositionDisplay::count);
         let position_reason = sample.position_reason(position);
+        let saved = saved_equity(&s, id).await;
+        let funds = current_funds(&sample, &saved, now);
         let portfolio = crate::native_futures::netting::store::load(&s.pool, id).await?;
         let strategy_anchor = portfolio
             .filter(|p| p.targets.keys().all(|name| scope.can_view(name)))
@@ -599,7 +781,18 @@ pub(super) async fn dashboard(
             "account_pnl_start_ts_us": first_anchor_us,
             "strategy_pnl_start_ts_us": strategy_anchor,
             "account_pnl_only": strategy_anchor.is_none(),
-            "live_equity_quote": null, "live_equity_status": "unavailable",
+            "live_equity_quote": funds.as_ref().map(|f| f.funds.balance),
+            "live_equity_status": funds.as_ref().map_or("unavailable", |f| {
+                if f.reason.is_some() { "stale" } else { "ok" }
+            }),
+            "account_funds": funds.as_ref().map(|f| json!({
+                "source": if source.adapter == "yida" { "yida_extended_account" } else { "ctp_trading_account" },
+                "status": f.status(), "historical_reason": f.reason,
+                "observed_us": f.funds.observed_us, "trading_day": f.funds.trading_day,
+                "currency": f.funds.currency, "available": f.funds.available,
+                "previous_balance": f.funds.pre_balance,
+                "trading_day_commission_cny": f.funds.commission,
+            })),
             "quote_currency": "CNY", "collection_status": sample.collection(),
             "collection_status_reason": sample.collection_reason,
             "execution_observed_ts_us": observed.and_then(|snapshot| snapshot.last_record_us),

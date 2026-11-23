@@ -141,6 +141,12 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
       const fundsDate = column.key === 'date_ms' && row.funds_as_of_ms != null && value === row.funds_as_of_ms
       const historicalFunds = row.funds_status === 'historical' && (fundsDate || column.key === 'equity' || column.key === 'margin')
       const dailyFundsMissing = row.quote_currency === 'CNY' && value == null && ['yesterday_equity', 'today_profit', 'profit_percent'].includes(column.key)
+      const cnTradingDayNote = row.quote_currency !== 'CNY' ? undefined
+        : ['yesterday_equity', 'today_profit', 'profit_percent'].includes(column.key) && value != null
+          ? `交易日 ${row.funds_trading_day ?? ''}（夜盘归下一交易日）：昨日权益为柜台上一交易日结算权益；今日盈利 = 权益 − 昨日权益 − 入金 + 出金`
+          : column.key === 'max_drawdown_15d_percent'
+            ? value == null ? '需连续 15 个交易日的柜台资金记录；缺少任一工作日（含节假日）时不计算' : '最近 15 个交易日按柜台结算权益逐日收益计算，扣除出入金'
+            : undefined
       const reconstructed = row.history_rebuilt_at_ms != null && ['yesterday_equity', 'today_profit', 'profit_percent', 'max_drawdown_15d_percent'].includes(column.key)
       const ltpMargin = row.margin_kind === 'ltp_frozen' && ['margin', 'margin_percent'].includes(column.key)
       const updated = row.history_rebuilt_at_ms == null ? '' : `；更新时间 ${dateTime.format(row.history_rebuilt_at_ms)} 上海时间`
@@ -155,7 +161,8 @@ function AccountRow({ row, index }: { row: OverviewRow; index: number }) {
         : undefined
       const title = sdkNote ?? positionTitle ?? (historicalFunds ? row.funds_historical_reason ?? '历史资金观察'
         : fundsDate ? '柜台资金观察时间（上海时间）'
-        : dailyFundsMissing ? '缺少上海时间零点的权益依据'
+        : dailyFundsMissing ? '缺少柜台上一交易日结算权益（按交易日，夜盘归下一交易日）'
+        : cnTradingDayNote ? cnTradingDayNote
         : ltpMargin ? 'LTP 实际冻结／占用保证金；占比 = 占用保证金 ÷ 实时权益 × 100%' : partialPosition ? positionNotice : (row.account_kind === 'fr' || row.account_kind === 'mm') && profit
         ? value == null ? 'FR/MM 已实现收益历史尚不可用，或缺少正的零点权益以计算收益率' : `FR/MM 按当日已实现交易盈亏 + 实际资金费 − 手续费 − 借贷利息计算，不含未平仓浮盈亏；盈亏比例以零点权益为分母${updated}`
         : value == null ? column.reason : time ? '上海时间' : reconstructed

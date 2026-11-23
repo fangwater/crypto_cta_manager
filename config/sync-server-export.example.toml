@@ -9,6 +9,10 @@ journal_root = "/home/operator/cn_futures_sync/journals"
 source_ids = ["cn_live01", "cn_live02"]
 batch_records = 500
 batch_bytes = 4194304
+# Optional same-host native Viz (loopback HTTP base URL). Its read-only
+# /account-funds/<source_id> relay supplies broker funds to Manager; each Viz
+# counter must name the source in `manager_source_id`. Omit to serve no funds.
+# account_funds_url = "http://127.0.0.1:8811"
 
 [[sources]]
 id = "cn_live01"
