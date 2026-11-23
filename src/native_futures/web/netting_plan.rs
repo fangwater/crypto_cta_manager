@@ -80,9 +80,7 @@ struct Plan {
     source_id: String,
     batch_id: String,
     target_revision: i64,
-    trading_day: String,
     decision_us: i64,
-    expires_at_us: i64,
     strategies: Strategies,
 }
 
@@ -189,43 +187,28 @@ async fn plan(service: &Service, id: &str, observe_only: bool) -> Result<PlanChe
         target,
         recheck_us,
     };
-    let payload = |trading_day, decision_us, expires_at_us| Plan {
+    let payload = |decision_us| Plan {
         source_id: id.to_owned(),
         batch_id: batch.clone(),
         target_revision: state.target_revision,
-        trading_day,
         decision_us,
-        expires_at_us,
         strategies: state.targets.clone(),
     };
     if observe_only {
         return Ok(check(
             PlanStatus::ObserveOnly,
-            Some(payload(
-                state.target_trading_day.clone().unwrap_or_default(),
-                state.decision_us,
-                0,
-            )),
+            Some(payload(state.decision_us)),
             None,
         ));
     }
-    let (Some(day), Some((decision_us, expires_at_us))) =
-        (state.target_trading_day.as_ref(), state.exec_lease())
-    else {
+    let Some(decision_us) = state.exec_decision_us() else {
         return Ok(check(PlanStatus::MissingTradingDay, None, None));
     };
-    let now = crate::native_futures::now_us();
-    if decision_us > now {
+    if decision_us > crate::native_futures::now_us() {
         return Ok(check(PlanStatus::DecisionInFuture, None, Some(decision_us)));
     }
-    if expires_at_us <= now {
-        return Ok(check(PlanStatus::LeaseExpired, None, None));
-    }
-    Ok(check(
-        PlanStatus::Ready,
-        Some(payload(day.clone(), decision_us, expires_at_us)),
-        Some(expires_at_us),
-    ))
+    // No lease: a ready plan stands until the next batch replaces it.
+    Ok(check(PlanStatus::Ready, Some(payload(decision_us)), None))
 }
 
 impl TryFrom<Plan> for PositionTarget {
@@ -236,9 +219,7 @@ impl TryFrom<Plan> for PositionTarget {
             source_id: plan.source_id,
             batch_id: plan.batch_id,
             target_revision: plan.target_revision,
-            trading_day: plan.trading_day,
             decision_us: plan.decision_us.try_into()?,
-            expires_at_us: plan.expires_at_us.try_into()?,
             strategy_targets: plan
                 .strategies
                 .into_iter()
@@ -300,7 +281,7 @@ impl ManagerPlans for PlanStream {
                 let check = plan(&service, &id, observe_only).await
                     .map_err(|_| Status::unavailable("read Manager plan"))?;
                 let recheck_us = check.recheck_us;
-                let wait_for_deadline = matches!(check.status, PlanStatus::Ready | PlanStatus::DecisionInFuture);
+                let wait_for_deadline = check.status == PlanStatus::DecisionInFuture;
                 let update = check.into_update()
                     .map_err(|_| Status::internal("invalid Manager target"))?;
                 if previous.as_ref() != Some(&update) {
@@ -345,7 +326,6 @@ mod tests {
         for (status, name) in [
             (PlanStatus::MissingTradingDay, "missing_trading_day"),
             (PlanStatus::DecisionInFuture, "decision_in_future"),
-            (PlanStatus::LeaseExpired, "lease_expired"),
         ] {
             let check = PlanCheck {
                 status,

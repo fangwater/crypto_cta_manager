@@ -345,16 +345,16 @@ fn product_groups_keep_independent_clocks_and_share_one_account_plan() {
 }
 
 #[test]
-fn exec_lease_is_bound_to_the_active_batch_with_a_native_trading_day() {
+fn exec_decision_is_bound_to_the_active_batch_with_a_native_trading_day() {
     let state = portfolio(0, 0);
     let mut request = batch(&state, 1, 0);
     let (analytical, _) = state.batch(&request, AT).unwrap();
-    assert_eq!(analytical.exec_lease(), None);
+    assert_eq!(analytical.exec_decision_us(), None);
 
     request.trading_day = Some("20261117".into());
     let (mut live, _) = state.batch(&request, AT).unwrap();
     live.decision_us = AT + 1;
-    assert_eq!(live.exec_lease(), Some((AT, AT + EXEC_LEASE_US)));
+    assert_eq!(live.exec_decision_us(), Some(AT));
 }
 
 #[test]

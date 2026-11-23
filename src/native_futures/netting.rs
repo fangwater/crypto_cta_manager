@@ -17,7 +17,6 @@ pub const UNALLOCATED: &str = "__unallocated__";
 pub type Quantities = BTreeMap<String, i64>;
 pub type Strategies = BTreeMap<String, Quantities>;
 const MAX_LOTS: i64 = i32::MAX as i64;
-const EXEC_LEASE_US: i64 = 60_000_000;
 
 #[derive(Debug)]
 pub struct Conflict(pub String);
@@ -644,15 +643,14 @@ impl Portfolio {
         Ok(next)
     }
 
-    pub(crate) fn exec_lease(&self) -> Option<(i64, i64)> {
+    /// Decision time of the active live batch (one published with a native
+    /// trading day). Exec targets have no lease: the plan stands until replaced.
+    pub(crate) fn exec_decision_us(&self) -> Option<i64> {
         self.target_trading_day.as_ref()?;
         let group = self
             .strategy_groups
             .get(self.last_strategy_group.as_ref()?)?;
-        Some((
-            group.decision_us,
-            group.decision_us.saturating_add(EXEC_LEASE_US),
-        ))
+        Some(group.decision_us)
     }
 
     pub fn execution_plan(&self) -> Result<ExecutionPlan> {
