@@ -91,6 +91,12 @@ HTTP API 只监听 loopback，前端保留 `/manager/` 和同源 `/manager/api/`
 净值快照。易达 Exec 尚未发布账户资金，其权益类指标保持不可用。Manager 不估算权益或
 保证金，也不写执行库或柜台。
 
+2026-11-23 部署：本机库显式执行 `apply_native_equity_schema.sql`；本机 Manager 发布
+`20261123T071517Z-c6cf0e2-broker-equity`，只重启 `cn-futures-manager`。sh_dev 收盘后同时换装
+ctp-trader 与 Viz（`mkt_signal` `86b21d5b`），导出器 `9a826b4` 配置 `account_funds_url`。
+创元当日总览：昨日权益 4,993,030.29、权益 4,992,249.09、保证金 78,125.30，状态 live，
+交易日 `20261123` 已写入每日表；易达保持不可用；15 日回撤待积累 15 个连续交易日。
+
 国内页面按合约、开仓、平仓、平今、平昨规则计算理论手续费。实际手续费来自记录扩展块（CNY），未报告时留空。
 
 ## 状态机对齐
