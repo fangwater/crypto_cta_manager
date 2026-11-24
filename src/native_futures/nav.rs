@@ -574,6 +574,29 @@ pub struct Report {
     pub sampled: bool,
     pub available_symbols: Vec<String>,
     pub selected_symbols: Vec<String>,
+    /// Merged `[start, end]` (UTC us) spans in which some valued contract has a
+    /// provider-final minute close; the gaps are recesses, nights, weekends
+    /// and holidays, so charts can compress them.
+    pub trading_segments_us: Vec<(i64, i64)>,
+}
+/// Union of every contract's published trading minutes inside the window.
+pub(crate) fn trading_segments(
+    prices: &BTreeMap<Market, MarketPrices>,
+    start_us: i64,
+    end_us: i64,
+) -> Vec<(i64, i64)> {
+    let minutes: BTreeSet<i64> = prices
+        .values()
+        .flat_map(|price| price.closes.range(start_us..=end_us).map(|(&end, _)| end))
+        .collect();
+    let mut segments: Vec<(i64, i64)> = Vec::new();
+    for end in minutes {
+        match segments.last_mut() {
+            Some((_, last)) if end - *last <= MINUTE_US => *last = end,
+            _ => segments.push(((end - MINUTE_US).max(start_us), end)),
+        }
+    }
+    segments
 }
 impl Report {
     pub fn unavailable(
@@ -601,6 +624,7 @@ impl Report {
             sampled: false,
             available_symbols: vec![],
             selected_symbols: vec![],
+            trading_segments_us: vec![],
         }
     }
 }
@@ -1012,6 +1036,7 @@ fn build_selected(
         sampled,
         available_symbols: available.iter().map(market_name).collect(),
         selected_symbols: selected.iter().map(market_name).collect(),
+        trading_segments_us: trading_segments(prices, start_us, end_us),
     })
 }
 

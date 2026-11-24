@@ -663,6 +663,7 @@ impl Replay {
                 points,
                 available_symbols: available.iter().map(market_name).collect(),
                 selected_symbols: selected.iter().map(market_name).collect(),
+                trading_segments_us: super::trading_segments(prices, start, end),
             },
             strategies,
         })

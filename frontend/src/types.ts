@@ -406,6 +406,8 @@ export interface NavTimelineReport {
   selected_symbols: string[]
   available_strategies: string[]
   fee_evidence?: NativeNavFeeEvidence
+  /** Native futures: merged [start, end] ms spans with published trading minutes. */
+  trading_segments_ms?: [number, number][]
   summary: NavTotals
   symbols: AggregateSymbolNavReport[]
   points: NavTimelinePoint[]

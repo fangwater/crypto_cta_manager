@@ -47,6 +47,8 @@ interface Props {
   mode: TimelineChartMode
   feeMode: FeeMode
   native?: boolean
+  /** Native futures trading spans; when present, recesses are compressed. */
+  tradingSegments?: [number, number][]
 }
 
 const symbolPalette = [
@@ -138,6 +140,57 @@ function money(value: number) {
   })
 }
 
+/** Visual width of one recess (night, lunch, weekend, holiday) on the session axis. */
+const RECESS_MS = 5 * 60_000
+
+/**
+ * Futures session axis: trading spans laid end to end, each recess shrunk to
+ * RECESS_MS, so flat non-trading time takes almost no width. Monotonic both
+ * ways; times inside a recess map proportionally into its short gap.
+ */
+export function sessionAxis(segments?: [number, number][]) {
+  if (!segments?.length) return null
+  const starts: number[] = []
+  let offset = 0
+  for (const [start, end] of segments) {
+    starts.push(offset)
+    offset += end - start + RECESS_MS
+  }
+  const last = segments.length - 1
+  const segmentAt = (t: number) => {
+    let lo = 0
+    let hi = last
+    let found = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (segments[mid][0] <= t) {
+        found = mid
+        lo = mid + 1
+      } else hi = mid - 1
+    }
+    return found
+  }
+  const toX = (t: number) => {
+    const i = segmentAt(t)
+    if (i < 0) return 0
+    const [start, end] = segments[i]
+    if (t <= end) return starts[i] + (t - start)
+    const gapEnd = i < last ? segments[i + 1][0] : end
+    const fraction = gapEnd > end ? Math.min(1, (t - end) / (gapEnd - end)) : 0
+    return starts[i] + (end - start) + fraction * RECESS_MS
+  }
+  const toTime = (x: number) => {
+    let i = last
+    while (i > 0 && starts[i] > x) i -= 1
+    const [start, end] = segments[i]
+    const inside = x - starts[i]
+    if (inside <= end - start) return start + inside
+    const gapEnd = i < last ? segments[i + 1][0] : end
+    return end + Math.min(1, (inside - (end - start)) / RECESS_MS) * (gapEnd - end)
+  }
+  return { toX, toTime, max: offset - RECESS_MS }
+}
+
 function chartTime(value: number) {
   const date = new Date(value)
   const month = String(date.getMonth() + 1).padStart(2, '0')
@@ -159,6 +212,7 @@ export function NavTimelineChart({
   mode,
   feeMode,
   native = false,
+  tradingSegments,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -250,6 +304,17 @@ export function NavTimelineChart({
             }
           })
 
+    // Futures: place every point on the session axis (time axis otherwise).
+    const axis = native ? sessionAxis(tradingSegments) : null
+    if (axis) {
+      for (const item of series) {
+        item.data = (item.data as unknown[][]).map((row) =>
+          [axis.toX(Number(row[0])), ...row.slice(1)],
+        ) as typeof item.data
+      }
+    }
+    const timeLabel = (value: number) => chartTime(axis ? axis.toTime(value) : value)
+
     chart.setOption(
       {
         animation: false,
@@ -273,15 +338,17 @@ export function NavTimelineChart({
           },
         },
         xAxis: {
-          type: 'time',
+          type: axis ? 'value' : 'time',
           boundaryGap: false,
+          ...(axis ? { min: 0, max: axis.max } : {}),
           axisLine: { lineStyle: { color: '#d7dbe2' } },
           axisTick: { show: false },
           axisLabel: {
             color: '#697386',
             hideOverlap: true,
-            formatter: (value: number) => chartTime(value),
+            formatter: (value: number) => timeLabel(value),
           },
+          axisPointer: { label: { formatter: (params: { value: unknown }) => timeLabel(Number(params.value)) } },
           splitLine: { show: false },
         },
         yAxis: {
@@ -340,6 +407,7 @@ export function NavTimelineChart({
     fundingIsEstimate,
     strategyFunding,
     visibleSeries,
+    tradingSegments,
   ])
 
   return (

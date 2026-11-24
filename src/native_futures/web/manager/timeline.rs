@@ -460,6 +460,8 @@ fn project(
         "available_strategies": strategy.iter().map(|row| &row.name).collect::<Vec<_>>(),
         "summary": totals(summary, &report.fees)?, "symbols": markets,
         "fee_evidence": report.fees,
+        "trading_segments_ms": report.trading_segments_us.iter()
+            .map(|&(start, end)| [start / 1000, end / 1000]).collect::<Vec<_>>(),
         "points": [], "symbol_points": [], "strategy_points": strategies, "sampled": report.sampled,
     });
     metadata["estimated_funding"] = json!({

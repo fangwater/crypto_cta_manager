@@ -562,3 +562,25 @@ fn valuation_stops_at_the_published_minute_of_an_in_progress_day() {
     assert_eq!(covered, at() + 120_000_000);
     assert_eq!(p.values().next().unwrap().mark(covered).unwrap(), 109.0);
 }
+
+#[test]
+fn trading_segments_merge_published_minutes_and_leave_recesses_out() {
+    let minute = 60_000_000i64;
+    let at = |m: i64| 1_000 * minute + m * minute;
+    let prices = |ends: &[i64]| MarketPrices {
+        multiplier: 1.0,
+        closes: ends.iter().map(|&m| (at(m), 1.0)).collect(),
+        ..MarketPrices::default()
+    };
+    // Two contracts: one trades minutes 1-3 and 10-11, the other 3-4.
+    let markets = BTreeMap::from([
+        (("SHFE".to_owned(), "rb2701".to_owned()), prices(&[1, 2, 3, 10, 11])),
+        (("SHFE".to_owned(), "hc2701".to_owned()), prices(&[3, 4])),
+    ]);
+    assert_eq!(
+        trading_segments(&markets, at(0), at(20)),
+        vec![(at(0), at(4)), (at(9), at(11))]
+    );
+    // The window bounds both the minutes and the first segment start.
+    assert_eq!(trading_segments(&markets, at(2), at(10)), vec![(at(2), at(4)), (at(9), at(10))]);
+}

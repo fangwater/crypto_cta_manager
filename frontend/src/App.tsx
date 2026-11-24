@@ -1028,6 +1028,7 @@ function NavPage() {
                   mode={chartMode}
                   feeMode={feeMode}
                   native={native}
+                  tradingSegments={native ? timeline.report.trading_segments_ms : undefined}
                 />
               )}
               {noSymbolsSelected && (
