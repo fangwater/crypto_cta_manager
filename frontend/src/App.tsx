@@ -1435,24 +1435,18 @@ function NavPage() {
 
 function NativeCommissionAnalysis({ evidence, funds }: { evidence?: NativeNavFeeEvidence; funds?: DashboardAccount['account_funds'] }) {
   const amount = (count: number, total: number) => count > 0 ? `${money(total)} CNY` : '—'
-  // Fee rate of exactly the fills behind a fee sum: fee / turnover x 1e4.
-  const bp = (fee: number, volume?: number) => volume && volume > 0 ? `${(fee / volume * 1e4).toFixed(2)} bp` : null
-  const rate = (fee: number, volume?: number) => {
-    const value = bp(fee, volume)
-    return value ? ` · ${value}` : ''
-  }
   const commission = funds?.trading_day ? funds.trading_day_commission_cny : null
   if (!evidence && commission == null) return null
   return (
     <section className="execution-section" aria-labelledby="execution-title">
       <div className="panel-heading">
         <h2 id="execution-title">手续费</h2>
-        {evidence && <span className="generation-time">区间 {integer(evidence.fill_count)} 笔 · {money(evidence.volume_cny)} CNY{evidence.missing_count === 0 ? rate(evidence.actual_known_cny + evidence.estimated_known_cny, evidence.volume_cny) : ''}</span>}
+        {evidence && <span className="generation-time">区间 {integer(evidence.fill_count)} 笔 · {money(evidence.volume_cny)} CNY</span>}
       </div>
       <div className="summary-strip nav-analysis-stats">
         {commission != null && funds?.trading_day && <AnalysisMetric label="柜台交易日手续费" value={`${money(commission)} CNY`} detail={`交易日 ${funds.trading_day} · ${timestampUs(funds.observed_us)}`} />}
-        {evidence && evidence.actual_count > 0 && <AnalysisMetric label="区间逐笔实收" value={amount(evidence.actual_count, evidence.actual_known_cny) + rate(evidence.actual_known_cny, evidence.actual_volume_cny)} detail={`${integer(evidence.actual_count)} 笔有柜台费用回报 · 成交额 ${money(evidence.actual_volume_cny ?? 0)} CNY`} />}
-        {evidence && <AnalysisMetric label="区间费率估算" value={amount(evidence.rate_count ?? 0, evidence.rate_known_cny ?? 0) + rate(evidence.rate_known_cny ?? 0, evidence.rate_volume_cny)} detail={`${integer(evidence.rate_count ?? 0)} 笔按合约和开平费率估算（含已有实收，供对照） · 成交额 ${money(evidence.rate_volume_cny ?? 0)} CNY${evidence.estimated_count > 0 ? ` · 其中 ${integer(evidence.estimated_count)} 笔无柜台回报，按费率计入净值` : ''}`} />}
+        {evidence && evidence.actual_count > 0 && <AnalysisMetric label="区间逐笔实收" value={amount(evidence.actual_count, evidence.actual_known_cny)} detail={`${integer(evidence.actual_count)} 笔有柜台费用回报`} />}
+        {evidence && <AnalysisMetric label="区间费率估算" value={amount(evidence.rate_count ?? 0, evidence.rate_known_cny ?? 0)} detail={`${integer(evidence.rate_count ?? 0)} 笔按合约和开平费率估算（含已有实收，供对照）${evidence.estimated_count > 0 ? ` · 其中 ${integer(evidence.estimated_count)} 笔无柜台回报，按费率计入净值` : ''}`} />}
         {evidence && evidence.missing_count > 0 && <AnalysisMetric label="缺少费用依据" value={`${integer(evidence.missing_count)} 笔`} />}
       </div>
     </section>
