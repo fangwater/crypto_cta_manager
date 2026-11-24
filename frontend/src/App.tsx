@@ -1451,7 +1451,7 @@ function NativeCommissionAnalysis({ evidence, funds }: { evidence?: NativeNavFee
       <div className="summary-strip nav-analysis-stats">
         {commission != null && funds?.trading_day && <AnalysisMetric label="柜台交易日手续费" value={`${money(commission)} CNY`} detail={`交易日 ${funds.trading_day} · ${timestampUs(funds.observed_us)}`} />}
         {evidence && evidence.actual_count > 0 && <AnalysisMetric label="区间逐笔实收" value={amount(evidence.actual_count, evidence.actual_known_cny) + rate(evidence.actual_known_cny, evidence.actual_volume_cny)} detail={`${integer(evidence.actual_count)} 笔有柜台费用回报 · 成交额 ${money(evidence.actual_volume_cny ?? 0)} CNY`} />}
-        {evidence && <AnalysisMetric label="区间费率估算" value={amount(evidence.estimated_count, evidence.estimated_known_cny) + rate(evidence.estimated_known_cny, evidence.estimated_volume_cny)} detail={`${integer(evidence.estimated_count)} 笔按合约和开平估算 · 成交额 ${money(evidence.estimated_volume_cny ?? 0)} CNY`} />}
+        {evidence && <AnalysisMetric label="区间费率估算" value={amount(evidence.rate_count ?? 0, evidence.rate_known_cny ?? 0) + rate(evidence.rate_known_cny ?? 0, evidence.rate_volume_cny)} detail={`${integer(evidence.rate_count ?? 0)} 笔按合约和开平费率估算（含已有实收，供对照） · 成交额 ${money(evidence.rate_volume_cny ?? 0)} CNY${evidence.estimated_count > 0 ? ` · 其中 ${integer(evidence.estimated_count)} 笔无柜台回报，按费率计入净值` : ''}`} />}
         {evidence && evidence.missing_count > 0 && <AnalysisMetric label="缺少费用依据" value={`${integer(evidence.missing_count)} 笔`} />}
       </div>
     </section>

@@ -391,6 +391,9 @@ export interface NativeNavFeeEvidence {
   volume_cny: number
   actual_volume_cny?: number
   estimated_volume_cny?: number
+  rate_count?: number
+  rate_known_cny?: number
+  rate_volume_cny?: number
 }
 
 export interface NavTimelineReport {

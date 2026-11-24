@@ -718,6 +718,7 @@ dependencies = [
  "cn_market_proto",
  "flate2",
  "futures-executor",
+ "futures-util",
  "hex",
  "hmac 0.12.1",
  "iceoryx2",

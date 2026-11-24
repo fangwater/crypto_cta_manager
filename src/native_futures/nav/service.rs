@@ -104,14 +104,26 @@ pub(crate) async fn timeline(
         let end_us = covered_end(&prices, end_us);
         ensure!(end_us >= start_us, "分钟行情尚未覆盖所选起点；请稍后重试");
         let fills: Vec<_> = fills.into_iter().filter(|f| f.received_us <= end_us).collect();
+        // Every traded contract, not only fills without counter fees: the rate
+        // model is also shown beside actual fees for comparison.
+        let traded: Vec<_> = selected
+            .into_iter()
+            .filter(|(venue, symbol)| {
+                fills.iter().any(|f| {
+                    &f.venue == venue && &f.symbol == symbol && f.received_us >= start_us
+                        && f.received_us <= end_us
+                })
+            })
+            .collect();
         let mut rates = BTreeMap::new();
-        for (venue, symbol) in selected {
-            if fills.iter().any(|f| {
-                f.venue == venue && f.symbol == symbol && f.received_us >= start_us
-                    && f.received_us <= end_us && f.needs_reference_fee()
-            }) && let Some(feed) = reference {
-                match feed.history(&anchor.source_id, &venue, &symbol, start_us, end_us).await {
-                    Ok(observations) => { rates.insert((venue, symbol), observations); }
+        if let Some(feed) = reference {
+            let rows = futures_util::future::join_all(traded.iter().map(|(venue, symbol)| {
+                feed.history(&anchor.source_id, venue, symbol, start_us, end_us)
+            }))
+            .await;
+            for (market, row) in traded.into_iter().zip(rows) {
+                match row {
+                    Ok(observations) => { rates.insert(market, observations); }
                     Err(error) => tracing::warn!(source_id=%anchor.source_id,error=?error,"native NAV fee observations unavailable; retain gross NAV"),
                 }
             }
@@ -159,14 +171,16 @@ pub(super) async fn prices(
         markets.len() <= 64,
         "native NAV market count exceeds budget"
     );
-    let mut prices = BTreeMap::new();
-    for (venue, symbol) in markets {
-        let feed = market.context("尚未配置持仓计价所需的 market-replay 行情")?;
-        prices.insert(
-            (venue.clone(), symbol.clone()),
-            feed.nav_prices(venue, symbol, start_us, end_us, false)
-                .await?,
-        );
+    if markets.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    Ok(prices)
+    let feed = market.context("尚未配置持仓计价所需的 market-replay 行情")?;
+    // Concurrent per contract; the feed's own permits bound the provider load.
+    let windows = futures_util::future::try_join_all(
+        markets
+            .iter()
+            .map(|(venue, symbol)| feed.nav_prices(venue, symbol, start_us, end_us, false)),
+    )
+    .await?;
+    Ok(markets.iter().cloned().zip(windows).collect())
 }

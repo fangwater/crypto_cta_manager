@@ -291,29 +291,29 @@ impl Replay {
         }
         let mut rates = BTreeMap::new();
         if let Some(feed) = reference {
-            for (venue, symbol) in active {
-                if self.moves.iter().any(|mv| {
-                    mv.market.0 == venue
-                        && mv.market.1 == symbol
-                        && mv.at >= query.start_us
-                        && mv.fill.as_ref().is_some_and(Fill::needs_reference_fee)
-                }) {
-                    match feed
-                        .history(
-                            &self.anchor.source_id,
-                            &venue,
-                            &symbol,
-                            query.start_us,
-                            query.end_us,
-                        )
-                        .await
-                    {
-                        Ok(rows) => {
-                            rates.insert((venue, symbol), rows);
-                        }
-                        Err(error) => {
-                            tracing::warn!(source_id=%self.anchor.source_id,error=?error,"strategy NAV fee observations unavailable")
-                        }
+            // Every traded contract: the rate model is shown beside actual fees.
+            let traded: Vec<_> = active
+                .into_iter()
+                .filter(|(venue, symbol)| {
+                    self.moves.iter().any(|mv| {
+                        &mv.market.0 == venue
+                            && &mv.market.1 == symbol
+                            && mv.at >= query.start_us
+                            && mv.fill.is_some()
+                    })
+                })
+                .collect();
+            let rows = futures_util::future::join_all(traded.iter().map(|(venue, symbol)| {
+                feed.history(&self.anchor.source_id, venue, symbol, query.start_us, query.end_us)
+            }))
+            .await;
+            for (market, row) in traded.into_iter().zip(rows) {
+                match row {
+                    Ok(rows) => {
+                        rates.insert(market, rows);
+                    }
+                    Err(error) => {
+                        tracing::warn!(source_id=%self.anchor.source_id,error=?error,"strategy NAV fee observations unavailable")
                     }
                 }
             }
@@ -419,20 +419,22 @@ fn apply(
         return position.apply(mv.lots, mv.price, multiplier, Some(0.0));
     };
     let estimated = fill.estimated_fee(multiplier, rates.map(Vec::as_slice))?;
+    let rate = fill.rate_fee(multiplier, rates.map(Vec::as_slice))?;
     let volume = fill.price * multiplier * fill.lots as f64;
     window
         .portfolio
-        .add(volume, fill.commission_cny, estimated)?;
+        .add(volume, fill.commission_cny, estimated, rate)?;
     window.markets.entry(mv.market.clone()).or_default().add(
         volume,
         fill.commission_cny,
         estimated,
+        rate,
     )?;
     window
         .strategies
         .entry(mv.strategy.clone())
         .or_default()
-        .add(volume, fill.commission_cny, estimated)?;
+        .add(volume, fill.commission_cny, estimated, rate)?;
     position.apply(
         mv.lots,
         mv.price,

@@ -332,17 +332,18 @@ async fn holdings(s: &Service, id: &str, sample: &Sample) -> Option<Holdings> {
     .ok()?
     .ok()?;
     let mut notionals = Some((0.0, 0.0));
-    for ((venue, contract), (long, short)) in &rows {
-        let value = async {
-            let prices = s
-                .market_data
-                .as_ref()?
-                .nav_prices(venue, contract, cut.at_us, cut.at_us, false)
-                .await
-                .ok()?;
-            Some(prices.mark(cut.at_us).ok()? * prices.multiplier)
-        }
-        .await;
+    // Concurrent per contract; the feed's own permits bound the provider load.
+    let values = futures_util::future::join_all(rows.keys().map(|(venue, contract)| async {
+        let prices = s
+            .market_data
+            .as_ref()?
+            .nav_prices(venue, contract, cut.at_us, cut.at_us, false)
+            .await
+            .ok()?;
+        Some(prices.mark(cut.at_us).ok()? * prices.multiplier)
+    }))
+    .await;
+    for ((long, short), value) in rows.values().zip(values) {
         notionals = notionals
             .zip(value)
             .map(|((l, s), lot)| (l + *long as f64 * lot, s + *short as f64 * lot));

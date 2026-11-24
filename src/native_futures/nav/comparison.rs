@@ -136,14 +136,16 @@ pub(crate) async fn timeline(
         .cloned()
         .collect();
     ensure!(markets.len() <= 64, "参考净值合约数超出计算上限");
-    let mut prices = BTreeMap::new();
-    for (venue, symbol) in markets {
+    let prices: BTreeMap<_, _> = if markets.is_empty() {
+        BTreeMap::new()
+    } else {
         let feed = market.context("缺少具体合约的一分钟行情源")?;
-        let window = feed
-            .nav_prices(&venue, &symbol, report.start_us, report.end_us, true)
-            .await?;
-        prices.insert((venue, symbol), window);
-    }
+        let windows = futures_util::future::try_join_all(markets.iter().map(|(venue, symbol)| {
+            feed.nav_prices(venue, symbol, report.start_us, report.end_us, true)
+        }))
+        .await?;
+        markets.into_iter().zip(windows).collect()
+    };
     let start = report.start_us;
     let end = report.end_us;
     let samples = report.points.clone();

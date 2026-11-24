@@ -178,9 +178,6 @@ pub struct Fill {
 }
 
 impl Fill {
-    fn needs_reference_fee(&self) -> bool {
-        self.commission_cny.is_none()
-    }
 
     fn estimated_fee(
         &self,
@@ -190,6 +187,11 @@ impl Fill {
         if self.commission_cny.is_some() {
             return Ok(None);
         }
+        self.rate_fee(multiplier, rates)
+    }
+    /// The fee implied by the latest observed contract rates, whether or not
+    /// the counter reported one.
+    fn rate_fee(&self, multiplier: f64, rates: Option<&[AccountRates]>) -> Result<Option<f64>> {
         let rate = rates
             .into_iter()
             .flatten()
@@ -491,11 +493,27 @@ pub struct Fees {
     /// fee / turnover x 1e4 for exactly those fills.
     pub actual_volume_cny: f64,
     pub estimated_volume_cny: f64,
+    /// Every fill priced from the contract and open/close rates, including
+    /// fills with counter fees, to compare the rate model with actual fees.
+    pub rate_count: usize,
+    pub rate_known_cny: f64,
+    pub rate_volume_cny: f64,
 }
 impl Fees {
-    fn add(&mut self, volume_cny: f64, actual: Option<f64>, estimated: Option<f64>) -> Result<()> {
+    fn add(
+        &mut self,
+        volume_cny: f64,
+        actual: Option<f64>,
+        estimated: Option<f64>,
+        rate: Option<f64>,
+    ) -> Result<()> {
         self.fill_count += 1;
         self.volume_cny += volume_cny;
+        if let Some(fee) = rate {
+            self.rate_count += 1;
+            self.rate_known_cny += fee;
+            self.rate_volume_cny += volume_cny;
+        }
         if let Some(fee) = actual {
             self.actual_count += 1;
             self.actual_known_cny += fee;
@@ -511,6 +529,7 @@ impl Fees {
             self.actual_known_cny.is_finite()
                 && self.estimated_known_cny.is_finite()
                 && (self.actual_known_cny + self.estimated_known_cny).is_finite()
+                && self.rate_known_cny.is_finite()
                 && self.volume_cny.is_finite(),
             "native fee sum overflow"
         );
@@ -913,14 +932,15 @@ fn build_selected(
                 .get_mut(&key)
                 .context("missing native market ledger")?;
             ledger.apply(fill)?;
-            let estimated =
-                fill.estimated_fee(ledger.multiplier, rates.get(&key).map(Vec::as_slice))?;
+            let market_rates = rates.get(&key).map(Vec::as_slice);
+            let estimated = fill.estimated_fee(ledger.multiplier, market_rates)?;
+            let rate = fill.rate_fee(ledger.multiplier, market_rates)?;
             let volume = fill.price * fill.lots as f64 * ledger.multiplier;
-            fees.add(volume, fill.commission_cny, estimated)?;
+            fees.add(volume, fill.commission_cny, estimated, rate)?;
             by_market
                 .get_mut(&key)
                 .context("missing native fee ledger")?
-                .add(volume, fill.commission_cny, estimated)?;
+                .add(volume, fill.commission_cny, estimated, rate)?;
             next += 1;
         }
         let values = valuation(&ledgers, prices, tick)?;
