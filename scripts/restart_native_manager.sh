@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Environment-local restart of the domestic Manager only; preserve runtime logs.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${CN_FUTURES_DEPLOY_ROOT:-$SOURCE_ROOT}"
 if [[ "${1:-}" != --execute ]]; then
     [[ $# == 0 ]] || { echo 'Usage: restart_native_manager.sh [--execute]' >&2; exit 2; }
     echo "[DRY-RUN] env=$ROOT action=restart process=cn-futures-manager"
@@ -27,6 +28,5 @@ for row in rows:
             shutil.copy2(path, archive / path.name)
 print('Preserved Manager logs:', archive)
 PY
-cd "$ROOT"
-pm2 startOrRestart deploy/cn_futures/ecosystem.config.cjs --only cn-futures-manager
+CN_FUTURES_DEPLOY_ROOT="$ROOT" pm2 startOrRestart "$SOURCE_ROOT/deploy/cn_futures/ecosystem.config.cjs" --only cn-futures-manager
 pm2 save --force >/dev/null

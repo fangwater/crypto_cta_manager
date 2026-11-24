@@ -7,9 +7,14 @@ Manager 与同步程序分别运行。两者使用 `mode = "cn_futures"`，共�
 
 ## 本机
 
-在现有 checkout 下准备 `releases/<release>/bin/{cn_futures_web,sync-server}` 与
-`releases/<release>/frontend/`；将 `run/current` 原子指向已校验的 release。
-维护 `config/sync-server-collect.toml`，来源示例见 `config/sync-server-collect.example.toml`。
+源码位于 `/home/fanghaizhou/crypto_cta_manager`。从源码目录执行以下命令，CN
+运行目录为 `$PWD/run/cn-futures`，由 `CN_FUTURES_DEPLOY_ROOT` 指定。
+在运行目录下准备 `releases/<release>/bin/{cn_futures_web,sync-server}` 与
+`releases/<release>/frontend/`，将 `run/current` 原子指向已校验的 Manager
+release。同步器可单独用 `run/sync-current` 指向已校验的 release，默认使用
+`run/current`。维护运行目录下的 `config/sync-server-collect.toml`，来源示例见
+源码目录的 `config/sync-server-collect.example.toml`。本机 CN 数据在 NVMe 的
+`/mnt/nvme-raid0-28t/fanghaizhou/crypto_cta_manager/cn-futures` 下。
 主机文件 `~/.config/cn-futures-cta-manager/host.env` 只定义数据库 URL 和同步令牌，
 变量名分别与 TOML 的 `database.url_env`、`sources.sync.token_env` 一致。
 
@@ -18,6 +23,7 @@ Manager 与同步程序分别运行。两者使用 `mode = "cn_futures"`，共�
 首次初始化仅对新建、空数据库显式运行 `cn_futures_web --init-db`；后续重启不执行 DDL。
 
 ```bash
+export CN_FUTURES_DEPLOY_ROOT="$PWD/run/cn-futures"
 pm2 start deploy/cn_futures/ecosystem.config.cjs --only cn-futures-sync-tunnel
 # 首次先用相同环境文件执行 sync-server pull --once，确认提交完整水位。
 pm2 start deploy/cn_futures/ecosystem.config.cjs --only cn-futures-sync,cn-futures-manager
@@ -40,7 +46,7 @@ Manager 的 `--frontend-root` 提供已构建网页和同源 API，总览地址�
 的私有登录文件，操作者自行读取；不在日志或 Git 中保存密码。
 通过既有反向代理或 SSH 转发访问；API 保持 loopback。没有启动 Vite 开发服务器。
 
-替换已校验的 `run/current` 后，只重启网页进程使用
+设置同一 `CN_FUTURES_DEPLOY_ROOT` 并替换已校验的 `run/current` 后，只重启网页进程使用
 `scripts/restart_native_manager.sh --execute`；省略参数先查看计划。
 脚本核对现有进程的工作目录并备份日志，不重启同步器、隧道或柜台观察进程。
 

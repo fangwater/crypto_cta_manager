@@ -2,7 +2,7 @@
 
 ## Project Scope
 
-`cn_futures_cta_manager` is a Git-history-preserving fork of `crypto_cta_manager`.
+`crypto_cta_manager` contains both Crypto CTA Manager and CN Futures CTA Manager.
 The native backend entry point is `cn_futures_web`, with code under
 `src/native_futures/`. Keep the common library/package names and upstream
 modules stable so changes can be merged. Use the shared auth and strategy tables
@@ -13,7 +13,7 @@ identity. Preserve native trading days, groups, lots and open/close semantics.
 CTP execution is forbidden on this development machine and all intranet hosts,
 including SDK initialization, probes, tests and offline SDK runs. Compilation is allowed.
 
-The upstream `crypto_cta_manager` is an independent Rust project for Exec/CTA management and
+`crypto_cta_manager` is a Rust project for Exec/CTA management and
 read-only order-history analysis. It is intentionally separate from
 `/home/fanghaizhou/crypto_nav_manager`, whose current responsibility is
 NAV-oriented order/history collection. Large Exec-specific changes belong here;
@@ -48,14 +48,15 @@ release, check the shared layout and navigation on desktop and mobile, and
 verify the SHA-256 of each published file against the local CN build. Exercise
 the same pages with CN accounts to verify data, units and account selection.
 
-Commit and publish CN product changes on `cn-futures` and deploy them to CN
-Manager only. A change to Crypto `main` or a Crypto production release requires
-an explicit request covering that target.
+Deploy CN product changes to CN Manager only. Publishing changes to the shared
+`main` or releasing to Crypto production requires an explicit request covering
+that target.
 
 ## Working Directory
 
-Work directly in `/home/fanghaizhou/cn_futures_cta_manager`. Make edits, run checks,
-and prepare deployments in this existing checkout. Do not create additional Git
+Work directly in `/home/fanghaizhou/crypto_cta_manager`. The local CN deployment
+uses its own runtime directory under `run/cn-futures` in this checkout. Make
+edits, run checks, and prepare deployments here. Do not create additional Git
 worktrees or alternate project checkouts unless the operator explicitly requests
 one. Preserve existing and concurrent edits; merge overlapping changes instead
 of overwriting them or resetting the working directory.

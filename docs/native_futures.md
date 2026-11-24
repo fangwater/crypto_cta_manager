@@ -1,8 +1,13 @@
 # 国内期货 CTA 管理与观察
 
-最后更新：2026-11-20 UTC。
+最后更新：2026-11-24 UTC。
 
-`cn_futures_cta_manager` 从 `crypto_cta_manager` 的 `757ea71` 建立共同历史的本地 fork，分支为 `cn-futures`，`upstream` 指向原 GitHub 仓库。未改包名和既有 Crypto API；原生入口和读取器集中在 `src/native_futures/` 与 `src/bin/cn_futures_web.rs`。CN 使用 Crypto 的前端入口、页面与交互，资产字段按国内合约、手数和 CNY 展示。
+国内期货代码最初从 `crypto_cta_manager` 的 `757ea71` 建立 `cn-futures`
+分支，随后通过 `ee23555` 合入共享 `main`。本机使用
+`/home/fanghaizhou/crypto_cta_manager` 这一份源码。原生入口和读取器集中在
+`src/native_futures/` 与 `src/bin/cn_futures_web.rs`。CN 使用 Crypto 的前端入口、
+页面与交互，资产字段按国内合约、手数和 CNY 展示。本机运行配置和发布包见
+[国内期货 PM2 部署](cn_futures_pm2.md)。
 
 本阶段支持易达、CTP 的账户目录、委托、事实成交、策略目录和授权，读取范围包括 SHFE、INE、DCE、CZCE、CFFEX、GFEX 六所。使用原 Manager 的登录、密码／会话实现、账户授权和私有策略目录表。国内 Manager 必须使用独立 PostgreSQL 数据库、凭据变量与 secondary 目录。Cookie 名为 `cn_cta_session`，与 Crypto 的 `cta_session` 分离。
 
@@ -134,8 +139,6 @@ cargo test --locked
 CTA_SCHEMA_TEST_SOCKET=/tmp/cta-schema-test-EXAMPLE/socket \
   cargo test --locked --test native_manager -- --ignored
 ```
-
-后续合并建议先向上游提交共用层的小改动（共享请求函数、按市场验证后的策略存储），再合入独立原生模块与构建入口。不要批量重命名 Crypto 类型或复制一套版本化内部 API。保留源库的历史和审计文档，国内运行配置与生产地址不从 Crypto 环境继承。
 
 2026-11-13 本地验证完成：550 项常规 Rust 测试通过，另在独立 PostgreSQL 集群完成 1 项完整 HTTP／权限联测；原有 32 项需特定环境或显式基准的测试仍保持跳过。新增 9 项原生状态／读库回归通过，release 构建、格式检查、Crypto 与国内两种前端构建通过。前端 lint 仅有上游两个既有未使用声明警告。
 

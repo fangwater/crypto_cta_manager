@@ -3,9 +3,14 @@
 set -euo pipefail
 umask 077
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${CN_FUTURES_DEPLOY_ROOT:-$SOURCE_ROOT}"
 ENV_FILE="${CN_FUTURES_HOST_ENV:-$HOME/.config/cn-futures-cta-manager/host.env}"
-RELEASE="${CN_FUTURES_RELEASE:-$ROOT/run/current}"
+RELEASE="$ROOT/run/current"
+if [[ "${1:-}" == pull && -L "$ROOT/run/sync-current" ]]; then
+    RELEASE="$ROOT/run/sync-current"
+fi
+RELEASE="${CN_FUTURES_RELEASE:-$RELEASE}"
 [[ -f "$ENV_FILE" ]] || { echo "Missing native Manager host environment file" >&2; exit 1; }
 set -a
 source "$ENV_FILE"

@@ -1,6 +1,7 @@
 // Secrets stay in the host-only environment file loaded by the launcher.
 const path = require('node:path')
-const root = process.env.CN_FUTURES_DEPLOY_ROOT || path.resolve(__dirname, '../..')
+const sourceRoot = path.resolve(__dirname, '../..')
+const root = path.resolve(process.env.CN_FUTURES_DEPLOY_ROOT || sourceRoot)
 const common = {
   cwd: root,
   interpreter: 'none',
@@ -14,7 +15,8 @@ const service = (name, role) => ({
   ...common,
   name,
   script: '/bin/bash',
-  args: [path.join(root, 'scripts/run_native_service.sh'), role],
+  args: [path.join(sourceRoot, 'scripts/run_native_service.sh'), role],
+  env: { CN_FUTURES_DEPLOY_ROOT: root },
   out_file: path.join(root, `logs/${name}.out.log`),
   error_file: path.join(root, `logs/${name}.err.log`),
 })
