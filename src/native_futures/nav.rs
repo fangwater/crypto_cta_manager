@@ -487,6 +487,10 @@ pub struct Fees {
     pub actual_known_cny: f64,
     pub estimated_known_cny: f64,
     pub volume_cny: f64,
+    /// Turnover of the fills behind each fee sum, so the fee rate in bp is
+    /// fee / turnover x 1e4 for exactly those fills.
+    pub actual_volume_cny: f64,
+    pub estimated_volume_cny: f64,
 }
 impl Fees {
     fn add(&mut self, volume_cny: f64, actual: Option<f64>, estimated: Option<f64>) -> Result<()> {
@@ -495,9 +499,11 @@ impl Fees {
         if let Some(fee) = actual {
             self.actual_count += 1;
             self.actual_known_cny += fee;
+            self.actual_volume_cny += volume_cny;
         } else if let Some(fee) = estimated {
             self.estimated_count += 1;
             self.estimated_known_cny += fee;
+            self.estimated_volume_cny += volume_cny;
         } else {
             self.missing_count += 1;
         }
