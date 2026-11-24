@@ -243,7 +243,11 @@ fn active(sessions: &[(u32, u32)], second: u32) -> bool {
 }
 
 fn execution_price(model: Model, execution: &Execution<'_>, prices: &MarketPrices) -> Result<f64> {
-    let mut day = execution.intent.trading_day;
+    // Exec keeps a standing target across sessions: a batch decided at a
+    // close (e.g. ni2701 at 11-23 15:00, trading day 20261123) executes at the
+    // next open, in the next trading day. Only a minute from an earlier
+    // trading day than the batch is inconsistent.
+    let target_day = execution.intent.trading_day;
     let mut traded_minutes = 0;
     let mut price_sum = 0.0;
     let mut lots = 0.0;
@@ -257,8 +261,8 @@ fn execution_price(model: Model, execution: &Execution<'_>, prices: &MarketPrice
             format!("缺少北京时间 {open} 的合约分钟行情")
         })?;
         ensure!(
-            *day.get_or_insert(minute.trading_day) == minute.trading_day,
-            "参考执行窗口超出目标交易日"
+            target_day.is_none_or(|day| minute.trading_day >= day),
+            "参考执行窗口早于目标交易日"
         );
         match model {
             Model::Twap => return minute.twap.context("缺少合约分钟 TWAP"),
@@ -410,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn five_minute_comparison_requires_closed_minutes_from_one_trading_day() -> Result<()> {
+    fn five_minute_comparison_follows_a_standing_target_into_the_next_trading_day() -> Result<()> {
         let start = reference::timestamp("2026-11-19T02:13:00Z")?;
         let market = ("SHFE".into(), "rb2701".into());
         let intents = [Intent {
@@ -476,6 +480,13 @@ mod tests {
             .get_mut(&minute_ends[4])
             .unwrap()
             .trading_day = 20261120;
+        // A close-time batch keeps executing at the next session's open.
+        assert_eq!(execution_price(Model::Twap5m, execution, window)?, 120.0);
+        window
+            .references
+            .get_mut(&minute_ends[4])
+            .unwrap()
+            .trading_day = 20261118;
         assert!(execution_price(Model::Twap5m, execution, window).is_err());
         window.references.remove(&minute_ends[4]);
         assert!(execution_price(Model::Vwap5m, execution, window).is_err());
