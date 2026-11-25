@@ -1,5 +1,5 @@
-//! Account-scoped Binance USDT target projection into native Bybit contracts.
-//! Contract aliases are explicit: digit prefixes alone do not identify an asset.
+//! Account-scoped target projection into native Bybit and OKX markets.
+//! OKX unit prefixes require a matching Binance index constituent.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
@@ -15,6 +15,9 @@ const MAX_RULE_AGE_US: i64 = 180_000_000;
 pub struct TargetProxyConfig {
     #[serde(default)]
     pub symbol_mappings: BTreeMap<String, ContractMapping>,
+    /// Interpret verified Binance USD-M unit prefixes when publishing to OKX.
+    #[serde(default)]
+    pub auto_binance_unit_prefixes: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,9 +32,20 @@ pub struct ContractMapping {
 
 impl TargetProxyConfig {
     pub fn validate(&self, venue: &str) -> Result<()> {
+        if self.auto_binance_unit_prefixes {
+            ensure!(
+                venue == "okex-futures",
+                "automatic Binance unit prefixes require an OKX source"
+            );
+            ensure!(
+                self.symbol_mappings.is_empty(),
+                "automatic OKX unit prefixes use exchange metadata exclusively"
+            );
+            return Ok(());
+        }
         ensure!(
             venue == "bybit-futures",
-            "target_proxy requires a Bybit USDT perpetual source"
+            "explicit target mappings require a Bybit USDT perpetual source"
         );
         let mut destinations = std::collections::BTreeSet::new();
         for (input, mapping) in &self.symbol_mappings {
@@ -70,6 +84,64 @@ fn is_usdt_contract(symbol: &str) -> bool {
         && symbol.ends_with("USDT")
         && symbol.to_uppercase() == symbol
         && crate::order_config::validate_exec_symbol(symbol).is_ok()
+}
+
+/// Candidate generation only. Binance's index must corroborate the venue,
+/// unscaled instrument and scale before a candidate can change a target.
+pub(crate) fn okx_unit_prefix_candidate(symbol: &str) -> Option<(&str, u32)> {
+    if !is_usdt_contract(symbol) {
+        return None;
+    }
+    let base = symbol.strip_suffix("USDT")?;
+    let asset = base.trim_start_matches(|c: char| c.is_ascii_digit());
+    let prefix = base.strip_suffix(asset)?;
+    let scale: u32 = prefix.parse().ok()?;
+    (scale > 1 && !prefix.starts_with('0') && asset.starts_with(|c: char| c.is_ascii_uppercase()))
+        .then_some((asset, scale))
+}
+
+pub(crate) struct OkxUnitPrefixes {
+    pub fetched_at_us: i64,
+    pub mappings: BTreeMap<String, ContractMapping>,
+}
+
+fn live_okx_swap(snapshot: &MarketRulesSnapshot, symbol: &str) -> bool {
+    snapshot.symbols.get(symbol).is_some_and(|rule| {
+        rule.status == "live"
+            && rule.quote_asset == "USDT"
+            && rule.contract_multiplier.is_some()
+            && symbol.strip_suffix("USDT") == Some(rule.base_asset.as_str())
+    })
+}
+
+pub(crate) fn okx_unit_prefix_destination(
+    snapshot: &MarketRulesSnapshot,
+    input: &str,
+) -> Option<(String, u32)> {
+    let (asset, scale) = okx_unit_prefix_candidate(input)?;
+    let symbol = format!("{asset}USDT");
+    (!snapshot.symbols.contains_key(input) && live_okx_swap(snapshot, &symbol))
+        .then_some((symbol, scale))
+}
+
+pub(crate) fn confirm_okx_unit_prefix(
+    input: &str,
+    symbol: String,
+    scale: u32,
+    index: &serde_json::Value,
+) -> Option<ContractMapping> {
+    let asset = symbol.strip_suffix("USDT")?;
+    let expected = format!("{asset}-USDT*{scale}");
+    let matches = index.get("symbol")?.as_str()? == input
+        && index.get("constituents")?.as_array()?.iter().any(|leg| {
+            matches!(leg["exchange"].as_str(), Some("okex" | "okx"))
+                && leg["symbol"].as_str() == Some(expected.as_str())
+        });
+    matches.then_some(ContractMapping {
+        symbol,
+        source_contract_multiplier: f64::from(scale),
+        target_contract_multiplier: 1.0,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,7 +185,7 @@ fn validate_cache_time(fetched_at_us: i64, now_us: i64) -> Result<()> {
         .context("invalid target_proxy cache timestamp")?;
     ensure!(
         fetched_at_us > 0 && (0..=MAX_RULE_AGE_US).contains(&age),
-        "Bybit target_proxy market-rules cache is stale or from the future; retry after refresh"
+        "target_proxy market-rules cache is stale or from the future; retry after refresh"
     );
     Ok(())
 }
@@ -172,9 +244,10 @@ pub fn project_cross_spread(
     Ok(result)
 }
 
-pub fn project(
+pub(crate) fn project(
     config: &TargetProxyConfig,
     snapshot: &MarketRulesSnapshot,
+    prefixes: Option<&OkxUnitPrefixes>,
     targets: &BTreeMap<String, TargetPosition>,
     shares: f64,
     now_us: i64,
@@ -183,7 +256,7 @@ pub fn project(
     snapshot.validate()?;
     ensure!(
         snapshot.execution_backend == "native" && snapshot.portfolio_id.is_none(),
-        "target_proxy requires native Bybit rules"
+        "target_proxy requires native market rules"
     );
     validate_cache_time(snapshot.fetched_at_us, now_us)?;
     crate::strategy_catalog::validate_targets(targets).map_err(anyhow::Error::msg)?;
@@ -195,27 +268,51 @@ pub fn project(
         matched: BTreeMap::new(),
         filtered: BTreeMap::new(),
     };
+    let bybit = snapshot.venue == "bybit-futures";
     for (input, target) in targets {
-        if !is_usdt_contract(input) {
-            result
-                .filtered
-                .insert(input.clone(), "not a USDT perpetual target".into());
-            continue;
+        let mut mapping = config.symbol_mappings.get(input);
+        if config.auto_binance_unit_prefixes
+            && !snapshot.symbols.contains_key(input)
+            && okx_unit_prefix_candidate(input).is_some()
+        {
+            mapping = prefixes.and_then(|proof| proof.mappings.get(input));
+            if shares > 0.0 && target.qty != 0.0 {
+                let verified = prefixes.context("OKX unit-prefix cache is loading")?;
+                validate_cache_time(verified.fetched_at_us, now_us)?;
+                let alias = mapping.with_context(|| {
+                    format!("Binance index did not confirm an OKX unit-prefix mapping for {input}")
+                })?;
+                ensure!(
+                    live_okx_swap(snapshot, &alias.symbol),
+                    "mapped OKX contract {} is unavailable for {input}",
+                    alias.symbol
+                );
+                result.rules_fetched_at_us = result.rules_fetched_at_us.min(verified.fetched_at_us);
+            }
         }
-        let mapping = config.symbol_mappings.get(input);
         let symbol = mapping.map_or(input, |m| &m.symbol);
-        let Some(rule) = snapshot.symbols.get(symbol) else {
-            result
-                .filtered
-                .insert(input.clone(), "symbol absent from Bybit cache".into());
-            continue;
-        };
-        if rule.status != "Trading" || rule.quote_asset != "USDT" {
-            result.filtered.insert(
-                input.clone(),
-                format!("Bybit contract is not tradable: {}", rule.status),
-            );
-            continue;
+        if bybit {
+            if !is_usdt_contract(input) {
+                result
+                    .filtered
+                    .insert(input.clone(), "not a USDT perpetual target".into());
+                continue;
+            }
+            let Some(rule) = snapshot.symbols.get(symbol) else {
+                result
+                    .filtered
+                    .insert(input.clone(), "symbol absent from Bybit cache".into());
+                continue;
+            };
+            if rule.status != "Trading" || rule.quote_asset != "USDT" {
+                result.filtered.insert(
+                    input.clone(),
+                    format!("Bybit contract is not tradable: {}", rule.status),
+                );
+                continue;
+            }
+        } else {
+            crate::exec_routing::symbol_market(&snapshot.venue, symbol)?;
         }
         let source_multiplier = mapping.map_or(1.0, |m| m.source_contract_multiplier);
         let target_multiplier = mapping.map_or(1.0, |m| m.target_contract_multiplier);
@@ -354,6 +451,7 @@ mod tests {
         let result = project(
             &TargetProxyConfig::default(),
             &snapshot(),
+            None,
             &input,
             3.0,
             2_000_000,
@@ -370,6 +468,7 @@ mod tests {
             project(
                 &TargetProxyConfig::default(),
                 &snapshot(),
+                None,
                 &empty,
                 1.0,
                 2_000_000
@@ -395,9 +494,10 @@ mod tests {
                         target_contract_multiplier: to,
                     },
                 )]),
+                ..Default::default()
             };
             let raw = targets(serde_json::json!({input:{"qty":-2,"signal":2}}));
-            let result = project(&config, &snapshot(), &raw, 3.0, 2_000_000).unwrap();
+            let result = project(&config, &snapshot(), None, &raw, 3.0, 2_000_000).unwrap();
             assert_eq!(result.targets[output].qty, expected);
             assert_eq!(result.targets[output].signal, 2);
             assert_eq!(
@@ -406,15 +506,131 @@ mod tests {
             );
             let clear = targets(serde_json::json!({input:{"qty":"clear","signal":-2}}));
             assert!(
-                project(&config, &snapshot(), &clear, 3.0, 2_000_000)
+                project(&config, &snapshot(), None, &clear, 3.0, 2_000_000)
                     .unwrap()
                     .targets[output]
                     .clear
             );
-            let stopped = project(&config, &snapshot(), &raw, 0.0, 2_000_000).unwrap();
+            let stopped = project(&config, &snapshot(), None, &raw, 0.0, 2_000_000).unwrap();
             assert_eq!(stopped.targets[output].qty, 0.0);
             assert!(!stopped.targets[output].clear);
         }
+    }
+
+    #[test]
+    fn okx_alias_scales_to_base_units_and_preserves_existing_market_routing() {
+        let mut rules = snapshot();
+        rules.venue = "okex-futures".into();
+        let mut pepe_rule = rules.symbols.remove("PEPEUSDT").unwrap();
+        pepe_rule.status = "live".into();
+        pepe_rule.contract_multiplier = Some("10000000".into());
+        rules.symbols = BTreeMap::from([("PEPEUSDT".into(), pepe_rule)]);
+        let config: TargetProxyConfig =
+            toml::from_str("auto_binance_unit_prefixes = true").unwrap();
+        assert!(config.validate("bybit-futures").is_err());
+        let verified = serde_json::json!({
+            "symbol": "1000PEPEUSDT",
+            "constituents": [{"exchange": "okex", "symbol": "PEPE-USDT*1000"}]
+        });
+        let mut prefixes = OkxUnitPrefixes {
+            fetched_at_us: 1_000_000,
+            mappings: BTreeMap::from([(
+                "1000PEPEUSDT".into(),
+                confirm_okx_unit_prefix("1000PEPEUSDT", "PEPEUSDT".into(), 1000, &verified)
+                    .unwrap(),
+            )]),
+        };
+        let input = targets(serde_json::json!({
+            "1000PEPEUSDT": {"qty": -2000, "signal": -1},
+            "BTC": 2,
+            "BTCUSDT": 3,
+        }));
+        let projection = project(&config, &rules, Some(&prefixes), &input, 1.5, 2_000_000).unwrap();
+        assert_eq!(projection.targets["PEPEUSDT"].qty, -3_000_000.0);
+        assert_eq!(projection.targets["PEPEUSDT"].signal, -1);
+        assert_eq!(projection.targets["BTC"].qty, 3.0);
+        assert_eq!(projection.targets["BTCUSDT"].qty, 4.5);
+        assert!(!projection.targets.contains_key("1000PEPEUSDT"));
+        assert_eq!(
+            projection.remap(&BTreeMap::from([("1000PEPEUSDT".into(), "custom")])),
+            BTreeMap::from([("PEPEUSDT".into(), "custom")])
+        );
+        let mut collision = input.clone();
+        collision.insert("PEPEUSDT".into(), TargetPosition::new(1.0, 0).unwrap());
+        assert!(project(&config, &rules, Some(&prefixes), &collision, 1.0, 2_000_000).is_err());
+
+        rules.symbols.get_mut("PEPEUSDT").unwrap().status = "suspend".into();
+        assert!(project(&config, &rules, Some(&prefixes), &input, 1.0, 2_000_000).is_err());
+        rules.symbols.get_mut("PEPEUSDT").unwrap().status = "live".into();
+        rules.fetched_at_us = 182_000_000;
+        assert!(project(&config, &rules, Some(&prefixes), &input, 1.0, 182_000_000).is_err());
+        let stopped = project(&config, &rules, Some(&prefixes), &input, 0.0, 182_000_000).unwrap();
+        assert_eq!(stopped.targets["PEPEUSDT"].qty, 0.0);
+        let clear = targets(serde_json::json!({"1000PEPEUSDT": "clear"}));
+        let cleared = project(&config, &rules, Some(&prefixes), &clear, 1.0, 182_000_000).unwrap();
+        assert!(cleared.targets["PEPEUSDT"].clear);
+        prefixes.mappings.clear();
+        assert!(project(&config, &rules, Some(&prefixes), &input, 1.0, 182_000_000).is_err());
+    }
+
+    #[test]
+    fn okx_prefixes_require_index_evidence_and_prefer_the_exact_contract() {
+        let mut rules = snapshot();
+        rules.venue = "okex-futures".into();
+        rules.symbols.retain(|symbol, _| symbol != "1000PEPEUSDT");
+        for rule in rules.symbols.values_mut() {
+            rule.status = "live".into();
+            rule.contract_multiplier = Some("10000000".into());
+        }
+        let config = TargetProxyConfig {
+            auto_binance_unit_prefixes: true,
+            ..Default::default()
+        };
+        let mut prefixes = OkxUnitPrefixes {
+            fetched_at_us: 950_000,
+            mappings: BTreeMap::new(),
+        };
+        for (input, asset, units) in [
+            ("1000PEPEUSDT", "PEPE", 1000),
+            ("10000BONKUSDT", "BONK", 10000),
+        ] {
+            let destination = format!("{asset}USDT");
+            let mut rule = rules.symbols["PEPEUSDT"].clone();
+            rule.base_asset = asset.into();
+            rules.symbols.insert(destination.clone(), rule);
+            assert_eq!(
+                okx_unit_prefix_destination(&rules, input),
+                Some((destination.clone(), units))
+            );
+            let proof = serde_json::json!({
+                "symbol": input,
+                "constituents": [{"exchange": "okex", "symbol": format!("{asset}-USDT*{units}")}],
+            });
+            assert!(
+                confirm_okx_unit_prefix(input, destination.clone(), units + 1, &proof).is_none()
+            );
+            prefixes.mappings.insert(
+                input.into(),
+                confirm_okx_unit_prefix(input, destination, units, &proof).unwrap(),
+            );
+        }
+        assert!(okx_unit_prefix_candidate("1INCHUSDT").is_none());
+        let input = targets(serde_json::json!({"1000PEPEUSDT": 2, "10000BONKUSDT": -3, "BTC": 4}));
+        assert!(project(&config, &rules, None, &input, 2.0, 1_000_001).is_err());
+        let translated = project(&config, &rules, Some(&prefixes), &input, 2.0, 1_000_001).unwrap();
+        assert_eq!(translated.targets["PEPEUSDT"].qty, 4000.0);
+        assert_eq!(translated.targets["BONKUSDT"].qty, -60000.0);
+        assert_eq!(translated.targets["BTC"].qty, 8.0);
+        assert_eq!(translated.rules_fetched_at_us, 950_000);
+        prefixes.mappings.remove("1000PEPEUSDT");
+        assert!(project(&config, &rules, Some(&prefixes), &input, 2.0, 1_000_001).is_err());
+
+        let mut exact = rules.symbols["PEPEUSDT"].clone();
+        exact.base_asset = "1000PEPE".into();
+        rules.symbols.insert("1000PEPEUSDT".into(), exact);
+        let translated = project(&config, &rules, Some(&prefixes), &input, 2.0, 1_000_001).unwrap();
+        assert_eq!(translated.targets["1000PEPEUSDT"].qty, 4.0);
+        assert!(!translated.targets.contains_key("PEPEUSDT"));
     }
 
     #[test]
@@ -422,14 +638,14 @@ mod tests {
         let input = targets(serde_json::json!({"BTCUSDT":1}));
         let config = TargetProxyConfig::default();
         for now in [999_999, 181_000_001] {
-            assert!(project(&config, &snapshot(), &input, 1.0, now).is_err());
+            assert!(project(&config, &snapshot(), None, &input, 1.0, now).is_err());
         }
         let mut bad = snapshot();
         bad.execution_backend = "ltp".into();
-        assert!(project(&config, &bad, &input, 1.0, 2_000_000).is_err());
-        assert!(project(&config, &snapshot(), &input, f64::INFINITY, 2_000_000).is_err());
+        assert!(project(&config, &bad, None, &input, 1.0, 2_000_000).is_err());
+        assert!(project(&config, &snapshot(), None, &input, f64::INFINITY, 2_000_000).is_err());
         let overflow = targets(serde_json::json!({"BTCUSDT":f64::MAX}));
-        assert!(project(&config, &snapshot(), &overflow, 2.0, 2_000_000).is_err());
+        assert!(project(&config, &snapshot(), None, &overflow, 2.0, 2_000_000).is_err());
         let mut config = TargetProxyConfig {
             symbol_mappings: BTreeMap::from([(
                 "PEPEUSDT".into(),
@@ -439,9 +655,10 @@ mod tests {
                     target_contract_multiplier: 1000.0,
                 },
             )]),
+            ..Default::default()
         };
         let collision = targets(serde_json::json!({"PEPEUSDT":2,"1000PEPEUSDT":3}));
-        assert!(project(&config, &snapshot(), &collision, 1.0, 2_000_000).is_err());
+        assert!(project(&config, &snapshot(), None, &collision, 1.0, 2_000_000).is_err());
         for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             config
                 .symbol_mappings

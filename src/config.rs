@@ -322,7 +322,7 @@ pub struct SourceConfig {
     /// Optional Exec env.sh used only to read exchange API credentials.
     #[serde(default)]
     pub env_path: Option<PathBuf>,
-    /// Optional account-scoped Binance USDT -> Bybit target filter/unit conversion.
+    /// Optional account-scoped Bybit filtering or OKX alias conversion.
     #[serde(default)]
     pub target_proxy: Option<crate::target_proxy::TargetProxyConfig>,
 }

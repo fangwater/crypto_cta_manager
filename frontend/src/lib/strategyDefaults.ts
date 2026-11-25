@@ -1,5 +1,4 @@
 import type { CatalogOrderStrategy, OrderParameters, PositionStrategy } from '../types'
-import { DEFAULT_ORDER_STRATEGY_NAME } from './orderParametersMeta'
 
 export const DEFAULT_ORDER: OrderParameters = {
   algorithm: 'batch',
@@ -46,7 +45,7 @@ export function emptyPosition(): PositionStrategy {
 
 export function emptyOrder(): CatalogOrderStrategy {
   return {
-    strategy_name: DEFAULT_ORDER_STRATEGY_NAME,
+    strategy_name: '',
     order_parameters: { ...DEFAULT_ORDER },
     updated_at_us: 0,
   }

@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::config::SourceConfig;
 use crate::redis_runtime::RedisRuntime;
+use crate::target_proxy::{OkxUnitPrefixes, confirm_okx_unit_prefix, okx_unit_prefix_destination};
 mod rapidx;
 mod unified;
 
@@ -170,6 +171,82 @@ async fn refresh_all(client: &Client, redis: &RedisRuntime, sources: &[SourceCon
             }
         }
     }
+    if sources.iter().any(|source| {
+        source.enabled
+            && source
+                .target_proxy
+                .as_ref()
+                .is_some_and(|proxy| proxy.auto_binance_unit_prefixes)
+    }) {
+        match fetch_okx_unit_prefixes(client, &mut native_snapshots).await {
+            Ok(snapshot) => {
+                info!(
+                    symbols = snapshot.mappings.len(),
+                    "OKX unit-prefix mappings refreshed"
+                );
+                redis.update_okx_unit_prefixes(snapshot);
+            }
+            Err(error) => {
+                warn!(%error, "OKX unit-prefix refresh failed; retaining last good proof")
+            }
+        }
+    }
+}
+
+async fn fetch_okx_unit_prefixes(
+    client: &Client,
+    native_snapshots: &mut BTreeMap<String, MarketRulesSnapshot>,
+) -> Result<OkxUnitPrefixes> {
+    for venue in ["binance-futures", "okex-futures"] {
+        if !native_snapshots.contains_key(venue) {
+            let snapshot = fetch_snapshot(client, venue).await?;
+            native_snapshots.insert(venue.into(), snapshot);
+        }
+    }
+    let binance = &native_snapshots["binance-futures"];
+    let okx = &native_snapshots["okex-futures"];
+    let mut mappings = BTreeMap::new();
+    let candidates: Vec<_> = binance
+        .symbols
+        .iter()
+        .filter(|(input, rule)| {
+            rule.status == "TRADING"
+                && rule.quote_asset == "USDT"
+                && input.strip_suffix("USDT") == Some(rule.base_asset.as_str())
+        })
+        .filter_map(|(input, _)| {
+            okx_unit_prefix_destination(okx, input).map(|(symbol, scale)| (input, symbol, scale))
+        })
+        .collect();
+    for batch in candidates.chunks(8) {
+        let mut lookups = tokio::task::JoinSet::new();
+        for (input, destination, scale) in batch.iter().cloned() {
+            let client = client.clone();
+            let input = input.clone();
+            lookups.spawn(async move {
+                let mut url = reqwest::Url::parse("https://fapi.binance.com/fapi/v1/constituents")?;
+                url.query_pairs_mut().append_pair("symbol", &input);
+                let index = get_json(&client, url.as_str()).await?;
+                anyhow::ensure!(
+                    index["symbol"].as_str() == Some(input.as_str())
+                        && index["constituents"].is_array(),
+                    "invalid Binance index response for {input}"
+                );
+                let mapping = confirm_okx_unit_prefix(&input, destination, scale, &index);
+                Ok::<_, anyhow::Error>((input, mapping))
+            });
+        }
+        while let Some(result) = lookups.join_next().await {
+            let (input, mapping) = result??;
+            if let Some(mapping) = mapping {
+                mappings.insert(input, mapping);
+            }
+        }
+    }
+    Ok(OkxUnitPrefixes {
+        fetched_at_us: binance.fetched_at_us.min(okx.fetched_at_us),
+        mappings,
+    })
 }
 
 fn validate_portfolio(id: &str) -> Result<()> {

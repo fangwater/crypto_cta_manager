@@ -100,6 +100,7 @@ pub struct RedisRuntime {
     inner: Arc<Mutex<RedisRuntimeInner>>,
     bnb_reserve_sources: Arc<std::sync::RwLock<std::collections::BTreeSet<String>>>,
     market_rules: Arc<std::sync::RwLock<BTreeMap<String, Arc<MarketRulesSnapshot>>>>,
+    okx_unit_prefixes: Arc<std::sync::RwLock<Option<Arc<crate::target_proxy::OkxUnitPrefixes>>>>,
 }
 
 struct RedisRuntimeInner {
@@ -116,6 +117,7 @@ impl RedisRuntime {
             settings: Arc::new(settings),
             bnb_reserve_sources: Arc::new(std::sync::RwLock::new(Default::default())),
             market_rules: Arc::new(std::sync::RwLock::new(Default::default())),
+            okx_unit_prefixes: Arc::new(std::sync::RwLock::new(None)),
             inner: Arc::new(Mutex::new(RedisRuntimeInner {
                 client,
                 connection: None,
@@ -940,6 +942,13 @@ impl RedisRuntime {
         }
     }
 
+    pub(crate) fn update_okx_unit_prefixes(&self, snapshot: crate::target_proxy::OkxUnitPrefixes) {
+        *self
+            .okx_unit_prefixes
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(snapshot));
+    }
+
     pub(crate) fn project_targets(
         &self,
         source: &SourceConfig,
@@ -958,6 +967,13 @@ impl RedisRuntime {
         let Some(config) = &source.target_proxy else {
             return Ok(None);
         };
+        if config.auto_binance_unit_prefixes
+            && !targets
+                .keys()
+                .any(|symbol| crate::target_proxy::okx_unit_prefix_candidate(symbol).is_some())
+        {
+            return Ok(None);
+        }
         config.validate(&source.venue)?;
         let key = format!("{}:{}:market_rules", source.id, source.venue);
         let snapshot = self
@@ -966,9 +982,26 @@ impl RedisRuntime {
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
             .cloned()
-            .context("Bybit target_proxy market-rules cache is loading; retry after refresh")?;
-        crate::target_proxy::project(config, &snapshot, targets, shares, next_updated_at_us(None))
-            .map(Some)
+            .with_context(|| {
+                format!(
+                    "{} target_proxy market-rules cache is loading; retry after refresh",
+                    source.id
+                )
+            })?;
+        let prefixes = self
+            .okx_unit_prefixes
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        crate::target_proxy::project(
+            config,
+            &snapshot,
+            prefixes.as_deref(),
+            targets,
+            shares,
+            next_updated_at_us(None),
+        )
+        .map(Some)
     }
 
     async fn lock_for_request(

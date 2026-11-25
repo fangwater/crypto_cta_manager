@@ -13,13 +13,17 @@ import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { DEFAULT_ORDER_STRATEGY_NAME, orderParameterMeta } from '../../lib/orderParametersMeta'
 import { emptyOrder } from '../../lib/strategyDefaults'
+import type { CatalogOrderStrategy } from '../../types'
 
 export function OrderStrategyPage() {
   const { user } = useAuth()
   const { orders, loading, error, reloadCatalog } = useStrategyCatalog()
   const { saving, error: writeError, notice, withWrite } = useConfigWrite()
-  const [selectedOrder, setSelectedOrder] = useState(emptyOrder)
+  const [orderDraft, setOrderDraft] = useState<CatalogOrderStrategy | null>(null)
   const [experimentalToken, setExperimentalToken] = useState('')
+  const selectedOrder = orderDraft
+    ?? orders.find((entry) => entry.strategy_name === DEFAULT_ORDER_STRATEGY_NAME)
+    ?? emptyOrder()
   const originalOrder = orders.find((entry) => entry.strategy_name === selectedOrder.strategy_name)
   const canEdit = !originalOrder || originalOrder.can_configure === true
   const owner = originalOrder ? (originalOrder.owner ?? '共享模板') : user?.username
@@ -51,12 +55,12 @@ export function OrderStrategyPage() {
             onSelect={(name) => {
               const item = orders.find((entry) => entry.strategy_name === name)
               if (item) {
-                setSelectedOrder(item)
+                setOrderDraft(item)
                 setExperimentalToken('')
               }
             }}
             onCreate={() => {
-              setSelectedOrder(emptyOrder())
+              setOrderDraft(emptyOrder())
               setExperimentalToken('')
             }}
             allowCreate
@@ -87,7 +91,7 @@ export function OrderStrategyPage() {
                   if (!canEdit) return
                   void withWrite(async () => {
                     const saved = await saveOrderStrategy(selectedOrder, experimentalToken)
-                    setSelectedOrder(saved)
+                    setOrderDraft(saved)
                     setExperimentalToken('')
                     await reloadCatalog()
                   })
@@ -98,8 +102,9 @@ export function OrderStrategyPage() {
                   <Input
                     value={selectedOrder.strategy_name}
                     placeholder={DEFAULT_ORDER_STRATEGY_NAME}
+                    required
                     onChange={(event) =>
-                      setSelectedOrder({ ...selectedOrder, strategy_name: event.target.value })
+                      setOrderDraft({ ...selectedOrder, strategy_name: event.target.value })
                     }
                   />
                   <FieldHint>例如 {DEFAULT_ORDER_STRATEGY_NAME}，不要复用 CTA 仓位策略名。</FieldHint>
@@ -107,7 +112,7 @@ export function OrderStrategyPage() {
                 <fieldset disabled={!canEdit || saving} className="grid min-w-0 gap-4">
                   <OrderParametersForm
                     value={selectedOrder.order_parameters}
-                    onChange={(order_parameters) => setSelectedOrder({ ...selectedOrder, order_parameters })}
+                    onChange={(order_parameters) => setOrderDraft({ ...selectedOrder, order_parameters })}
                   />
                   {isExperimental && (
                     <Label>
@@ -135,7 +140,7 @@ export function OrderStrategyPage() {
                       onClick={() =>
                         void withWrite(async () => {
                           await deleteOrderStrategy(selectedOrder.strategy_name)
-                          setSelectedOrder(emptyOrder())
+                          setOrderDraft(emptyOrder())
                           await reloadCatalog()
                         })
                       }
