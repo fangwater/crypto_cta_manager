@@ -50,7 +50,7 @@ pub(crate) fn unavailable(reason: &str) -> Vec<Reference> {
         .collect()
 }
 
-/// A target-batch receipt: the account net target per contract.
+/// A target-batch or stop/retire receipt: the account net target per contract.
 #[derive(Deserialize)]
 struct Batch {
     source_id: String,
@@ -72,8 +72,10 @@ pub(crate) async fn timeline(
     filtered: bool,
 ) -> Result<Vec<Reference>> {
     let receipts: Vec<(i64, Value, Option<String>)> = sqlx::query_as(
-        "SELECT received_at_us,receipt,request->>'trading_day' FROM cta_native_netting_events
-         WHERE source_id=$1 AND kind='target_batch' AND revision <= $2
+        "SELECT received_at_us,receipt,COALESCE(request->>'trading_day',receipt->>'trading_day')
+         FROM cta_native_netting_events
+         WHERE source_id=$1 AND kind IN ('target_batch','strategy_stop','strategy_retire')
+           AND revision <= $2
            AND received_at_us BETWEEN $3 AND $4 ORDER BY received_at_us,revision LIMIT 20001",
     )
     .bind(&report.source_id)

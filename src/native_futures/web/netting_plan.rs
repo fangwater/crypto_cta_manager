@@ -195,9 +195,11 @@ async fn plan(service: &Service, id: &str, observe_only: bool) -> Result<PlanChe
         strategies: state.targets.clone(),
     };
     if observe_only {
+        // Batches keep the latest group decision; stop/retire carry event time.
+        let observed = state.decision_us.max(state.plan_decision_us.unwrap_or(0));
         return Ok(check(
             PlanStatus::ObserveOnly,
-            Some(payload(state.decision_us)),
+            Some(payload(observed)),
             None,
         ));
     }
@@ -207,7 +209,8 @@ async fn plan(service: &Service, id: &str, observe_only: bool) -> Result<PlanChe
     if decision_us > crate::native_futures::now_us() {
         return Ok(check(PlanStatus::DecisionInFuture, None, Some(decision_us)));
     }
-    // No lease: a ready plan stands until the next batch replaces it.
+    // No lease: a ready plan stands until the next batch or member event
+    // replaces it. An empty roster is a ready plan with zero strategy targets.
     Ok(check(PlanStatus::Ready, Some(payload(decision_us)), None))
 }
 
@@ -340,6 +343,30 @@ mod tests {
             assert_eq!(response.headers()["x-cta-plan-batch-id"], "batch-7");
             assert_eq!(response.headers()["x-cta-plan-target-revision"], "7");
         }
+    }
+
+    #[test]
+    fn an_empty_roster_is_a_ready_flatten_plan_with_zero_strategy_targets() {
+        let plan = || Plan {
+            source_id: "source".into(),
+            batch_id: "retire:drop".into(),
+            target_revision: 9,
+            decision_us: 1_794_000_000_000_000,
+            strategies: Strategies::new(),
+        };
+        let target = PositionTarget::try_from(plan()).unwrap();
+        assert!(target.strategy_targets.is_empty());
+        assert_eq!(target.target_revision, 9);
+        let check = PlanCheck {
+            status: PlanStatus::Ready,
+            batch_id: "retire:drop".into(),
+            target_revision: 9,
+            target: Some(plan()),
+            recheck_us: None,
+        };
+        let update = check.into_update().unwrap();
+        assert_eq!(update.status, PlanStatus::Ready as i32);
+        assert!(update.target.unwrap().strategy_targets.is_empty());
     }
 
     #[tokio::test]

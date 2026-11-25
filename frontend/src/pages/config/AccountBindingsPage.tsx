@@ -9,11 +9,14 @@ import {
   getAccountStudio,
   getDashboard,
   listPositionAccess,
+  nativeEventId,
   publishAccountBinding,
+  retireNativeStrategies,
   saveAccountBinding,
   saveAccountContractLeverage,
   saveAccountExecOrderRateLimits,
   saveBindingShares,
+  stopNativeStrategies,
 } from '../../api'
 import {
   ContractLeveragePanel,
@@ -35,7 +38,7 @@ import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { readSourceId, routes } from '../../lib/routes'
 import { accountSignalConfigPath } from '../../lib/signalConfigLinks'
 import { executionMarketLabel, executionSymbolPlaceholder, symbolMatchesExecMarket } from '../../format'
-import type { AccountStudio, DashboardSnapshot, ExecOrderRateLimits } from '../../types'
+import type { AccountBinding, AccountStudio, DashboardSnapshot, ExecOrderRateLimits } from '../../types'
 
 const MAX_EXEC_ORDER_RATE_LIMIT = 2_147_483_647
 
@@ -196,6 +199,24 @@ export function AccountBindingsPage() {
       })
     return () => controller.abort()
   }, [accounts, applyExecOrderRateLimits, loadStudio, native, sourceId])
+
+  // CN netting members: stop sends zero targets now; delete needs a flat Exec ledger.
+  const nativeMembersEditable = native && !!studio && studio.source_id === sourceId && !!studio.native_netting
+
+  async function changeNativeMember(binding: AccountBinding, action: 'stop' | 'retire') {
+    if (!studio?.native_netting || !binding.strategy_group) throw new Error('策略归因账本暂不可用，请刷新后重试。')
+    const change = {
+      event_id: nativeEventId(action),
+      expected_revision: studio.native_netting.revision,
+      strategy_group: binding.strategy_group,
+      members: [binding.position_strategy_name],
+      note: `${action === 'stop' ? '停止并清仓' : '删除配置'} ${binding.position_strategy_name}（策略启用页）`,
+    }
+    if (action === 'stop') await stopNativeStrategies(sourceId, change)
+    else await retireNativeStrategies(sourceId, change)
+    await loadStudio(sourceId)
+    await reloadCatalog()
+  }
 
   async function bindExecution(
     positionStrategyName: string,
@@ -483,6 +504,9 @@ export function AccountBindingsPage() {
                   shareDraft.trim() !== '' && Number.isFinite(parsedShares) && parsedShares >= 0
                 const sharesChanged = validShares && parsedShares !== binding.shares
                 const signalConfigPath = accountSignalConfigPath(selectedPublicAccount?.source_id ?? sourceId, binding.position_strategy_name)
+                const stopped = native ? !!binding.native_stopped : binding.shares === 0
+                const execLots = Object.entries(binding.native_exec_lots ?? {}).filter(([, lots]) => lots !== 0)
+                const execFlat = !!binding.native_exec_lots && execLots.length === 0
                 return <Card key={binding.binding_name}>
                   <CardContent className="space-y-4 pt-5">
                     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -495,12 +519,12 @@ export function AccountBindingsPage() {
                       </div>
                       <span
                         className={
-                          binding.shares === 0
+                          stopped
                             ? 'rounded-full bg-slate-100 px-3 py-1 text-sm font-semibold text-subtle'
                             : 'rounded-full bg-brand-soft px-3 py-1 text-sm font-semibold text-brand'
                         }
                       >
-                        {native ? '手数归因' : binding.shares === 0 ? '已停止' : `${binding.shares} 份`}
+                        {native ? (stopped ? '已停止' : '手数归因') : binding.shares === 0 ? '已停止' : `${binding.shares} 份`}
                       </span>
                     </div>
                     <div className="flex flex-wrap items-end gap-3">
@@ -619,7 +643,44 @@ export function AccountBindingsPage() {
                             <Trash2 size={15} /> 删除配置
                           </Button>
                         )}
+                        {nativeMembersEditable && !stopped && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={saving}
+                            onClick={() =>
+                              void withWrite(async () => {
+                                await changeNativeMember(binding, 'stop')
+                                return `已停止 ${binding.binding_name}；零目标已发送，平仓成交继续归属原策略`
+                              })
+                            }
+                          >
+                            <Power size={15} /> 停止并清仓
+                          </Button>
+                        )}
+                        {nativeMembersEditable && stopped && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={saving || !execFlat}
+                            onClick={() =>
+                              void withWrite(async () => {
+                                await changeNativeMember(binding, 'retire')
+                                return `已删除 ${binding.binding_name} 的策略配置；Exec 账本已清仓，历史净值保留`
+                              })
+                            }
+                          >
+                            <Trash2 size={15} /> 删除配置
+                          </Button>
+                        )}
                       </div>
+                      {nativeMembersEditable && stopped && !execFlat && (
+                        <FieldHint className="w-full">
+                          {binding.native_exec_lots
+                            ? `Exec 账本仍有持仓（${execLots.map(([market, lots]) => `${market} ${lots} 手`).join('，')}），清仓完成后可删除配置。`
+                            : 'Exec 账本暂不可读，无法确认已清仓；稍后刷新再删除配置。'}
+                        </FieldHint>
+                      )}
                     </div>
                     <BindingTargetPreview key={`${sourceId}:${binding.binding_name}:${binding.updated_at_us}:${positions.find((p) => p.strategy_name === binding.position_strategy_name)?.updated_at_us}`} sourceId={sourceId} bindingName={binding.binding_name} />
                   </CardContent>

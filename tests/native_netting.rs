@@ -50,6 +50,11 @@ async fn atomic_batches_survive_reconnects_and_serialize_writers() -> Result<()>
     sqlx::raw_sql(include_str!("../scripts/apply_native_netting_schema.sql"))
         .execute(&pool)
         .await?;
+    sqlx::raw_sql(include_str!(
+        "../scripts/apply_native_netting_retirement_schema.sql"
+    ))
+    .execute(&pool)
+    .await?;
     let catalog_count: i64 = sqlx::query_scalar("SELECT count(*) FROM cta_position_strategies")
         .fetch_one(&pool)
         .await?;
@@ -387,6 +392,79 @@ async fn atomic_batches_survive_reconnects_and_serialize_writers() -> Result<()>
         .json()
         .await?;
     assert_eq!(history.len(), 5);
+    // 停止并清仓 then 删除配置: each event issues a new plan revision.
+    let admin_cookie = format!("cn_cta_session={admin_token}");
+    let member = |id: &str, revision: i64, name: &str| {
+        json!({"event_id":id,"expected_revision":revision,"strategy_group":"test",
+            "members":[name],"note":"operator retirement"})
+    };
+    let post = |path: &str, request: &Value| {
+        client
+            .post(format!("{root}/netting/{path}"))
+            .header("Cookie", &admin_cookie)
+            .json(request)
+            .send()
+    };
+    assert_eq!(
+        post("retire", &member("early", 4, "b-1h")).await?.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let stopped: Value = post("stop", &member("halt-b", 4, "b-1h"))
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(stopped["batch_id"], "stop:halt-b");
+    assert_eq!(stopped["execution_plan"]["target_revision"], 5);
+    assert_eq!(stopped["execution_plan"]["strategies"]["b-1h"][market], 0);
+    let again: Value = post("stop", &member("halt-b", 4, "b-1h"))
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(again, stopped);
+    assert_eq!(
+        post("stop", &member("halt-b2", 4, "a-1h")).await?.status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    let mut zeroed = request.clone();
+    zeroed.batch_id = "after-stop".into();
+    zeroed.expected_revision = 5;
+    zeroed.decision_us = now_us() - 500;
+    let receipt = store::batch(&pool, "source", &zeroed, 1).await?;
+    assert_eq!(receipt["execution_plan"]["strategies"]["b-1h"][market], 0);
+    let retired: Value = post("retire", &member("drop-b", 6, "b-1h"))
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(retired["retired"], json!(["b-1h"]));
+    post("stop", &member("halt-a", 7, "a-1h"))
+        .await?
+        .error_for_status()?;
+    let emptied: Value = post("retire", &member("drop-a", 8, "a-1h"))
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(emptied["removed_group"], "test");
+    let plan: Value = client
+        .get(format!("{root}/netting/execution-plan"))
+        .header("Cookie", &admin_cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(plan["strategies"], json!({}));
+    assert_eq!(plan["net_targets"][market], 0);
+    assert_eq!(plan["target_revision"], 9);
+    let targets: Value = sqlx::query_scalar(
+        "SELECT targets FROM cta_position_strategies WHERE strategy_name='a-1h'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(targets, json!({}));
     server.abort();
     pool.close().await;
     sqlx::raw_sql(AssertSqlSafe(format!("DROP DATABASE {database}")))

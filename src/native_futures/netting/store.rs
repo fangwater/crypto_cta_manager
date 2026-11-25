@@ -326,6 +326,95 @@ pub async fn batch(
     Ok(serde_json::to_value(receipt)?)
 }
 
+/// 停止并清仓: zero targets and a new live plan, committed with the catalog.
+pub async fn stop(
+    pool: &PgPool,
+    source: &str,
+    request: &MemberChange,
+    user_id: i64,
+) -> Result<serde_json::Value> {
+    valid_id(&request.event_id)?;
+    let id = format!("stop:{}", request.event_id);
+    let hash = fingerprint(request)?;
+    let mut tx = pool.begin().await?;
+    let state = locked(&mut tx, source).await?;
+    if let Some(previous) = existing(&mut tx, source, &id, &hash).await? {
+        return Ok(previous);
+    }
+    let (next, receipt) = state.stop(request, super::super::now_us())?;
+    catalog(&mut tx, &next).await?;
+    save(
+        &mut tx,
+        &next,
+        EventMeta {
+            id: &id,
+            kind: "strategy_stop",
+            hash: &hash,
+            batch: next.batch_id.as_deref(),
+            user_id,
+        },
+        request,
+        &receipt,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(serde_json::to_value(receipt)?)
+}
+
+/// 删除配置: removes flat stopped members (and an emptied group with its
+/// publish tokens). Name ownership stays reserved like rebase-retired members,
+/// so the attribution history keeps a single owner.
+pub async fn retire(
+    pool: &PgPool,
+    source: &str,
+    request: &MemberChange,
+    cut: &Anchor,
+    exec_ledger: &ExecLedger,
+    user_id: i64,
+) -> Result<serde_json::Value> {
+    valid_id(&request.event_id)?;
+    let id = format!("retire:{}", request.event_id);
+    let hash = fingerprint(request)?;
+    let mut tx = pool.begin().await?;
+    let state = locked(&mut tx, source).await?;
+    if let Some(previous) = existing(&mut tx, source, &id, &hash).await? {
+        return Ok(previous);
+    }
+    let (next, receipt) = state.retire(request, cut, exec_ledger, super::super::now_us())?;
+    let retired: Vec<_> = request.members.iter().collect();
+    sqlx::query("UPDATE cta_position_strategies SET targets='{}'::jsonb,updated_at_us=$2 WHERE strategy_name = ANY($1)")
+        .bind(&retired)
+        .bind(super::super::now_us())
+        .execute(&mut *tx)
+        .await?;
+    if let Some(group) = &receipt.removed_group {
+        sqlx::query(
+            "DELETE FROM cta_native_netting_publishers WHERE source_id=$1 AND strategy_group=$2",
+        )
+        .bind(source)
+        .bind(group)
+        .execute(&mut *tx)
+        .await?;
+    }
+    catalog(&mut tx, &next).await?;
+    save(
+        &mut tx,
+        &next,
+        EventMeta {
+            id: &id,
+            kind: "strategy_retire",
+            hash: &hash,
+            batch: next.batch_id.as_deref(),
+            user_id,
+        },
+        request,
+        &receipt,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(serde_json::to_value(receipt)?)
+}
+
 pub async fn history(
     pool: &PgPool,
     source: &str,

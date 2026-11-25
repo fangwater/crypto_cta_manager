@@ -571,6 +571,51 @@ export function getNativeContractRates(sourceId: string, contract: string, signa
   )
 }
 
+/** 停止并清仓 / 删除配置 request for named members of one native strategy group. */
+export interface NativeMemberChange {
+  event_id: string
+  expected_revision: number
+  strategy_group: string
+  members: string[]
+  note: string
+}
+
+export interface NativeMemberReceipt {
+  kind: 'strategy_stop' | 'strategy_retire'
+  source_id: string
+  event_id: string
+  revision: number
+  batch_id: string
+  strategy_group: string
+  members: string[]
+  stopped: string[]
+  retired: string[]
+  removed_group?: string
+  net_targets: Record<string, number>
+}
+
+/** Event ids admit ASCII letters, digits, `_`, `-`, `.` and `:`. */
+export function nativeEventId(action: 'stop' | 'retire') {
+  return `ui-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function postNativeMemberChange(sourceId: string, action: 'stop' | 'retire', change: NativeMemberChange) {
+  return requestJson<NativeMemberReceipt>(
+    `/native/sources/${encodeURIComponent(sourceId)}/netting/${action}`,
+    { method: 'POST', body: change },
+  )
+}
+
+/** Zeroes the members' targets and issues a new Exec plan at once. */
+export function stopNativeStrategies(sourceId: string, change: NativeMemberChange) {
+  return postNativeMemberChange(sourceId, 'stop', change)
+}
+
+/** Removes stopped members once the Exec ledger holds no lots for them. */
+export function retireNativeStrategies(sourceId: string, change: NativeMemberChange) {
+  return postNativeMemberChange(sourceId, 'retire', change)
+}
+
 export function getAccountExecOrderRateLimits(sourceId: string, signal?: AbortSignal) {
   return requestJson<ExecOrderRateLimits>(
     `/catalog/accounts/${encodeURIComponent(sourceId)}/exec-order-rate-limits`,

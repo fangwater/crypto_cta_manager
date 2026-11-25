@@ -19,6 +19,8 @@ pub(super) fn routes() -> Router<Service> {
             post(extend_scope),
         )
         .route("/api/native/sources/{id}/netting/rebase", post(rebase))
+        .route("/api/native/sources/{id}/netting/stop", post(stop))
+        .route("/api/native/sources/{id}/netting/retire", post(retire))
         .route(
             "/api/native/sources/{id}/netting/execution-plan",
             get(execution_plan),
@@ -92,7 +94,7 @@ async fn authorized(
     Ok(state)
 }
 
-async fn with_source<T: Send + 'static>(
+pub(super) async fn with_source<T: Send + 'static>(
     s: &Service,
     id: &str,
     read: impl FnOnce(&crate::native_futures::config::Source, &rocksdb::DB) -> anyhow::Result<T>
@@ -174,6 +176,7 @@ async fn read(
     .await?;
     body(
         json!({"portfolio":state,"net_targets":state.net_targets()?,"exec_ledger":exec_ledger,
+        "stopped":state.stopped,"retired":state.retired,
         "account_basis":"portfolio.positions are the anchor allocation; exec_ledger folds Exec's cn_uniform_orders"}),
     )
 }
@@ -321,6 +324,83 @@ async fn batch(
     // Like crypto targets, acceptance never waits on the Exec replica: Exec
     // checks the trading day and account itself when it admits the target.
     let receipt = store::batch(&s.pool, &id, &request, user.user_id)
+        .await
+        .map_err(failure)?;
+    s.plan_changed(&id);
+    body(receipt)
+}
+
+/// Loads the portfolio after account access, then requires configure rights
+/// on every named member (the strategies being stopped or retired).
+async fn member_change(
+    s: &Service,
+    user: &AuthUser,
+    access: &SourceAccess,
+    id: &str,
+    request: &model::MemberChange,
+    prefix: &str,
+) -> Result<Option<serde_json::Value>, ApiError> {
+    authorize(s, user, access, id, std::iter::empty(), true).await?;
+    store::load(&s.pool, id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "账户尚未初始化策略归因账本".into()))?;
+    authorize(s, user, access, id, request.members.iter(), true).await?;
+    model::valid_id(&request.event_id).map_err(bad)?;
+    if request.note.trim().is_empty() || request.note.len() > 4096 {
+        return Err(bad("请填写不超过 4096 字节的说明"));
+    }
+    store::replay(
+        &s.pool,
+        id,
+        &format!("{prefix}:{}", request.event_id),
+        request,
+    )
+    .await
+    .map_err(failure)
+}
+
+async fn stop(
+    State(s): State<Service>,
+    Extension(user): Extension<AuthUser>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    Json(request): Json<model::MemberChange>,
+) -> ApiResult {
+    let _guard = s.catalog_lock.lock().await;
+    if let Some(receipt) = member_change(&s, &user, &access, &id, &request, "stop").await? {
+        return body(receipt);
+    }
+    // Like a batch, the zero targets never wait on the Exec replica.
+    let receipt = store::stop(&s.pool, &id, &request, user.user_id)
+        .await
+        .map_err(failure)?;
+    s.plan_changed(&id);
+    body(receipt)
+}
+
+async fn retire(
+    State(s): State<Service>,
+    Extension(user): Extension<AuthUser>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    Json(request): Json<model::MemberChange>,
+) -> ApiResult {
+    let _guard = s.catalog_lock.lock().await;
+    if let Some(receipt) = member_change(&s, &user, &access, &id, &request, "retire").await? {
+        return body(receipt);
+    }
+    let current = store::load(&s.pool, &id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "账户尚未初始化策略归因账本".into()))?
+        .anchor;
+    let note = request.note.clone();
+    // The same Exec ledger fold as extend-scope/rebase, at a fresh cut.
+    let (cut, exec_ledger) = with_source(&s, &id, move |source, db| {
+        current.verify(source, db)?;
+        model::Anchor::capture(source, db, note)
+    })
+    .await?;
+    let receipt = store::retire(&s.pool, &id, &request, &cut, &exec_ledger, user.user_id)
         .await
         .map_err(failure)?;
     s.plan_changed(&id);

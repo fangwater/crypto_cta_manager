@@ -93,7 +93,9 @@ async fn publication(
     super::netting::authorize(&s, &user, &access, &id, group.members.iter(), true).await?;
     body(
         json!({"source_id":id,"strategy_group":selection.strategy_group,"revision":state.revision,
-        "members":group.members,"contracts":state.contracts.keys().collect::<Vec<_>>(),"group_decision_us":group.decision_us}),
+        "members":group.members,"contracts":state.contracts.keys().collect::<Vec<_>>(),"group_decision_us":group.decision_us,
+        // Stopped members stay in every batch; Manager keeps their targets at zero.
+        "stopped":group.members.intersection(&state.stopped).collect::<Vec<_>>()}),
     )
 }
 

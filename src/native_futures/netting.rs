@@ -140,6 +140,17 @@ pub struct ExtendScope {
     pub note: String,
 }
 
+/// Stop (停止并清仓) or retire (删除配置) named members of one strategy group.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberChange {
+    pub event_id: String,
+    pub expected_revision: i64,
+    pub strategy_group: String,
+    pub members: BTreeSet<String>,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetBatch {
@@ -274,9 +285,21 @@ pub struct Portfolio {
     pub target_trading_day: Option<String>,
     pub target_revision: i64,
     pub last_strategy_group: Option<String>,
+    /// Decision time carried by the current execution plan: the batch decision,
+    /// or the event time of a stop/retirement. Legacy states derive it from
+    /// `last_strategy_group`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_decision_us: Option<i64>,
     pub strategy_groups: BTreeMap<String, StrategyGroup>,
     pub contracts: BTreeMap<String, Contract>,
     pub targets: Strategies,
+    /// Members whose targets Manager forces to zero, whatever a batch submits.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub stopped: BTreeSet<String>,
+    /// Former members removed once Exec held no lots for them. Their anchor rows
+    /// and historical Exec records stay part of the attribution history.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub retired: BTreeSet<String>,
     /// Strategy allocation at the anchor, including [`UNALLOCATED`]. Later changes
     /// are Exec's uniform-order records; Manager never advances these rows itself.
     pub positions: BTreeMap<String, BTreeMap<String, Position>>,
@@ -306,9 +329,44 @@ pub struct ExecutionPlan {
     pub batch_id: Option<String>,
     pub target_revision: i64,
     pub account_revision: i64,
-    /// Complete registered roster; Exec nets, crosses and attributes them.
+    /// The plan's own decision time and native trading day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_us: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trading_day: Option<String>,
+    /// Complete registered roster, possibly empty (flatten the account); Exec
+    /// nets, crosses and attributes them. Stopped members carry zero targets.
     pub strategies: Strategies,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub stopped: BTreeSet<String>,
     pub net_targets: Quantities,
+}
+
+/// Receipt of a stop or retirement event; it publishes a new execution plan.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemberReceipt {
+    /// `strategy_stop` or `strategy_retire`.
+    pub kind: String,
+    pub source_id: String,
+    pub event_id: String,
+    pub revision: i64,
+    pub batch_id: String,
+    pub strategy_group: String,
+    pub members: BTreeSet<String>,
+    pub note: String,
+    pub decision_us: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trading_day: Option<String>,
+    pub stopped: BTreeSet<String>,
+    pub retired: BTreeSet<String>,
+    /// The group left empty by a retirement, removed with its publish tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_group: Option<String>,
+    /// Cut of the execution store whose Exec ledger fold proved the members flat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<Anchor>,
+    pub net_targets: Quantities,
+    pub execution_plan: ExecutionPlan,
 }
 
 /// Named-strategy lots per contract folded from `cn_uniform_orders` at a cut.
@@ -390,7 +448,8 @@ impl Portfolio {
             positions,
             note: request.note.clone(),
         };
-        let mut next = Self::initialize(&self.source_id, &init, exec_ledger, anchor)?;
+        // After retirements the roster may be empty; the account stays anchored.
+        let mut next = Self::build(&self.source_id, &init, exec_ledger, anchor, true)?;
         for (market, position) in &next.account {
             ensure!(
                 position.quantity() == *account.get(market).unwrap_or(&0),
@@ -401,6 +460,22 @@ impl Portfolio {
         // Keep the next issued target newer than any target the Exec has seen.
         next.target_revision = self.target_revision;
         next.baseline_revision = next.revision;
+        // Keep the live trading day so a later stop/retirement still delivers.
+        next.target_trading_day = self.target_trading_day.clone();
+        next.retired = self.retired.clone();
+        next.stopped = self
+            .stopped
+            .iter()
+            .filter(|name| next.targets.contains_key(*name))
+            .cloned()
+            .collect();
+        for name in &next.stopped {
+            next.targets
+                .get_mut(name)
+                .into_iter()
+                .flat_map(|rows| rows.values_mut())
+                .for_each(|lots| *lots = 0);
+        }
         Ok(next)
     }
 
@@ -413,14 +488,26 @@ impl Portfolio {
         exec_ledger: &ExecLedger,
         anchor: Anchor,
     ) -> Result<Self> {
+        Self::build(source_id, request, exec_ledger, anchor, false)
+    }
+
+    /// `allow_empty` admits a roster without groups (a rebase after retirements).
+    fn build(
+        source_id: &str,
+        request: &Initialize,
+        exec_ledger: &ExecLedger,
+        anchor: Anchor,
+        allow_empty: bool,
+    ) -> Result<Self> {
         anchor.validate()?;
         ensure!(
             anchor.source_id == source_id && anchor.note == request.note,
             "attribution anchor does not match source/request"
         );
         let at_us = anchor.snapshot_us;
+        let least = usize::from(!allow_empty);
         ensure!(
-            (1..=32).contains(&request.strategy_groups.len()),
+            (least..=32).contains(&request.strategy_groups.len()),
             "require 1..32 strategy groups"
         );
         let mut strategies = BTreeSet::new();
@@ -436,7 +523,7 @@ impl Portfolio {
         }
 
         ensure!(
-            (1..=128).contains(&strategies.len())
+            (least..=128).contains(&strategies.len())
                 && (1..=64).contains(&request.contracts.len())
                 && at_us > 0
                 && !request.note.trim().is_empty()
@@ -525,6 +612,7 @@ impl Portfolio {
             target_trading_day: None,
             target_revision: 0,
             last_strategy_group: None,
+            plan_decision_us: None,
             strategy_groups: request
                 .strategy_groups
                 .iter()
@@ -540,6 +628,8 @@ impl Portfolio {
                 .collect(),
             contracts: request.contracts.clone(),
             targets,
+            stopped: BTreeSet::new(),
+            retired: BTreeSet::new(),
             positions,
             account,
             anchor,
@@ -593,6 +683,10 @@ impl Portfolio {
                 name != UNALLOCATED && !self.targets.contains_key(name),
                 "strategy {name} already registered"
             );
+            ensure!(
+                !self.retired.contains(name),
+                "strategy {name} was retired from this account; use a new strategy name"
+            );
         }
         for (market, contract) in &request.contracts {
             super::validate_market(market)?;
@@ -643,14 +737,22 @@ impl Portfolio {
         Ok(next)
     }
 
-    /// Decision time of the active live batch (one published with a native
-    /// trading day). Exec targets have no lease: the plan stands until replaced.
+    /// Decision time of the current plan. States written before plans carried
+    /// their own time derive it from the group of the last batch.
+    pub(crate) fn plan_decision(&self) -> Option<i64> {
+        self.plan_decision_us.or_else(|| {
+            let group = self
+                .strategy_groups
+                .get(self.last_strategy_group.as_ref()?)?;
+            Some(group.decision_us)
+        })
+    }
+
+    /// Decision time of the active live plan (one carrying a native trading
+    /// day). Exec targets have no lease: the plan stands until replaced.
     pub(crate) fn exec_decision_us(&self) -> Option<i64> {
         self.target_trading_day.as_ref()?;
-        let group = self
-            .strategy_groups
-            .get(self.last_strategy_group.as_ref()?)?;
-        Some(group.decision_us)
+        self.plan_decision()
     }
 
     pub fn execution_plan(&self) -> Result<ExecutionPlan> {
@@ -659,9 +761,157 @@ impl Portfolio {
             batch_id: self.batch_id.clone(),
             target_revision: self.target_revision,
             account_revision: self.revision,
+            decision_us: self.plan_decision(),
+            trading_day: self.target_trading_day.clone(),
             strategies: self.targets.clone(),
+            stopped: self.stopped.clone(),
             net_targets: self.net_targets()?,
         })
+    }
+
+    fn member_change(&self, request: &MemberChange, prefix: &str) -> Result<String> {
+        let batch_id = format!("{prefix}:{}", request.event_id);
+        valid_id(&request.event_id)?;
+        valid_id(&batch_id)?;
+        require(
+            self.revision == request.expected_revision,
+            "portfolio changed; reload before changing members",
+        )?;
+        ensure!(
+            !request.note.trim().is_empty() && request.note.len() <= 4096,
+            "a note of at most 4096 bytes is required"
+        );
+        let group = self
+            .strategy_groups
+            .get(&request.strategy_group)
+            .context("unknown strategy group")?;
+        ensure!(
+            !request.members.is_empty() && request.members.is_subset(&group.members),
+            "members must be registered strategies of the group"
+        );
+        Ok(batch_id)
+    }
+
+    /// Issues the current targets as a new live plan at Manager time `at_us`.
+    fn publish(&mut self, batch_id: String, at_us: i64) -> Result<()> {
+        ensure!(at_us > 0, "invalid event time");
+        self.revision = self.revision.checked_add(1).context("revision overflow")?;
+        self.target_revision = self.revision;
+        self.batch_id = Some(batch_id);
+        self.plan_decision_us = Some(at_us);
+        Ok(())
+    }
+
+    fn member_receipt(
+        &self,
+        kind: &str,
+        request: &MemberChange,
+        removed_group: Option<String>,
+        cut: Option<Anchor>,
+    ) -> Result<MemberReceipt> {
+        Ok(MemberReceipt {
+            kind: kind.into(),
+            source_id: self.source_id.clone(),
+            event_id: request.event_id.clone(),
+            revision: self.revision,
+            batch_id: self.batch_id.clone().context("event plan has a batch id")?,
+            strategy_group: request.strategy_group.clone(),
+            members: request.members.clone(),
+            note: request.note.clone(),
+            decision_us: self.plan_decision_us.context("event plan decision")?,
+            trading_day: self.target_trading_day.clone(),
+            stopped: self.stopped.clone(),
+            retired: self.retired.clone(),
+            removed_group,
+            cut,
+            net_targets: self.net_targets()?,
+            execution_plan: self.execution_plan()?,
+        })
+    }
+
+    /// 停止并清仓: the members' targets become zero at once in a new plan.
+    /// They stay in the roster, so publishers keep sending complete batches,
+    /// but Manager keeps their targets at zero. Exec closes their lots and
+    /// attributes the closing fills to them.
+    pub fn stop(&self, request: &MemberChange, now_us: i64) -> Result<(Self, MemberReceipt)> {
+        let batch_id = self.member_change(request, "stop")?;
+        ensure!(
+            request.members.is_disjoint(&self.stopped),
+            "strategy already stopped"
+        );
+        let mut next = self.clone();
+        for name in &request.members {
+            next.stopped.insert(name.clone());
+            next.targets
+                .get_mut(name)
+                .context("registered strategy lacks targets")?
+                .values_mut()
+                .for_each(|lots| *lots = 0);
+        }
+        next.publish(batch_id, now_us)?;
+        let receipt = next.member_receipt("strategy_stop", request, None, None)?;
+        Ok((next, receipt))
+    }
+
+    /// 删除配置: removes stopped members that Exec's ledger fold at `cut` shows
+    /// flat in every contract. An emptied group is removed. Retired names stay
+    /// valid attribution identities; contracts stay registered.
+    pub fn retire(
+        &self,
+        request: &MemberChange,
+        cut: &Anchor,
+        exec_ledger: &ExecLedger,
+        now_us: i64,
+    ) -> Result<(Self, MemberReceipt)> {
+        let batch_id = self.member_change(request, "retire")?;
+        ensure!(
+            request.members.is_subset(&self.stopped),
+            "only stopped strategies can be retired; stop them first"
+        );
+        cut.validate()?;
+        ensure!(
+            cut.source_id == self.source_id
+                && cut.store_id == self.anchor.store_id
+                && cut.orders_key >= self.anchor.orders_key
+                && cut.note == request.note,
+            "retirement requires a cut of the anchored execution store"
+        );
+        for (market, row) in exec_ledger {
+            for name in &request.members {
+                if let Some(lots) = row.get(name).filter(|lots| **lots != 0) {
+                    return Err(Conflict(format!(
+                        "Exec 账本中 {name} 在 {market} 仍有 {lots} 手；请等待清仓完成后再删除"
+                    ))
+                    .into());
+                }
+            }
+        }
+        let mut next = self.clone();
+        let group = next
+            .strategy_groups
+            .get_mut(&request.strategy_group)
+            .context("unknown strategy group")?;
+        for name in &request.members {
+            group.members.remove(name);
+            next.targets.remove(name);
+            next.stopped.remove(name);
+            next.retired.insert(name.clone());
+        }
+        let removed_group = group
+            .members
+            .is_empty()
+            .then(|| request.strategy_group.clone());
+        if let Some(name) = &removed_group {
+            next.strategy_groups.remove(name);
+            if next.last_strategy_group.as_ref() == Some(name) {
+                next.last_strategy_group = None;
+            }
+        }
+        next.publish(batch_id, now_us)?;
+        next.check()?;
+        let receipt =
+            next.member_receipt("strategy_retire", request, removed_group, Some(cut.clone()))?;
+        Ok((next, receipt))
     }
 
     /// Signed account target per contract: the sum of all strategy targets.
@@ -741,6 +991,14 @@ impl Portfolio {
         }
         let mut next = self.clone();
         next.targets.extend(request.strategies.clone());
+        // Stopped members stay in the roster; their submitted targets are void.
+        for name in group.members.intersection(&self.stopped) {
+            next.targets
+                .get_mut(name)
+                .context("stopped strategy lacks targets")?
+                .values_mut()
+                .for_each(|lots| *lots = 0);
+        }
         next.strategy_groups
             .get_mut(&request.strategy_group)
             .unwrap()
@@ -748,6 +1006,7 @@ impl Portfolio {
         next.last_strategy_group = Some(request.strategy_group.clone());
         next.revision = next.revision.checked_add(1).context("revision overflow")?;
         next.target_revision = next.revision;
+        next.plan_decision_us = Some(request.decision_us);
         next.decision_us = self.decision_us.max(request.decision_us);
         next.batch_id = Some(request.batch_id.clone());
         next.target_trading_day = request.trading_day.clone();

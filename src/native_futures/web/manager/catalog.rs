@@ -148,24 +148,47 @@ async fn account(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let (_guard, user, access) = catalog_actor(&s, &headers).await?;
+    let (guard, user, access) = catalog_actor(&s, &headers).await?;
     get_source(&s, &access, &id)?;
     let scope = Scope::load(&s, &access, &user).await?;
     let portfolio = crate::native_futures::netting::store::load(&s.pool, &id).await?;
+    drop(guard);
     let mut bindings = Vec::new();
+    let mut netting = Value::Null;
     if let Some(portfolio) = portfolio {
-        for group in portfolio.strategy_groups.values() {
+        // Only stopped members need the Exec ledger: it gates 删除配置.
+        let ledger = if !portfolio.stopped.iter().any(|name| scope.can_view(name)) {
+            None
+        } else {
+            super::super::netting::with_source(&s, &id, |_, db| {
+                crate::native_futures::records::strategy_positions(db, i64::MAX)
+            })
+            .await
+            .inspect_err(|error| tracing::warn!(source_id=%id,error=?error.1,"native Exec ledger unavailable for bindings"))
+            .ok()
+        };
+        for (group_name, group) in &portfolio.strategy_groups {
             for name in group.members.iter().filter(|name| scope.can_view(name)) {
+                let stopped = portfolio.stopped.contains(name);
+                let exec_lots = ledger.as_ref().filter(|_| stopped).map(|ledger| {
+                    ledger
+                        .iter()
+                        .filter_map(|(market, row)| row.get(name).map(|lots| (market, *lots)))
+                        .collect::<BTreeMap<_, _>>()
+                });
                 bindings.push(json!({
                     "source_id": id, "binding_name": name, "position_strategy_name": name,
                     "order_strategy_name": if s.config.exec_plan_readers.contains_key(&id) { "exec" } else { "" },
                     "shares": null, "updated_at_us": group.decision_us,
+                    "strategy_group": group_name, "native_stopped": stopped, "native_exec_lots": exec_lots,
                 }));
             }
         }
+        netting = json!({ "revision": portfolio.revision });
     }
     body(json!({
         "source_id": id, "bindings": bindings, "configuration": { "mode": "independent" }, "pending_publishes": [],
+        "native_netting": netting,
         "estimated_fee_rate": null, "maker_fee_rate": null, "taker_fee_rate": null,
         "theoretical_twap_fee_rate": null, "quote_fee_rates": {},
     }))

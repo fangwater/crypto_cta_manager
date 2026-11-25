@@ -192,7 +192,8 @@ async fn can_view_targets(
         return Ok(true);
     }
     let visible = strategy_catalog::list_position_visibility(&s.pool).await?;
-    Ok(ledger.targets.keys().all(|name| {
+    // Retired members remain in the strategy NAV history.
+    Ok(ledger.targets.keys().chain(&ledger.retired).all(|name| {
         visible
             .iter()
             .any(|v| v.strategy_name == *name && v.user_can_view(user.user_id))

@@ -108,9 +108,11 @@ impl Replay {
             markets: BTreeMap::new(),
             positions: BTreeMap::new(),
             moves: vec![],
+            // Retired members keep their anchor rows and historical records.
             members: portfolio
                 .targets
                 .into_keys()
+                .chain(portfolio.retired)
                 .chain([netting::UNALLOCATED.to_owned()])
                 .collect(),
         };
@@ -143,8 +145,8 @@ impl Replay {
                     let Extension { anchor, contracts } = serde_json::from_value(value)?;
                     replay.add_scope(&anchor, contracts)?;
                 }
-                // Targets never move positions; Exec records do.
-                "target_batch" => {}
+                // Targets and roster changes never move positions; Exec records do.
+                "target_batch" | "strategy_stop" | "strategy_retire" => {}
                 _ => anyhow::bail!("unknown native attribution event kind"),
             }
         }
@@ -304,7 +306,13 @@ impl Replay {
                 })
                 .collect();
             let rows = futures_util::future::join_all(traded.iter().map(|(venue, symbol)| {
-                feed.history(&self.anchor.source_id, venue, symbol, query.start_us, query.end_us)
+                feed.history(
+                    &self.anchor.source_id,
+                    venue,
+                    symbol,
+                    query.start_us,
+                    query.end_us,
+                )
             }))
             .await;
             for (market, row) in traded.into_iter().zip(rows) {
@@ -820,6 +828,83 @@ mod tests {
                 (BASE + 22, netting::UNALLOCATED, 1, 101.0, Some(Some(1.5))),
             ]
         );
+    }
+
+    #[test]
+    fn stop_and_retire_events_replay_and_retired_strategies_keep_their_fills() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db, source, initial) = fixture(temp.path(), |_| {});
+        let portfolio = {
+            let request = netting::Initialize {
+                strategy_groups: BTreeMap::from([(
+                    "g".into(),
+                    BTreeSet::from(["alpha".into(), "beta".into()]),
+                )]),
+                contracts: BTreeMap::from([(M.into(), netting::Contract { multiplier: 10.0 })]),
+                positions: BTreeMap::new(),
+                note: "flat synthetic anchor".into(),
+            };
+            let mut anchor = initial.anchor.clone();
+            anchor.note = request.note.clone();
+            netting::Portfolio::initialize("account", &request, &BTreeMap::new(), anchor).unwrap()
+        };
+        let change = |state: &netting::Portfolio, id: &str| netting::MemberChange {
+            event_id: id.into(),
+            expected_revision: state.revision,
+            strategy_group: "g".into(),
+            members: BTreeSet::from(["beta".into()]),
+            note: "retire beta".into(),
+        };
+        let (stopped, stop) = portfolio
+            .stop(&change(&portfolio, "halt"), BASE + 5)
+            .unwrap();
+        let (cut, ledger) = netting::Anchor::capture(&source, &db, "retire beta".into()).unwrap();
+        let (retired, retire) = stopped
+            .retire(&change(&stopped, "drop"), &cut, &ledger, BASE + 6)
+            .unwrap();
+        let receipts = vec![
+            (
+                0,
+                "initialize".into(),
+                serde_json::to_value(&portfolio).unwrap(),
+            ),
+            (
+                1,
+                "strategy_stop".into(),
+                serde_json::to_value(&stop).unwrap(),
+            ),
+            (
+                2,
+                "strategy_retire".into(),
+                serde_json::to_value(&retire).unwrap(),
+            ),
+        ];
+        let mut replay = Replay::from_receipts(retired.clone(), receipts.clone()).unwrap();
+        assert!(replay.members.contains("beta"));
+        // Exec crosses beta out to alpha after the cut; the leg stays beta's.
+        for (leg, (side, name)) in [(Side::Buy, "alpha"), (Side::Sell, "beta")]
+            .into_iter()
+            .enumerate()
+        {
+            fixture::put_order(
+                &db,
+                BASE + 10 + leg as i64,
+                &fixture::cross_leg(M, DAY, BASE + 9, 0, side, name, 1, 100.0, BASE + 10),
+            );
+        }
+        replay
+            .read_records(&source, &db, BASE, BASE + 100, &[])
+            .unwrap();
+        let moves: Vec<_> = replay
+            .moves
+            .iter()
+            .map(|mv| (mv.strategy.as_str(), mv.lots))
+            .collect();
+        assert_eq!(moves, vec![("alpha", 1), ("beta", -1)]);
+        // Without the retired set, beta's anchor row and fills are unregistered.
+        let mut forgotten = retired;
+        forgotten.retired.clear();
+        assert!(Replay::from_receipts(forgotten, receipts).is_err());
     }
 
     #[test]
