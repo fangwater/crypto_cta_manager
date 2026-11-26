@@ -130,12 +130,13 @@ export function AccountOverviewPage() {
   const liquidityReport = report?.execution_sources?.find(s => s.source_id === sourceId) ?? report
   const canConfigure = marketAccount?.access_level === 'configure'
   const signalConfigPath = canConfigure ? accountSignalConfigPath(publicId) : undefined
-  const knownLiquidityVolume =
-    (liquidityReport?.maker_volume_quote ?? 0) + (liquidityReport?.taker_volume_quote ?? 0)
-  const makerRatio = knownLiquidityVolume > 0
-    ? (liquidityReport?.maker_volume_quote ?? 0) / knownLiquidityVolume
-    : 0
-  const takerRatio = knownLiquidityVolume > 0 ? 1 - makerRatio : 0
+  const unknownFillCount = liquidityReport?.unknown_liquidity_fill_count ?? 0
+  const liquidityRows = [
+    { label: 'Maker', volume: liquidityReport?.maker_volume_quote ?? 0, count: liquidityReport?.maker_fill_count ?? 0, color: 'bg-emerald-600' },
+    { label: 'Taker', volume: liquidityReport?.taker_volume_quote ?? 0, count: liquidityReport?.taker_fill_count ?? 0, color: 'bg-amber-500' },
+    { label: '未判定及内部对敲', volume: liquidityReport?.unknown_liquidity_volume_quote ?? 0, count: unknownFillCount, color: 'bg-slate-400' },
+  ]
+  const liquidityVolume = liquidityRows.reduce((total, row) => total + row.volume, 0)
 
   useEffect(() => {
     if (!loading && !catalogLoading && native && window.location.hash === '#contract-fees') {
@@ -258,22 +259,24 @@ export function AccountOverviewPage() {
                   })} />}
                 {!native && <div className="space-y-2 border-t border-border-soft pt-3">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="font-medium text-ink">成交名义比例</span>
-                    <span className="mono text-muted">
-                      Maker {(makerRatio * 100).toFixed(2)}% · Taker {(takerRatio * 100).toFixed(2)}%
-                    </span>
+                    <span className="font-medium text-ink">成交额占比</span>
+                    {liquidityVolume === 0 && <span className="text-muted">暂无成交额</span>}
                   </div>
-                  <div className="flex h-2 overflow-hidden bg-surface-strong">
-                    <div className="bg-emerald-600" style={{ width: `${makerRatio * 100}%` }} />
-                    <div className="bg-amber-500" style={{ width: `${takerRatio * 100}%` }} />
-                  </div>
+                  {liquidityVolume > 0 && (
+                    <div className="flex h-2 overflow-hidden bg-surface-strong" aria-hidden="true">
+                      {liquidityRows.map(row => (
+                        <div key={row.label} className={row.color} style={{ width: `${row.volume / liquidityVolume * 100}%` }} />
+                      ))}
+                    </div>
+                  )}
                   <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-                    <span>Maker {money(liquidityReport?.maker_volume_quote ?? 0)} 报价币 / {liquidityReport?.maker_fill_count ?? 0} 笔</span>
-                    <span>Taker {money(liquidityReport?.taker_volume_quote ?? 0)} 报价币 / {liquidityReport?.taker_fill_count ?? 0} 笔</span>
-                    {(liquidityReport?.unknown_liquidity_fill_count ?? 0) > 0 && (
-                      <span>Unknown {money(liquidityReport?.unknown_liquidity_volume_quote ?? 0)} 报价币 / {liquidityReport?.unknown_liquidity_fill_count ?? 0} 笔</span>
-                    )}
+                    {liquidityRows.map(row => (
+                      <span key={row.label}>
+                        {row.label}{liquidityVolume > 0 && ` ${(row.volume / liquidityVolume * 100).toFixed(2)}%`} · {money(row.volume)} 报价币 / {row.count} 笔
+                      </span>
+                    ))}
                   </div>
+                  {unknownFillCount > 0 && <p className="text-xs text-muted">未判定的交易所成交暂按 Taker 费率估算，内部对敲手续费为零。</p>}
                 </div>}
               </CardContent>
             </Card>
