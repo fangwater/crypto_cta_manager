@@ -461,13 +461,35 @@ pub async fn allowed_source_access(
     configured_source_ids: &BTreeSet<String>,
     source_viewers: &BTreeMap<String, Vec<String>>,
 ) -> Result<SourceAccess> {
+    allowed_source_access_with_grants(
+        pool,
+        user,
+        configured_source_ids,
+        source_viewers,
+        &BTreeSet::new(),
+    )
+    .await
+}
+
+pub(crate) async fn allowed_source_access_with_grants(
+    pool: &PgPool,
+    user: &AuthUser,
+    configured_source_ids: &BTreeSet<String>,
+    source_viewers: &BTreeMap<String, Vec<String>>,
+    grant_only_sources: &BTreeSet<String>,
+) -> Result<SourceAccess> {
     let configured_source_ids =
         visible_source_boundary(configured_source_ids, source_viewers, Some(&user.username));
+    let mut access = SourceAccess::default();
     if user.is_admin() {
-        return Ok(SourceAccess {
-            view: configured_source_ids.clone(),
-            configure: configured_source_ids.clone(),
-        });
+        access.view = configured_source_ids
+            .difference(grant_only_sources)
+            .cloned()
+            .collect();
+        access.configure = access.view.clone();
+        if access.view == configured_source_ids {
+            return Ok(access);
+        }
     }
     let rows = sqlx::query(
         "SELECT source_id, access_level FROM cta_user_source_permissions WHERE user_id = $1",
@@ -476,7 +498,6 @@ pub async fn allowed_source_access(
     .fetch_all(pool)
     .await
     .context("failed to load authorized source ids")?;
-    let mut access = SourceAccess::default();
     for row in rows {
         let source_id: String = row.try_get("source_id")?;
         if !configured_source_ids.contains(&source_id) {
@@ -852,6 +873,7 @@ mod tests {
             INSERT INTO cta_users VALUES(1,'prc','admin',false),(3,'lgq','user',false);
             INSERT INTO cta_user_source_permissions(user_id,source_id,access_level) VALUES(3,'public','view'),(3,'private','configure'),(1,'private','configure');
             CREATE TEMP TABLE cta_order_sources(source_id text PRIMARY KEY, display_alias text, updated_at timestamptz DEFAULT now());
+            CREATE TEMP TABLE cta_managed_account_aliases(account_id text PRIMARY KEY, display_alias text NOT NULL);
             INSERT INTO cta_order_sources(source_id) VALUES('public'),('private'),('new-account');")
             .execute(&pool).await?;
         let configured = BTreeSet::from(["public".into(), "private".into()]);
@@ -921,6 +943,50 @@ mod tests {
                 .view
                 .is_empty()
         );
+        let grant_only = BTreeSet::from(["new-account".into()]);
+        let configured = configured
+            .union(&grant_only)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let access =
+            allowed_source_access_with_grants(&pool, &prc, &configured, &viewers, &grant_only)
+                .await?;
+        assert_eq!(access.view, scope);
+        set_source_grants(
+            &pool,
+            "new-account",
+            &[
+                SourceGranteeInput {
+                    user_id: 1,
+                    access_level: "view".into(),
+                },
+                SourceGranteeInput {
+                    user_id: 3,
+                    access_level: "view".into(),
+                },
+            ],
+            &configured,
+        )
+        .await?;
+        let access =
+            allowed_source_access_with_grants(&pool, &prc, &configured, &viewers, &grant_only)
+                .await?;
+        assert!(access.view.contains("new-account"));
+        assert_eq!(access.configure, scope);
+        let access =
+            allowed_source_access_with_grants(&pool, &lgq, &configured, &viewers, &grant_only)
+                .await?;
+        assert!(access.view.contains("new-account"));
+        assert!(!access.configure.contains("new-account"));
+        set_source_grants(&pool, "new-account", &[], &configured).await?;
+        let access =
+            allowed_source_access_with_grants(&pool, &prc, &configured, &viewers, &grant_only)
+                .await?;
+        assert_eq!(access.view, scope);
+        let access =
+            allowed_source_access_with_grants(&pool, &lgq, &configured, &viewers, &grant_only)
+                .await?;
+        assert!(!access.view.contains("new-account"));
         crate::postgres::save_source_alias(&pool, "public", Some("  新账户  ")).await?;
         assert_eq!(
             crate::postgres::load_source_aliases(&pool).await?["public"],

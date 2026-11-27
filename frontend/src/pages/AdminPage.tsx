@@ -352,7 +352,7 @@ export function AdminPage() {
                 </div>
                 {target.role !== 'admin' && (
                   <div className="mt-4 space-y-2">
-                    {sources.map((source) => {
+                    {sources.filter((source) => source.access_level === 'configure').map((source) => {
                       const level = target.source_grants.find((grant) => grant.source_id === source.source_id)?.access_level ?? 'none'
                       return (
                         <div key={source.source_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-soft px-3 py-2">

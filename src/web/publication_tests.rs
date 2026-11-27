@@ -206,7 +206,7 @@ async fn auth_sessions_update_immediately_without_interrupting_publishers() {
     let demoted = auth_user_role(
         State(state.clone()),
         Extension(owner.clone()),
-        Extension(VisibleSources(BTreeSet::new())),
+        Extension(ConfigurableSources(BTreeSet::new())),
         Path(owner.user_id),
         Json(auth::SetRoleRequest {
             role: "user".into(),

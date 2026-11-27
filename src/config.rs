@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -169,6 +169,8 @@ pub struct DashboardConfig {
     /// Host-enforced account visibility cap, including administrators. Normal
     /// database grants still determine view/configure within this boundary.
     pub source_viewers: BTreeMap<String, Vec<String>>,
+    /// Sources that require an explicit database grant even for administrators.
+    pub grant_only_sources: BTreeSet<String>,
     /// Named order templates accessible to each listed username.
     pub order_strategy_allowlists: BTreeMap<String, Vec<String>>,
     pub overview_alerts: crate::account_overview::OverviewAlertSettings,
@@ -388,6 +390,7 @@ impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
             source_viewers: BTreeMap::new(),
+            grant_only_sources: BTreeSet::new(),
             order_strategy_allowlists: BTreeMap::new(),
             overview_alerts: Default::default(),
             nav_overview: Default::default(),
@@ -604,6 +607,13 @@ impl AppConfig {
                             })
                     }),
                 "dashboard.source_viewers requires configured source IDs and nonempty valid usernames"
+            );
+        }
+        for source_id in &self.dashboard.grant_only_sources {
+            anyhow::ensure!(
+                self.sources.iter().any(|source| &source.id == source_id)
+                    && !self.dashboard.source_viewers.contains_key(source_id),
+                "dashboard.grant_only_sources requires configured source IDs outside dashboard.source_viewers"
             );
         }
         for (username, names) in &self.dashboard.order_strategy_allowlists {
@@ -1175,6 +1185,21 @@ mod tests {
             assert!(config.validate().is_err());
         }
         config.dashboard.source_viewers = BTreeMap::from([("unknown".into(), vec!["lgq".into()])]);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn grant_only_sources_must_exist_and_have_no_static_viewers() {
+        let mut config = config_with_sources(vec![source("private", "/account/private")]);
+        config.dashboard.grant_only_sources.insert("private".into());
+        config.validate().unwrap();
+        config
+            .dashboard
+            .source_viewers
+            .insert("private".into(), vec!["lgq".into()]);
+        assert!(config.validate().is_err());
+        config.dashboard.source_viewers.clear();
+        config.dashboard.grant_only_sources.insert("unknown".into());
         assert!(config.validate().is_err());
     }
 

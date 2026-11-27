@@ -418,7 +418,6 @@ struct AuthMiddlewareState {
     pool: PgPool,
     targets: Arc<target_state::Targets>,
     configured_source_ids: BTreeSet<String>,
-    source_viewers: BTreeMap<String, Vec<String>>,
     config: Arc<AppConfig>,
 }
 
@@ -574,7 +573,9 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
         manager_db.clone(),
         config.archive.cold.clone(),
     )?);
-    let targets = Arc::new(target_state::Targets::default());
+    let targets = Arc::new(target_state::Targets::new(
+        config.dashboard.grant_only_sources.clone(),
+    ));
     targets.load(&pool, &position_archive).await?;
     {
         let pending = targets.clone();
@@ -871,7 +872,6 @@ pub async fn serve(config: AppConfig, bind: SocketAddr, refresh_interval_secs: u
                 pool: pool.clone(),
                 targets: state.targets.clone(),
                 configured_source_ids,
-                source_viewers: state.config.dashboard.source_viewers.clone(),
                 config: state.config.clone(),
             },
             auth_middleware,
@@ -965,11 +965,11 @@ async fn auth_middleware(
     // writes it. Global catalog/access mutations remain admin-only, except
     // order templates, owned/delegated Virtual accounts, strategy grant edits
     // and creator-owned strategy token edits.
-    let mut access = match auth::allowed_source_access(
+    let access = match manager_source_access(
         &auth_state.pool,
         &user,
         &auth_state.configured_source_ids,
-        &auth_state.source_viewers,
+        &auth_state.config,
     )
     .await
     {
@@ -979,8 +979,6 @@ async fn auth_middleware(
             return internal_error();
         }
     };
-    crate::managed_accounts::scope_access(&auth_state.config, &mut access.view);
-    crate::managed_accounts::scope_access(&auth_state.config, &mut access.configure);
     if let Some(message) =
         request_permission_error(user.is_admin(), read_only, source_id, path, &access)
     {
@@ -994,6 +992,25 @@ async fn auth_middleware(
     next.run(request).await
 }
 
+async fn manager_source_access(
+    pool: &PgPool,
+    user: &AuthUser,
+    configured: &BTreeSet<String>,
+    config: &AppConfig,
+) -> Result<auth::SourceAccess> {
+    let mut access = auth::allowed_source_access_with_grants(
+        pool,
+        user,
+        configured,
+        &config.dashboard.source_viewers,
+        &config.dashboard.grant_only_sources,
+    )
+    .await?;
+    crate::managed_accounts::scope_access(config, &mut access.view);
+    crate::managed_accounts::scope_access(config, &mut access.configure);
+    Ok(access)
+}
+
 fn request_permission_error(
     is_admin: bool,
     read_only: bool,
@@ -1003,9 +1020,6 @@ fn request_permission_error(
 ) -> Option<&'static str> {
     if source_id.is_some_and(|source_id| !access.view.contains(source_id)) {
         return Some("you are not authorized to view or configure this account");
-    }
-    if is_admin {
-        return None;
     }
     if read_only {
         return None;
@@ -1017,6 +1031,9 @@ fn request_permission_error(
         if !access.configure.contains(source_id) {
             return Some("you are not authorized to configure this account");
         }
+        return None;
+    }
+    if is_admin {
         return None;
     }
     if path == "/api/catalog/order-strategies"
@@ -1261,15 +1278,7 @@ async fn auth_verify(
         .iter()
         .map(|source| source.id.clone())
         .collect();
-    let mut access = auth::allowed_source_access(
-        &state.pool,
-        &user,
-        &configured,
-        &state.config.dashboard.source_viewers,
-    )
-    .await?;
-    crate::managed_accounts::scope_access(&state.config, &mut access.view);
-    crate::managed_accounts::scope_access(&state.config, &mut access.configure);
+    let access = manager_source_access(&state.pool, &user, &configured, &state.config).await?;
     let configure = headers
         .get("x-cta-access")
         .and_then(|value| value.to_str().ok())
@@ -1308,7 +1317,7 @@ fn project_user_grants(config: &AppConfig, grants: &mut Vec<auth::SourceGrantVie
 async fn auth_users(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
-    Extension(visible): Extension<VisibleSources>,
+    Extension(configurable): Extension<ConfigurableSources>,
 ) -> Result<Response, ApiError> {
     let mut users = auth::list_users(&state.pool).await?;
     // Grant managers pick grantees from the user list too, but only admins may
@@ -1321,7 +1330,7 @@ async fn auth_users(
     for target in &mut users {
         target
             .source_grants
-            .retain(|grant| visible.0.contains(&grant.source_id));
+            .retain(|grant| configurable.0.contains(&grant.source_id));
         project_user_grants(&state.config, &mut target.source_grants);
     }
     Ok((NO_STORE, Json(users)).into_response())
@@ -1344,17 +1353,37 @@ async fn auth_create_user(
 async fn auth_user_sources(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
-    Extension(visible): Extension<VisibleSources>,
+    Extension(mut configurable): Extension<ConfigurableSources>,
     Path(user_id): Path<i64>,
     Json(request): Json<auth::SetSourcesRequest>,
 ) -> Result<Response, ApiError> {
     if !user.is_admin() {
         return Ok(forbidden("administrator permission required"));
     }
+    let _publication_edit = if !state
+        .config
+        .dashboard
+        .grant_only_sources
+        .is_disjoint(&configurable.0)
+    {
+        let edit = state.targets.edit(&state.configuration_lock).await;
+        let configured = state
+            .config
+            .sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect();
+        configurable.0 = manager_source_access(&state.pool, &user, &configured, &state.config)
+            .await?
+            .configure;
+        Some(edit)
+    } else {
+        None
+    };
     if request
         .grants
         .iter()
-        .any(|grant| !visible.0.contains(grant.source_id.trim()))
+        .any(|grant| !configurable.0.contains(grant.source_id.trim()))
     {
         return Ok(forbidden("you are not authorized to manage this account"));
     }
@@ -1372,10 +1401,10 @@ async fn auth_user_sources(
             access_level: grant.access_level.clone(),
         }));
     }
-    match auth::set_sources(&state.pool, user_id, &grants, &visible.0).await {
+    match auth::set_sources(&state.pool, user_id, &grants, &configurable.0).await {
         Ok(mut view) => {
             view.source_grants
-                .retain(|grant| visible.0.contains(&grant.source_id));
+                .retain(|grant| configurable.0.contains(&grant.source_id));
             project_user_grants(&state.config, &mut view.source_grants);
             Ok((NO_STORE, Json(view)).into_response())
         }
@@ -1386,7 +1415,7 @@ async fn auth_user_sources(
 async fn auth_user_role(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
-    Extension(visible): Extension<VisibleSources>,
+    Extension(configurable): Extension<ConfigurableSources>,
     Path(user_id): Path<i64>,
     Json(request): Json<auth::SetRoleRequest>,
 ) -> Result<Response, ApiError> {
@@ -1399,7 +1428,7 @@ async fn auth_user_role(
     match auth::set_role(&state.pool, user_id, &request.role).await {
         Ok(mut view) => {
             view.source_grants
-                .retain(|grant| visible.0.contains(&grant.source_id));
+                .retain(|grant| configurable.0.contains(&grant.source_id));
             Ok((NO_STORE, Json(view)).into_response())
         }
         Err(error) => Ok(bad_request(error.to_string())),
@@ -1723,23 +1752,26 @@ async fn list_symbols(
         .iter()
         .map(|source| source.id.clone())
         .collect();
-    let mut visible = match user {
-        Some(user) => match auth::allowed_source_access(
-            &state.pool,
-            &user,
-            &configured,
-            &state.config.dashboard.source_viewers,
-        )
-        .await
-        {
-            Ok(access) => access.view,
-            Err(_) => return internal_error(),
-        },
+    let visible = match user {
+        Some(user) => {
+            match manager_source_access(&state.pool, &user, &configured, &state.config).await {
+                Ok(access) => access.view,
+                Err(_) => return internal_error(),
+            }
+        }
         None => {
-            auth::visible_source_boundary(&configured, &state.config.dashboard.source_viewers, None)
+            let mut visible = auth::visible_source_boundary(
+                &configured,
+                &state.config.dashboard.source_viewers,
+                None,
+            )
+            .difference(&state.config.dashboard.grant_only_sources)
+            .cloned()
+            .collect();
+            crate::managed_accounts::scope_access(&state.config, &mut visible);
+            visible
         }
     };
-    crate::managed_accounts::scope_access(&state.config, &mut visible);
     if selected_source_ids.iter().any(|id| !visible.contains(id)) {
         return forbidden("you are not authorized to view this account");
     }
@@ -3912,11 +3944,10 @@ async fn save_account_exec_order_rate_limits(
 /// holders; a view-only grant does not expose who else is authorized.
 async fn list_account_grants(
     State(state): State<WebState>,
-    Extension(user): Extension<AuthUser>,
     Extension(configurable): Extension<ConfigurableSources>,
     Path(source_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    if !user.is_admin() && !configurable.0.contains(&source_id) {
+    if !configurable.0.contains(&source_id) {
         return Ok(forbidden(
             "account configure permission required to view grants",
         ));
@@ -3951,6 +3982,7 @@ async fn list_account_grants(
 async fn save_account_grants(
     State(state): State<WebState>,
     Extension(user): Extension<AuthUser>,
+    Extension(mut configurable): Extension<ConfigurableSources>,
     Path(source_id): Path<String>,
     Json(request): Json<auth::SetSourceGrantsRequest>,
 ) -> Result<Response, ApiError> {
@@ -3968,31 +4000,34 @@ async fn save_account_grants(
         .iter()
         .map(|source| source.id.clone())
         .collect();
-    if let Some(account) = state.config.accounts.get(&source_id) {
-        match auth::set_account_source_grants(
-            &state.pool,
-            &account.source_ids,
-            &request.grants,
-            &configured,
-        )
-        .await
-        {
-            Ok(()) => {
-                return list_account_grants(
-                    State(state),
-                    Extension(user),
-                    Extension(ConfigurableSources(BTreeSet::from([source_id.clone()]))),
-                    Path(source_id),
-                )
-                .await;
-            }
-            Err(error) => return Ok(bad_request(error.to_string())),
-        }
+    let source_ids = state
+        .config
+        .accounts
+        .get(&source_id)
+        .map_or(std::slice::from_ref(&source_id), |account| {
+            &account.source_ids
+        });
+    let _publication_edit = if source_ids
+        .iter()
+        .any(|id| state.config.dashboard.grant_only_sources.contains(id))
+    {
+        let edit = state.targets.edit(&state.configuration_lock).await;
+        configurable.0 = manager_source_access(&state.pool, &user, &configured, &state.config)
+            .await?
+            .configure;
+        Some(edit)
+    } else {
+        None
+    };
+    if !configurable.0.contains(&source_id) {
+        return Ok(forbidden("account configure permission required"));
     }
-    match auth::set_source_grants(&state.pool, &source_id, &request.grants, &configured).await {
-        Ok(grants) => Ok((NO_STORE, Json(grants)).into_response()),
-        Err(error) => Ok(bad_request(error.to_string())),
+    if let Err(error) =
+        auth::set_account_source_grants(&state.pool, source_ids, &request.grants, &configured).await
+    {
+        return Ok(bad_request(error.to_string()));
     }
+    list_account_grants(State(state), Extension(configurable), Path(source_id)).await
 }
 
 async fn save_account_estimated_fee_rate(
@@ -7451,10 +7486,18 @@ mod tests {
             "exec-order-rate-limits",
         ] {
             let path = format!("/api/catalog/accounts/alias-only/{suffix}");
-            assert_eq!(
-                request_permission_error(false, false, source_id_from_path(&path), &path, &access),
-                Some("you are not authorized to configure this account")
-            );
+            for is_admin in [false, true] {
+                assert_eq!(
+                    request_permission_error(
+                        is_admin,
+                        false,
+                        source_id_from_path(&path),
+                        &path,
+                        &access
+                    ),
+                    Some("you are not authorized to configure this account")
+                );
+            }
         }
     }
 
@@ -7487,19 +7530,13 @@ mod tests {
                 let path = format!("/api/catalog/accounts/{source}/{suffix}");
                 let source_id = source_id_from_path(&path);
                 assert_eq!(source_id, Some(source));
-                assert_eq!(
-                    request_permission_error(false, false, source_id, &path, &access),
-                    expected,
-                    "{path}"
-                );
-                assert_eq!(
-                    request_permission_error(true, false, source_id, &path, &access),
-                    if source == "account-c" {
-                        Some("you are not authorized to view or configure this account")
-                    } else {
-                        None
-                    }
-                );
+                for is_admin in [false, true] {
+                    assert_eq!(
+                        request_permission_error(is_admin, false, source_id, &path, &access),
+                        expected,
+                        "{path}"
+                    );
+                }
             }
         }
         for suffix in ["bfusd-auto", "bnb-auto"] {

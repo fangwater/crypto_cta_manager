@@ -10,6 +10,9 @@ max_connections = 8
 refresh_secs = 60
 # Bounded analysis CPU pool, independent of kline.concurrency and API weights.
 compute_threads = 16
+# These sources require explicit grants from the permissions page, including for admins.
+# Remove their entries from dashboard.source_viewers when enabling this mode.
+# grant_only_sources = ["binance_exec_trade01"]
 
 # Optional: read-only FR account summaries, polled by CTA Manager.
 # Apply scripts/apply_external_overview_schema.sql explicitly before enabling.
