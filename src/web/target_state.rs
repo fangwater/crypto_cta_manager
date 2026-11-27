@@ -20,11 +20,14 @@ pub(super) struct Catalog {
     pub bindings: Vec<strategy_catalog::AccountBinding>,
     pub fees: BTreeMap<String, TheoreticalFeeRates>,
     pub fallback_hashes: Vec<String>,
+    // Used only to filter browser acknowledgements without a PostgreSQL read.
+    grant_only_viewers: BTreeMap<i64, BTreeSet<String>>,
 }
 
 #[derive(Default)]
 pub(super) struct Targets {
     catalog: SyncRwLock<Arc<Catalog>>,
+    grant_only_sources: BTreeSet<String>,
     sessions: SyncRwLock<BTreeMap<Vec<u8>, (AuthUser, i64)>>,
     // Serialize session SQL/cache mutations with session reloads. Publications
     // only read the memory map and never acquire this asynchronous lock.
@@ -70,6 +73,13 @@ impl Drop for Edit {
 }
 
 impl Targets {
+    pub fn new(grant_only_sources: BTreeSet<String>) -> Self {
+        Self {
+            grant_only_sources,
+            ..Self::default()
+        }
+    }
+
     /// Only publication configuration/authorization changes invalidate the
     /// catalog. Session creation/deletion uses session_mutations instead.
     pub async fn edit(self: &Arc<Self>, lock: &Arc<RwLock<()>>) -> Edit {
@@ -300,6 +310,18 @@ impl Targets {
             sqlx::query_scalar("SELECT token_hash FROM cta_publish_fallback_tokens")
                 .fetch_all(pool)
                 .await?;
+        if !self.grant_only_sources.is_empty() {
+            let ids: Vec<_> = self.grant_only_sources.iter().cloned().collect();
+            for (user_id, source_id) in sqlx::query_as::<_, (i64, String)>(
+                "SELECT user_id, source_id FROM cta_user_source_permissions WHERE source_id = ANY($1)",
+            )
+            .bind(ids)
+            .fetch_all(pool)
+            .await?
+            {
+                catalog.grant_only_viewers.entry(user_id).or_default().insert(source_id);
+            }
+        }
         // A configuration reload must not overwrite a concurrent login/logout
         // with a stale SQL snapshot (or resurrect a revoked session).
         let _sessions = self.session_mutations.lock().await;
@@ -692,7 +714,12 @@ pub(super) async fn publish(
             &state.config.dashboard.source_viewers,
             Some(&user.username),
         );
-        publishes.retain(|p| visible.contains(&p.source_id));
+        let grants = catalog.grant_only_viewers.get(&user.user_id);
+        publishes.retain(|p| {
+            visible.contains(&p.source_id)
+                && (!state.targets.grant_only_sources.contains(&p.source_id)
+                    || grants.is_some_and(|ids| ids.contains(&p.source_id)))
+        });
     }
     let mut saved = saved;
     template_access.filter_overrides(&mut saved.symbol_order_strategy_overrides);
