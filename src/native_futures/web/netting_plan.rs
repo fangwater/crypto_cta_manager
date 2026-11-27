@@ -18,7 +18,12 @@ use wire::{
 };
 
 const PLAN_TOKEN: &str = "x-cta-plan-token";
-const MAX_MESSAGE: usize = 16 * 1024;
+/// Inbound is only a `PlanSubscription`.
+const MAX_REQUEST: usize = 16 * 1024;
+/// Plans are dense (every strategy carries every contract), so the frame grows
+/// with strategies x contracts; must equal Exec's `MAX_WIRE_SIZE`. A 16 KiB cap
+/// stopped delivery once a 32 x 39 roster reached ~19 KB.
+const MAX_PLAN: usize = 8 * 1024 * 1024;
 
 pub(super) fn credentials(config: &Config) -> Result<BTreeMap<String, [u8; 32]>> {
     let mut hashes = BTreeSet::new();
@@ -67,8 +72,8 @@ fn token_mac(value: &str) -> Hmac<Sha256> {
 
 pub(super) fn routes(service: Service) -> Router {
     let stream = ManagerPlansServer::new(PlanStream(service.clone()))
-        .max_decoding_message_size(MAX_MESSAGE)
-        .max_encoding_message_size(MAX_MESSAGE);
+        .max_decoding_message_size(MAX_REQUEST)
+        .max_encoding_message_size(MAX_PLAN);
     Router::new()
         .route("/api/native/sources/{id}/netting/exec-plan", get(read))
         .with_state(service)
