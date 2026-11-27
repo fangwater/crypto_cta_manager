@@ -125,7 +125,7 @@ Exec 执行库只有两个追加型列族，key 为 20 位零填充的 UTC 微�
 }
 ```
 
-**删除**（`/netting/retire`）：只接受已停止的策略。服务端核对旧锚点仍属同一执行库，在新的 `cn_uniform_orders` 切点折叠 Exec 账本（与 extend-scope / rebase 相同），所列策略在任一合约仍有手数时返回 409。通过后在同一事务内：把它们移出 `targets`、组成员和 `stopped`，记入 `retired`；清空其目录目标；组变空时删除该组并撤销该组发布令牌（收据带 `removed_group`）；生成 `batch_id` 为 `retire:<event_id>` 的新执行计划。策略名仍保留在本账户（成员归属表不删除），不可再加入其他账户或重新加入本账户；其锚点 `positions` 行保留，账户核对不变。收据与停止相同，`kind` 为 `strategy_retire`，另含 `cut`（折叠所用切点）：
+**删除**（`/netting/retire`）：只接受已停止的策略。服务端核对旧锚点仍属同一执行库，在新的 `cn_uniform_orders` 切点折叠 Exec 账本（与 extend-scope / rebase 相同），所列策略在任一合约仍有手数时返回 409。通过后在同一事务内：把它们移出 `targets`、组成员和 `stopped`，记入 `retired`；清空其目录目标；组变空时删除该组并撤销该组发布令牌（收据带 `removed_group`）；生成 `batch_id` 为 `retire:<event_id>` 的新执行计划。策略名仍归属本账户（成员归属表不删除），不可加入其他账户；可以用 extend-scope 重新加入本账户的任意组，只要 Exec 账本显示它已平仓：它移出 `retired`、目标从 0 开始，锚点行沿用，NAV 接着回放它的成交。其锚点 `positions` 行保留，账户核对不变。收据与停止相同，`kind` 为 `strategy_retire`，另含 `cut`（折叠所用切点）：
 
 ```json
 {

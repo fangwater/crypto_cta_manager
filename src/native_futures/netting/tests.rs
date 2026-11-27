@@ -544,7 +544,7 @@ fn retirement_requires_a_stop_and_a_flat_exec_ledger() {
             .retire(&request, &foreign, &ExecLedger::new(), AT + 60)
             .is_err()
     );
-    // Retired names cannot come back into this account.
+    // A deleted name may come back into this account.
     let extension = ExtendScope {
         event_id: "re-add".into(),
         expected_revision: next.revision,
@@ -557,10 +557,11 @@ fn retirement_requires_a_stop_and_a_flat_exec_ledger() {
         snapshot_us: AT + 100,
         ..later(&next, "re-add")
     };
-    assert!(
-        next.extend_scope(&extension, &proof, &ExecLedger::new())
-            .is_err()
-    );
+    let back = next
+        .extend_scope(&extension, &proof, &ExecLedger::new())
+        .unwrap();
+    assert!(back.retired.is_empty());
+    assert!(back.strategy_groups["test"].members.contains("b-1h"));
 }
 
 #[test]
@@ -630,6 +631,54 @@ fn legacy_state_without_plan_time_derives_readiness_from_the_last_group() {
     let legacy: Portfolio = serde_json::from_value(value).unwrap();
     assert_eq!(legacy.plan_decision_us, None);
     assert_eq!(legacy.exec_decision_us(), Some(AT));
+}
+
+#[test]
+fn a_deleted_strategy_can_be_added_back_flat_with_its_anchor_row() {
+    let state = live(&portfolio(2, -1), 2, -1);
+    let (stopped, _) = state
+        .stop(&change(&state, "halt-b", &["b-1h"]), AT + 50)
+        .unwrap();
+    let request = change(&stopped, "drop-b", &["b-1h"]);
+    let (retired, _) = stopped
+        .retire(
+            &request,
+            &later(&stopped, &request.note),
+            &ledger(2, 0),
+            AT + 60,
+        )
+        .unwrap();
+    let extension = ExtendScope {
+        event_id: "back-b".into(),
+        expected_revision: retired.revision,
+        strategy_group: "other".into(),
+        members: BTreeSet::from(["b-1h".into()]),
+        contracts: BTreeMap::new(),
+        note: "b returns".into(),
+    };
+    let proof = Anchor {
+        snapshot_us: AT + 100,
+        ..later(&retired, &extension.note)
+    };
+    // Still holding lots in Exec: refused.
+    assert!(
+        retired
+            .extend_scope(&extension, &proof, &ledger(2, 1))
+            .is_err()
+    );
+    // Exec rows that fold to zero do not block it.
+    let mut flat = ledger(2, 0);
+    flat.get_mut(MARKET).unwrap().insert("b-1h".into(), 0);
+    let back = retired.extend_scope(&extension, &proof, &flat).unwrap();
+    assert!(back.retired.is_empty());
+    assert_eq!(back.targets["b-1h"][MARKET], 0);
+    assert_eq!(
+        back.strategy_groups["other"].members,
+        BTreeSet::from(["b-1h".into()])
+    );
+    // The anchor allocation NAV replays is kept, so the account still reconciles.
+    assert_eq!(back.positions["b-1h"][MARKET].quantity(), -1);
+    back.check().unwrap();
 }
 
 #[test]

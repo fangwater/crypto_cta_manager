@@ -206,7 +206,8 @@ pub async fn extend_scope(
     }
     let next = state.extend_scope(request, anchor, exec_ledger)?;
     for name in &request.members {
-        let result = sqlx::query("INSERT INTO cta_native_netting_members(source_id,strategy_group,strategy_name) VALUES($1,$2,$3) ON CONFLICT(strategy_name) DO NOTHING")
+        // A name deleted from this account may come back, in any group.
+        let result = sqlx::query("INSERT INTO cta_native_netting_members(source_id,strategy_group,strategy_name) VALUES($1,$2,$3) ON CONFLICT(strategy_name) DO UPDATE SET strategy_group=EXCLUDED.strategy_group WHERE cta_native_netting_members.source_id=EXCLUDED.source_id")
             .bind(source).bind(&request.strategy_group).bind(name).execute(&mut *tx).await?;
         require(
             result.rows_affected() == 1,

@@ -661,7 +661,9 @@ impl Portfolio {
         for (market, row) in exec_ledger {
             ensure!(
                 !request.contracts.contains_key(market)
-                    && row.keys().all(|name| !request.members.contains(name)),
+                    && row
+                        .iter()
+                        .all(|(name, lots)| *lots == 0 || !request.members.contains(name)),
                 "Exec already attributes {market} to a strategy being added"
             );
         }
@@ -682,10 +684,6 @@ impl Portfolio {
             ensure!(
                 name != UNALLOCATED && !self.targets.contains_key(name),
                 "strategy {name} already registered"
-            );
-            ensure!(
-                !self.retired.contains(name),
-                "strategy {name} was retired from this account; use a new strategy name"
             );
         }
         for (market, contract) in &request.contracts {
@@ -724,13 +722,17 @@ impl Portfolio {
                 name.clone(),
                 next.contracts.keys().map(|m| (m.clone(), 0)).collect(),
             );
-            next.positions.insert(
-                name.clone(),
-                next.account
+            // A deleted name comes back with its anchor row, which NAV replays
+            // together with its fills; Exec shows it flat (checked above).
+            next.retired.remove(name);
+            if !next.positions.contains_key(name) {
+                let flat = next
+                    .account
                     .keys()
                     .map(|m| (m.clone(), Position::default()))
-                    .collect(),
-            );
+                    .collect();
+                next.positions.insert(name.clone(), flat);
+            }
         }
         next.revision = self.revision.checked_add(1).context("revision overflow")?;
         next.check()?;
