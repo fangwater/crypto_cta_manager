@@ -14,6 +14,7 @@ interface Props {
   symbolPoints: SymbolNavTimeline[]
   mode: 'portfolio' | 'symbols'
   equityQuote: number | null
+  currency: string
 }
 
 const palette = ['#176b5b', '#2563a7', '#b7791f', '#c2413b', '#7357a3', '#0f766e']
@@ -22,7 +23,7 @@ function money(value: number) {
   return value.toLocaleString('en-US', { maximumFractionDigits: 0 })
 }
 
-export function PositionLeverageChart({ points, symbolPoints, mode, equityQuote }: Props) {
+export function PositionLeverageChart({ points, symbolPoints, mode, equityQuote, currency }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -90,7 +91,7 @@ export function PositionLeverageChart({ points, symbolPoints, mode, equityQuote 
               const value = Number(row.value?.[1])
               const formatted = row.seriesName === '杠杆率'
                 ? `${value.toFixed(3)}x`
-                : `${money(value)} CNY`
+                : `${money(value)} ${currency}`
               return `${row.marker ?? ''}${row.seriesName ?? ''}: ${formatted}`
             })
             .join('<br/>')
@@ -113,7 +114,7 @@ export function PositionLeverageChart({ points, symbolPoints, mode, equityQuote 
       observer.disconnect()
       chart.dispose()
     }
-  }, [equityQuote, mode, points, symbolPoints])
+  }, [currency, equityQuote, mode, points, symbolPoints])
 
   return <div ref={containerRef} className="pnl-chart" aria-label="仓位与杠杆率时间曲线" />
 }

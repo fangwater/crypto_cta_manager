@@ -21,7 +21,6 @@ import {
 import {
   ContractLeveragePanel,
   ContractLeverageToolbar,
-  isNativeFuturesVenue,
   NativeContractRatesPanel,
 } from '../../components/ContractLeveragePanel'
 import { FundingSettingsPanel } from '../../components/FundingSettingsPanel'
@@ -37,7 +36,7 @@ import { useConfigWrite } from '../../hooks/useConfigWrite'
 import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { readSourceId, routes } from '../../lib/routes'
 import { accountSignalConfigPath } from '../../lib/signalConfigLinks'
-import { executionMarketLabel, executionSymbolPlaceholder, symbolMatchesExecMarket } from '../../format'
+import { executionMarketLabel, executionSymbolPlaceholder, isNativeFuturesVenue, symbolMatchesExecMarket } from '../../format'
 import type { AccountBinding, AccountStudio, DashboardSnapshot, ExecOrderRateLimits } from '../../types'
 
 const MAX_EXEC_ORDER_RATE_LIMIT = 2_147_483_647

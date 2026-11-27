@@ -1,8 +1,6 @@
 import { accountExecutionUrl } from '../lib/executionGroups'
-import { accountFeeSummary, fundingMoney } from '../format'
 import { FundingStatusBadge } from '../components/FundingStatusBadge'
 import { AccountAliasEditor } from '../components/AccountAliasEditor'
-import { isNativeFuturesVenue } from '../components/ContractLeveragePanel'
 import {
   Activity,
   ArrowRight,
@@ -21,7 +19,7 @@ import { AppShell, PageIntro, StatTile } from '../components/AppShell'
 import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
-import { executionMarketLabel, formatUniMmr, integer, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
+import { accountFeeSummary, executionMarketLabel, formatUniMmr, fundingMoney, integer, isNativeFuturesVenue, isUnifiedVenue, liveAccountEquity, moneyWithUnit, quoteUnit, signedClass, timestampUs } from '../format'
 import { cn } from '../lib/cn'
 import { routes } from '../lib/routes'
 import { accountSignalConfigPath } from '../lib/signalConfigLinks'
@@ -295,14 +293,15 @@ function AccountCard({
     ? `截至 ${timestampUs(account.position_observed_ts_us)}`
     : undefined
   const funds = account.account_funds
-  const equity = account.live_equity_quote
+  const equity = liveAccountEquity(account)
   const availableCash = equity == null ? (funds?.usable_cash ?? funds?.available) : null
   const amount = equity ?? availableCash
   const historical = funds?.status === 'historical' || account.live_equity_status === 'stale'
   const assetLabel = availableCash != null
     ? historical || account.venue === 'yida' ? '最近可用资金' : '可用资金'
     : historical ? '历史权益' : '实时权益'
-  const assetUnit = equity != null ? 'CNY' : funds?.currency
+  const currency = quoteUnit(native)
+  const assetUnit = native ? funds?.currency ?? currency : 'USDT'
   const assetTime = funds ? `回报 ${timestampUs(funds.observed_us)}` : undefined
 
   return (
@@ -331,13 +330,13 @@ function AccountCard({
         <div className="grid grid-cols-2 gap-3 text-sm">
           <Metric
             label={report?.nav_is_historical && report.nav_as_of_ts_us ? `累计费后净值（截至 ${timestampUs(report.nav_as_of_ts_us)}）` : funding?.income_quote != null ? '累计费后净值（含 Funding）' : '累计费后净值'}
-            value={displayedNav != null ? `${money(displayedNav)} CNY` : '--'}
+            value={moneyWithUnit(displayedNav, currency)}
             tone={displayedNav != null ? signedClass(displayedNav) : ''}
             title={report?.nav_as_of_ts_us ? `截至 ${timestampUs(report.nav_as_of_ts_us)}` : undefined}
           />
           <Metric
             label={assetLabel}
-            value={amount != null ? [money(amount), assetUnit].filter(Boolean).join(' ') : '--'}
+            value={moneyWithUnit(amount, assetUnit)}
             detail={assetTime}
             title={funds?.historical_reason ?? undefined}
           />
@@ -353,9 +352,9 @@ function AccountCard({
             />
           )}
           {funding && <>
-            <Metric label="订单费后净值" value={report ? `${money(report.nav_change_after_fee_quote)} CNY` : '--'} />
+            <Metric label="订单费后净值" value={moneyWithUnit(report?.nav_change_after_fee_quote, currency)} />
             <Metric label={`Funding（${funding.kind === 'actual' ? '实际' : '估算'}）`}
-              value={funding.income_quote != null ? `${fundingMoney(funding.income_quote)} CNY` : '--'}
+              value={funding.income_quote != null ? `${fundingMoney(funding.income_quote)} ${currency}` : '--'}
               title={funding.income_quote != null ? `统计截至 ${timestampUs(funding.end_ts_us)}${funding.refreshing ? '，更新中' : ''}` : undefined}
               tone={funding.income_quote != null ? signedClass(funding.income_quote) : ''} />
           </>}

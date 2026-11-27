@@ -31,7 +31,6 @@ import { AppShell, PageIntro } from '../components/AppShell'
 import {
   ContractLeveragePanel,
   ContractLeverageToolbar,
-  isNativeFuturesVenue,
   NativeContractRatesPanel,
 } from '../components/ContractLeveragePanel'
 import { OrderParametersView } from '../components/OrderParametersView'
@@ -42,7 +41,7 @@ import { Select } from '../components/ui/Field'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { useStrategyCatalog } from '../hooks/useStrategyCatalog'
 import { useConfigWrite } from '../hooks/useConfigWrite'
-import { executionMarketLabel, executionSymbolPlaceholder, formatUniMmr, isUnifiedVenue, money, signedClass, timestampUs } from '../format'
+import { executionMarketLabel, executionSymbolPlaceholder, formatUniMmr, isNativeFuturesVenue, isUnifiedVenue, money, moneyWithUnit, quoteUnit, signedClass, timestampUs } from '../format'
 import { readSourceId, routes } from '../lib/routes'
 import { accountSignalConfigPath } from '../lib/signalConfigLinks'
 import { cn } from '../lib/cn'
@@ -542,6 +541,7 @@ function AccountMeta({
   sourceId: string
 }) {
   const funds = account.account_funds
+  const currency = quoteUnit(isNativeFuturesVenue(account.venue))
   const sdkValues = funds?.valuation_basis === 'sdk_mark_time_unverified' ? [
     ['SDK 资金权益', funds.sdk_cash_balance],
     ['SDK 市值权益', funds.sdk_market_value],
@@ -576,11 +576,11 @@ function AccountMeta({
           funds.trading_day ? `交易日 ${funds.trading_day}` : undefined, '行情估值时间未核验',
         ].filter(Boolean).join(' · ')}>{sdkValues.join(' · ')}</span>}
         <span className={signedClass(report.nav_change_after_fee_quote)}>
-          累计费后 {money(report.nav_change_after_fee_quote)} CNY
+          累计费后 {moneyWithUnit(report.nav_change_after_fee_quote, currency)}
         </span>
         {account.funding && usesActualFunding(account.funding) && <>
-          <span className={signedClass(account.funding.income_quote)}>累计实际 Funding {money(account.funding.income_quote)} CNY</span>
-          <span className={signedClass(account.total_nav_after_fee_quote ?? 0)}>总体费后 {money(account.total_nav_after_fee_quote ?? 0)} CNY</span>
+          <span className={signedClass(account.funding.income_quote)}>累计实际 Funding {moneyWithUnit(account.funding.income_quote, currency)}</span>
+          <span className={signedClass(account.total_nav_after_fee_quote ?? 0)}>总体费后 {moneyWithUnit(account.total_nav_after_fee_quote, currency)}</span>
         </>}
       </CardContent>
     </Card>

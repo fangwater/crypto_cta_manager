@@ -123,6 +123,7 @@ export interface DashboardAccount extends SourceSyncState {
   account_pnl_start_ts_us?: number | null
   strategy_pnl_start_ts_us?: number | null
   live_equity_quote?: number | null
+  live_equity_usdt?: number | null
   live_equity_status?: 'ok' | 'stale' | string | null
   account_funds?: {
     source: 'ctp_trading_account' | 'yida_extended_account'
@@ -656,6 +657,7 @@ export interface AcquisitionCostRow {
 }
 
 export interface AcquisitionCostReport {
+  quote_currency?: string
   execution_model: TheoreticalExecutionModel | null
   execution_window_secs: number
   generated_at_us: number

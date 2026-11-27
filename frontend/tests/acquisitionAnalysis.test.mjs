@@ -1,6 +1,34 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { analyzePricePath, deltaKey, priceFormatter } from '../src/lib/acquisitionAnalysis.ts'
+import { normalizeAcquisitionCost } from '../src/lib/acquisitionCostResponse.ts'
+
+test('acquisition reports read Crypto amounts and preserve domestic evidence', () => {
+  const crypto = {
+    execution_model: 'twap5m',
+    totals: { actual_turnover_usdt: 512.25, matched_fill_count: 3 },
+    points: [{ ts_us: 123, after_fee_shortfall_usdt: -0.25 }],
+    by_strategy: [{ bucket: 'test_usdt', reference_turnover_usdt: 500, virtual_fee_usdt: 0 }],
+    rows: [{ symbol: 'BTCUSDC', after_fee_shortfall_usdt: null }],
+  }
+  const native = {
+    execution_model: 'native_reference', quote_currency: 'CNY', quantity_unit: 'lot',
+    totals: { actual_turnover_quote: 1200 },
+    by_offset: [{ bucket: 'close_today', actual_fee_quote: null }],
+    rows: [{ symbol: 'SHFE:rb2701', offset: 'close_today', delta_qty: -2 }],
+  }
+  const reports = normalizeAcquisitionCost({ generated_at_us: 321, reports: [crypto, native] }).reports
+  assert.deepEqual(reports[0], {
+    execution_model: 'twap5m',
+    totals: { actual_turnover_quote: 512.25, matched_fill_count: 3 },
+    points: [{ ts_us: 123, after_fee_shortfall_quote: -0.25 }],
+    by_strategy: [{ bucket: 'test_usdt', reference_turnover_quote: 500, virtual_fee_quote: 0 }],
+    rows: [{ symbol: 'BTCUSDC', after_fee_shortfall_quote: null }],
+  })
+  assert.deepEqual(reports[1], native)
+  const totals = { actual_turnover_usdt: 50, actual_turnover_quote: null }
+  assert.deepEqual(normalizeAcquisitionCost({ reports: [{ totals }] }).reports[0].totals, { actual_turnover_quote: null })
+})
 
 function row(prices, overrides = {}) {
   return {
