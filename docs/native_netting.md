@@ -32,7 +32,8 @@ Exec 执行库只有两个追加型列族，key 为 20 位零填充的 UTC 微�
 | POST `/api/native/sources/{id}/netting/extend-scope` | 注册新组，或向现有组添加策略和零仓合约（Exec 记录中须尚无其归属） |
 | POST `/api/native/sources/{id}/netting/rebase` | 管理员以明确的期初持仓开启新的账户和策略净值起点 |
 | POST `/api/native/sources/{id}/netting/stop` | 停止并清仓：所列策略目标立即置零并生成新的执行计划 |
-| POST `/api/native/sources/{id}/netting/retire` | 删除配置：Exec 账本已清仓的已停止策略移出名单，空组连同发布令牌一并删除 |
+| POST `/api/native/sources/{id}/netting/resume` | 恢复：已停止的策略立即恢复其最新提交的目标 |
+| POST `/api/native/sources/{id}/netting/retire` | 删除配置：已停止的策略移出名单（剩余持仓由 Exec 清仓），空组连同发布令牌一并删除 |
 | GET `/api/native/sources/{id}/netting` | 组合（锚点分配）、完整净目标、`stopped` / `retired`，以及 `exec_ledger`（折叠全部 Exec 记录得到的当前具名策略手数） |
 | POST `/api/native/sources/{id}/target-batches` | 原子替换指定组全部策略的完整目标 |
 | GET `/api/native/sources/{id}/netting/events?after=-1&limit=50` | 按 revision 分页读取不可变审计，最多 100 条 |
@@ -75,9 +76,9 @@ Exec 执行库只有两个追加型列族，key 为 20 位零填充的 UTC 微�
 
 重设净值起点显式提供 `event_id`、`expected_revision`、各组成员 `strategy_groups`、按策略（可含 `__unallocated__`）和合约分配的有符号期初手数 `positions`、期初原生交易日 `trading_day`、账户期初今昨／多空持仓 `inventory`（`[{venue,symbol,side,today,yesterday}]`，不支持同合约双向）以及 `note`。各合约策略手数之和须等于 `inventory` 净手数，具名策略手数须等于切点的 Exec 记录。按切点的已完成分钟收盘价计价，原子保存账户净值快照和新的归因起点。原始执行事实和旧审计记录保留，发布令牌和执行 revision 连续。
 
-## 停止并清仓与删除配置
+## 停止并清仓、恢复与删除配置
 
-国内组合与 crypto 的「停止并清仓 → 删除配置」两步对齐。两个接口都使用会话授权，需要账户配置权限和所列每个策略的配置权限；请求格式相同，`event_id` 在账户内幂等（相同内容重试返回原收据，内容不同返回 409），`expected_revision` 不一致返回 409：
+国内组合与 crypto 的绑定一致：「停止并清仓」相当于份数设为 0，「恢复」相当于份数改回，「删除配置」相当于删除份数为 0 的绑定，删除后可按原名重新启用。三个接口都使用会话授权，需要账户配置权限和所列每个策略的配置权限；请求格式相同，`event_id` 在账户内幂等（相同内容重试返回原收据，内容不同返回 409），`expected_revision` 不一致返回 409：
 
 ```json
 {
@@ -89,9 +90,9 @@ Exec 执行库只有两个追加型列族，key 为 20 位零填充的 UTC 微�
 }
 ```
 
-`event_id` 只含字母、数字和 `_-.:`，加上 `stop:` / `retire:` 前缀后不超过 128 字节；`note` 非空且不超过 4096 字节；`members` 非空，且都属于 `strategy_group`。
+`event_id` 只含字母、数字和 `_-.:`，加上 `stop:` / `resume:` / `retire:` 前缀后不超过 128 字节；`note` 非空且不超过 4096 字节；`members` 非空，且都属于 `strategy_group`。
 
-**停止**（`/netting/stop`）：所列策略记入组合的 `stopped`，当前目标全部置零，revision 与 `target_revision` 同时加一，`batch_id` 为 `stop:<event_id>`，计划决策时间为 Manager 接收时间，交易日沿用最近一次实盘批次的 `trading_day`，因此不等发布端下一批即交付 Exec。已停止的策略仍在名单内：之后该组的 `target-batches` 仍须包含它们（现有发布端无需改动），但 Manager 无论提交值如何都把它们的目标强制为零，收据与执行计划中可见。Exec 继续持有其手数并以零目标平仓，平仓成交仍归属原策略。重复停止已停止的策略被拒绝；不支持撤销停止。收据：
+**停止**（`/netting/stop`）：所列策略记入组合的 `stopped`，当前目标全部置零，revision 与 `target_revision` 同时加一，`batch_id` 为 `stop:<event_id>`，计划决策时间为 Manager 接收时间，交易日沿用最近一次实盘批次的 `trading_day`，因此不等发布端下一批即交付 Exec。已停止的策略仍在名单内：之后该组的 `target-batches` 仍须包含它们（现有发布端无需改动），但 Manager 把它们的目标强制为零，收据与执行计划中可见；停止时的目标和之后提交的目标保存在组合的 `held_targets`。Exec 继续持有其手数并以零目标平仓，平仓成交仍归属原策略。重复停止已停止的策略被拒绝。收据：
 
 ```json
 {
@@ -125,7 +126,9 @@ Exec 执行库只有两个追加型列族，key 为 20 位零填充的 UTC 微�
 }
 ```
 
-**删除**（`/netting/retire`）：只接受已停止的策略。服务端核对旧锚点仍属同一执行库，在新的 `cn_uniform_orders` 切点折叠 Exec 账本（与 extend-scope / rebase 相同），所列策略在任一合约仍有手数时返回 409。通过后在同一事务内：把它们移出 `targets`、组成员和 `stopped`，记入 `retired`；清空其目录目标；组变空时删除该组并撤销该组发布令牌（收据带 `removed_group`）；生成 `batch_id` 为 `retire:<event_id>` 的新执行计划。策略名仍归属本账户（成员归属表不删除），不可加入其他账户；可以用 extend-scope 重新加入本账户的任意组，只要 Exec 账本显示它已平仓：它移出 `retired`、目标从 0 开始，锚点行沿用，NAV 接着回放它的成交。其锚点 `positions` 行保留，账户核对不变。收据与停止相同，`kind` 为 `strategy_retire`，另含 `cut`（折叠所用切点）：
+**恢复**（`/netting/resume`）：只接受已停止的策略。所列策略移出 `stopped`，目标立即恢复为 `held_targets` 中最新提交的值（停止期间新登记的合约为 0），`batch_id` 为 `resume:<event_id>`，其余与停止相同，收据 `kind` 为 `strategy_resume`。
+
+**删除**（`/netting/retire`）：只接受已停止的策略，不要求 Exec 账本已清仓：删除后它们不在执行计划内，Exec 对其仍持有的手数按隐式零目标平仓，成交照常归属原策略（与 crypto 删除份数为 0 的绑定一致）。服务端核对旧锚点仍属同一执行库，并在新的 `cn_uniform_orders` 切点记录删除位置（`cut`）。通过后在同一事务内：把它们移出 `targets`、组成员和 `stopped`，记入 `retired`；清空其目录目标；组变空时删除该组并撤销该组发布令牌（收据带 `removed_group`）；生成 `batch_id` 为 `retire:<event_id>` 的新执行计划。策略名仍归属本账户（成员归属表不删除），不可加入其他账户；可以用 extend-scope 重新加入本账户的任意组（前端「重新启用」加回原组）：它移出 `retired`、目标从 0 开始，锚点行沿用，Exec 中尚未平掉的手数仍归属它，NAV 接着回放它的成交。其锚点 `positions` 行保留，账户核对不变。收据与停止相同，`kind` 为 `strategy_retire`，另含 `cut`（删除时的切点）：
 
 ```json
 {
@@ -136,12 +139,12 @@ Exec 执行库只有两个追加型列族，key 为 20 位零填充的 UTC 微�
   "batch_id": "retire:drop-td_pr_010-20261126",
   "strategy_group": "cn-futures-01",
   "members": ["cn-futures-01-td_pr_010-1h"],
-  "note": "Exec 账本已清仓，删除配置",
+  "note": "因子下线，删除配置",
   "decision_us": 1795680000000000,
   "trading_day": "20261126",
   "stopped": [],
   "retired": ["cn-futures-01-td_pr_010-1h"],
-  "cut": {"source_id": "cn_ctp_01", "snapshot_us": 1795680000000000, "orders_key": 1795679990000000, "store_id": "sync:…", "note": "Exec 账本已清仓，删除配置"},
+  "cut": {"source_id": "cn_ctp_01", "snapshot_us": 1795680000000000, "orders_key": 1795679990000000, "store_id": "sync:…", "note": "因子下线，删除配置"},
   "net_targets": {"SHFE:sn2612": -1},
   "execution_plan": {
     "source_id": "cn_ctp_01",
@@ -156,7 +159,7 @@ Exec 执行库只有两个追加型列族，key 为 20 位零填充的 UTC 微�
 }
 ```
 
-全部策略删除后，组、名单可以为空，合约仍保留登记；`net_targets` 各合约为 0，执行计划仍为 `ready`，`strategies` 为空、gRPC `strategy_targets` 为零条，Exec 据此清空账户。之后可用 extend-scope 注册新组；rebase 的 `strategy_groups` 须与当前（可能已减少或为空）的组集合一致，`stopped` 跨 rebase 保留并保持零目标。策略 NAV 回放把 `strategy_stop` / `strategy_retire` 事件视为不移动持仓；参考净值把它们的 `net_targets` 视同一批目标。前端「策略启用」页对国内账户逐策略提供「停止并清仓」，对 Exec 账本已清仓的已停止策略提供「删除配置」，其余编辑保持禁用。
+全部策略删除后，组、名单可以为空，合约仍保留登记；`net_targets` 各合约为 0，执行计划仍为 `ready`，`strategies` 为空、gRPC `strategy_targets` 为零条，Exec 据此清空账户。之后可用 extend-scope 注册新组；rebase 的 `strategy_groups` 须与当前（可能已减少或为空）的组集合一致，`stopped` 跨 rebase 保留并保持零目标。策略 NAV 回放把 `strategy_stop` / `strategy_resume` / `strategy_retire` 事件视为不移动持仓；参考净值把它们的 `net_targets` 视同一批目标。前端「策略启用」页对国内账户逐策略提供「停止并清仓」，对已停止的策略提供「恢复」和「删除配置」，并列出已删除的策略供「重新启用」，其余编辑保持禁用。已有数据库启用恢复前审核并执行 `scripts/apply_native_netting_resume_schema.sql`（只放宽事件种类约束）。
 
 ## 组级发布与执行计划
 

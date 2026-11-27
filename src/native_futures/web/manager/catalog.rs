@@ -155,36 +155,41 @@ async fn account(
     drop(guard);
     let mut bindings = Vec::new();
     let mut netting = Value::Null;
+    let mut deleted_members = Vec::new();
     if let Some(portfolio) = portfolio {
-        // Only stopped members need the Exec ledger: it gates 删除配置.
-        let ledger = if !portfolio.stopped.iter().any(|name| scope.can_view(name)) {
-            None
-        } else {
-            super::super::netting::with_source(&s, &id, |_, db| {
-                crate::native_futures::records::strategy_positions(db, i64::MAX)
-            })
-            .await
-            .inspect_err(|error| tracing::warn!(source_id=%id,error=?error.1,"native Exec ledger unavailable for bindings"))
-            .ok()
-        };
         for (group_name, group) in &portfolio.strategy_groups {
             for name in group.members.iter().filter(|name| scope.can_view(name)) {
-                let stopped = portfolio.stopped.contains(name);
-                let exec_lots = ledger.as_ref().filter(|_| stopped).map(|ledger| {
-                    ledger
-                        .iter()
-                        .filter_map(|(market, row)| row.get(name).map(|lots| (market, *lots)))
-                        .collect::<BTreeMap<_, _>>()
-                });
                 bindings.push(json!({
                     "source_id": id, "binding_name": name, "position_strategy_name": name,
                     "order_strategy_name": if s.config.exec_plan_readers.contains_key(&id) { "exec" } else { "" },
                     "shares": null, "updated_at_us": group.decision_us,
-                    "strategy_group": group_name, "native_stopped": stopped, "native_exec_lots": exec_lots,
+                    "strategy_group": group_name, "native_stopped": portfolio.stopped.contains(name),
                 }));
             }
         }
-        netting = json!({ "revision": portfolio.revision });
+        // 删除配置 keeps the name in this account; 重新启用 adds it back to its group.
+        let deleted: Vec<_> = portfolio
+            .retired
+            .iter()
+            .filter(|name| scope.can_view(name))
+            .collect();
+        let groups: BTreeMap<String, String> = sqlx::query_as(
+            "SELECT strategy_name,strategy_group FROM cta_native_netting_members WHERE source_id=$1 AND strategy_name = ANY($2)",
+        )
+        .bind(&id)
+        .bind(&deleted)
+        .fetch_all(&s.pool)
+        .await
+        .map_err(anyhow::Error::from)?
+        .into_iter()
+        .collect();
+        for name in deleted {
+            deleted_members.push(json!({
+                "position_strategy_name": name,
+                "strategy_group": groups.get(name),
+            }));
+        }
+        netting = json!({ "revision": portfolio.revision, "deleted": deleted_members });
     }
     body(json!({
         "source_id": id, "bindings": bindings, "configuration": { "mode": "independent" }, "pending_publishes": [],

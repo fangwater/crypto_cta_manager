@@ -328,28 +328,40 @@ pub async fn batch(
 }
 
 /// 停止并清仓: zero targets and a new live plan, committed with the catalog.
+/// 停止并清仓 (`resume == false`) or 恢复 (`resume == true`).
 pub async fn stop(
     pool: &PgPool,
     source: &str,
     request: &MemberChange,
+    resume: bool,
     user_id: i64,
 ) -> Result<serde_json::Value> {
     valid_id(&request.event_id)?;
-    let id = format!("stop:{}", request.event_id);
+    let (prefix, kind) = if resume {
+        ("resume", "strategy_resume")
+    } else {
+        ("stop", "strategy_stop")
+    };
+    let id = format!("{prefix}:{}", request.event_id);
     let hash = fingerprint(request)?;
     let mut tx = pool.begin().await?;
     let state = locked(&mut tx, source).await?;
     if let Some(previous) = existing(&mut tx, source, &id, &hash).await? {
         return Ok(previous);
     }
-    let (next, receipt) = state.stop(request, super::super::now_us())?;
+    let now = super::super::now_us();
+    let (next, receipt) = if resume {
+        state.resume(request, now)?
+    } else {
+        state.stop(request, now)?
+    };
     catalog(&mut tx, &next).await?;
     save(
         &mut tx,
         &next,
         EventMeta {
             id: &id,
-            kind: "strategy_stop",
+            kind,
             hash: &hash,
             batch: next.batch_id.as_deref(),
             user_id,
@@ -362,15 +374,14 @@ pub async fn stop(
     Ok(serde_json::to_value(receipt)?)
 }
 
-/// 删除配置: removes flat stopped members (and an emptied group with its
-/// publish tokens). Name ownership stays reserved like rebase-retired members,
-/// so the attribution history keeps a single owner.
+/// 删除配置: removes stopped members (and an emptied group with its publish
+/// tokens). The names stay owned by this account, so the attribution history
+/// keeps a single owner, and extend-scope may add them back.
 pub async fn retire(
     pool: &PgPool,
     source: &str,
     request: &MemberChange,
     cut: &Anchor,
-    exec_ledger: &ExecLedger,
     user_id: i64,
 ) -> Result<serde_json::Value> {
     valid_id(&request.event_id)?;
@@ -381,7 +392,7 @@ pub async fn retire(
     if let Some(previous) = existing(&mut tx, source, &id, &hash).await? {
         return Ok(previous);
     }
-    let (next, receipt) = state.retire(request, cut, exec_ledger, super::super::now_us())?;
+    let (next, receipt) = state.retire(request, cut, super::super::now_us())?;
     let retired: Vec<_> = request.members.iter().collect();
     sqlx::query("UPDATE cta_position_strategies SET targets='{}'::jsonb,updated_at_us=$2 WHERE strategy_name = ANY($1)")
         .bind(&retired)

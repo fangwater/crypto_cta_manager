@@ -293,11 +293,16 @@ pub struct Portfolio {
     pub strategy_groups: BTreeMap<String, StrategyGroup>,
     pub contracts: BTreeMap<String, Contract>,
     pub targets: Strategies,
-    /// Members whose targets Manager forces to zero, whatever a batch submits.
+    /// Members whose targets Manager forces to zero, whatever a batch submits
+    /// (crypto: shares 0). 恢复 lifts the stop.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub stopped: BTreeSet<String>,
-    /// Former members removed once Exec held no lots for them. Their anchor rows
-    /// and historical Exec records stay part of the attribution history.
+    /// Latest targets a stopped member's publisher submitted, held back while
+    /// stopped and restored at once by 恢复.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub held_targets: Strategies,
+    /// Deleted former members (删除配置). Their anchor rows and historical Exec
+    /// records stay part of the attribution history; extend-scope adds them back.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub retired: BTreeSet<String>,
     /// Strategy allocation at the anchor, including [`UNALLOCATED`]. Later changes
@@ -345,7 +350,7 @@ pub struct ExecutionPlan {
 /// Receipt of a stop or retirement event; it publishes a new execution plan.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MemberReceipt {
-    /// `strategy_stop` or `strategy_retire`.
+    /// `strategy_stop`, `strategy_resume` or `strategy_retire`.
     pub kind: String,
     pub source_id: String,
     pub event_id: String,
@@ -470,11 +475,15 @@ impl Portfolio {
             .cloned()
             .collect();
         for name in &next.stopped {
-            next.targets
-                .get_mut(name)
-                .into_iter()
-                .flat_map(|rows| rows.values_mut())
-                .for_each(|lots| *lots = 0);
+            if let Some(rows) = next.targets.get_mut(name) {
+                let held = self
+                    .held_targets
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| rows.clone());
+                rows.values_mut().for_each(|lots| *lots = 0);
+                next.held_targets.insert(name.clone(), held);
+            }
         }
         Ok(next)
     }
@@ -629,6 +638,7 @@ impl Portfolio {
             contracts: request.contracts.clone(),
             targets,
             stopped: BTreeSet::new(),
+            held_targets: Strategies::new(),
             retired: BTreeSet::new(),
             positions,
             account,
@@ -661,9 +671,9 @@ impl Portfolio {
         for (market, row) in exec_ledger {
             ensure!(
                 !request.contracts.contains_key(market)
-                    && row
-                        .iter()
-                        .all(|(name, lots)| *lots == 0 || !request.members.contains(name)),
+                    && row.iter().all(|(name, lots)| {
+                        *lots == 0 || !request.members.contains(name) || self.retired.contains(name)
+                    }),
                 "Exec already attributes {market} to a strategy being added"
             );
         }
@@ -710,7 +720,11 @@ impl Portfolio {
         next.contracts.extend(request.contracts.clone());
         for market in request.contracts.keys() {
             next.account.insert(market.clone(), Position::default());
-            for targets in next.targets.values_mut() {
+            for targets in next
+                .targets
+                .values_mut()
+                .chain(next.held_targets.values_mut())
+            {
                 targets.insert(market.clone(), 0);
             }
             for positions in next.positions.values_mut() {
@@ -723,7 +737,7 @@ impl Portfolio {
                 next.contracts.keys().map(|m| (m.clone(), 0)).collect(),
             );
             // A deleted name comes back with its anchor row, which NAV replays
-            // together with its fills; Exec shows it flat (checked above).
+            // together with its fills; lots it still holds stay attributed to it.
             next.retired.remove(name);
             if !next.positions.contains_key(name) {
                 let flat = next
@@ -844,25 +858,54 @@ impl Portfolio {
         let mut next = self.clone();
         for name in &request.members {
             next.stopped.insert(name.clone());
-            next.targets
+            let rows = next
+                .targets
                 .get_mut(name)
-                .context("registered strategy lacks targets")?
-                .values_mut()
-                .for_each(|lots| *lots = 0);
+                .context("registered strategy lacks targets")?;
+            next.held_targets.insert(name.clone(), rows.clone());
+            rows.values_mut().for_each(|lots| *lots = 0);
         }
         next.publish(batch_id, now_us)?;
         let receipt = next.member_receipt("strategy_stop", request, None, None)?;
         Ok((next, receipt))
     }
 
-    /// 删除配置: removes stopped members that Exec's ledger fold at `cut` shows
-    /// flat in every contract. An emptied group is removed. Retired names stay
-    /// valid attribution identities; contracts stay registered.
+    /// 恢复: lifts a stop. The members' latest submitted targets apply again in
+    /// a new plan at once, as crypto shares returning above zero.
+    pub fn resume(&self, request: &MemberChange, now_us: i64) -> Result<(Self, MemberReceipt)> {
+        let batch_id = self.member_change(request, "resume")?;
+        ensure!(
+            request.members.is_subset(&self.stopped),
+            "only stopped strategies can be resumed"
+        );
+        let mut next = self.clone();
+        for name in &request.members {
+            next.stopped.remove(name);
+            let held = next.held_targets.remove(name);
+            let rows = next
+                .targets
+                .get_mut(name)
+                .context("registered strategy lacks targets")?;
+            if let Some(held) = held {
+                for (market, lots) in rows.iter_mut() {
+                    *lots = held.get(market).copied().unwrap_or(0);
+                }
+            }
+        }
+        next.publish(batch_id, now_us)?;
+        let receipt = next.member_receipt("strategy_resume", request, None, None)?;
+        Ok((next, receipt))
+    }
+
+    /// 删除配置: removes stopped members from the roster, as crypto deletes a
+    /// zero-share binding. Exec closes lots they still hold at an implicit zero
+    /// target and attributes the fills to them, so no flat ledger is required.
+    /// An emptied group is removed; the names stay attribution identities and
+    /// extend-scope may add them back. `cut` records the execution store.
     pub fn retire(
         &self,
         request: &MemberChange,
         cut: &Anchor,
-        exec_ledger: &ExecLedger,
         now_us: i64,
     ) -> Result<(Self, MemberReceipt)> {
         let batch_id = self.member_change(request, "retire")?;
@@ -878,16 +921,6 @@ impl Portfolio {
                 && cut.note == request.note,
             "retirement requires a cut of the anchored execution store"
         );
-        for (market, row) in exec_ledger {
-            for name in &request.members {
-                if let Some(lots) = row.get(name).filter(|lots| **lots != 0) {
-                    return Err(Conflict(format!(
-                        "Exec 账本中 {name} 在 {market} 仍有 {lots} 手；请等待清仓完成后再删除"
-                    ))
-                    .into());
-                }
-            }
-        }
         let mut next = self.clone();
         let group = next
             .strategy_groups
@@ -897,6 +930,7 @@ impl Portfolio {
             group.members.remove(name);
             next.targets.remove(name);
             next.stopped.remove(name);
+            next.held_targets.remove(name);
             next.retired.insert(name.clone());
         }
         let removed_group = group
@@ -993,13 +1027,14 @@ impl Portfolio {
         }
         let mut next = self.clone();
         next.targets.extend(request.strategies.clone());
-        // Stopped members stay in the roster; their submitted targets are void.
+        // Stopped members stay in the roster at zero; 恢复 restores what they submitted.
         for name in group.members.intersection(&self.stopped) {
-            next.targets
+            let rows = next
+                .targets
                 .get_mut(name)
-                .context("stopped strategy lacks targets")?
-                .values_mut()
-                .for_each(|lots| *lots = 0);
+                .context("stopped strategy lacks targets")?;
+            next.held_targets.insert(name.clone(), rows.clone());
+            rows.values_mut().for_each(|lots| *lots = 0);
         }
         next.strategy_groups
             .get_mut(&request.strategy_group)

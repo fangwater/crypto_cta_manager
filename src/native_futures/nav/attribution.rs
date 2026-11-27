@@ -146,7 +146,7 @@ impl Replay {
                     replay.add_scope(&anchor, contracts)?;
                 }
                 // Targets and roster changes never move positions; Exec records do.
-                "target_batch" | "strategy_stop" | "strategy_retire" => {}
+                "target_batch" | "strategy_stop" | "strategy_resume" | "strategy_retire" => {}
                 _ => anyhow::bail!("unknown native attribution event kind"),
             }
         }
@@ -858,9 +858,9 @@ mod tests {
         let (stopped, stop) = portfolio
             .stop(&change(&portfolio, "halt"), BASE + 5)
             .unwrap();
-        let (cut, ledger) = netting::Anchor::capture(&source, &db, "retire beta".into()).unwrap();
+        let (cut, _) = netting::Anchor::capture(&source, &db, "retire beta".into()).unwrap();
         let (retired, retire) = stopped
-            .retire(&change(&stopped, "drop"), &cut, &ledger, BASE + 6)
+            .retire(&change(&stopped, "drop"), &cut, BASE + 6)
             .unwrap();
         let receipts = vec![
             (

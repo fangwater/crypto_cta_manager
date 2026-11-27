@@ -280,10 +280,9 @@ export interface AccountBinding {
   order_strategy_name: string
   shares: number
   updated_at_us: number
-  /** CN only: netting group, stop state and the Exec ledger lots of a stopped member. */
+  /** CN only: netting group and stop state. */
   strategy_group?: string
   native_stopped?: boolean
-  native_exec_lots?: Record<string, number> | null
 }
 
 export interface SharesChange {
@@ -339,8 +338,11 @@ export interface AccountStudio {
   bindings: AccountBinding[]
   configuration: AccountConfiguration
   pending_publishes: { binding_name: string; error: string | null }[]
-  /** CN only: the netting portfolio revision that stop/retire requests expect. */
-  native_netting?: { revision: number } | null
+  /** CN only: the netting revision member changes expect, and deleted members. */
+  native_netting?: {
+    revision: number
+    deleted?: { position_strategy_name: string; strategy_group: string | null }[]
+  } | null
 }
 
 export interface ExecOrderRateLimits {

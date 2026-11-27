@@ -20,6 +20,7 @@ pub(super) fn routes() -> Router<Service> {
         )
         .route("/api/native/sources/{id}/netting/rebase", post(rebase))
         .route("/api/native/sources/{id}/netting/stop", post(stop))
+        .route("/api/native/sources/{id}/netting/resume", post(resume))
         .route("/api/native/sources/{id}/netting/retire", post(retire))
         .route(
             "/api/native/sources/{id}/netting/execution-plan",
@@ -366,12 +367,34 @@ async fn stop(
     Path(id): Path<String>,
     Json(request): Json<model::MemberChange>,
 ) -> ApiResult {
+    toggle(s, user, access, id, request, false).await
+}
+
+async fn resume(
+    State(s): State<Service>,
+    Extension(user): Extension<AuthUser>,
+    Extension(access): Extension<Arc<SourceAccess>>,
+    Path(id): Path<String>,
+    Json(request): Json<model::MemberChange>,
+) -> ApiResult {
+    toggle(s, user, access, id, request, true).await
+}
+
+async fn toggle(
+    s: Service,
+    user: AuthUser,
+    access: Arc<SourceAccess>,
+    id: String,
+    request: model::MemberChange,
+    resume: bool,
+) -> ApiResult {
     let _guard = s.catalog_lock.lock().await;
-    if let Some(receipt) = member_change(&s, &user, &access, &id, &request, "stop").await? {
+    let prefix = if resume { "resume" } else { "stop" };
+    if let Some(receipt) = member_change(&s, &user, &access, &id, &request, prefix).await? {
         return body(receipt);
     }
-    // Like a batch, the zero targets never wait on the Exec replica.
-    let receipt = store::stop(&s.pool, &id, &request, user.user_id)
+    // Like a batch, the new targets never wait on the Exec replica.
+    let receipt = store::stop(&s.pool, &id, &request, resume, user.user_id)
         .await
         .map_err(failure)?;
     s.plan_changed(&id);
@@ -394,13 +417,13 @@ async fn retire(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "账户尚未初始化策略归因账本".into()))?
         .anchor;
     let note = request.note.clone();
-    // The same Exec ledger fold as extend-scope/rebase, at a fresh cut.
-    let (cut, exec_ledger) = with_source(&s, &id, move |source, db| {
+    // A fresh cut of the anchored execution store records the deletion point.
+    let (cut, _) = with_source(&s, &id, move |source, db| {
         current.verify(source, db)?;
         model::Anchor::capture(source, db, note)
     })
     .await?;
-    let receipt = store::retire(&s.pool, &id, &request, &cut, &exec_ledger, user.user_id)
+    let receipt = store::retire(&s.pool, &id, &request, &cut, user.user_id)
         .await
         .map_err(failure)?;
     s.plan_changed(&id);

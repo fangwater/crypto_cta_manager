@@ -491,29 +491,81 @@ fn later_batches_keep_the_full_roster_but_stopped_members_stay_zero() {
 }
 
 #[test]
-fn retirement_requires_a_stop_and_a_flat_exec_ledger() {
+fn resume_restores_the_latest_targets_submitted_while_stopped() {
+    let state = live(&portfolio(0, 0), 1, 1);
+    let (stopped, receipt) = state
+        .stop(&change(&state, "halt-b", &["b-1h"]), AT + 50)
+        .unwrap();
+    assert_eq!(receipt.execution_plan.strategies["b-1h"][MARKET], 0);
+    // Only stopped members can be resumed.
+    assert!(
+        stopped
+            .resume(&change(&stopped, "go-a", &["a-1h"]), AT + 55)
+            .is_err()
+    );
+    // Without a newer batch, 恢复 brings back the targets held at the stop.
+    let (back, receipt) = stopped
+        .resume(&change(&stopped, "go-b", &["b-1h"]), AT + 55)
+        .unwrap();
+    assert!(back.stopped.is_empty() && back.held_targets.is_empty());
+    assert_eq!(back.targets["b-1h"][MARKET], 1);
+    assert_eq!(receipt.kind, "strategy_resume");
+    assert_eq!(receipt.net_targets[MARKET], 2);
+    assert_eq!(back.batch_id.as_deref(), Some("resume:go-b"));
+    assert_eq!(back.exec_decision_us(), Some(AT + 55));
+    // A batch while stopped is held at zero; a contract added meanwhile joins
+    // the held row at zero, and 恢复 applies the latest submission at once.
+    let mut request = batch(&stopped, 3, 5);
+    request.decision_us = AT + 60;
+    let (held, _) = stopped.batch(&request, AT + 60).unwrap();
+    assert_eq!(held.targets["b-1h"][MARKET], 0);
+    let added = "CZCE:SA701";
+    let extension = ExtendScope {
+        event_id: "add-sa".into(),
+        expected_revision: held.revision,
+        strategy_group: "test".into(),
+        members: BTreeSet::new(),
+        contracts: BTreeMap::from([(added.into(), Contract { multiplier: 20.0 })]),
+        note: "add sa".into(),
+    };
+    let proof = Anchor {
+        snapshot_us: AT + 100,
+        ..later(&held, &extension.note)
+    };
+    let held = held
+        .extend_scope(&extension, &proof, &ExecLedger::new())
+        .unwrap();
+    let (back, _) = held
+        .resume(&change(&held, "go-b", &["b-1h"]), AT + 120)
+        .unwrap();
+    assert_eq!(back.targets["b-1h"][MARKET], 5);
+    assert_eq!(back.targets["b-1h"][added], 0);
+    assert_eq!(back.net_targets().unwrap()[MARKET], 8);
+    // Deleting a stopped member drops its held targets.
+    let (gone, _) = held
+        .retire(
+            &change(&held, "drop-b", &["b-1h"]),
+            &later(&held, "operator retirement"),
+            AT + 130,
+        )
+        .unwrap();
+    assert!(gone.held_targets.is_empty());
+}
+
+#[test]
+fn deletion_requires_a_stop_but_not_a_flat_exec_ledger() {
     let state = live(&portfolio(2, -1), 2, -1);
     let cut = |s: &Portfolio| later(s, "operator retirement");
     // Not stopped yet.
     let request = change(&state, "drop-b", &["b-1h"]);
-    assert!(
-        state
-            .retire(&request, &cut(&state), &ExecLedger::new(), AT + 50)
-            .is_err()
-    );
+    assert!(state.retire(&request, &cut(&state), AT + 50).is_err());
     let (stopped, _) = state
         .stop(&change(&state, "halt-b", &["b-1h"]), AT + 50)
         .unwrap();
     let request = change(&stopped, "drop-b", &["b-1h"]);
-    // Exec still holds b's lots: refused with a conflict.
-    let error = stopped
-        .retire(&request, &cut(&stopped), &ledger(2, -1), AT + 60)
-        .unwrap_err();
-    assert!(error.downcast_ref::<Conflict>().is_some(), "{error}");
-    // Another strategy's lots do not block it.
-    let (next, receipt) = stopped
-        .retire(&request, &cut(&stopped), &ledger(2, 0), AT + 60)
-        .unwrap();
+    // Lots Exec still attributes to b do not block it: Exec closes them at an
+    // implicit zero target, as crypto deletes a zero-share binding.
+    let (next, receipt) = stopped.retire(&request, &cut(&stopped), AT + 60).unwrap();
     assert!(!next.targets.contains_key("b-1h"));
     assert_eq!(
         next.strategy_groups["test"].members,
@@ -539,11 +591,7 @@ fn retirement_requires_a_stop_and_a_flat_exec_ledger() {
         store_id: "replacement-store".into(),
         ..cut(&stopped)
     };
-    assert!(
-        stopped
-            .retire(&request, &foreign, &ExecLedger::new(), AT + 60)
-            .is_err()
-    );
+    assert!(stopped.retire(&request, &foreign, AT + 60).is_err());
     // A deleted name may come back into this account.
     let extension = ExtendScope {
         event_id: "re-add".into(),
@@ -573,12 +621,7 @@ fn retiring_every_member_removes_the_group_and_leaves_a_valid_empty_plan() {
     assert_eq!(stopped.net_targets().unwrap()[MARKET], 0);
     let request = change(&stopped, "drop", &["a-1h", "b-1h"]);
     let (empty, receipt) = stopped
-        .retire(
-            &request,
-            &later(&stopped, &request.note),
-            &ExecLedger::new(),
-            AT + 60,
-        )
+        .retire(&request, &later(&stopped, &request.note), AT + 60)
         .unwrap();
     assert!(empty.strategy_groups.is_empty() && empty.targets.is_empty());
     assert_eq!(empty.last_strategy_group, None);
@@ -634,19 +677,14 @@ fn legacy_state_without_plan_time_derives_readiness_from_the_last_group() {
 }
 
 #[test]
-fn a_deleted_strategy_can_be_added_back_flat_with_its_anchor_row() {
+fn a_deleted_strategy_can_be_added_back_with_its_anchor_row() {
     let state = live(&portfolio(2, -1), 2, -1);
     let (stopped, _) = state
         .stop(&change(&state, "halt-b", &["b-1h"]), AT + 50)
         .unwrap();
     let request = change(&stopped, "drop-b", &["b-1h"]);
     let (retired, _) = stopped
-        .retire(
-            &request,
-            &later(&stopped, &request.note),
-            &ledger(2, 0),
-            AT + 60,
-        )
+        .retire(&request, &later(&stopped, &request.note), AT + 60)
         .unwrap();
     let extension = ExtendScope {
         event_id: "back-b".into(),
@@ -660,16 +698,18 @@ fn a_deleted_strategy_can_be_added_back_flat_with_its_anchor_row() {
         snapshot_us: AT + 100,
         ..later(&retired, &extension.note)
     };
-    // Still holding lots in Exec: refused.
-    assert!(
+    // Lots Exec still attributes to the deleted name stay with it: it comes
+    // back at zero targets and Exec keeps closing them.
+    let back = retired
+        .extend_scope(&extension, &proof, &ledger(2, -1))
+        .unwrap();
+    assert_eq!(
         retired
-            .extend_scope(&extension, &proof, &ledger(2, 1))
-            .is_err()
+            .extend_scope(&extension, &proof, &ledger(2, 0))
+            .unwrap()
+            .targets,
+        back.targets
     );
-    // Exec rows that fold to zero do not block it.
-    let mut flat = ledger(2, 0);
-    flat.get_mut(MARKET).unwrap().insert("b-1h".into(), 0);
-    let back = retired.extend_scope(&extension, &proof, &flat).unwrap();
     assert!(back.retired.is_empty());
     assert_eq!(back.targets["b-1h"][MARKET], 0);
     assert_eq!(
@@ -689,12 +729,7 @@ fn rebase_after_retirement_uses_the_reduced_roster() {
         .unwrap();
     let request = change(&stopped, "drop-b", &["b-1h"]);
     let (retired, _) = stopped
-        .retire(
-            &request,
-            &later(&stopped, &request.note),
-            &ExecLedger::new(),
-            AT + 60,
-        )
+        .retire(&request, &later(&stopped, &request.note), AT + 60)
         .unwrap();
     let note = "baseline after retirement";
     let rebase = |state: &Portfolio, groups: BTreeMap<String, BTreeSet<String>>, owner: &str| {
@@ -744,12 +779,7 @@ fn rebase_after_retirement_uses_the_reduced_roster() {
     // With every member retired, the account rebases into an empty roster.
     let request = change(&halted, "drop-a", &["a-1h"]);
     let (empty, _) = halted
-        .retire(
-            &request,
-            &later(&halted, &request.note),
-            &ExecLedger::new(),
-            AT + 80,
-        )
+        .retire(&request, &later(&halted, &request.note), AT + 80)
         .unwrap();
     let next = rebase(&empty, BTreeMap::new(), UNALLOCATED).unwrap();
     assert!(next.strategy_groups.is_empty() && next.targets.is_empty());

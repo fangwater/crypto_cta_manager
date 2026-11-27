@@ -1,6 +1,6 @@
 import { estimatedFundingOnly } from '../../lib/executionGroups'
 import { accountVenueLabel } from '../../lib/workspace'
-import { CheckCircle2, Gauge, Layers3, LoaderCircle, Plus, Power, Save, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { CheckCircle2, Gauge, Layers3, LoaderCircle, Plus, Power, RotateCcw, Save, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   deleteAccountBinding,
@@ -11,6 +11,8 @@ import {
   listPositionAccess,
   nativeEventId,
   publishAccountBinding,
+  readdNativeStrategies,
+  resumeNativeStrategies,
   retireNativeStrategies,
   saveAccountBinding,
   saveAccountContractLeverage,
@@ -37,7 +39,7 @@ import { useStrategyCatalog } from '../../hooks/useStrategyCatalog'
 import { readSourceId, routes } from '../../lib/routes'
 import { accountSignalConfigPath } from '../../lib/signalConfigLinks'
 import { executionMarketLabel, executionSymbolPlaceholder, isNativeFuturesVenue, symbolMatchesExecMarket } from '../../format'
-import type { AccountBinding, AccountStudio, DashboardSnapshot, ExecOrderRateLimits } from '../../types'
+import type { AccountStudio, DashboardSnapshot, ExecOrderRateLimits } from '../../types'
 
 const MAX_EXEC_ORDER_RATE_LIMIT = 2_147_483_647
 
@@ -199,20 +201,29 @@ export function AccountBindingsPage() {
     return () => controller.abort()
   }, [accounts, applyExecOrderRateLimits, loadStudio, native, sourceId])
 
-  // CN netting members: stop sends zero targets now; delete needs a flat Exec ledger.
+  // CN netting members follow crypto bindings: stop sends zero targets now and
+  // 恢复 lifts it; a stopped member can be deleted at once (Exec closes what it
+  // still holds) and added back later under the same name.
   const nativeMembersEditable = native && !!studio && studio.source_id === sourceId && !!studio.native_netting
+  const nativeActionLabel = { stop: '停止并清仓', resume: '恢复', retire: '删除配置', readd: '重新启用' } as const
 
-  async function changeNativeMember(binding: AccountBinding, action: 'stop' | 'retire') {
-    if (!studio?.native_netting || !binding.strategy_group) throw new Error('策略归因账本暂不可用，请刷新后重试。')
+  async function changeNativeMember(
+    name: string,
+    strategyGroup: string | null | undefined,
+    action: 'stop' | 'resume' | 'retire' | 'readd',
+  ) {
+    if (!studio?.native_netting || !strategyGroup) throw new Error('策略归因账本暂不可用，请刷新后重试。')
     const change = {
       event_id: nativeEventId(action),
       expected_revision: studio.native_netting.revision,
-      strategy_group: binding.strategy_group,
-      members: [binding.position_strategy_name],
-      note: `${action === 'stop' ? '停止并清仓' : '删除配置'} ${binding.position_strategy_name}（策略启用页）`,
+      strategy_group: strategyGroup,
+      members: [name],
+      note: `${nativeActionLabel[action]} ${name}（策略启用页）`,
     }
     if (action === 'stop') await stopNativeStrategies(sourceId, change)
-    else await retireNativeStrategies(sourceId, change)
+    else if (action === 'resume') await resumeNativeStrategies(sourceId, change)
+    else if (action === 'retire') await retireNativeStrategies(sourceId, change)
+    else await readdNativeStrategies(sourceId, change)
     await loadStudio(sourceId)
     await reloadCatalog()
   }
@@ -504,8 +515,6 @@ export function AccountBindingsPage() {
                 const sharesChanged = validShares && parsedShares !== binding.shares
                 const signalConfigPath = accountSignalConfigPath(selectedPublicAccount?.source_id ?? sourceId, binding.position_strategy_name)
                 const stopped = native ? !!binding.native_stopped : binding.shares === 0
-                const execLots = Object.entries(binding.native_exec_lots ?? {}).filter(([, lots]) => lots !== 0)
-                const execFlat = !!binding.native_exec_lots && execLots.length === 0
                 return <Card key={binding.binding_name}>
                   <CardContent className="space-y-4 pt-5">
                     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -649,7 +658,7 @@ export function AccountBindingsPage() {
                             disabled={saving}
                             onClick={() =>
                               void withWrite(async () => {
-                                await changeNativeMember(binding, 'stop')
+                                await changeNativeMember(binding.position_strategy_name, binding.strategy_group, 'stop')
                                 return `已停止 ${binding.binding_name}；零目标已发送，平仓成交继续归属原策略`
                               })
                             }
@@ -661,11 +670,26 @@ export function AccountBindingsPage() {
                           <Button
                             type="button"
                             variant="ghost"
-                            disabled={saving || !execFlat}
+                            disabled={saving}
                             onClick={() =>
                               void withWrite(async () => {
-                                await changeNativeMember(binding, 'retire')
-                                return `已删除 ${binding.binding_name} 的策略配置；Exec 账本已清仓，历史净值保留`
+                                await changeNativeMember(binding.position_strategy_name, binding.strategy_group, 'resume')
+                                return `已恢复 ${binding.binding_name}；最新提交的目标已重新发送`
+                              })
+                            }
+                          >
+                            <RotateCcw size={15} /> 恢复
+                          </Button>
+                        )}
+                        {nativeMembersEditable && stopped && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={saving}
+                            onClick={() =>
+                              void withWrite(async () => {
+                                await changeNativeMember(binding.position_strategy_name, binding.strategy_group, 'retire')
+                                return `已删除 ${binding.binding_name} 的策略配置；剩余持仓由 Exec 清仓，历史净值保留`
                               })
                             }
                           >
@@ -673,18 +697,39 @@ export function AccountBindingsPage() {
                           </Button>
                         )}
                       </div>
-                      {nativeMembersEditable && stopped && !execFlat && (
-                        <FieldHint className="w-full">
-                          {binding.native_exec_lots
-                            ? `Exec 账本仍有持仓（${execLots.map(([market, lots]) => `${market} ${lots} 手`).join('，')}），清仓完成后可删除配置。`
-                            : 'Exec 账本暂不可读，无法确认已清仓；稍后刷新再删除配置。'}
-                        </FieldHint>
-                      )}
                     </div>
                     <BindingTargetPreview key={`${sourceId}:${binding.binding_name}:${binding.updated_at_us}:${positions.find((p) => p.strategy_name === binding.position_strategy_name)?.updated_at_us}`} sourceId={sourceId} bindingName={binding.binding_name} />
                   </CardContent>
                 </Card>
               })
+            )}
+            {nativeMembersEditable && (studio?.native_netting?.deleted ?? []).length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>已删除的策略</CardTitle>
+                  <CardDescription>重新启用后按原名字加回原分组，目标从 0 开始，等待下一次推送。</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {(studio?.native_netting?.deleted ?? []).map((member) => (
+                    <div key={member.position_strategy_name} className="flex flex-wrap items-center justify-between gap-3">
+                      <span className="text-sm text-ink">{member.position_strategy_name}</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        disabled={saving || !member.strategy_group}
+                        onClick={() =>
+                          void withWrite(async () => {
+                            await changeNativeMember(member.position_strategy_name, member.strategy_group, 'readd')
+                            return `已重新启用 ${member.position_strategy_name}`
+                          })
+                        }
+                      >
+                        <RotateCcw size={15} /> 重新启用
+                      </Button>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
             )}
           </div>
         </div>

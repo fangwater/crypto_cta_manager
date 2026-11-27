@@ -571,7 +571,7 @@ export function getNativeContractRates(sourceId: string, contract: string, signa
   )
 }
 
-/** 停止并清仓 / 删除配置 request for named members of one native strategy group. */
+/** 停止并清仓 / 恢复 / 删除配置 request for named members of one native strategy group. */
 export interface NativeMemberChange {
   event_id: string
   expected_revision: number
@@ -581,7 +581,7 @@ export interface NativeMemberChange {
 }
 
 export interface NativeMemberReceipt {
-  kind: 'strategy_stop' | 'strategy_retire'
+  kind: 'strategy_stop' | 'strategy_resume' | 'strategy_retire'
   source_id: string
   event_id: string
   revision: number
@@ -595,11 +595,11 @@ export interface NativeMemberReceipt {
 }
 
 /** Event ids admit ASCII letters, digits, `_`, `-`, `.` and `:`. */
-export function nativeEventId(action: 'stop' | 'retire') {
+export function nativeEventId(action: 'stop' | 'resume' | 'retire' | 'readd') {
   return `ui-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-function postNativeMemberChange(sourceId: string, action: 'stop' | 'retire', change: NativeMemberChange) {
+function postNativeMemberChange(sourceId: string, action: 'stop' | 'resume' | 'retire', change: NativeMemberChange) {
   return requestJson<NativeMemberReceipt>(
     `/native/sources/${encodeURIComponent(sourceId)}/netting/${action}`,
     { method: 'POST', body: change },
@@ -611,9 +611,23 @@ export function stopNativeStrategies(sourceId: string, change: NativeMemberChang
   return postNativeMemberChange(sourceId, 'stop', change)
 }
 
-/** Removes stopped members once the Exec ledger holds no lots for them. */
+/** Lifts a stop: the members' latest submitted targets apply again at once. */
+export function resumeNativeStrategies(sourceId: string, change: NativeMemberChange) {
+  return postNativeMemberChange(sourceId, 'resume', change)
+}
+
+/** Removes stopped members; Exec closes any lots they still hold. */
 export function retireNativeStrategies(sourceId: string, change: NativeMemberChange) {
   return postNativeMemberChange(sourceId, 'retire', change)
+}
+
+/** Adds deleted members back to a group of this account at zero targets. */
+export function readdNativeStrategies(sourceId: string, change: NativeMemberChange) {
+  const { event_id, expected_revision, strategy_group, members, note } = change
+  return requestJson<unknown>(
+    `/native/sources/${encodeURIComponent(sourceId)}/netting/extend-scope`,
+    { method: 'POST', body: { event_id, expected_revision, strategy_group, members, contracts: {}, note } },
+  )
 }
 
 export function getAccountExecOrderRateLimits(sourceId: string, signal?: AbortSignal) {
