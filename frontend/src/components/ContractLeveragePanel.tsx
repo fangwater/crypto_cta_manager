@@ -92,10 +92,6 @@ export function ContractLeveragePanel({ toolbar, native = false }: { toolbar?: R
   )
 }
 
-export function isNativeFuturesVenue(venue?: string) {
-  return venue === 'ctp' || venue === 'yida'
-}
-
 const percent = new Intl.NumberFormat('zh-CN', { style: 'percent', maximumFractionDigits: 16 })
 const perLotAmount = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 16 })
 

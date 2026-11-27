@@ -5,6 +5,7 @@ import type { TimelinePayload } from './lib/timelineProto'
 import type { TimelineOverlay } from './types'
 import type { AccountOverview } from './lib/accountOverview'
 import { normalizeTargetMap } from './lib/targetPositions'
+import { normalizeAcquisitionCost } from './lib/acquisitionCostResponse'
 import { serverClock } from './lib/serverClock'
 import type {
   AccountStudio,
@@ -26,7 +27,6 @@ import type {
   SavedSymbolContractLeverage,
   SharesHistory,
   SharesHistoryCursor,
-  AcquisitionCostSnapshot,
   TimelineSnapshot,
 } from './types'
 
@@ -279,9 +279,9 @@ export function getAcquisitionCost(query: AcquisitionCostQuery) {
   if (query.rowSort) params.set('rowSort', query.rowSort)
   if (query.page) params.set('page', String(query.page))
   if (query.pageSize) params.set('pageSize', String(query.pageSize))
-  return requestJson<AcquisitionCostSnapshot>(`/catalog/acquisition-cost?${params}`, {
+  return requestJson<unknown>(`/catalog/acquisition-cost?${params}`, {
     signal: query.signal,
-  })
+  }).then(normalizeAcquisitionCost)
 }
 
 export interface KlineCacheStatus {

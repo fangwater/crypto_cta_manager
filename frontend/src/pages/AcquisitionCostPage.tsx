@@ -9,7 +9,7 @@ import { Alert, Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
 import { Input, Label, Select } from '../components/ui/Field'
-import { money, quantity, timestampUs } from '../format'
+import { money, moneyWithUnit, quantity, timestampUs } from '../format'
 import { cn } from '../lib/cn'
 import { readSourceId } from '../lib/routes'
 import { deltaKey, priceFormatter, rowPriceFormatter } from '../lib/acquisitionAnalysis'
@@ -26,10 +26,6 @@ function toDatetimeLocal(ms: number) {
 function fromDatetimeLocal(value: string) {
   const parsed = new Date(value).getTime()
   return Number.isFinite(parsed) ? parsed : null
-}
-
-function moneyCny(value: number | null | undefined) {
-  return value == null ? '--' : `${money(value)} CNY`
 }
 
 function bps(value: number | null | undefined) {
@@ -179,6 +175,8 @@ export function AcquisitionCostPage() {
   const totals = report?.totals
   const model = report?.execution_model ?? (dashboard?.report.valuation.startsWith('native_') ? 'native_reference' : null)
   const native = isNativeExecutionModel(model)
+  const currency = report?.quote_currency ?? (native ? 'CNY' : 'U')
+  const formatAmount = (value: number | null | undefined) => moneyWithUnit(value, currency)
   const comparisons = native ? report?.by_offset ?? [] : report?.by_strategy ?? []
   return (
     <AppShell
@@ -215,7 +213,7 @@ export function AcquisitionCostPage() {
       {totals && totals.stale_reference_fill_count > 0 && (
         <Alert className="mb-4">
           {totals.stale_reference_fill_count} 笔事实 fill 的最近虚拟参考超过 300 秒，成交额{' '}
-          {moneyCny(totals.stale_reference_fill_notional_quote)}，未进入价格差。
+          {formatAmount(totals.stale_reference_fill_notional_quote)}，未进入价格差。
         </Alert>
       )}
 
@@ -258,19 +256,19 @@ export function AcquisitionCostPage() {
         </div>)}</CardContent>
       </Card>}
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-        <StatTile label="目标虚拟成交额" value={totals ? moneyCny(totals.virtual_turnover_quote) : '--'} hint={totals ? `${totals.virtual_delta_count} 个 delta · 费 ${moneyCny(totals.virtual_fee_quote)}` : undefined} />
-        <StatTile label="事实成交额" value={totals ? moneyCny(totals.actual_turnover_quote) : '--'} hint={totals ? `${totals.actual_fill_count} 笔 · 费 ${moneyCny(totals.actual_fee_quote)}` : undefined} />
-        <StatTile label="同量虚拟成交额" value={totals ? moneyCny(totals.matched_virtual_turnover_quote) : '--'} hint="完全使用事实 fill 数量" />
+        <StatTile label="目标虚拟成交额" value={totals ? formatAmount(totals.virtual_turnover_quote) : '--'} hint={totals ? `${totals.virtual_delta_count} 个 delta · 费 ${formatAmount(totals.virtual_fee_quote)}` : undefined} />
+        <StatTile label="事实成交额" value={totals ? formatAmount(totals.actual_turnover_quote) : '--'} hint={totals ? `${totals.actual_fill_count} 笔 · 费 ${formatAmount(totals.actual_fee_quote)}` : undefined} />
+        <StatTile label="同量虚拟成交额" value={totals ? formatAmount(totals.matched_virtual_turnover_quote) : '--'} hint="完全使用事实 fill 数量" />
         <StatTile label="事实成交覆盖" value={totals?.actual_fill_reference_coverage != null ? `${(totals.actual_fill_reference_coverage * 100).toFixed(1)}%` : '--'} />
-        <StatTile label="费前执行滑点" value={totals?.matched_fill_count ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? `价格差 ${moneyCny(totals.price_shortfall_quote)} · 按可比理论成交额归一化` : undefined} />
-        <StatTile label="费后执行滑点" value={totals?.matched_fill_count ? bps(totals.after_fee_shortfall_bps) : '--'} hint={totals ? `费后差 ${moneyCny(totals.after_fee_shortfall_quote)} · 手续费差 ${moneyCny(totals.fee_shortfall_quote)}` : undefined} />
+        <StatTile label="费前执行滑点" value={totals?.matched_fill_count ? bps(totals.price_shortfall_bps) : '--'} hint={totals ? `价格差 ${formatAmount(totals.price_shortfall_quote)} · 按可比理论成交额归一化` : undefined} />
+        <StatTile label="费后执行滑点" value={totals?.matched_fill_count ? bps(totals.after_fee_shortfall_bps) : '--'} hint={totals ? `费后差 ${formatAmount(totals.after_fee_shortfall_quote)} · 手续费差 ${formatAmount(totals.fee_shortfall_quote)}` : undefined} />
       </div>
 
       {!snapshot && !loading && <Card><CardContent className="py-16 text-center text-sm text-muted">选择范围后查询。</CardContent></Card>}
       {loading && !snapshot && <Card><CardContent className="flex items-center justify-center gap-2 py-16 text-sm text-muted"><LoaderCircle size={18} className="animate-spin-slow" />正在生成成本账本</CardContent></Card>}
 
       {report && <>
-        <AcquisitionOverview report={report} onSelectSymbol={(symbol) => selectDetails(symbol, 'price_shortfall')} />
+        <AcquisitionOverview report={report} currency={currency} onSelectSymbol={(symbol) => selectDetails(symbol, 'price_shortfall')} />
         <Card className="mb-4 scroll-mt-4" id="delta-details">
           <CardHeader>
             <CardTitle>定位 delta</CardTitle>
@@ -302,7 +300,7 @@ export function AcquisitionCostPage() {
           </CardContent>
         </Card>
         {!loading && (report.rows.length
-          ? <AcquisitionDeltaAnalysis report={report} selectedKey={selectedKey} onSelect={setSelectedKey} />
+          ? <AcquisitionDeltaAnalysis report={report} currency={currency} selectedKey={selectedKey} onSelect={setSelectedKey} />
           : <Alert className="mb-6">当前合约、策略和范围没有可展示的 delta，可切换复盘条件或扩大上方查询范围。</Alert>)}
       </>}
 
@@ -315,16 +313,16 @@ export function AcquisitionCostPage() {
           <CardContent className="overflow-x-auto">
             <table className="min-w-full text-left text-[13px]">
               <thead><tr>
-                <th>{native ? '开平' : '策略'}</th><th className="text-right">可比成交数</th><th className="text-right">可比成交额 CNY</th>
-                {native && <><th className="text-right">实际手续费 CNY</th><th className="text-right">参考手续费 CNY</th></>}
-                <th className="text-right">价格差 bps</th><th className="text-right">费后差 CNY</th>
+                <th>{native ? '开平' : '策略'}</th><th className="text-right">可比成交数</th><th className="text-right">可比成交额 {currency}</th>
+                {native && <><th className="text-right">实际手续费 {currency}</th><th className="text-right">参考手续费 {currency}</th></>}
+                <th className="text-right">价格差 bps</th><th className="text-right">费后差 {currency}</th>
               </tr></thead>
               <tbody>{comparisons.map((row) => <tr key={row.bucket} className="border-b border-border-soft">
                 <td className="py-2">{native ? nativeOffsetLabel(row.bucket) ?? '—' : row.bucket}</td><td className="text-right tabular-nums">{row.fill_count}</td>
                 <td className="text-right tabular-nums">{money(row.reference_turnover_quote)}</td>
-                {native && <><td className="text-right tabular-nums">{moneyCny(row.actual_fee_quote)}</td><td className="text-right tabular-nums">{moneyCny(row.virtual_fee_quote)}</td></>}
+                {native && <><td className="text-right tabular-nums">{formatAmount(row.actual_fee_quote)}</td><td className="text-right tabular-nums">{formatAmount(row.virtual_fee_quote)}</td></>}
                 <td className={cn('text-right tabular-nums', costClass(row.price_shortfall_bps))}>{bps(row.price_shortfall_bps)}</td>
-                <td className={cn('text-right tabular-nums', costClass(row.after_fee_shortfall_quote))}>{moneyCny(row.after_fee_shortfall_quote)}</td>
+                <td className={cn('text-right tabular-nums', costClass(row.after_fee_shortfall_quote))}>{formatAmount(row.after_fee_shortfall_quote)}</td>
               </tr>)}</tbody>
             </table>
             {native && comparisons.length === 0 && <p className="py-4 text-sm text-muted">没有可比开平成交。</p>}
@@ -348,7 +346,7 @@ export function AcquisitionCostPage() {
             <table className="min-w-full text-left text-[13px]">
               <thead className="border-b border-border-soft bg-canvas/80 text-[11px] uppercase tracking-wide text-muted">
                 <tr>
-                  <th className="px-4 py-2 font-medium">信号 / 策略</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">Delta（手）</th><th className="px-4 py-2 text-right font-medium">分钟价格</th><th className="px-4 py-2 text-right font-medium">计价分钟</th><th className="px-4 py-2 text-right font-medium">{(snapshot?.reports.length ?? 0) > 1 ? "三分钟参考价" : theoreticalExecutionLabel(report?.execution_model)}</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">实际 − 理论</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 CNY</th>
+                  <th className="px-4 py-2 font-medium">信号 / 策略</th><th className="px-4 py-2 font-medium">合约</th><th className="px-4 py-2 font-medium">方向</th><th className="px-4 py-2 text-right font-medium">{native ? 'Delta（手）' : 'Delta'}</th><th className="px-4 py-2 text-right font-medium">分钟价格</th><th className="px-4 py-2 text-right font-medium">计价分钟</th><th className="px-4 py-2 text-right font-medium">{(snapshot?.reports.length ?? 0) > 1 ? "三分钟参考价" : theoreticalExecutionLabel(report?.execution_model)}</th><th className="px-4 py-2 text-right font-medium">实际 VWAP</th><th className="px-4 py-2 text-right font-medium">实际 − 理论</th><th className="px-4 py-2 text-right font-medium">完成率</th><th className="px-4 py-2 text-right font-medium">价格差</th><th className="px-4 py-2 text-right font-medium">费后差 {currency}</th>
                 </tr>
               </thead>
               <tbody>
@@ -368,7 +366,7 @@ export function AcquisitionCostPage() {
                     <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{difference != null && difference > 0 ? '+' : ''}{priceFormatter([difference])(difference)}</td>
                     <td className="px-4 py-2 text-right tabular-nums">{(row.fill_ratio * 100).toFixed(1)}%</td>
                     <td className={cn('px-4 py-2 text-right tabular-nums', costClass(row.price_shortfall_bps))}>{bps(row.price_shortfall_bps)}</td>
-                    <td className={cn('px-4 py-2 text-right tabular-nums', costClass(row.after_fee_shortfall_quote))}>{moneyCny(row.after_fee_shortfall_quote)}</td>
+                    <td className={cn('px-4 py-2 text-right tabular-nums', costClass(row.after_fee_shortfall_quote))}>{formatAmount(row.after_fee_shortfall_quote)}</td>
                   </tr>
                 })}
               </tbody>

@@ -5,7 +5,7 @@ import { DataZoomComponent, GridComponent, MarkLineComponent, TooltipComponent }
 import { CanvasRenderer } from 'echarts/renderers'
 import { ArrowDownRight, ArrowUpRight, RefreshCw } from 'lucide-react'
 import { ApiError, getNavMonitor, type NavMonitor } from '../api'
-import { money } from '../format'
+import { isNativeFuturesVenue, money, quoteUnit } from '../format'
 import { isExternalOverview, type OverviewRow } from '../lib/accountOverview'
 import { accountVenueLabel } from '../lib/workspace'
 import { routes } from '../lib/routes'
@@ -95,7 +95,7 @@ function AccountNavCard({ account, entry }: { account: OverviewRow; entry?: Entr
     </header>
     <div className="overview-nav-metrics">
       <div>
-        <p className="overview-nav-metric-label">累计净值变化 <span>CNY</span></p>
+        <p className="overview-nav-metric-label">累计净值变化 <span>{account.quote_currency ?? quoteUnit(isNativeFuturesVenue(account.venue))}</span></p>
         <p className={`overview-nav-number ${latest == null || latest === 0 ? 'text-ink' : latest > 0 ? 'text-teal-700' : 'text-rose-600'}`} data-nav-value>{latest == null ? '—' : `${latest > 0 ? '+' : ''}${money(latest)}`}<TrendIcon size={20} aria-hidden="true" /></p>
       </div>
       <div className="overview-nav-change"><span>本期变化</span><strong className={change == null || change === 0 ? 'text-muted' : change > 0 ? 'text-teal-700' : 'text-rose-600'}>{change == null ? '—' : `${change > 0 ? '+' : ''}${money(change)}`}</strong></div>

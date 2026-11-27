@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { overviewTotal, overviewAlertCount, isExternalOverview, nativeSourceStatus } from '../src/lib/accountOverview.ts'
+import { isNativeFuturesVenue, liveAccountEquity, moneyWithUnit, quoteUnit } from '../src/format.ts'
+
+test('dashboard equity uses the field and currency for the account market', () => {
+  for (const venue of ['binance-futures', 'binance-coin-futures', 'okex-futures', 'spread']) {
+    assert.equal(quoteUnit(isNativeFuturesVenue(venue)), '报价币')
+    assert.equal(moneyWithUnit(liveAccountEquity({ venue, live_equity_usdt: 125.5 }), 'USDT'), '125.50 USDT')
+    assert.equal(liveAccountEquity({ venue, live_equity_usdt: null, live_equity_quote: 500 }), null)
+  }
+  for (const venue of ['ctp', 'yida']) {
+    const currency = quoteUnit(isNativeFuturesVenue(venue))
+    assert.equal(moneyWithUnit(liveAccountEquity({ venue, live_equity_quote: 0 }), currency), '0.00 CNY')
+    assert.equal(moneyWithUnit(liveAccountEquity({ venue, live_equity_usdt: 500 }), currency), '--')
+  }
+})
 
 test('native sync and execution statuses remain distinct', () => {
   assert.equal(nativeSourceStatus({ collection_status: 'live', execution_status: 'quiet' }).label, '已同步')

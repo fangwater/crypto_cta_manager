@@ -4,7 +4,7 @@ import { DataZoomComponent, GridComponent, LegendComponent, MarkAreaComponent, M
 import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { useEffect, useRef, useState } from 'react'
-import { money, quantity, timestampUs, UI_FONT_SANS } from '../format'
+import { moneyWithUnit, quantity, timestampUs, UI_FONT_SANS } from '../format'
 import { analyzePricePath, deltaKey, priceFormatter, rowPriceFormatter } from '../lib/acquisitionAnalysis'
 import type { AcquisitionCostReport } from '../types'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/Card'
@@ -48,7 +48,7 @@ function CostChart({ option, label, height = 300, onDataClick }: { option: echar
   return <div ref={ref} style={{ height, width: '100%', minWidth: 0 }} role="img" aria-label={label} />
 }
 
-export function AcquisitionOverview({ report, onSelectSymbol }: { report: AcquisitionCostReport; onSelectSymbol: (symbol: string) => void }) {
+export function AcquisitionOverview({ report, currency, onSelectSymbol }: { report: AcquisitionCostReport; currency: string; onSelectSymbol: (symbol: string) => void }) {
   const [symbolMetric, setSymbolMetric] = useState('bps')
   const [delayMode, setDelayMode] = useState('target')
   const native = isNativeExecutionModel(report.execution_model)
@@ -61,15 +61,15 @@ export function AcquisitionOverview({ report, onSelectSymbol }: { report: Acquis
       <CardHeader>
         <CardTitle>哪些合约的滑点更明显</CardTitle>
         <CardDescription>全查询区间，按价格差金额绝对值选前 12 个合约。bps 可跨合约比较，正值更差、负值更好。点击柱形可筛选该合约的 delta，优先查看价格差金额最大的目标。</CardDescription>
-        <Label>显示指标<Select value={symbolMetric} onChange={(e) => setSymbolMetric(e.target.value)}><option value="bps">方向调整价格差 · bps</option><option value="amount">价格差金额 · CNY</option></Select></Label>
+        <Label>显示指标<Select value={symbolMetric} onChange={(e) => setSymbolMetric(e.target.value)}><option value="bps">方向调整价格差 · bps</option><option value="amount">价格差金额 · {currency}</option></Select></Label>
       </CardHeader>
       <CardContent>
         {symbols.length ? <CostChart label="各合约价格滑点对比，点击柱形筛选目标" onDataClick={(index) => { if (symbols[index]) onSelectSymbol(symbols[index].bucket) }} height={Math.max(280, symbols.length * 26 + 70)} option={{
           grid, tooltip: { ...tooltip, trigger: 'item', formatter: (p: { dataIndex: number }) => {
             const row = symbols[p.dataIndex]
-            return `${row.bucket}\n价格差 ${bps(row.price_shortfall_bps)}\n价格差金额 ${money(row.price_shortfall_quote)} CNY\n可比成交额 ${money(row.reference_turnover_quote)} CNY\n${row.fill_count} 笔可比成交`
+            return `${row.bucket}\n价格差 ${bps(row.price_shortfall_bps)}\n价格差金额 ${moneyWithUnit(row.price_shortfall_quote, currency)}\n可比成交额 ${moneyWithUnit(row.reference_turnover_quote, currency)}\n${row.fill_count} 笔可比成交`
           } },
-          xAxis: { ...valueAxis, name: symbolMetric === 'bps' ? 'bps' : 'CNY', nameLocation: 'middle', nameGap: 25 },
+          xAxis: { ...valueAxis, name: symbolMetric === 'bps' ? 'bps' : currency, nameLocation: 'middle', nameGap: 25 },
           yAxis: { type: 'category', data: symbols.map((row) => row.bucket), axisTick: { show: false }, axisLine: { show: false } },
           series: [{ type: 'bar', barMaxWidth: 18, data: symbols.map((row) => {
             const value = symbolMetric === 'bps' ? row.price_shortfall_bps : row.price_shortfall_quote
@@ -89,7 +89,7 @@ export function AcquisitionOverview({ report, onSelectSymbol }: { report: Acquis
           grid: { ...grid, right: 36 }, legend: { top: 0, data: ['成交额占比', '价格差'] },
           tooltip: { ...tooltip, trigger: 'axis', formatter: (items: { dataIndex: number }[]) => {
             const row = delays[items[0].dataIndex]
-            return `${delayLabels[row.bucket] ?? row.bucket}\n${row.fill_count} 笔 · ${money(row.reference_turnover_quote)} CNY\n占比 ${(turnover ? row.reference_turnover_quote / turnover * 100 : 0).toFixed(2)}%\n价格差 ${bps(row.price_shortfall_bps)} · ${money(row.price_shortfall_quote)} CNY`
+            return `${delayLabels[row.bucket] ?? row.bucket}\n${row.fill_count} 笔 · ${moneyWithUnit(row.reference_turnover_quote, currency)}\n占比 ${(turnover ? row.reference_turnover_quote / turnover * 100 : 0).toFixed(2)}%\n价格差 ${bps(row.price_shortfall_bps)} · ${moneyWithUnit(row.price_shortfall_quote, currency)}`
           } },
           xAxis: { type: 'category', data: delays.map((row) => delayLabels[row.bucket] ?? row.bucket), axisLabel: { interval: 0, fontSize: 10 } },
           yAxis: [{ ...valueAxis, name: '%' }, { ...valueAxis, name: 'bps', splitLine: { show: false } }],
@@ -111,7 +111,7 @@ function Diagnostic({ title, detected, children }: { title: string; detected: bo
   </div>
 }
 
-export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { report: AcquisitionCostReport; selectedKey: string; onSelect: (key: string) => void }) {
+export function AcquisitionDeltaAnalysis({ report, currency, selectedKey, onSelect }: { report: AcquisitionCostReport; currency: string; selectedKey: string; onSelect: (key: string) => void }) {
   const [priceMode, setPriceMode] = useState('bps')
   const [moveThreshold, setMoveThreshold] = useState(10)
   const [slowThreshold, setSlowThreshold] = useState(60)
@@ -165,7 +165,7 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
       data: fills.map((fill) => ({
         value: [offset(fill.fill_ts_us), plotPrice(fill.actual_price)],
         symbolSize: 7 + Math.sqrt(Math.abs(fill.actual_qty) / maxQty) * 13,
-        detail: `发布后 ${seconds(fill.target_delay_us)}${native ? `\n开平 ${nativeOffsetLabel(fill.offset) ?? '—'}` : `\n订单后 ${seconds(fill.order_delay_us)}`}\n成交价 ${formatPrice(fill.actual_price)}\n数量 ${quantity(Math.abs(fill.actual_qty))} 手\n方向调整价差 ${bps(sign * (fill.actual_price / row.virtual_vwap - 1) * 10_000)}`,
+        detail: `发布后 ${seconds(fill.target_delay_us)}${native ? `\n开平 ${nativeOffsetLabel(fill.offset) ?? '—'}` : `\n订单后 ${seconds(fill.order_delay_us)}`}\n成交价 ${formatPrice(fill.actual_price)}\n数量 ${quantity(Math.abs(fill.actual_qty))}${native ? ' 手' : ''}\n方向调整价差 ${bps(sign * (fill.actual_price / row.virtual_vwap - 1) * 10_000)}`,
       })),
       tooltip: { formatter: (p: { data: { detail: string } }) => p.data.detail },
     })),
@@ -178,7 +178,7 @@ export function AcquisitionDeltaAnalysis({ report, selectedKey, onSelect }: { re
     <CardContent className="min-w-0 space-y-4">
       <div className="grid min-w-0 gap-3 sm:grid-cols-2">
         <Label className="min-w-0">当前页目标<Select value={deltaKey(row)} onChange={(e) => onSelect(e.target.value)} className="w-full min-w-0">
-          {[...report.rows].reverse().map((item) => <option key={deltaKey(item)} value={deltaKey(item)}>{item.symbol} · {item.delta_qty > 0 ? '买' : '卖'} · {native ? nativeOffsetLabel(item.offset) ?? '开平未知' : item.strategy_name} · {timestampUs(item.received_at_us)} · 价差 {item.price_shortfall_quote == null ? '--' : `${money(item.price_shortfall_quote)} CNY`}</option>)}
+          {[...report.rows].reverse().map((item) => <option key={deltaKey(item)} value={deltaKey(item)}>{item.symbol} · {item.delta_qty > 0 ? '买' : '卖'} · {native ? nativeOffsetLabel(item.offset) ?? '开平未知' : item.strategy_name} · {timestampUs(item.received_at_us)} · 价差 {moneyWithUnit(item.price_shortfall_quote, currency)}</option>)}
         </Select></Label>
         <Label>价格坐标<Select value={priceMode} onChange={(e) => setPriceMode(e.target.value)}><option value="bps">相对理论价 · 方向调整 bps</option><option value="price">合约原始价格</option></Select></Label>
       </div>

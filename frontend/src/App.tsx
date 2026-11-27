@@ -21,7 +21,6 @@ import type { TimelineQuery } from './api'
 import { ApiError, getAccountTimeline, getDashboard, getHealth, getTimeline, getTimelineOverlay } from './api'
 import { AppShell } from './components/AppShell'
 import { AnalysisMetric } from './components/AnalysisMetric'
-import { isNativeFuturesVenue } from './components/ContractLeveragePanel'
 import { NavMonitorPage } from './pages/NavMonitorPage'
 import { WorkspacePage } from './pages/WorkspacePage'
 import { AccountsPage } from './pages/AccountsPage'
@@ -54,10 +53,14 @@ import {
   fundingMoney,
   formatUniMmr,
   integer,
+  isNativeFuturesVenue,
   isOkxVenue,
   isUnifiedVenue,
+  liveAccountEquity,
   money,
+  moneyWithUnit,
   quantity,
+  quoteUnit,
   signedClass,
   strategyLabel,
   timestampUs,
@@ -281,6 +284,7 @@ function NavPage() {
     [dashboard, scope],
   )
   const native = dashboard?.report.valuation.startsWith('native_') === true || isNativeFuturesVenue(selectedSource?.configured_venue)
+  const currency = quoteUnit(native)
   const feeMode = native ? 'after' : feePreference
 
   const refreshDashboard = useCallback(
@@ -582,21 +586,13 @@ function NavPage() {
         account.source_id === scope &&
         (account.execution_sources?.length ? account.execution_sources.every(leg => (timeline?.report.selected_source_ids ?? []).includes(leg.source_id)) : (timeline?.report.selected_source_ids ?? []).includes(account.source_id)),
     )
-    if (
-      accounts.length === 0 ||
-      accounts.some(
-        (account) =>
-          account.live_equity_status !== 'ok' ||
-          !Number.isFinite(account.live_equity_quote) ||
-          (account.live_equity_quote ?? 0) <= 0,
-      )
-    ) {
-      return null
+    let equity = 0
+    for (const account of accounts) {
+      const value = liveAccountEquity(account)
+      if (account.live_equity_status !== 'ok' || value == null || !Number.isFinite(value) || value <= 0) return null
+      equity += value
     }
-    return accounts.reduce(
-      (total, account) => total + (account.live_equity_quote ?? 0),
-      0,
-    )
+    return equity > 0 ? equity : null
   }, [dashboard, scope, timeline])
   const effectiveStartMs = dashboard
     ? scopeStartMs(dashboard, scope, endMs ?? serverClock.now(), pnlMode)
@@ -889,6 +885,7 @@ function NavPage() {
           <div className={`summary-strip${hasFunding ? ' summary-strip--funding' : ''}`}>
             <SummaryItem
               icon={<Sigma size={18} />}
+              currency={currency}
               label={hasFunding ? (usesEstimatedFunding ? '区间净值变化（含估算 funding）' : '区间总体净值变化（含 funding）') : '区间净值变化'}
               value={noSymbolsSelected ? 0 : hasFunding && fundingValue
                 ? (feeMode === 'after' ? fundingValue.total_nav_after_fee_quote : fundingValue.total_nav_before_fee_quote)
@@ -897,29 +894,34 @@ function NavPage() {
             />
             <SummaryItem
               icon={<WalletCards size={18} />}
+              currency={currency}
               label="区间已实现"
               value={totals ? realizedValue(totals, feeMode) : null}
               signed
             />
             <SummaryItem
               icon={<Activity size={18} />}
+              currency={currency}
               label="区间浮动盈亏"
               value={totals?.floating_pnl_quote ?? null}
               signed
             />
             <SummaryItem
               icon={<Coins size={18} />}
+              currency={currency}
               label={native ? '区间手续费' : '区间估算手续费'}
               value={totals?.estimated_trading_fee_quote ?? null}
             />
             <SummaryItem
               icon={<Database size={18} />}
+              currency={currency}
               label="区间成交额"
               value={totals?.volume_quote ?? null}
             />
             {hasFunding && (
               <SummaryItem
                 icon={<Coins size={18} />}
+                currency={currency}
                 label={usesEstimatedFunding ? "区间估算 Funding" : "区间 Funding（资金费）"}
                 value={noSymbolsSelected ? 0 : fundingIncome ?? null}
                 signed
@@ -1195,6 +1197,7 @@ function NavPage() {
                   symbolPoints={timeline.report.symbol_points}
                   mode={chartMode === 'symbols' ? 'symbols' : 'portfolio'}
                   equityQuote={leverageEquityQuote}
+                  currency={currency}
                 />
               )}
               {noSymbolsSelected && <div className="chart-empty">当前未选择合约</div>}
@@ -1342,7 +1345,7 @@ function NavPage() {
               <thead>
                 <tr>
                   <th>合约</th>
-                  <th className="numeric">期末净手数</th>
+                  <th className="numeric">{native ? '期末净手数' : '期末净数量'}</th>
                   <th className="numeric">期末净敞口</th>
                   <th className="numeric">区间已实现</th>
                   <th className="numeric">区间浮动盈亏</th>
@@ -1355,6 +1358,7 @@ function NavPage() {
                   <SymbolTableRow
                     key={row.symbol}
                     row={row}
+                    native={native}
                     feeMode={feeMode}
                     selected={selectedSet.has(row.symbol)}
                     onToggle={() => toggleSymbol(row.symbol)}
@@ -1408,7 +1412,7 @@ function NavPage() {
                   : <SourceDatum label="Maker / Taker 费率" value={accountFeeSummary(source)} />}
                 <SourceDatum
                   label="累计费后净值"
-                  value={`${money(source.nav_change_after_fee_quote)} CNY`}
+                  value={moneyWithUnit(source.nav_change_after_fee_quote, quoteUnit(isNativeFuturesVenue(source.configured_venue)))}
                   tone={signedClass(source.nav_change_after_fee_quote)}
                 />
                 {unified && (
@@ -1483,7 +1487,7 @@ function LiquidityExecutionAnalysis({ totals }: { totals: NavTotals }) {
           <h2 id="execution-title">区间成交执行分析</h2>
         </div>
         <span className="generation-time">
-          {integer(totals.fill_count)} 笔 · {money(totals.volume_quote)} CNY
+          {integer(totals.fill_count)} 笔 · {money(totals.volume_quote)} 报价币
         </span>
       </div>
       <div className="liquidity-analysis">
@@ -1518,7 +1522,7 @@ function LiquidityTableCell({ count, volume }: { count: number; volume: number }
   return (
     <td className="numeric mono liquidity-cell">
       <strong>{integer(count)} 笔</strong>
-      <small>{money(volume)} CNY</small>
+      <small>{money(volume)} 报价币</small>
     </td>
   )
 }
@@ -1527,11 +1531,13 @@ function SummaryItem({
   icon,
   label,
   value,
+  currency,
   signed = false,
 }: {
   icon: React.ReactNode
   label: string
   value: number | null
+  currency: string
   signed?: boolean
 }) {
   return (
@@ -1541,7 +1547,7 @@ function SummaryItem({
         <span>{label}</span>
         <strong className={signed && value !== null ? signedClass(value) : ''}>
           {value === null ? '--' : money(value)}{' '}
-          {value !== null && <small>CNY</small>}
+          {value !== null && <small>{currency}</small>}
         </strong>
       </div>
     </div>
@@ -1555,7 +1561,11 @@ function ContractName({ market }: { market: string }) {
   return <span title={market}>{contract.name} <span className="symbol-quote">{contract.code}</span></span>
 }
 
-function SymbolName({ market }: { market: string }) {
+function SymbolName({ market, native }: { market: string; native: boolean }) {
+  if (!native) {
+    const quote = /^.+(USDT|USDC|USD)$/.exec(market)?.[1]
+    return <><strong className="symbol-name">{quote ? market.slice(0, -quote.length) : market}</strong>{quote && <span className="symbol-quote">/{quote}</span>}</>
+  }
   const contract = nativeContract(market)
   if (!contract) return <><strong className="symbol-name">{market}</strong><span className="symbol-quote">/CNY</span></>
   return <><strong className="symbol-name" title={market}>{contract.name}</strong> <span className="symbol-quote">{contract.code}</span></>
@@ -1563,11 +1573,13 @@ function SymbolName({ market }: { market: string }) {
 
 function SymbolTableRow({
   row,
+  native,
   feeMode,
   selected,
   onToggle,
 }: {
   row: AggregateSymbolNavReport
+  native: boolean
   feeMode: FeeMode
   selected: boolean
   onToggle: () => void
@@ -1584,7 +1596,7 @@ function SymbolTableRow({
         >
           {selected && <Check size={13} />}
         </button>
-        <SymbolName market={row.symbol} />
+        <SymbolName market={row.symbol} native={native} />
       </td>
       <td className={`numeric mono ${signedClass(row.net_quantity)}`}>
         {quantity(row.net_quantity)}

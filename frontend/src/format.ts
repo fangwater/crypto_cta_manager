@@ -1,3 +1,5 @@
+import type { DashboardAccount } from './types'
+
 export const UI_FONT_SANS =
   '"PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "WenQuanYi Micro Hei", ui-sans-serif, system-ui, sans-serif'
 
@@ -39,6 +41,10 @@ export function money(value: number | null | undefined) {
   return value != null && Number.isFinite(value) ? moneyFormatter.format(value) : '--'
 }
 
+export function moneyWithUnit(value: number | null | undefined, unit: string) {
+  return value != null && Number.isFinite(value) ? `${money(value)} ${unit}` : '--'
+}
+
 export function fundingMoney(value: number) {
   return fundingFormatter.format(value)
 }
@@ -73,14 +79,26 @@ export function isUnifiedVenue(venue: string) {
   return isOkxVenue(venue) || venue === 'bybit-futures' || venue === 'bitget-futures'
 }
 
+export function isNativeFuturesVenue(venue?: string) {
+  return venue === 'ctp' || venue === 'yida'
+}
+
+export function quoteUnit(native: boolean) {
+  return native ? 'CNY' : '报价币'
+}
+
+export function liveAccountEquity(account: Pick<DashboardAccount, 'venue' | 'live_equity_quote' | 'live_equity_usdt'>) {
+  return isNativeFuturesVenue(account.venue) ? account.live_equity_quote : account.live_equity_usdt
+}
+
 export function executionMarketLabel(venue: string) {
-  if (venue === 'yida' || venue === 'ctp') return '国内期货 · CNY'
+  if (isNativeFuturesVenue(venue)) return '国内期货 · CNY'
   if (venue === 'spread') return '多市场账户'
   return venue === 'binance-coin-futures' ? '币本位' : 'U 本位'
 }
 
 export function executionSymbolPlaceholder(venue: string) {
-  if (venue === 'yida' || venue === 'ctp') return 'SHFE:rb2701 / CZCE:SA701'
+  if (isNativeFuturesVenue(venue)) return 'SHFE:rb2701 / CZCE:SA701'
   if (venue === 'bybit-futures' || venue === 'bitget-futures') return 'BTCUSDT / ETHUSDT'
   return venue === 'binance-coin-futures' ? 'BTCUSD / ETHUSD' : 'BTCUSDT / BTCUSDC'
 }

@@ -85,7 +85,7 @@ export function SymbolChart({ rows, chartMode, feeMode }: Props) {
             const item = Array.isArray(items) ? items[0] : null
             if (!item || typeof item !== 'object') return ''
             const record = item as { axisValue?: string; value?: number }
-            return `${record.axisValue ?? ''}<br/><strong>${money(Number(record.value ?? 0))} CNY</strong>`
+            return `${record.axisValue ?? ''}<br/><strong>${money(Number(record.value ?? 0))} 报价币</strong>`
           },
         },
         xAxis: {
